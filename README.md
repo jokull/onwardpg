@@ -210,6 +210,10 @@ has mature coverage of several object families that onwardpg still blocks, and
 onwardpg's preview contract is intentionally stricter around destructive and
 operational changes.
 
+See the [detailed Migra/onwardpg compatibility guide](docs/compatibility.md)
+for object-by-object support, answer/manual requirements, and the preview
+boundary.
+
 ### Known preview gaps
 
 Do not use onwardpg as the sole production migration authority yet. In
@@ -256,5 +260,6 @@ is retained as test research, not a product-completeness promise. See
 - [Architecture](docs/architecture.md)
 - [Reference behavior study](docs/atlas-postgres-parity.md)
 - [Supported-feature ledger](docs/supported-features.md)
+- [Migra/onwardpg compatibility guide](docs/compatibility.md)
 - [Changelog](CHANGELOG.md)
 - [Installation and release status](docs/installation.md)
