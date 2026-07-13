@@ -85,8 +85,8 @@ func PrepareEditedFiles(base Artifact, editable map[string][]byte) (Artifact, er
 	if err := base.Validate(); err != nil {
 		return Artifact{}, fmt.Errorf("validate generated bundle: %w", err)
 	}
-	if base.Manifest.State != "planned" {
-		return Artifact{}, fmt.Errorf("only a planned bundle can receipt SQL edits")
+	if base.Manifest.State != string(protocol.Planned) && base.Manifest.State != string(protocol.NeedsSQLEdits) {
+		return Artifact{}, fmt.Errorf("only a planned or needs_sql_edits bundle can receipt SQL edits")
 	}
 	files := make(map[string][]byte, len(base.Files)+len(editable))
 	for name, body := range base.Files {
@@ -121,8 +121,8 @@ func ReconcileEditedDraft(previous, generated Artifact) (Artifact, EditReconcili
 	if err := generated.Validate(); err != nil {
 		return Artifact{}, report, fmt.Errorf("validate newly generated bundle: %w", err)
 	}
-	if generated.Manifest.PhaseSource != "generated" || generated.Manifest.State != "planned" {
-		return Artifact{}, report, fmt.Errorf("replacement bundle is not a complete generated draft")
+	if generated.Manifest.PhaseSource != "generated" || generated.Manifest.State != string(protocol.Planned) && generated.Manifest.State != string(protocol.NeedsSQLEdits) {
+		return Artifact{}, report, fmt.Errorf("replacement bundle is not a generated draft eligible for SQL reconciliation")
 	}
 	if previous.Manifest.BundleID != generated.Manifest.BundleID || previous.Manifest.Target != generated.Manifest.Target {
 		return Artifact{}, report, fmt.Errorf("edited and generated bundle identities differ")

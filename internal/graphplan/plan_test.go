@@ -1275,6 +1275,60 @@ func TestBuildRequiresFingerprintBoundTableRenameAnswer(t *testing.T) {
 	}
 }
 
+func TestBuildOffersEveryCredibleTableRenameCandidate(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "public"}
+	oldTable := pgschema.Table{Schema: "public", Name: "accounts"}
+	customers := pgschema.Table{Schema: "public", Name: "customers"}
+	prospects := pgschema.Table{Schema: "public", Name: "prospects"}
+	oldID := pgschema.Column{Table: oldTable.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	customerID := pgschema.Column{Table: customers.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	prospectID := pgschema.Column{Table: prospects.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	for _, object := range []pgschema.Object{schema, oldTable, oldID} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{schema, customers, customerID, prospects, prospectID} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{oldTable.ObjectID(), schema.ObjectID()}, {oldID.ObjectID(), oldTable.ObjectID()}} {
+		if err := current.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{
+		{customers.ObjectID(), schema.ObjectID()}, {customerID.ObjectID(), customers.ObjectID()},
+		{prospects.ObjectID(), schema.ObjectID()}, {prospectID.ObjectID(), prospects.ObjectID()},
+	} {
+		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantChoices := []string{customers.ObjectID().String(), prospects.ObjectID().String(), "create"}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || !reflect.DeepEqual(pending.Questions[0].Choices, wantChoices) {
+		t.Fatalf("rename choices = %#v, want %#v", pending.Questions, wantChoices)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: prospects.ObjectID().String(), QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
+	}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := joinSQL(planned)
+	if planned.Status != protocol.Planned || !strings.Contains(sql, `CREATE TABLE "public"."customers"`) || !strings.Contains(sql, `ALTER TABLE "public"."accounts" RENAME TO "prospects";`) {
+		t.Fatalf("selected rename plan = %#v\n%s", planned, sql)
+	}
+}
+
 func TestBuildKeepsTableRenameIntentStableWhileAddingColumn(t *testing.T) {
 	current, desiredBefore, desiredAfter := pgschema.New(), pgschema.New(), pgschema.New()
 	schema := pgschema.Schema{Name: "public"}
@@ -1342,6 +1396,69 @@ func TestBuildKeepsTableRenameIntentStableWhileAddingColumn(t *testing.T) {
 	sql := joinSQL(planned)
 	if planned.Status != protocol.Planned || !strings.Contains(sql, `ALTER TABLE "public"."accounts" ADD COLUMN "timezone" text`) || !strings.Contains(sql, `ALTER TABLE "public"."accounts" RENAME TO "customers"`) {
 		t.Fatalf("rename plus additive column plan = %#v\n%s", planned, sql)
+	}
+}
+
+func TestBuildComposesConfirmedTableRenameWithColumnTypeChange(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "public"}
+	oldTable := pgschema.Table{Schema: "public", Name: "accounts"}
+	newTable := pgschema.Table{Schema: "public", Name: "customers"}
+	before := pgschema.Column{Table: oldTable.ObjectID(), Name: "occurred_at", Position: 1, Type: "timestamp without time zone"}
+	after := pgschema.Column{Table: newTable.ObjectID(), Name: "occurred_at", Position: 1, Type: "date"}
+	for _, object := range []pgschema.Object{schema, oldTable, before} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{schema, newTable, after} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{oldTable.ObjectID(), schema.ObjectID()}, {before.ObjectID(), oldTable.ObjectID()}} {
+		if err := current.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{newTable.ObjectID(), schema.ObjectID()}, {after.ObjectID(), newTable.ObjectID()}} {
+		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	renamePending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamePending.Status != protocol.NeedsInput || len(renamePending.Questions) != 1 || renamePending.Questions[0].Kind != "rename_table" {
+		t.Fatalf("rename stage = %#v", renamePending)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: renamePending.CurrentFingerprint, DesiredFingerprint: renamePending.DesiredFingerprint,
+		Answers: []protocol.Answer{{
+			Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String(),
+			QuestionFingerprint: renamePending.Questions[0].ScopeFingerprint,
+		}},
+	}
+	typePending, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typePending.Status != protocol.NeedsInput || len(typePending.Questions) != 1 || typePending.Questions[0].Kind != "type_change" || typePending.Questions[0].Key != before.ObjectID().String() {
+		t.Fatalf("type stage = %#v", typePending)
+	}
+	answers.Answers = append(answers.Answers, protocol.Answer{
+		Kind: "type_change", Key: before.ObjectID().String(), Value: "direct",
+		QuestionFingerprint: typePending.Questions[0].ScopeFingerprint,
+	})
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := joinSQL(planned)
+	if planned.Status != protocol.Planned || !strings.Contains(sql, `ALTER TABLE "public"."accounts" ALTER COLUMN "occurred_at" TYPE date;`) || !strings.Contains(sql, `ALTER TABLE "public"."accounts" RENAME TO "customers";`) {
+		t.Fatalf("compound rename/type plan = %#v\n%s", planned, sql)
 	}
 }
 

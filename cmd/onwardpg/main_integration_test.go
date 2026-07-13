@@ -121,7 +121,7 @@ schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_ITERATION_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 `)
-	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n"
+	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, occurred_at timestamp);\n"
 	writeTestFile(t, repository, "schema.sql", baseDDL)
 
 	initialized := captureStdout(t, func() int {
@@ -134,7 +134,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		t.Fatalf("workflow unexpectedly created or required Git metadata: %v", err)
 	}
 
-	featureDDL := "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint);\n"
+	featureDDL := "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at timestamp);\n"
 	writeTestFile(t, repository, "schema.sql", featureDDL)
 	pendingOutput := captureStdout(t, func() int {
 		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
@@ -206,20 +206,73 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		t.Fatalf("verify exit = %d, stdout = %s", verified.code, verified.stdout)
 	}
 
+	// The feature now needs product-aware timestamp-to-date conversion. The
+	// existing rename receipt is explicitly invalidated because its participating
+	// column changed. The semantic relationship is still known to the agent, so
+	// it can resubmit that intent together with the anticipated type handoff.
+	featureDDL = "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date);\n"
+	writeTestFile(t, repository, "schema.sql", featureDDL)
+	typePendingOutput := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if typePendingOutput.code != 2 {
+		t.Fatalf("type decision exit = %d, stdout = %s", typePendingOutput.code, typePendingOutput.stdout)
+	}
+	var typePending struct {
+		Decisions []protocol.Decision `json:"decisions"`
+	}
+	if err := json.Unmarshal([]byte(typePendingOutput.stdout), &typePending); err != nil {
+		t.Fatal(err)
+	}
+	if len(typePending.Decisions) != 1 || typePending.Decisions[0].Choices[0].Hint.Kind != "rename" {
+		t.Fatalf("compound edit did not re-ask invalidated rename intent: %#v", typePending)
+	}
+	manualTypeHint := protocol.Hint{Kind: "type_change", Name: []string{"app", "accounts", "occurred_at"}, Strategy: "manual_sql"}
+	manualHintData, err := json.Marshal(manualTypeHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typeHandoffOutput := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--hint", string(hintData), "--hint", string(manualHintData)}, repository)
+	})
+	if typeHandoffOutput.code != 2 || !strings.Contains(typeHandoffOutput.stdout, "needs_sql_edits") {
+		t.Fatalf("type SQL handoff exit = %d, stdout = %s", typeHandoffOutput.code, typeHandoffOutput.stdout)
+	}
+	featurePath := filepath.Join(repository, "onward-bundles", "primary", "customer-rename")
+	conversionSQL := `-- Product conversion chosen from feature context.
+ALTER TABLE "app"."accounts"
+  ALTER COLUMN "occurred_at" TYPE date
+  USING "occurred_at"::date;
+`
+	conversionVerification := `-- onwardpg:assert occurred_at_is_date
+SELECT data_type = 'date'
+FROM information_schema.columns
+WHERE table_schema = 'app'
+  AND table_name = 'customers'
+  AND column_name = 'occurred_at';
+`
+	writeTestFile(t, featurePath, "phases/migrate.sql", conversionSQL)
+	writeTestFile(t, featurePath, "verify.sql", conversionVerification)
+	conversionVerified := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if conversionVerified.code != 0 {
+		t.Fatalf("conversion verification exit = %d, stdout = %s", conversionVerified.code, conversionVerified.stdout)
+	}
+
 	// Simulate an agent rebasing files: an upstream bundle now follows the old
 	// baseline while the explicitly selected feature still names that baseline
 	// as its parent. No Git API is involved in detecting or repairing the fork.
-	featurePath := filepath.Join(repository, "onward-bundles", "primary", "customer-rename")
 	parkedPath := filepath.Join(repository, "customer-rename.parked")
 	if err := os.Rename(featurePath, parkedPath); err != nil {
 		t.Fatal(err)
 	}
-	upstreamDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint); CREATE TABLE app.audit_log (id bigint);\n"
+	upstreamDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, occurred_at timestamp); CREATE TABLE app.audit_log (id bigint);\n"
 	writeHistoryTransitionFixture(t, repository, adminURL, "upstream-audit", upstreamDDL)
 	if err := os.Rename(parkedPath, featurePath); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.audit_log (id bigint);\n")
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date); CREATE TABLE app.audit_log (id bigint);\n")
 
 	restackedOutput := captureStdout(t, func() int {
 		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
@@ -248,12 +301,12 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := os.Rename(featurePath, parkedPath); err != nil {
 		t.Fatal(err)
 	}
-	secondUpstreamDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n"
+	secondUpstreamDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, occurred_at timestamp); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n"
 	writeHistoryTransitionFixture(t, repository, adminURL, "upstream-settings", secondUpstreamDDL)
 	if err := os.Rename(parkedPath, featurePath); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
 	secondRestackOutput := captureStdout(t, func() int {
 		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
 	})
@@ -279,12 +332,21 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	// a boolean assertion directly to the migration folder. Read-only check mode
 	// rejects the unreceipted edits; normal verification executes them only in
 	// disposable PostgreSQL and receipts their exact bytes after convergence.
-	migrateSQL := `-- Product-aware work owned by the feature agent.
+	secondRestackedArtifact, err := bundle.Read(featurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseMigrate := string(secondRestackedArtifact.Files["phases/migrate.sql"])
+	if !strings.Contains(baseMigrate, `"occurred_at"::date`) {
+		t.Fatalf("restack lost product conversion SQL: %s", baseMigrate)
+	}
+	migrateSQL := baseMigrate + `
+-- Product-aware work owned by the feature agent.
 CREATE TEMP TABLE onwardpg_agent_receipt (value text NOT NULL);
 INSERT INTO onwardpg_agent_receipt (value) VALUES ('customer-rename');
 `
 	writeTestFile(t, featurePath, "phases/migrate.sql", migrateSQL)
-	writeTestFile(t, featurePath, "verify.sql", `-- onwardpg:assert agent_sql_ran
+	writeTestFile(t, featurePath, "verify.sql", conversionVerification+`-- onwardpg:assert agent_sql_ran
 SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 `)
 	unreceiptedCheck := captureStdout(t, func() int {
@@ -326,7 +388,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	// A receipted bundle is not fresh merely because it still converges to its
 	// own recorded plan. CI must compare it with the schema the working code now
 	// exports and direct the agent back through the same draft loop.
-	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, unplanned text); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date, unplanned text); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
 	staleCheck := captureStdout(t, func() int {
 		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename", "--check"}, repository)
 	})
@@ -340,7 +402,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	if staleReport.Outcome != "stale" || len(staleReport.Findings) != 1 || staleReport.Findings[0].Code != "working_schema_changed" || staleReport.WorkingFingerprint == staleReport.DesiredFingerprint {
 		t.Fatalf("stale read-only report = %#v", staleReport)
 	}
-	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
 
 	// Applying the current migration to the developer database is not a history
 	// transition. The feature may keep evolving, and the same explicit bundle
@@ -365,7 +427,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 			}
 		}
 	}
-	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.audit_log (id bigint, note text); CREATE TABLE app.settings (id bigint);\n")
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date); CREATE TABLE app.audit_log (id bigint, note text); CREATE TABLE app.settings (id bigint);\n")
 
 	localOutput := captureStdout(t, func() int {
 		return runDevAt([]string{"plan", "--target", "primary"}, repository)
@@ -433,7 +495,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	if receiptAgentExpand.code != 0 {
 		t.Fatalf("receipt agent expand edit = %d, %s", receiptAgentExpand.code, receiptAgentExpand.stdout)
 	}
-	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, timezone text); CREATE TABLE app.audit_log (id bigint, note text); CREATE TABLE app.settings (id bigint);\n")
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date, timezone text); CREATE TABLE app.audit_log (id bigint, note text); CREATE TABLE app.settings (id bigint);\n")
 	conflictedOutput := captureStdout(t, func() int {
 		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
 	})

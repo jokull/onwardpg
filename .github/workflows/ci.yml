@@ -95,4 +95,8 @@ jobs:
           ATLAS_PINNED_BIN: ${{ github.workspace }}/.tools/atlas-pinned
           STRIPE_PG_SCHEMA_DIFF_BIN: ${{ github.workspace }}/.tools/pg-schema-diff-v1.0.7
           STRIPE_PG_SCHEMA_DIFF_REF: ${{ github.workspace }}/.stripe-pg-schema-diff
-        run: go test ./... -count=1
+        run: go test -p 1 ./... -count=1
+      - name: Black-box README workflow
+        env:
+          ONWARDPG_TEST_DATABASE_URL: postgres://pgmig:pgmig@localhost:5432/pgmig?sslmode=disable
+        run: scripts/test-readme-workflow.sh

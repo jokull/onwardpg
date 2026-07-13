@@ -146,9 +146,10 @@ func TestPinnedAtlasAndOnwardPGConvergeForMutationCorpus(t *testing.T) {
 	}
 	defer func() { _, _ = admin.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) }()
 	cases := []struct {
-		name       string
-		currentDDL string
-		desiredDDL string
+		name           string
+		currentDDL     string
+		desiredDDL     string
+		minimumVersion int
 	}{
 		{
 			name:       "default-change",
@@ -287,7 +288,8 @@ CREATE TABLE app.orders (id bigint PRIMARY KEY, account_id bigint,
   CONSTRAINT orders_account_id_fkey FOREIGN KEY (account_id) REFERENCES app.accounts(id) NOT VALID);`,
 		},
 		{
-			name: "unique-nulls-not-distinct-add",
+			name:           "unique-nulls-not-distinct-add",
+			minimumVersion: 150000,
 			currentDDL: `CREATE SCHEMA app;
 CREATE TABLE app.orders (id bigint);`,
 			desiredDDL: `CREATE SCHEMA app;
@@ -540,6 +542,9 @@ CREATE TYPE app.state AS ENUM ('open');`,
 	}
 	for index, corpus := range cases {
 		t.Run(corpus.name, func(t *testing.T) {
+			if corpus.minimumVersion != 0 {
+				requirePostgresVersion(t, ctx, admin, corpus.minimumVersion, corpus.name)
+			}
 			stamp := time.Now().UTC().Format("20060102150405") + fmt.Sprintf("_%02d", index)
 			currentName := "onwardpg_diff_current_" + stamp
 			atlasName := "onwardpg_diff_atlas_" + stamp

@@ -564,7 +564,10 @@ func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Questio
 // the receipt.
 func renameTableScopeExclusions(question protocol.Question, current, desired *pgschema.Snapshot) (map[pgschema.ID]bool, map[pgschema.ID]bool) {
 	currentExcluded, desiredExcluded := make(map[pgschema.ID]bool), make(map[pgschema.ID]bool)
-	if question.Kind != "rename_table" || len(question.Choices) == 0 {
+	// With one candidate plus "create", new-only columns can be excluded from
+	// the rename receipt. Multiple candidates must retain their full closures
+	// because each candidate can differ independently.
+	if question.Kind != "rename_table" || len(question.Choices) != 2 {
 		return currentExcluded, desiredExcluded
 	}
 	fromObject, fromExists := objectByString(current, question.Key)
@@ -1099,15 +1102,19 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 				candidates = append(candidates, create)
 			}
 		}
-		if len(candidates) != 1 {
+		if len(candidates) == 0 {
 			continue
 		}
-		candidate := candidates[0]
-		to := candidate.After.(pgschema.Column)
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID.String() < candidates[j].ID.String() })
+		choices := make([]string, 0, len(candidates)+1)
+		for _, candidate := range candidates {
+			choices = append(choices, candidate.ID.String())
+		}
+		choices = append(choices, "create")
 		question := protocol.Question{
 			ID: "rename_column:" + drop.ID.String(), Kind: "rename_column", Key: drop.ID.String(),
-			Message:            "Was " + drop.ID.String() + " renamed to " + candidate.ID.String() + "?",
-			Choices:            []string{candidate.ID.String(), "create"},
+			Message:            "Which desired column, if any, is the new identity of " + drop.ID.String() + "?",
+			Choices:            choices,
 			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		}
 		answer, found, err := resolver.Resolve(question)
@@ -1118,7 +1125,21 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 			questions = append(questions, question)
 			continue
 		}
-		if answer == candidate.ID.String() {
+		if answer != "create" {
+			var candidate change.Change
+			for _, possible := range candidates {
+				if possible.ID.String() == answer {
+					candidate = possible
+					break
+				}
+			}
+			if candidate.ID.Kind == "" {
+				return nil, nil, nil, nil, fmt.Errorf("resolved column rename candidate %q is unavailable", answer)
+			}
+			if consumed[candidate.ID] {
+				return nil, nil, nil, nil, fmt.Errorf("desired column %s was selected as more than one rename target", candidate.ID)
+			}
+			to := candidate.After.(pgschema.Column)
 			consumed[drop.ID], consumed[candidate.ID] = true, true
 			// PostgreSQL rewrites catalog references to a renamed column.  Keep
 			// only modifications which are exactly that automatic rewrite out of
@@ -1429,6 +1450,7 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 	}
 	consumed := make(map[pgschema.ID]bool)
 	var renames []renameTable
+	var compoundColumnChanges []change.Change
 	var questions []protocol.Question
 	for _, drop := range drops {
 		from := drop.Before.(pgschema.Table)
@@ -1439,15 +1461,19 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 				candidates = append(candidates, create)
 			}
 		}
-		if len(candidates) != 1 {
+		if len(candidates) == 0 {
 			continue
 		}
-		candidate := candidates[0]
-		to := candidate.After.(pgschema.Table)
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID.String() < candidates[j].ID.String() })
+		choices := make([]string, 0, len(candidates)+1)
+		for _, candidate := range candidates {
+			choices = append(choices, candidate.ID.String())
+		}
+		choices = append(choices, "create")
 		question := protocol.Question{
 			ID: "rename_table:" + drop.ID.String(), Kind: "rename_table", Key: drop.ID.String(),
-			Message:            "Was " + drop.ID.String() + " renamed to " + candidate.ID.String() + "?",
-			Choices:            []string{candidate.ID.String(), "create"},
+			Message:            "Which desired table, if any, is the new identity of " + drop.ID.String() + "?",
+			Choices:            choices,
 			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		}
 		answer, found, err := resolver.Resolve(question)
@@ -1458,13 +1484,35 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 			questions = append(questions, question)
 			continue
 		}
-		if answer == candidate.ID.String() {
+		if answer != "create" {
+			var candidate change.Change
+			for _, possible := range candidates {
+				if possible.ID.String() == answer {
+					candidate = possible
+					break
+				}
+			}
+			if candidate.ID.Kind == "" {
+				return nil, nil, nil, nil, fmt.Errorf("resolved table rename candidate %q is unavailable", answer)
+			}
+			if consumed[candidate.ID] {
+				return nil, nil, nil, nil, fmt.Errorf("desired table %s was selected as more than one rename target", candidate.ID)
+			}
+			to := candidate.After.(pgschema.Table)
 			consumed[drop.ID], consumed[candidate.ID] = true, true
 			fromChildren, toChildren := tableChildren(current, from.ObjectID()), tableChildren(desired, to.ObjectID())
 			for key, before := range fromChildren {
 				after := toChildren[key]
 				consumed[before.ObjectID()] = true
 				consumed[after.ObjectID()] = true
+				if !equivalentChildForTableRename(before, after, from, to) {
+					beforeColumn := before.(pgschema.Column)
+					afterColumn := after.(pgschema.Column)
+					afterColumn.Table = from.ObjectID()
+					compoundColumnChanges = append(compoundColumnChanges, change.Change{
+						Kind: change.Modify, ID: beforeColumn.ObjectID(), Before: beforeColumn, After: afterColumn,
+					})
+				}
 			}
 			for key, after := range toChildren {
 				if _, exists := fromChildren[key]; exists {
@@ -1521,6 +1569,13 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 			filtered = append(filtered, item)
 		}
 	}
+	filtered = append(filtered, compoundColumnChanges...)
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].ID.String() == filtered[j].ID.String() {
+			return filtered[i].Kind < filtered[j].Kind
+		}
+		return filtered[i].ID.String() < filtered[j].ID.String()
+	})
 	return filtered, renames, questions, nil, nil
 }
 
@@ -2313,7 +2368,10 @@ func equivalentTableForRename(current, desired *pgschema.Snapshot, from, to pgsc
 	toChildren := tableChildren(desired, to.ObjectID())
 	for key, before := range fromChildren {
 		after, exists := toChildren[key]
-		if !exists || !equivalentChildForTableRename(before, after, from, to) {
+		if !exists {
+			return false
+		}
+		if !equivalentChildForTableRename(before, after, from, to) && !plannableColumnChangeDuringTableRename(before, after) {
 			return false
 		}
 	}
@@ -2326,6 +2384,12 @@ func equivalentTableForRename(current, desired *pgschema.Snapshot, from, to pgsc
 		}
 	}
 	return true
+}
+
+func plannableColumnChangeDuringTableRename(before, after pgschema.Object) bool {
+	beforeColumn, beforeOK := before.(pgschema.Column)
+	afterColumn, afterOK := after.(pgschema.Column)
+	return beforeOK && afterOK && beforeColumn.Name == afterColumn.Name && beforeColumn.Position == afterColumn.Position
 }
 
 func tableChildren(snapshot *pgschema.Snapshot, table pgschema.ID) map[string]pgschema.Object {
@@ -2766,7 +2830,7 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 // independently creatable. This is a catalog relationship, not a name-based
 // heuristic.
 func constraintPropagatedByPartitionParent(object pgschema.Constraint, desired *pgschema.Snapshot) bool {
-	if desired == nil || object.Parent != nil || (object.Type != pgschema.ConstraintPrimary && object.Type != pgschema.ConstraintUnique) {
+	if desired == nil {
 		return false
 	}
 	tableObject, exists := desired.Object(object.Table)
@@ -2775,6 +2839,15 @@ func constraintPropagatedByPartitionParent(object pgschema.Constraint, desired *
 	}
 	table, ok := tableObject.(pgschema.Table)
 	if !ok || table.PartitionOf == nil {
+		return false
+	}
+	if object.Parent != nil {
+		parentObject, exists := desired.Object(*object.Parent)
+		parent, ok := parentObject.(pgschema.Constraint)
+		return exists && ok && parent.Table == table.PartitionOf.Parent &&
+			parent.Type == object.Type && parent.Definition == object.Definition
+	}
+	if object.Type != pgschema.ConstraintPrimary && object.Type != pgschema.ConstraintUnique {
 		return false
 	}
 	for _, candidate := range desired.Objects() {
@@ -4611,7 +4684,24 @@ func constraintUsesMatchPartial(object pgschema.Constraint) bool {
 
 func renderConstraintCreateUsingExistingIndex(object pgschema.Constraint, current, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	if object.Parent != nil {
-		return renderPartitionConstraintAttachment(object, current, desired)
+		// A child constraint with a typed parent edge is normally created by
+		// PostgreSQL together with the partitioned parent's constraint. The one
+		// exception is claiming a compatible standalone child index and attaching
+		// it to the parent hierarchy; that transition is proven by current state.
+		if object.UsingIndex != "" {
+			indexID := (pgschema.Index{Table: object.Table, Name: object.UsingIndex}).ObjectID()
+			beforeObject, beforeExists := current.Object(indexID)
+			afterObject, afterExists := desired.Object(indexID)
+			before, beforeOK := beforeObject.(pgschema.Index)
+			after, afterOK := afterObject.(pgschema.Index)
+			if beforeExists && afterExists && beforeOK && afterOK && partitionConstraintAttachmentValid(object, before, after, desired) {
+				return renderPartitionConstraintAttachment(object, current, desired)
+			}
+		}
+		if constraintPropagatedByPartitionParent(object, desired) {
+			return nil, nil, nil, nil
+		}
+		return nil, nil, []string{"partition_constraint_parent:" + object.ObjectID().String()}, nil
 	}
 	if constraintPropagatedByPartitionParent(object, desired) {
 		return nil, nil, nil, nil
@@ -5035,6 +5125,7 @@ func rebuildBatches(result *protocol.Result) error {
 	}
 	result.Statements, result.Batches = nil, nil
 	for _, phase := range orderedPhases {
+		phaseBatch := 0
 		for _, item := range byPhase[phase] {
 			result.Statements = append(result.Statements, item)
 			transactional := !item.NonTransactional
@@ -5046,8 +5137,9 @@ func rebuildBatches(result *protocol.Result) error {
 					continue
 				}
 			}
+			phaseBatch++
 			result.Batches = append(result.Batches, protocol.Batch{
-				ID: fmt.Sprintf("batch-%03d", len(result.Batches)+1), Phase: phase,
+				ID: fmt.Sprintf("batch-%s-%03d", phase, phaseBatch), Phase: phase,
 				Transactional: transactional, Statements: []protocol.Statement{item},
 			})
 		}
@@ -5058,6 +5150,7 @@ func rebuildBatches(result *protocol.Result) error {
 func rebuildUnsortedBatches(result *protocol.Result) error {
 	statements := append([]protocol.Statement(nil), result.Statements...)
 	result.Statements, result.Batches = nil, nil
+	phaseBatches := make(map[string]int)
 	for _, item := range statements {
 		result.Statements = append(result.Statements, item)
 		transactional := !item.NonTransactional
@@ -5068,8 +5161,9 @@ func rebuildUnsortedBatches(result *protocol.Result) error {
 				continue
 			}
 		}
+		phaseBatches[item.Phase]++
 		result.Batches = append(result.Batches, protocol.Batch{
-			ID: fmt.Sprintf("batch-%03d", len(result.Batches)+1), Phase: item.Phase,
+			ID: fmt.Sprintf("batch-%s-%03d", item.Phase, phaseBatches[item.Phase]), Phase: item.Phase,
 			Transactional: transactional, Statements: []protocol.Statement{item},
 		})
 	}

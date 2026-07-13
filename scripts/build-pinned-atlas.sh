@@ -15,5 +15,6 @@ if [[ "$(git -C "$source_dir" rev-parse HEAD)" != "$commit" ]]; then
 fi
 
 mkdir -p "$(dirname "$output")"
-(cd "$source_dir/cmd/atlas" && go build -o "$(cd "$(dirname "$output")" && pwd)/$(basename "$output")" .)
+output="$(cd "$(dirname "$output")" && pwd)/$(basename "$output")"
+(cd "$source_dir/cmd/atlas" && go build -o "$output" .)
 echo "built pinned Atlas at $output"

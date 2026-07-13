@@ -327,7 +327,7 @@ func TestPartitionAttachAndDetachConvergeOnPostgreSQL(t *testing.T) {
 	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
 	baseDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
 		"CREATE TABLE " + quote(schemaName) + ".events (id bigint NOT NULL, occurred_at date NOT NULL) PARTITION BY RANGE (occurred_at);" +
-		"CREATE TABLE " + quote(schemaName) + ".events_2026 (LIKE " + quote(schemaName) + ".events INCLUDING ALL);" +
+		"CREATE TABLE " + quote(schemaName) + ".events_2026 (id bigint NOT NULL, occurred_at date NOT NULL);" +
 		"ALTER TABLE " + quote(schemaName) + ".events_2026 ADD CONSTRAINT events_2026_range CHECK (occurred_at >= DATE '2026-01-01' AND occurred_at < DATE '2027-01-01');"
 	if _, err := conn.Exec(ctx, baseDDL); err != nil {
 		t.Fatal(err)
@@ -1406,7 +1406,7 @@ func TestDefaultPartitionAttachDetachConvergeOnPostgreSQL(t *testing.T) {
 	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
 	baseDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
 		"CREATE TABLE " + quote(schemaName) + ".events (id bigint NOT NULL) PARTITION BY LIST (id);" +
-		"CREATE TABLE " + quote(schemaName) + ".events_default (LIKE " + quote(schemaName) + ".events INCLUDING ALL);"
+		"CREATE TABLE " + quote(schemaName) + ".events_default (id bigint NOT NULL);"
 	if _, err := conn.Exec(ctx, baseDDL); err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jokull/onwardpg/internal/protocol"
 )
 
 func TestParsePhaseSQLPreservesBatchesAndDefaultsToTransactional(t *testing.T) {
@@ -118,6 +120,39 @@ func TestReconcileEditedDraftPreservesUntouchedAgentPhase(t *testing.T) {
 	}
 	if !strings.Contains(string(reconciled.Files["phases/expand.sql"]), "ADD COLUMN email") {
 		t.Fatalf("generated expand phase was not refreshed: %s", reconciled.Files["phases/expand.sql"])
+	}
+}
+
+func TestReconcileEditedDraftCarriesResolvedTODOAcrossNewHistoryParent(t *testing.T) {
+	meta := metadata()
+	meta.HistoryParentDigest = HistoryRootDigest()
+	todo := statement("-- ONWARDPG TODO: convert app.accounts.occurred_at from timestamp to date", "migrate", true)
+	oldResult := plannedResult(todo)
+	oldResult.Status = protocol.NeedsSQLEdits
+	oldGenerated, err := Build(Input{Metadata: meta, Result: oldResult})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversion := []byte("ALTER TABLE app.accounts ALTER COLUMN occurred_at TYPE date USING occurred_at::date;\n")
+	previous, err := PrepareEditedFiles(oldGenerated, map[string][]byte{"phases/migrate.sql": conversion})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	meta.Generation = 2
+	meta.HistoryParentDigest = desiredFingerprint
+	newResult := plannedResult(todo)
+	newResult.Status = protocol.NeedsSQLEdits
+	newGenerated, err := Build(Input{Metadata: meta, Result: newResult})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, report, err := ReconcileEditedDraft(previous, newGenerated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "reconciled" || reconciled.Manifest.State != string(protocol.Planned) || string(reconciled.Files["phases/migrate.sql"]) != string(conversion) {
+		t.Fatalf("TODO reconciliation = %#v, manifest = %#v", report, reconciled.Manifest)
 	}
 }
 

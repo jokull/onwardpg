@@ -663,7 +663,8 @@ the exact result.
 ### Wave 5 — preserve decisions and edits through feature evolution
 
 - Rebind unchanged narrow-scope decisions when working DDL changes elsewhere.
-- Explicitly list invalidated and newly required decisions.
+- Re-emit invalidated and newly required semantic choices; do not add receipt
+  metadata to the minimal decision envelope merely to label the distinction.
 - Preserve the same selected bundle across repeated local application and
   further DDL edits.
 - Restack the selected bundle when its parent moves after incoming history.
@@ -718,8 +719,8 @@ workflow that implies Git intelligence, JSON orchestration, or database apply.
 
 ### B. Rename with multiple credible candidates
 
-- Remove two compatible columns and add one compatible column.
-- JSON lists every credible rename plus create/drop and manual choices.
+- Remove one column and add two compatible replacement candidates.
+- JSON lists every credible rename plus deliberate drop-and-create.
 - Supplying the semantic rename before or after the question produces the same
   intended rename.
 - An invented, stale, duplicate, or unused hint is rejected.

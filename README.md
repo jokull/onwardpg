@@ -209,6 +209,10 @@ onwardpg draft \
   --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}'
 ~~~
 
+When more than one desired object is structurally credible, onwardpg offers
+every candidate plus deliberate drop-and-create. It never suppresses the
+ambiguity or chooses the closest name.
+
 The agent can supply the same hint on the first invocation when it already
 knows the rename from the feature context. It may prepare a complete hints file
 for every decision it anticipates; onwardpg walks staged questions until all
@@ -631,3 +635,7 @@ the [Atlas reference study](parity/atlas-postgres.json), and the pinned
 The immediate path to the first preview tag is selecting a project license,
 final documentation review, and release-candidate testing from the generated archives. The
 planner remains a planner.
+
+CI runs this walkthrough as a black-box CLI fixture from a new directory on
+every supported PostgreSQL major; see
+[`scripts/test-readme-workflow.sh`](scripts/test-readme-workflow.sh).

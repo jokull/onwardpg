@@ -62,6 +62,12 @@ development, staging, or production database.
   bundle receipts, and enforced during replay rather than duplicated in config.
 - Frameworks participate only by exporting PostgreSQL DDL; onwardpg has no
   framework adapter API.
+- Rename decisions enumerate every credible target, and confirmed table
+  renames compose with same-column structural changes instead of degrading to
+  destructive replacement.
+- Product-authored SQL that resolves a generated TODO is preserved and
+  re-verified when the same logical bundle is restacked over a new history
+  parent.
 
 ### Removed
 

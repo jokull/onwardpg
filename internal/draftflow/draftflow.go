@@ -212,7 +212,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		sort.Strings(report.EditFiles)
 	}
 	if selected != nil && selected.Artifact.Manifest.PhaseSource == "edited" {
-		if plan.Status != protocol.Planned {
+		if plan.Status != protocol.Planned && plan.Status != protocol.NeedsSQLEdits {
 			relative, pathErr := filepath.Rel(input.Root, destination)
 			if pathErr != nil {
 				return report, pathErr
@@ -254,9 +254,13 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			return report, nil
 		}
 		artifact = reconciled
+		report.Outcome = artifact.Manifest.State
+		if artifact.Manifest.State == string(protocol.Planned) {
+			report.EditFiles = nil
+		}
 	}
 
-	if plan.Status == protocol.Planned {
+	if artifact.Manifest.State == string(protocol.Planned) {
 		proposed := chain
 		proposed.Entries = append(append([]history.Entry(nil), chain.Entries...), history.Entry{
 			Directory: input.BundleID,

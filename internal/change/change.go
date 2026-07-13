@@ -80,13 +80,26 @@ func objectsEqual(before, after pgschema.Object) bool {
 
 func Schedule(current, desired *pgschema.Snapshot, changes []Change) []Batch {
 	createsAndModifies := make(map[pgschema.ID]Change)
+	currentIdentityModifies := make(map[pgschema.ID]Change)
 	drops := make(map[pgschema.ID]Change)
-	for _, change := range changes {
-		switch change.Kind {
+	for _, item := range changes {
+		switch item.Kind {
 		case Drop:
-			drops[change.ID] = change
+			drops[item.ID] = item
 		default:
-			createsAndModifies[change.ID] = change
+			// A confirmed parent rename can turn a drop/create child pair into
+			// a modification against the current identity. Schedule that work
+			// from the current dependency graph so it executes before the parent
+			// receives its desired identity.
+			if item.Kind == Modify {
+				_, inCurrent := current.Object(item.ID)
+				_, inDesired := desired.Object(item.ID)
+				if inCurrent && !inDesired {
+					currentIdentityModifies[item.ID] = item
+					continue
+				}
+			}
+			createsAndModifies[item.ID] = item
 		}
 	}
 	var batches []Batch
@@ -110,6 +123,7 @@ func Schedule(current, desired *pgschema.Snapshot, changes []Change) []Batch {
 		}
 	}
 	appendBatches(desired, createsAndModifies, false)
+	appendBatches(current, currentIdentityModifies, false)
 	appendBatches(current, drops, true)
 	return batches
 }
