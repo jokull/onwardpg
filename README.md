@@ -256,6 +256,7 @@ is retained as test research, not a product-completeness promise. See
 - [JSON protocol and answer files](docs/protocol.md)
 - [Adapter API](docs/adapter.md)
 - [Forward-only migration workflow](docs/migration-workflow.md)
+- [Agent-assisted migration walkthrough](docs/agent-workflow.md)
 - [Safety model](docs/safety-model.md)
 - [Architecture](docs/architecture.md)
 - [Reference behavior study](docs/atlas-postgres-parity.md)
