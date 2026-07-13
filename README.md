@@ -154,8 +154,22 @@ schema diff to production.
 The first durable bundle layer is also available: `onwardpg plan --bundle ...`
 writes a versioned manifest, preserved decision attempts, answers, the ready
 plan, and separate non-empty phase SQL files while keeping the normal planner
-JSON and exit codes. See [migration bundles](docs/bundles.md). Git-aware
-`pr regenerate` and CI policy commands remain the next implementation wave.
+JSON and exit codes. See [migration bundles](docs/bundles.md).
+
+`onwardpg pr status --base origin/main --target NAME` provides the first
+Git-aware guardrail. It resolves exact commits, distinguishes the PR-owned
+merge-base patch from an eroded current base, fingerprints dirty checkout
+state, and blocks edits to base-reachable migration history or migration-path
+collisions. Synthetic merged-schema compilation and regeneration remain in
+the `pr regenerate` workflow below; `pr status` itself stays read-only.
+
+`onwardpg pr regenerate --base origin/main --target NAME --bundle FEATURE`
+now compiles the exact base and the would-be merged head in isolated trees,
+replays base migrations in PostgreSQL, requires base code and history to match,
+and writes the fingerprinted PR bundle. It runs configured schema compilers
+twice and rejects nondeterminism or undeclared filesystem output. The current
+slice does not yet write Drizzle/ORM journal entries or prove the bottom/right
+edges of the schema square; runner handoff and clone verification remain next.
 
 ## Developer preview: what works now
 

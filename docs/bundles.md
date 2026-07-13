@@ -2,8 +2,8 @@
 
 An onwardpg bundle is the durable receipt for one logical migration generation.
 The first bundle implementation wraps the existing explicit-source `plan`
-command; upcoming PR commands will resolve Git base/head schemas and ORM
-migration handoff automatically.
+command. `pr regenerate` can now resolve and compile exact Git base/head schema
+state; ORM migration handoff remains upcoming.
 
 ## Current command
 
@@ -91,6 +91,12 @@ The manifest is `onwardpg.bundle/v1`. It records:
 - decision history; and
 - plan, answer, intent, and phase digests.
 
+Bundles produced by `pr regenerate` also record the partial schema square:
+base declarative fingerprint, replayed base-history fingerprint, synthetic
+head declarative fingerprint, and the explicit handoff state. Regeneration
+refuses to bundle an unhealthy base. Until the runner adapter is implemented,
+head artifact fidelity is `not_generated` rather than an implied `HC == HM`.
+
 ## Repository configuration
 
 `.onwardpg.toml` declares repository-relative target paths and schema compiler
@@ -102,7 +108,7 @@ onwardpg config check --config .onwardpg.toml
 
 See [the example configuration](../.onwardpg.example.toml). Configuration is
 strict: unknown fields, absolute/escaping paths, literal URLs, ambiguous schema
-sources, unsupported PostgreSQL majors, and duplicate policy hazards are
-rejected. The target configuration is the foundation for the planned
-`onwardpg pr status`, `pr regenerate`, and `ci check` commands; those workflows
+sources, overlapping bundle/runner paths, unsupported PostgreSQL majors, and
+duplicate policy hazards are rejected. `pr status` and the top-edge/base-integrity portion of
+`pr regenerate` use this configuration today. Runner handoff and `ci check`
 are not implemented yet.

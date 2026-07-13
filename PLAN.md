@@ -126,6 +126,17 @@ The local dev database is a fifth, deliberately non-authoritative state. Its
 diff to `HC` helps the developer work, but it never substitutes for any corner
 of the PR square.
 
+`HC` is the tree that would actually result from merging the PR contribution
+into the exact recorded base, not necessarily the raw feature-branch checkout.
+When the base advanced after the branch forked, onwardpg must construct a
+synthetic three-way merge of `base + (merge-base → head patch)` in an isolated
+worktree and compile the schema there. Otherwise newly landed base objects can
+be misread as feature-branch drops. A merge conflict is an explicit blocked
+state, never a guessed desired schema. For a dirty checkout, only an explicitly
+captured working-tree overlay may be applied to that synthetic tree; its
+content digest becomes the head revision without writing untracked content
+into Git history.
+
 Deferred contract work complicates exact `HC == HM` at merge time. In that
 case the bundle records a real-PostgreSQL post-expand checkpoint plus an
 explicit residual plan to final `HC`. CI requires every residual operation to
@@ -499,6 +510,13 @@ sequence/name. If it gains overlapping schema changes, the new diff may ask new
 questions or reject a conflict. That is useful information; onwardpg must not
 try to preserve the old SQL for aesthetic stability.
 
+Git classification uses two boundaries at once: the merge-base-to-head diff is
+the PR-owned contribution, while the exact current base tree defines protected
+migration history and the regeneration baseline. Files newly added to the base
+are not PR deletions. Editing or removing a file reachable from either the old
+merge base or current base is an immutable-history violation; adding a branch
+file at a path now occupied by the base is a concurrent identity collision.
+
 If only the Git commit changes while `BC`, `BM`, and the feature diff remain
 identical, onwardpg may fast-path semantic reuse, but it still reissues the
 provenance and migration-runner handoff. An unrelated migration can change
@@ -670,10 +688,18 @@ receipt.
 - Low-level `plan --bundle` writes non-empty phase files without changing the
   normal plan JSON or exit behavior. Source descriptions are redacted, and a
   real-PostgreSQL CLI integration test covers bundle creation.
-- Git ref resolution, schema-square validation, ORM compiler/materializer/
-  writer execution, amendments, clone receipts, and `pr`/`ci` commands remain
-  upcoming work; explicit base/head flags are receipts, not yet independently
-  verified provenance.
+- Read-only `pr status` now resolves exact base/head/merge-base identities,
+  fingerprints dirty checkout state, separates PR-owned changes from base
+  erosion, and blocks base-history edits and concurrent migration-path
+  collisions.
+- `pr regenerate` now materializes the exact base and synthetic would-be merge
+  tree, overlays fingerprinted dirty state without staging it, runs generic
+  declarative compilers deterministically, replays generic/Drizzle base history
+  in PostgreSQL, requires `BC == BM`, and records the partial schema square in
+  the bundle.
+- ORM runner artifact writing and `HC == HM`, amendments, clone receipts, and
+  `ci` remain upcoming work. Low-level `plan --bundle` base/head flags are still
+  caller receipts rather than independently verified provenance.
 
 ## Safety and code-quality debt carried from REVIEW.md
 

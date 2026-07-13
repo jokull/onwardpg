@@ -136,6 +136,21 @@ func TestBuildRejectsMismatchedReceiptAndIncompletePlan(t *testing.T) {
 	}
 }
 
+func TestBuildValidatesSchemaSquareReceipt(t *testing.T) {
+	meta := metadata()
+	meta.SchemaSquare = &SchemaSquareReceipt{
+		BaseCodeFingerprint: currentFingerprint, BaseHistoryFingerprint: currentFingerprint,
+		HeadCodeFingerprint: desiredFingerprint, BaseIntegrity: "matched", HeadArtifactFidelity: "not_generated",
+	}
+	if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err != nil {
+		t.Fatal(err)
+	}
+	meta.SchemaSquare.BaseHistoryFingerprint = desiredFingerprint
+	if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err == nil || !strings.Contains(err.Error(), "matched base") {
+		t.Fatalf("expected base integrity receipt rejection, got %v", err)
+	}
+}
+
 func TestWriteRequiresExplicitSafeDraftReplacement(t *testing.T) {
 	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult()})
 	if err != nil {

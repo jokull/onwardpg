@@ -3,8 +3,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/jokull/onwardpg/internal/gitbase"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
 )
@@ -32,6 +37,63 @@ func TestVersionedDiagnosticContract(t *testing.T) {
 	}
 	if !contains(string(data), protocol.DiagnosticVersion) || !contains(string(data), `"code":"invalid_invocation"`) {
 		t.Fatalf("diagnostic = %s", data)
+	}
+}
+
+func TestPRStatusCLIBlocksBaseMigrationEdits(t *testing.T) {
+	repository := t.TempDir()
+	git(t, repository, "init", "-b", "main")
+	git(t, repository, "config", "user.name", "Onward Test")
+	git(t, repository, "config", "user.email", "onward@example.test")
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+adapter = "ddl"
+schema_file = "schema.sql"
+migration_path = "migrations"
+dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
+postgres_major = 16
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE TABLE users (id bigint);\n")
+	writeTestFile(t, repository, "migrations/0001.sql", "SELECT 1;\n")
+	git(t, repository, "add", "-A")
+	git(t, repository, "commit", "-m", "base")
+	git(t, repository, "checkout", "-b", "feature")
+	writeTestFile(t, repository, "migrations/0001.sql", "SELECT 2;\n")
+	git(t, repository, "add", "-A")
+	git(t, repository, "commit", "-m", "edit history")
+
+	output := captureStdout(t, func() int {
+		return runPRAt([]string{"status", "--base", "main", "--target", "primary"}, repository)
+	})
+	if output.code != 4 {
+		t.Fatalf("exit = %d, stdout = %s", output.code, output.stdout)
+	}
+	var status gitbase.Status
+	if err := json.Unmarshal([]byte(output.stdout), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.ProtocolVersion != gitbase.Version || status.Outcome != "blocked" || len(status.Problems) != 1 || status.Problems[0].Code != "base_history_modified" {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func writeTestFile(t *testing.T, root, name, contents string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func git(t *testing.T, repository string, arguments ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", repository}, arguments...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
 	}
 }
 

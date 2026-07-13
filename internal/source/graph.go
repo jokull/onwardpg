@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,10 @@ func materializeDDLGraph(ctx context.Context, path, devURL string, ignores []str
 	if err != nil {
 		return nil, err
 	}
+	return materializeDDLBytesGraph(ctx, ddl, filepath.Base(path), devURL, ignores, validateIgnores)
+}
+
+func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devURL string, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
 	admin, err := pgx.Connect(ctx, devURL)
 	if err != nil {
 		return nil, fmt.Errorf("connect dev database: %w", err)
@@ -43,7 +48,7 @@ func materializeDDLGraph(ctx context.Context, path, devURL string, ignores []str
 	}
 	if _, err = target.Exec(ctx, string(ddl)); err != nil {
 		target.Close(ctx)
-		return nil, fmt.Errorf("execute %s: %w", path, err)
+		return nil, fmt.Errorf("execute declarative DDL from %s: %w", provenance, err)
 	}
 	if err := target.Close(ctx); err != nil {
 		return nil, fmt.Errorf("close temp database connection: %w", err)

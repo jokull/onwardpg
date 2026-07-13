@@ -58,5 +58,11 @@ catalog inspection or fail explicitly; it must not omit the object from a
 typed snapshot.
 
 The CLI currently accepts URLs and DDL files. Wiring arbitrary adapter sources
-into the CLI is an integration task still tracked in `PLAN.md`; library users
-can use the adapter boundary directly.
+into the low-level CLI remains an integration task. PR regeneration uses the
+stable `Compiler` boundary through `.onwardpg.toml`: `schema_file` reads genesis
+DDL from an isolated tree, while `schema_command` executes an argument vector
+in that tree and accepts DDL on stdout. Commands run twice; changing the tree,
+emitting empty output, or producing different output is rejected. Commands
+that require unmaterialized dependencies such as `node_modules` need the
+upcoming Drizzle-specific compiler rather than relying on the generic command
+runner.

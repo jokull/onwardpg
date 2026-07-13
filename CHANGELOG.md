@@ -25,6 +25,11 @@ claim and does not apply migrations automatically.
 - Deterministic statement IDs, `onwardpg.bundle/v1` receipt directories,
   phase-specific SQL artifacts, preserved decision history, strict repository
   configuration, and versioned diagnostic errors.
+- Read-only `pr status` Git provenance with base-erosion, protected migration
+  history, concurrent path-collision, and dirty-revision classification.
+- Isolated synthetic PR trees, deterministic declarative compilers, Drizzle or
+  ordered-SQL base-history replay, `BC == BM` enforcement, and Git-verified
+  `pr regenerate` bundle generation.
 
 ### Known limitations
 

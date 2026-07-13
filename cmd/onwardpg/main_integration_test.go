@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jokull/onwardpg/internal/bundle"
+	"github.com/jokull/onwardpg/internal/prflow"
 )
 
 func TestPlanCLIWritesVersionedBundleOnPostgreSQL(t *testing.T) {
@@ -56,6 +57,76 @@ func TestPlanCLIWritesVersionedBundleOnPostgreSQL(t *testing.T) {
 	}
 	if !strings.Contains(string(phase), `CREATE TABLE "app"."users"`) {
 		t.Fatalf("expand phase = %s", phase)
+	}
+}
+
+func TestPRRegenerateWritesVerifiedBaseToSyntheticHeadBundle(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	git(t, repository, "init", "-b", "main")
+	git(t, repository, "config", "user.name", "Onward Test")
+	git(t, repository, "config", "user.email", "onward@example.test")
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+adapter = "ddl"
+schema_file = "schema.sql"
+migration_path = "migrations"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+postgres_major = 16
+`)
+	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.users (id bigint PRIMARY KEY);\n"
+	writeTestFile(t, repository, "schema.sql", baseDDL)
+	writeTestFile(t, repository, "migrations/0001.sql", baseDDL)
+	git(t, repository, "add", "-A")
+	git(t, repository, "commit", "-m", "base")
+	git(t, repository, "checkout", "-b", "feature")
+	writeTestFile(t, repository, "schema.sql", baseDDL+"CREATE TABLE app.projects (id bigint PRIMARY KEY);\n")
+	git(t, repository, "add", "schema.sql")
+	git(t, repository, "commit", "-m", "feature schema")
+
+	output := captureStdout(t, func() int {
+		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "projects"}, repository)
+	})
+	if output.code != 0 {
+		t.Fatalf("exit = %d, stdout = %s", output.code, output.stdout)
+	}
+	var analysis prflow.Analysis
+	if err := json.Unmarshal([]byte(output.stdout), &analysis); err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Outcome != "ready" || analysis.Bundle == nil || analysis.Bundle.Generation != 1 || analysis.SchemaSquare.BaseIntegrity != "matched" {
+		t.Fatalf("analysis = %#v", analysis)
+	}
+	bundlePath := filepath.Join(repository, filepath.FromSlash(analysis.Bundle.Path))
+	artifact, err := bundle.Read(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.SchemaSquare == nil || artifact.Manifest.SchemaSquare.BaseCodeFingerprint != artifact.Manifest.SchemaSquare.BaseHistoryFingerprint {
+		t.Fatalf("bundle schema square = %#v", artifact.Manifest.SchemaSquare)
+	}
+	if !strings.Contains(string(artifact.Files["phases/expand.sql"]), `CREATE TABLE "app"."projects"`) {
+		t.Fatalf("expand phase = %s", artifact.Files["phases/expand.sql"])
+	}
+
+	// The existing receipt root is excluded from source revision provenance, so
+	// an explicit draft regeneration remains on the same clean head revision.
+	second := captureStdout(t, func() int {
+		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "projects", "--replace-draft"}, repository)
+	})
+	if second.code != 0 {
+		t.Fatalf("second exit = %d, stdout = %s", second.code, second.stdout)
+	}
+	var regenerated prflow.Analysis
+	if err := json.Unmarshal([]byte(second.stdout), &regenerated); err != nil {
+		t.Fatal(err)
+	}
+	if regenerated.Git.HeadRevision != analysis.Git.HeadRevision || regenerated.Bundle == nil || regenerated.Bundle.Generation != 2 {
+		t.Fatalf("regenerated analysis = %#v", regenerated)
 	}
 }
 

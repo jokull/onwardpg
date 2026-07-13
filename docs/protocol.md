@@ -128,6 +128,7 @@ operator-chosen `REFRESH MATERIALIZED VIEW` form and any required verification.
 | `0` | `planned` | v1 result JSON, or SQL with `--sql` |
 | `2` | `needs_input` | v1 result JSON |
 | `3` | `unsupported` | v1 result JSON |
+| `4` | repository policy blocked | command-specific versioned status JSON |
 | `1` | invocation, input, connection, configuration, bundle, or internal planning error | `onwardpg.diagnostic/v1` JSON |
 
 Errors outside a normal plan result use a stable diagnostic envelope:
@@ -144,4 +145,10 @@ Errors outside a normal plan result use a stable diagnostic envelope:
 Consumers should branch on `protocol_version` and `code`; `message` is
 human-readable context and may become more specific without a protocol change.
 Current codes distinguish invocation, answers, source, ignore, planning,
-configuration, and bundle failures.
+configuration, bundle, and Git-status failures.
+
+`pr regenerate` emits `onwardpg.pr-analysis/v1`. It nests the exact
+`onwardpg.git-status/v1`, partial schema-square fingerprints, the ordinary
+`onwardpg.plan/v1` result, and the written bundle generation/path. A blocked
+Git or base-integrity result omits `plan` and exits `4`; needs-input and
+unsupported planner results retain exits `2` and `3`.

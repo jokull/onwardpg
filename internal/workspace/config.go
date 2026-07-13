@@ -77,6 +77,9 @@ func (c Config) Validate() error {
 		if err := target.Validate(); err != nil {
 			return fmt.Errorf("target %s: %w", name, err)
 		}
+		if pathsOverlap(c.BundleRoot, target.MigrationPath) {
+			return fmt.Errorf("target %s: bundle_root and migration_path must not overlap", name)
+		}
 	}
 	seenHazards := make(map[string]bool, len(c.Policy.ApprovalHazards))
 	for _, hazard := range c.Policy.ApprovalHazards {
@@ -86,6 +89,10 @@ func (c Config) Validate() error {
 		seenHazards[hazard] = true
 	}
 	return nil
+}
+
+func pathsOverlap(first, second string) bool {
+	return first == second || strings.HasPrefix(first, second+"/") || strings.HasPrefix(second, first+"/")
 }
 
 func (t Target) Validate() error {

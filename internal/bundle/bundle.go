@@ -20,7 +20,7 @@ const Version = "onwardpg.bundle/v1"
 
 var (
 	fingerprintPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	commitPattern      = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	commitPattern      = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 )
 
 type SourceReceipt struct {
@@ -42,6 +42,15 @@ type PlannerOptions struct {
 type PlannerReceipt struct {
 	Version string         `json:"version"`
 	Options PlannerOptions `json:"options"`
+}
+
+type SchemaSquareReceipt struct {
+	BaseCodeFingerprint     string `json:"base_code_fingerprint"`
+	BaseHistoryFingerprint  string `json:"base_history_fingerprint"`
+	HeadCodeFingerprint     string `json:"head_code_fingerprint"`
+	HeadArtifactFingerprint string `json:"head_artifact_fingerprint,omitempty"`
+	BaseIntegrity           string `json:"base_integrity"`
+	HeadArtifactFidelity    string `json:"head_artifact_fidelity"`
 }
 
 type Lineage struct {
@@ -74,9 +83,10 @@ type Manifest struct {
 	BaseCommit   string `json:"base_commit,omitempty"`
 	HeadRevision string `json:"head_revision,omitempty"`
 
-	BaselineSource SourceReceipt  `json:"baseline_source"`
-	DesiredSource  SourceReceipt  `json:"desired_source"`
-	Planner        PlannerReceipt `json:"planner"`
+	BaselineSource SourceReceipt        `json:"baseline_source"`
+	DesiredSource  SourceReceipt        `json:"desired_source"`
+	Planner        PlannerReceipt       `json:"planner"`
+	SchemaSquare   *SchemaSquareReceipt `json:"schema_square,omitempty"`
 
 	ResultDigest  string                   `json:"result_digest"`
 	PlanDigest    string                   `json:"plan_digest,omitempty"`
@@ -99,6 +109,7 @@ type Metadata struct {
 	BaselineSource SourceReceipt
 	DesiredSource  SourceReceipt
 	Planner        PlannerReceipt
+	SchemaSquare   *SchemaSquareReceipt
 	Lineage        *Lineage
 }
 
@@ -200,7 +211,8 @@ func Build(input Input) (Artifact, error) {
 		State: string(input.Result.Status), BaseRef: input.Metadata.BaseRef,
 		BaseCommit: input.Metadata.BaseCommit, HeadRevision: input.Metadata.HeadRevision,
 		BaselineSource: input.Metadata.BaselineSource, DesiredSource: input.Metadata.DesiredSource,
-		Planner: input.Metadata.Planner, ResultDigest: Digest(resultBytes), Lineage: input.Metadata.Lineage,
+		Planner: input.Metadata.Planner, SchemaSquare: input.Metadata.SchemaSquare,
+		ResultDigest: Digest(resultBytes), Lineage: input.Metadata.Lineage,
 	}
 	files := make(map[string][]byte)
 	switch input.Result.Status {
@@ -376,6 +388,11 @@ func (m Manifest) Validate() error {
 	if strings.TrimSpace(m.Planner.Version) == "" {
 		return fmt.Errorf("planner version is required")
 	}
+	if m.SchemaSquare != nil {
+		if err := m.SchemaSquare.Validate(m.BaselineSource.Fingerprint, m.DesiredSource.Fingerprint); err != nil {
+			return fmt.Errorf("schema_square: %w", err)
+		}
+	}
 	if !fingerprintPattern.MatchString(m.ResultDigest) {
 		return fmt.Errorf("result digest %q is invalid", m.ResultDigest)
 	}
@@ -422,6 +439,40 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
+func (s SchemaSquareReceipt) Validate(baselineFingerprint, desiredFingerprint string) error {
+	for name, fingerprint := range map[string]string{
+		"base_code": s.BaseCodeFingerprint, "base_history": s.BaseHistoryFingerprint,
+		"head_code": s.HeadCodeFingerprint,
+	} {
+		if !fingerprintPattern.MatchString(fingerprint) {
+			return fmt.Errorf("%s fingerprint %q is invalid", name, fingerprint)
+		}
+	}
+	if s.HeadArtifactFingerprint != "" && !fingerprintPattern.MatchString(s.HeadArtifactFingerprint) {
+		return fmt.Errorf("head_artifact fingerprint %q is invalid", s.HeadArtifactFingerprint)
+	}
+	if s.BaseCodeFingerprint != baselineFingerprint || s.HeadCodeFingerprint != desiredFingerprint {
+		return fmt.Errorf("schema square does not match planner source receipts")
+	}
+	if s.BaseIntegrity != "matched" || s.BaseCodeFingerprint != s.BaseHistoryFingerprint {
+		return fmt.Errorf("bundle requires matched base code and migration history")
+	}
+	switch s.HeadArtifactFidelity {
+	case "not_generated":
+		if s.HeadArtifactFingerprint != "" {
+			return fmt.Errorf("not_generated head artifact must not have a fingerprint")
+		}
+	case "matched":
+		if s.HeadArtifactFingerprint == "" || s.HeadArtifactFingerprint != s.HeadCodeFingerprint {
+			return fmt.Errorf("matched head artifact must equal head code")
+		}
+	case "mismatched", "deferred":
+	default:
+		return fmt.Errorf("head artifact fidelity %q is invalid", s.HeadArtifactFidelity)
+	}
+	return nil
+}
+
 func (s SourceReceipt) Validate() error {
 	if s.Kind != "database" && s.Kind != "ddl" && s.Kind != "adapter" && s.Kind != "git_migrations" && s.Kind != "typed_snapshot" {
 		return fmt.Errorf("kind %q is invalid", s.Kind)
@@ -433,7 +484,7 @@ func (s SourceReceipt) Validate() error {
 		return fmt.Errorf("fingerprint %q is invalid", s.Fingerprint)
 	}
 	if s.GitCommit != "" && !commitPattern.MatchString(s.GitCommit) {
-		return fmt.Errorf("git_commit must be a full lowercase SHA-1")
+		return fmt.Errorf("git_commit must be a full lowercase Git object ID")
 	}
 	if s.PostgresMajor != 0 && (s.PostgresMajor < 14 || s.PostgresMajor > 18) {
 		return fmt.Errorf("postgres_major must be between 14 and 18")

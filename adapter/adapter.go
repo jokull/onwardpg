@@ -21,6 +21,27 @@ type SourceFunc func(context.Context) (Artifact, error)
 
 func (f SourceFunc) Load(ctx context.Context) (Artifact, error) { return f(ctx) }
 
+// CompileRequest identifies an isolated repository tree whose declarative
+// schema should be compiled. Root is never the developer's mutable checkout
+// for PR planning; callers provide an exact base or synthetic head tree.
+type CompileRequest struct {
+	Root     string
+	Target   string
+	Revision string
+}
+
+// Compiler is the stable adapter boundary for declarative schema tools. It
+// returns schema state, never migration SQL or migration-runner metadata.
+type Compiler interface {
+	Compile(context.Context, CompileRequest) (Artifact, error)
+}
+
+type CompilerFunc func(context.Context, CompileRequest) (Artifact, error)
+
+func (f CompilerFunc) Compile(ctx context.Context, request CompileRequest) (Artifact, error) {
+	return f(ctx, request)
+}
+
 type Artifact struct {
 	// DDL contains declarative CREATE statements. It is never parsed by the
 	// adapter API; the engine executes it in disposable PostgreSQL.
