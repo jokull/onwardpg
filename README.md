@@ -174,6 +174,16 @@ their important ordering relationships. Partition-child attach/detach is
 planned with hazards; a bound, parent, or default-partition change requires an
 operator-authored manual-work contract rather than inferred data movement.
 
+More concretely, the preview plans structural index create/drop/rename/rebuild
+(including concurrent execution when requested), standalone sequence
+create/drop/parameter changes, and extension create/drop/version/schema
+changes. It plans ordinary-view replacement and typed view/routine/trigger
+ordering, as well as partitioned-table and partition-child creation. These are
+supported capabilities—not generic “unsupported resources.” The conservative
+boundary is at ambiguous or operational transitions: for example an arbitrary
+materialized-view rebuild, an unprovable dependent-view rewrite, or partition
+reconfiguration that could move or validate data.
+
 ### Compared with Migra
 
 [Migra](https://github.com/djrobstep/migra) established the developer-friendly
