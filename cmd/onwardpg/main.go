@@ -317,11 +317,11 @@ func runPRRegenerateAt(arguments []string, start string) int {
 		BundleID: *bundleID, Target: *targetName, Purpose: *purpose, Mode: "pr",
 		BaseRef: *base, BaseCommit: status.BaseCommit, HeadRevision: status.HeadRevision,
 		BaselineSource: bundle.SourceReceipt{
-			Kind: "adapter", Description: "base declarative " + analysis.BaseProvenance,
+			Kind: "ddl_export", Description: "base declarative " + analysis.BaseProvenance,
 			Fingerprint: analysis.SchemaSquare.BaseCodeFingerprint, GitCommit: status.BaseCommit, PostgresMajor: target.PostgresMajor,
 		},
 		DesiredSource: bundle.SourceReceipt{
-			Kind: "adapter", Description: "synthetic head declarative " + analysis.HeadProvenance,
+			Kind: "ddl_export", Description: "synthetic head declarative " + analysis.HeadProvenance,
 			Fingerprint: analysis.SchemaSquare.HeadCodeFingerprint, GitCommit: status.HeadCommit, PostgresMajor: target.PostgresMajor,
 		},
 		Planner: bundle.PlannerReceipt{Version: buildVersion, IgnoreSelectors: sortedUniqueStrings(ignores), Options: bundle.PlannerOptions{
@@ -408,7 +408,7 @@ func runPlan(arguments []string) int {
 		return writeError("invalid_invocation", errors.New("bundle receipt flags require --bundle"))
 	}
 	if *unsortedDump {
-		return writeError("invalid_invocation", errors.New("--unsorted-dump requires an adapter-supplied object order and is unavailable for CLI URL/DDL sources"))
+		return writeError("invalid_invocation", errors.New("--unsorted-dump requires a complete typed object order and is unavailable for CLI URL/DDL sources"))
 	}
 	answers, err := readAnswers(*answerFile)
 	if err != nil {

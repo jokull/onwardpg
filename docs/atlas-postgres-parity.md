@@ -49,7 +49,7 @@ discarded state.
 
 ## Safety gate
 
-Before snapshotting modeled objects, the source adapter detects catalog objects
+Before snapshotting modeled objects, catalog inspection detects objects
 that the planner cannot faithfully preserve. Any such object makes the plan
 `unsupported`; `--ignore kind:name` is an explicit user acceptance of that
 blind spot. The gate intentionally blocks an unchanged unknown object too: a

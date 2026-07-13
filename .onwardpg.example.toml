@@ -2,7 +2,6 @@ version = 1
 bundle_root = "migrations/onward"
 
 [targets.primary-postgres]
-adapter = "ddl"
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
 # Transitional until onwardpg-owned bundle-chain replay replaces plain SQL.
 migration_path = "packages/db/migrations"

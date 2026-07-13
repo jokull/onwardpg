@@ -68,8 +68,8 @@ func testArtifact(t *testing.T) (bundle.Artifact, protocol.Result) {
 	artifact, err := bundle.Build(bundle.Input{Metadata: bundle.Metadata{
 		BundleID: "feature", Generation: 1, Target: "primary", Purpose: "feature", Mode: "pr",
 		BaseRef: "main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
-		BaselineSource: bundle.SourceReceipt{Kind: "adapter", Description: "base tree", Fingerprint: current},
-		DesiredSource:  bundle.SourceReceipt{Kind: "adapter", Description: "desired tree", Fingerprint: desired},
+		BaselineSource: bundle.SourceReceipt{Kind: "ddl_export", Description: "base tree", Fingerprint: current},
+		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "desired tree", Fingerprint: desired},
 		Planner:        bundle.PlannerReceipt{Version: "test"},
 	}, Result: result})
 	if err != nil {

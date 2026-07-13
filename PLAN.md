@@ -64,9 +64,11 @@ explicit operator/deployment-system action.
     design.
 11. **Simple is a product constraint.** The ordinary workflow stays: identify
     current and desired schemas, answer only genuine ambiguities, and receive
-    one reviewable forward plan. Git, GitHub, ORM journals, bundle storage, and
-    CI are optional adapters around that workflow. They must not leak into the
-    semantic engine or become prerequisites for using it.
+    one reviewable forward plan. onwardpg is a CLI, not an integration
+    framework. Git-aware commands, bundle storage, and CI may support that
+    workflow; ORM journals and framework-specific adapters remain out of
+    scope. None may leak into the semantic engine or become prerequisites for
+    using the basic current-to-desired diff.
 12. **Complexity belongs in receipts, not incantations.** The CLI may perform
     deep verification, but the golden path must remain one discoverable
     command with actionable output. Advanced flags expose composition points;
@@ -238,7 +240,7 @@ Before execution, a generation becomes stale and replaceable when:
 - the head declarative schema changes;
 - planner version or schema-affecting options change;
 - a checked-in answer no longer matches the questions; or
-- generated SQL or adapter output changes.
+- generated SQL or exported DDL changes.
 
 After any phase is executed, the generation is immutable. If the PR then
 changes, onwardpg produces a successor forward generation from the environment
@@ -367,8 +369,8 @@ Alembic, or another runner format.
     "fingerprint": "sha256:..."
   },
   "desired_source": {
-    "kind": "adapter_ddl",
-    "adapter": "drizzle",
+    "kind": "ddl_export",
+    "provenance": "schema_command",
     "fingerprint": "sha256:..."
   },
   "planner": {
@@ -386,7 +388,7 @@ URLs, credentials, and secret environment values must never be persisted.
 Source receipts store safe identities, commit SHAs, PostgreSQL major version,
 and schema fingerprints.
 
-## Onwardpg-owned history and declarative compilers
+## Onwardpg-owned history and DDL export
 
 Each target has one append-only, content-addressed bundle chain. A merged
 bundle records the exact prior `parent_digest` it extends; its `entry_digest`
@@ -402,13 +404,13 @@ merge-queue CI enforces that serialization. A bundle path remains a stable
 human feature identity while the hash link supplies ordering and collision
 proof.
 
-Declarative integrations have one responsibility: compile application schema
-state into executable genesis DDL or a complete typed snapshot. For example,
-`drizzle-kit export` may compile `schema.ts` to DDL, but onwardpg never reads or
-writes Drizzle's migration journal, snapshots, or runtime `migrate()` ledger.
-The same boundary applies to Django, Prisma, and SQLAlchemy: use their schema
-export capability when useful; keep runner-specific migration machinery out of
-the onwardpg lifecycle.
+The application has one responsibility at the boundary: export its desired
+schema as executable PostgreSQL genesis DDL. For example, a project may use a
+Drizzle command to render `schema.ts`, but onwardpg only consumes the resulting
+SQL. It never imports framework model formats or reads and writes migration
+journals, snapshots, or runtime ledgers. Framework-specific integration work
+is deferred until the core CLI workflow is mature—and should remain
+unnecessary wherever a reliable DDL export exists.
 
 The ordinary invariants become:
 
@@ -477,8 +479,8 @@ onwardpg release plan \
 onwardpg ci check --base origin/main --head HEAD
 ```
 
-The repository supplies `.onwardpg.toml` (or equivalent) with targets,
-adapters, schema-generation commands, migration paths, and policy. Commands
+The repository supplies `.onwardpg.toml` (or equivalent) with targets, DDL
+files or export commands, migration paths, and policy. Commands
 resolve refs to full SHAs and record them. They do not silently fetch, rebase,
 checkout, commit, push, or apply production SQL.
 
@@ -634,14 +636,15 @@ baseline is still valid is not an acceptable optimization.
 
 The typed graph planner remains the sole semantic planning engine. The
 lifecycle core is Git-free and consumes prepared directories, typed snapshots,
-and caller-supplied provenance receipts. Git wrappers and declarative schema
-compilers are thin edge adapters. This boundary is a release constraint: no core planning,
-freshness, bundle, history, or verification package may execute Git.
+and caller-supplied provenance receipts. The CLI may prepare Git trees and run
+a configured DDL export command, but there is no plugin or adapter ecosystem.
+This boundary is a release constraint: no core planning, freshness, bundle,
+history, or verification package may execute Git.
 
 ```text
 prepared current + desired inputs
                  │
-                 ├── live PostgreSQL / DDL / typed snapshot
+                 ├── live PostgreSQL / exported DDL
                  └── prepared base/head directories + content receipts
                                       │
                                typed graph snapshots
@@ -654,20 +657,20 @@ prepared current + desired inputs
                                       │
                     phase artifacts + clone verification
 
-optional edge adapters
+optional CLI conveniences
   Git CLI / GitHub Action ──► prepared directories + provenance receipts
-  Drizzle / Django / Prisma ─► DDL or typed snapshot
+  project schema command ───► PostgreSQL DDL on stdout
 ```
 
 Required packages/interfaces:
 
-- `workspace.Config`: targets, adapters, paths, phase policy, hazard policy;
-- `provenance.SourceReceipt`: safe database/adapter/tree identity and digest;
+- `workspace.Config`: targets, DDL inputs, paths, phase policy, hazard policy;
+- `provenance.SourceReceipt`: safe database/DDL/tree identity and digest;
 - `workflow.PreparedInput`: caller-owned base/head directories, migration
   snapshots, content digests, and opaque provenance;
-- `adapter.SchemaCompiler`: declarative source to DDL or typed snapshot;
+- `workspace.TargetCompiler`: repository file/command to PostgreSQL DDL;
 - `history.Chain`: validate and replay ordered onwardpg bundle history;
-- `adapter.BaselineMaterializer`: bundle chain to disposable PostgreSQL;
+- `history.Materializer`: bundle chain to disposable PostgreSQL;
 - `bundle.Manifest`: versioned lineage, digests, phases, and verification;
 - `bundle.Amendment`: reviewed statement additions/replacements/removals with
   rationale, phase, hazards, and verification;
@@ -676,7 +679,7 @@ Required packages/interfaces:
 - `verify.CloneRunner`: disposable-only batch execution and residual inspection;
 - `report.Summary`: stable JSON plus human-readable PR/terminal output.
 
-The optional `gitbase` adapter may resolve refs, classify protected history,
+The optional `gitbase` CLI helper may resolve refs, classify protected history,
 detect merge conflicts, and prepare trees. The CLI may call it to preserve the
 one-command local experience. The same core operation must also be callable
 with explicit directories and receipts, while CI owns authoritative
@@ -725,8 +728,8 @@ receipt.
   erosion, and blocks base-history edits and concurrent migration-path
   collisions.
 - `pr regenerate` now materializes the exact base and synthetic would-be merge
-  tree, overlays fingerprinted dirty state without staging it, runs generic
-  declarative compilers deterministically, replays plain-SQL base history
+  tree, overlays fingerprinted dirty state without staging it, runs the
+  configured DDL export deterministically, replays plain-SQL base history
   in PostgreSQL, requires `BC == BM`, and records the partial schema square in
   the bundle.
 - The discarded generic runner/handoff experiment never entered committed
@@ -756,7 +759,7 @@ simple enough for developers and agents.
 
 | Priority | Accepted work |
 | --- | --- |
-| P0 architecture | Make PR analysis, regeneration, freshness, history replay, and verification consume prepared trees/snapshots and receipts. Keep Git only in an optional CLI/CI adapter. |
+| P0 architecture | Make PR analysis, regeneration, freshness, history replay, and verification consume prepared trees/snapshots and receipts. Keep Git only in optional CLI/CI orchestration. |
 | P0 DX | Implement a read-only freshness oracle that classifies fresh, provenance-stale, schema-stale, decision-stale, artifact-stale, and immutable-successor-required, each with a remediation command. `status` must never mutate a bundle. |
 | P0 lifecycle | Same base/head/schema/options stay in the same generation. Decision reruns increment attempts only when the decision document changes; a new generation represents changed source state or a forward successor. Idempotent reruns do not churn files. |
 | P0 integrity | Reject `.`/`..` identities, revalidate replacement immediately before swap, enforce bundle identity/generation compare-and-swap, recover or explicitly diagnose orphan backups, cross-check phase SQL against `plan.json`, and use length-framed digests. |
@@ -764,7 +767,7 @@ simple enough for developers and agents.
 | P1 decisions | Fingerprint questions from participating objects/operations, preserve unaffected answers across base erosion, and add an explicit answer-rebind flow that reports carried and invalidated decisions. |
 | P1 receipts | Reserve and validate execution, verification, and amendment receipt slots so strict bundle reads do not deadlock the documented lifecycle. |
 | P1 amendments | Represent edited SQL as typed, statement-ID-bound amendments with rationale and reverification; never make a reviewed bundle unrecoverable through undocumented edits. |
-| P1 compilers | Keep Drizzle/Django/Prisma/SQLAlchemy integrations export-only; equivalent DDL or typed snapshots must produce equivalent graphs. |
+| P1 DDL input | Stabilize `schema_file` and deterministic `schema_command`; do not build framework adapters. Equivalent exported DDL must produce equivalent graphs. |
 | P1 diagnostics | Preserve typed merge-conflict/blocked results and add stable remediation fields to high-traffic diagnostics. |
 | P2 hardening | Use a minimal compiler environment, stronger deterministic-output evidence, config overlap validation, safe URL/libpq redaction, and consolidated hashing/path/exec validation. |
 
@@ -805,15 +808,17 @@ Create temporary real Git repositories and exercise:
 - multiple database targets; and
 - no-op, feature, repair, and contract-only bundles.
 
-### Declarative compiler contract tests
+### DDL export contract tests
 
-For Drizzle first, then Django/Prisma/SQLAlchemy:
+Use small representative project commands without owning their framework
+integration:
 
 - equivalent desired schemas yield equivalent typed fingerprints;
-- schema compilation runs without touching the user's migration machinery;
+- DDL export runs without touching the user's migration machinery;
 - no ORM journal, snapshot, or runtime migration ledger is read or written;
-- the same onwardpg chain replay is used regardless of compiler; and
-- adapter command failure, nondeterminism, or undeclared output is explicit.
+- the same onwardpg chain replay is used regardless of how DDL was produced;
+  and
+- command failure, nondeterminism, or undeclared output is explicit.
 
 ### Planner and PostgreSQL tests
 
@@ -843,7 +848,7 @@ For Drizzle first, then Django/Prisma/SQLAlchemy:
 
 - Document the four comparison boundaries everywhere.
 - Define `onwardpg.bundle/v1`, source receipts, phase digests, and lineage.
-- Add `.onwardpg.toml` target/adapter configuration.
+- Add `.onwardpg.toml` target and DDL-input configuration.
 - Make planner build version, normalized options, and input provenance part of
   every reproducible plan.
 - Formalize versioned structured error/diagnostic codes.
@@ -884,7 +889,7 @@ idempotent reruns do not churn a bundle.
   PostgreSQL, proving both sides of the schema square.
 - Replace `migration_path` and Drizzle/plain-SQL migration replay with the
   onwardpg bundle chain as the sole history source.
-- Keep Drizzle as an export-only schema compiler fixture.
+- Keep one external-tool DDL export as a black-box fixture, not an integration.
 
 **Exit:** In a fixture repo, a multi-day feature branch can absorb new main
 bundles, regenerate one clean PR bundle, and prove `BC == BM` plus `HC == HM`
@@ -926,10 +931,8 @@ non-convergent migration bundles with actionable diagnostics.
 **Exit:** A feature can safely span pre-merge expand, squash merge, observed
 backfill, and later contract without rewriting executed history.
 
-### Wave 7 — compiler ecosystem and production hardening
+### Wave 7 — production hardening
 
-- Add export-only Django, Prisma, and SQLAlchemy compilers through the same
-  DDL/typed-snapshot contract.
 - Complete feature-map gaps according to developer demand.
 - Benchmark large repos/schemas and publish performance bounds.
 - Publish binaries, checksums, provenance/signing, changelog, release
@@ -938,6 +941,11 @@ backfill, and later contract without rewriting executed history.
 
 **Exit:** A clean production release can be built and its documented feature
 and workflow claims match observed CI behavior.
+
+Framework adapters, plugin APIs, and migration-runner handoffs are explicit
+non-goals for these delivery waves. Reconsider them only after the CLI's dev
+iteration and PR-restacking loops are mature, and only for a demonstrated need
+that PostgreSQL DDL cannot satisfy.
 
 ## Developer-preview milestone
 

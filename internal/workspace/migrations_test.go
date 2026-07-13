@@ -9,7 +9,7 @@ import (
 
 func TestLoadSortedSQLHistoryIsDeterministic(t *testing.T) {
 	root := t.TempDir()
-	target := Target{Adapter: "ddl", SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16}
+	target := Target{SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16}
 	writeWorkspaceFile(t, root, "migrations/002.sql", "SELECT 2;\n")
 	writeWorkspaceFile(t, root, "migrations/001.sql", "SELECT 1;\n")
 	history, err := LoadMigrationHistory(root, target)
@@ -23,7 +23,7 @@ func TestLoadSortedSQLHistoryIsDeterministic(t *testing.T) {
 
 func TestLoadSortedSQLHistoryRejectsAmbiguousNumericOrder(t *testing.T) {
 	root := t.TempDir()
-	target := Target{Adapter: "ddl", SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16}
+	target := Target{SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16}
 	writeWorkspaceFile(t, root, "migrations/2_second.sql", "SELECT 2;\n")
 	writeWorkspaceFile(t, root, "migrations/10_tenth.sql", "SELECT 10;\n")
 	if _, err := LoadMigrationHistory(root, target); err == nil || !strings.Contains(err.Error(), "zero-padded") {

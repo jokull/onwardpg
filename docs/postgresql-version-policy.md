@@ -28,7 +28,7 @@ Catalog selectors preserve the relevant PostgreSQL-version boundaries for
 features that predate the supported range (such as generated columns and index
 `INCLUDE`) so a future policy change cannot accidentally erase that knowledge.
 
-The source adapter treats catalog state it cannot model faithfully as an
+Catalog inspection treats state it cannot model faithfully as an
 explicit unsupported result. Version support is therefore not a promise that
 every PostgreSQL extension or every Atlas product feature is supported; the
 authoritative scope is the machine-readable

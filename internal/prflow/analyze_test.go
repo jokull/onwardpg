@@ -34,7 +34,7 @@ func TestAnalyzeProvesBaseIntegrityAndPlansSyntheticHeadOnPostgreSQL(t *testing.
 	write(t, baseRoot, "migrations/0001.sql", baseDDL)
 	write(t, headRoot, "schema.sql", baseDDL+"CREATE TABLE app.projects (id bigint PRIMARY KEY);\n")
 	target := workspace.Target{
-		Adapter: "ddl", SchemaFile: "schema.sql", MigrationPath: "migrations",
+		SchemaFile: "schema.sql", MigrationPath: "migrations",
 		DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16,
 	}
 	analysis, err := Analyze(context.Background(), Input{
@@ -61,7 +61,7 @@ func TestAnalyzeBlocksUnhealthyBaseOnPostgreSQL(t *testing.T) {
 	write(t, baseRoot, "schema.sql", "CREATE TABLE users (id bigint);\n")
 	write(t, baseRoot, "migrations/0001.sql", "CREATE TABLE accounts (id bigint);\n")
 	write(t, headRoot, "schema.sql", "CREATE TABLE users (id bigint);\n")
-	target := workspace.Target{Adapter: "ddl", SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16}
+	target := workspace.Target{SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16}
 	analysis, err := Analyze(context.Background(), Input{
 		BaseRoot: baseRoot, HeadRoot: headRoot, BaseRevision: "base-tree", HeadRevision: "head-tree",
 		TargetName: "primary", Target: target, DevDatabaseURL: devURL,

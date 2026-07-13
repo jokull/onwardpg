@@ -72,7 +72,6 @@ func TestPRRegenerateWritesVerifiedBaseToSyntheticHeadBundle(t *testing.T) {
 	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
 bundle_root = "onward-bundles"
 [targets.primary]
-adapter = "ddl"
 schema_file = "schema.sql"
 migration_path = "migrations"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"

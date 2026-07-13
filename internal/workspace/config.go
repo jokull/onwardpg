@@ -1,5 +1,5 @@
 // Package workspace owns repository-level onwardpg configuration. It keeps
-// schema-tool commands, migration paths, and policy separate from the typed
+// schema-export commands, migration paths, and policy separate from the typed
 // PostgreSQL planner.
 package workspace
 
@@ -25,7 +25,6 @@ type Config struct {
 }
 
 type Target struct {
-	Adapter        string   `toml:"adapter" json:"adapter"`
 	SchemaFile     string   `toml:"schema_file" json:"schema_file,omitempty"`
 	SchemaCommand  []string `toml:"schema_command" json:"schema_command,omitempty"`
 	MigrationPath  string   `toml:"migration_path" json:"migration_path"`
@@ -92,9 +91,6 @@ func pathsOverlap(first, second string) bool {
 }
 
 func (t Target) Validate() error {
-	if !safeName(t.Adapter) {
-		return fmt.Errorf("adapter is required and must be a safe name")
-	}
 	hasFile, hasCommand := t.SchemaFile != "", len(t.SchemaCommand) > 0
 	if hasFile == hasCommand {
 		return fmt.Errorf("exactly one of schema_file or schema_command is required")

@@ -41,12 +41,12 @@ func (c TargetCompiler) Compile(ctx context.Context, request adapter.CompileRequ
 		if len(bytes.TrimSpace(data)) == 0 {
 			return adapter.Artifact{}, fmt.Errorf("declarative schema file is empty")
 		}
-		return adapter.DDL(c.Target.Adapter+":"+c.Target.SchemaFile, data), nil
+		return adapter.DDL("schema_file:"+c.Target.SchemaFile, data), nil
 	}
 
 	before, err := digestTree(request.Root)
 	if err != nil {
-		return adapter.Artifact{}, fmt.Errorf("fingerprint compiler tree before command: %w", err)
+		return adapter.Artifact{}, fmt.Errorf("fingerprint DDL export tree before command: %w", err)
 	}
 	command := exec.CommandContext(ctx, c.Target.SchemaCommand[0], c.Target.SchemaCommand[1:]...)
 	command.Dir = request.Root
@@ -57,26 +57,26 @@ func (c TargetCompiler) Compile(ctx context.Context, request adapter.CompileRequ
 	commandErr := command.Run()
 	after, digestErr := digestTree(request.Root)
 	if digestErr != nil {
-		return adapter.Artifact{}, fmt.Errorf("fingerprint compiler tree after command: %w", digestErr)
+		return adapter.Artifact{}, fmt.Errorf("fingerprint DDL export tree after command: %w", digestErr)
 	}
 	if before != after {
-		return adapter.Artifact{}, fmt.Errorf("schema compiler modified its isolated input tree; undeclared outputs are not allowed")
+		return adapter.Artifact{}, fmt.Errorf("DDL export command modified its isolated input tree; undeclared outputs are not allowed")
 	}
 	if commandErr != nil {
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
 			message = commandErr.Error()
 		}
-		return adapter.Artifact{}, fmt.Errorf("schema compiler failed: %s", message)
+		return adapter.Artifact{}, fmt.Errorf("DDL export command failed: %s", message)
 	}
 	if stdout.exceeded {
-		return adapter.Artifact{}, fmt.Errorf("schema compiler output exceeds %d bytes", maxCompilerOutput)
+		return adapter.Artifact{}, fmt.Errorf("DDL export output exceeds %d bytes", maxCompilerOutput)
 	}
 	data := stdout.Bytes()
 	if len(bytes.TrimSpace(data)) == 0 {
-		return adapter.Artifact{}, fmt.Errorf("schema compiler produced empty DDL")
+		return adapter.Artifact{}, fmt.Errorf("DDL export produced empty output")
 	}
-	return adapter.DDL(c.Target.Adapter+":command", data), nil
+	return adapter.DDL("schema_command", data), nil
 }
 
 type limitedBuffer struct {

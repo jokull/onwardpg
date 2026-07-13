@@ -275,7 +275,7 @@ func metadata() Metadata {
 		BundleID: "customer-profile", Generation: 1, Target: "primary-postgres", Purpose: "feature", Mode: "pr",
 		BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
 		BaselineSource: SourceReceipt{Kind: "git_migrations", Description: "origin/main migrations", Fingerprint: currentFingerprint, GitCommit: strings.Repeat("a", 40), PostgresMajor: 16},
-		DesiredSource:  SourceReceipt{Kind: "adapter", Description: "drizzle primary schema", Fingerprint: desiredFingerprint, PostgresMajor: 16},
+		DesiredSource:  SourceReceipt{Kind: "ddl_export", Description: "project primary schema", Fingerprint: desiredFingerprint, PostgresMajor: 16},
 		Planner:        PlannerReceipt{Version: "dev", Options: PlannerOptions{ConcurrentIndexes: true}},
 	}
 }

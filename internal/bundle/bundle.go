@@ -529,7 +529,7 @@ func (s SchemaSquareReceipt) Validate(baselineFingerprint, desiredFingerprint st
 }
 
 func (s SourceReceipt) Validate() error {
-	if s.Kind != "database" && s.Kind != "ddl" && s.Kind != "adapter" && s.Kind != "git_migrations" && s.Kind != "onwardpg_history" && s.Kind != "typed_snapshot" {
+	if s.Kind != "database" && s.Kind != "ddl" && s.Kind != "ddl_export" && s.Kind != "adapter" && s.Kind != "git_migrations" && s.Kind != "onwardpg_history" && s.Kind != "typed_snapshot" {
 		return fmt.Errorf("kind %q is invalid", s.Kind)
 	}
 	if strings.TrimSpace(s.Description) == "" || strings.ContainsRune(s.Description, '\x00') || strings.Contains(s.Description, "://") || secretDSNPattern.MatchString(s.Description) {

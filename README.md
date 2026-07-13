@@ -1,12 +1,13 @@
 # onwardpg
 
-`onwardpg` is a forward-only PostgreSQL schema-diff and migration-planning tool
-for developers and coding agents.
+`onwardpg` is an agent-friendly PostgreSQL CLI for two jobs: keeping a
+developer database moving while a feature evolves, and producing one
+reviewable, forward-only schema diff for that feature before its PR lands.
 
-You describe the schema you want in Drizzle, Django, Prisma, SQLAlchemy, or
-plain PostgreSQL DDL. onwardpg compares that desired state with the schema that
-actually exists, reports drift, and drafts a reviewable plan to get from here
-to there. It never applies the plan for you.
+Give the CLI a live PostgreSQL schema and desired PostgreSQL
+`CREATE`-statement DDL. It reports drift, asks for intent that schema state
+cannot prove, and drafts the expand/migrate/contract plan to get from here to
+there. It never applies the plan for you.
 
 The project is built around the workflow described in [Use a diff tool for SQL
 migrations](https://www.solberg.is/sql-diff-migrations): derive migrations from
@@ -14,39 +15,41 @@ the real difference between a declarative schema and a real database; commit
 and review forward SQL; test difficult work on a clone; and treat migrations as
 an operational change, not an opaque CI side effect.
 
-## The experience we are building
+## The two loops
 
-The ideal interaction is not “ask an agent to write some `ALTER TABLE`
-statements and hope.” It is a tight, inspectable loop:
+Feature development needs two related—but different—diffs.
 
-1. An application or coding agent changes the declarative schema while feature
-   work is still in motion.
-2. A schema adapter produces DDL or a typed snapshot. onwardpg materializes DDL
-   in a disposable PostgreSQL database and catalog-inspects both sides, so the
-   comparison is against PostgreSQL semantics rather than a partial SQL parser.
-3. onwardpg generates a deterministic plan from the current production-like
-   schema to the desired schema, including accidental drift from abandoned or
-   concurrent work.
-4. If intent cannot be known from the two schemas, onwardpg asks a typed,
-   fingerprint-bound question. An agent or reviewer answers explicitly in a
-   checked-in file, then reruns the exact plan.
-5. The reviewed SQL is committed as a forward migration. It is tested on a
-   clone, deployed in compatible stages, and re-diffed until the residual is
-   empty.
+The fast **development loop** compares the schema exported by the code in the
+working tree with the developer database. The developer or coding agent can
+plan, inspect, apply deliberately, keep building, and diff again. Abandoned
+local experiments appear as drift instead of becoming permanent migration
+history.
+
+The receipted **PR loop** compares the schema and onwardpg history on the
+current base branch with the final schema that would result from merging the
+feature. The agent resolves rename, cast, destructive, and data-migration
+questions, then regenerates the same logical bundle whenever the feature or
+`origin/main` changes. Exploratory schema edits collapse into one reviewed
+migration for the PR instead of a stack of development-time migrations.
+
+“One migration per PR” means one logical, restackable feature outcome. Its SQL
+may contain separate `EXPAND`, `MIGRATE`, `CONTRACT`, and `MANUAL` phase files,
+because safe rollout timing matters more than forcing everything into one
+transaction or deployment.
 
 The tool should make the safe path the convenient path, while keeping a human
 or agent accountable for the decisions that require knowledge of data,
 application behavior, traffic, and rollout timing.
 
-Simplicity is a product constraint. The semantic workflow is always “current
-schema + desired schema + explicit intent → forward plan.” Git, GitHub, ORM
-journals, bundles, and CI are optional adapters around that operation. The
-one-command PR workflow may prepare snapshots from Git for convenience, but
-planning, freshness, bundle history, and verification do not depend on Git
-internally.
+Simplicity is a product constraint. onwardpg is a CLI, not an ORM integration
+framework or migration runner. A code-schema tool only needs to export
+PostgreSQL DDL to a file or stdout; onwardpg does not read or write its
+migration journal. Git-aware PR commands are conveniences around the same
+current + desired + explicit intent operation, while the planning core remains
+independent of Git.
 
 ```text
-declarative schema ──► disposable PostgreSQL ──► desired catalog graph
+code-exported DDL ───► disposable PostgreSQL ──► desired catalog graph
                                                         │
 live / clone database ───────────────────────────► current catalog graph
                                                         │
@@ -127,24 +130,47 @@ plan, but it cannot smuggle in unproven intent.
 
 ## Intended developer workflow
 
+During feature work, repeatedly export the schema described by the code and
+diff it against the developer database:
+
 ```sh
-# Produce schema.sql from your ORM/declarative schema tool, then:
+# Any tool is fine if it emits PostgreSQL CREATE-statement DDL.
+pnpm db:schema:export > schema.sql
+
 onwardpg plan \
-  --from "$DATABASE_URL" \
+  --from "$DEV_DATABASE_URL" \
   --to "file://$PWD/schema.sql" \
   --dev-url "$DEV_POSTGRES_URL" \
   --concurrent-indexes \
   > plan.json
 
-# Exit 2 means: commit an explicit answer file, then rerun.
+# Exit 2 means: record explicit intent in an answer file, then rerun.
 onwardpg plan \
-  --from "$DATABASE_URL" \
+  --from "$DEV_DATABASE_URL" \
   --to "file://$PWD/schema.sql" \
   --dev-url "$DEV_POSTGRES_URL" \
   --answers migration.answers.json \
   --concurrent-indexes \
-  --sql > migrations/20260712_account_profile.sql
+  --sql > dev-plan.sql
 ```
+
+The developer or agent reviews and deliberately runs the relevant SQL against
+the development database. Re-export and re-plan as often as the feature
+changes; this loop does not create permanent migration history.
+
+Before review or merge, regenerate the PR's single logical bundle from the
+latest base to the would-be merged feature schema:
+
+```sh
+git fetch origin
+onwardpg pr status --base origin/main --target primary-postgres --bundle account-profile
+onwardpg pr regenerate --base origin/main --target primary-postgres --bundle account-profile
+```
+
+If regeneration returns questions, the agent records the developer's intent in
+the fingerprint-bound answer file and reruns it. When `origin/main` advances,
+the same commands restack the bundle on the new base; they do not append
+another migration for the same feature.
 
 The review checklist is simple:
 
@@ -174,10 +200,9 @@ typed findings and remediation. It never regenerates as a side effect.
 `onwardpg pr regenerate --base origin/main --target NAME --bundle FEATURE`
 now compiles the exact base and the would-be merged head in isolated trees,
 replays base migrations in PostgreSQL, requires base code and history to match,
-and writes the fingerprinted PR bundle. It runs configured schema compilers
-twice and rejects nondeterminism or undeclared filesystem output. Drizzle and
-other frameworks are DDL/typed-snapshot compilers only; onwardpg does not
-integrate with their migration journals or runners. The bundle's phase files
+and writes the fingerprinted PR bundle. It runs the configured DDL export
+twice and rejects nondeterminism or undeclared filesystem output. onwardpg does
+not integrate with framework migration journals or runners. The bundle's phase files
 are the reviewed migration history, and the developer or coding agent
 orchestrates their timing. Per-target hash-chain replay, durable execution
 receipts, CI fidelity checks, and clone execution receipts remain upcoming.
@@ -285,7 +310,7 @@ is retained as test research, not a product-completeness promise. See
 
 - [CLI reference](docs/cli.md)
 - [JSON protocol and answer files](docs/protocol.md)
-- [Adapter API](docs/adapter.md)
+- [Schema DDL inputs](docs/schema-inputs.md)
 - [Forward-only migration workflow](docs/migration-workflow.md)
 - [Agent-assisted migration walkthrough](docs/agent-workflow.md)
 - [Migration bundles and repository configuration](docs/bundles.md)

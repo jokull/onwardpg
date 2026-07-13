@@ -112,8 +112,8 @@ execution receipts plus residual catalog diff make that rollout checkable.
 
 ## Repository configuration
 
-`.onwardpg.toml` declares repository-relative target paths and schema compiler
-commands without storing database credentials. Validate it with:
+`.onwardpg.toml` declares repository-relative target paths and a DDL file or
+export command without storing database credentials. Validate it with:
 
 ```sh
 onwardpg config check --config .onwardpg.toml

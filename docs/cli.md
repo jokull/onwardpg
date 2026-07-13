@@ -25,7 +25,7 @@ isolated disposable database role.
 | `--cascade-drops` | Permit `CASCADE` for supported schema/table drops after destructive approval. |
 | `--sql` | Print reviewable, commented SQL instead of JSON only for a ready plan. It includes `EXPAND`, `MIGRATE`, `CONTRACT`, and batch-boundary comments. |
 | `--indent STRING` | Prefix every line in `--sql` output. |
-| `--unsorted-dump` | Rejected by the URL/DDL CLI. Only a typed `adapter.OrderedSnapshot` with a validated, complete order may request it through the library boundary; that output is review-only, not executable migration SQL. |
+| `--unsorted-dump` | Rejected by the URL/DDL CLI. It is reserved for an internal typed snapshot with a validated, complete object order; that output is review-only, not executable migration SQL. |
 | `--bundle PATH` | Write a versioned receipt bundle in addition to the normal stdout result. |
 | `--bundle-id ID` | Stable logical feature/bundle identifier. Required with `--bundle`. |
 | `--target NAME` | Database target name. Required with `--bundle`. |

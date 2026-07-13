@@ -6,7 +6,7 @@ an input and an output, not the internal schema model.
 ```text
 live URL ───────────────┐
                        ├─ catalog snapshot ─ typed graph ─ semantic changes
-DDL / ORM adapter ─ temp PostgreSQL ┘                         │
+exported DDL ───── temp PostgreSQL ┘                         │
                                                              ▼
                                             questions + hazard policy
                                                              │
@@ -30,11 +30,11 @@ DDL / ORM adapter ─ temp PostgreSQL ┘                         │
   never heuristics presented as facts.
 - Plans are forward-only artifacts. Applying them is outside the planner.
 
-## Public boundaries
+## Product boundaries
 
 - [`pgschema`](../pgschema) is the public typed graph model.
-- [`adapter`](../adapter) lets ORM and code-schema tooling provide declarative
-  PostgreSQL DDL or a complete typed snapshot.
+- [`schema-inputs.md`](schema-inputs.md) defines the CLI's deliberately narrow
+  PostgreSQL DDL input contract.
 - [`parity/atlas-postgres.json`](../parity/atlas-postgres.json) is a
   machine-readable pinned-reference behavior study.
 

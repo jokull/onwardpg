@@ -27,17 +27,18 @@ claim and does not apply migrations automatically.
   configuration, and versioned diagnostic errors.
 - Read-only `pr status` Git provenance with base-erosion, protected migration
   history, concurrent path-collision, and dirty-revision classification.
-- Isolated synthetic PR trees, deterministic declarative compilers,
+- Isolated synthetic PR trees, deterministic DDL export commands,
   ordered-SQL base-history replay, `BC == BM` enforcement, and Git-aware
   `pr regenerate` bundle generation.
 - Git-free PR-analysis core fed by prepared directories and
-  explicit receipts, with Git retained as an optional CLI convenience adapter.
+  explicit receipts, with Git retained as optional CLI orchestration.
 - Read-only bundle freshness classification with typed remediation.
 - Idempotent draft generations/decision attempts and stronger bundle
   replacement, phase-integrity, digest-framing, path, and secret guards.
-- Export-only declarative compiler boundary: onwardpg intentionally does not
-  integrate with ORM migration journals or runners; phase bundles are the
-  forward migration history.
+- Narrow DDL-export boundary: `schema_file` or deterministic `schema_command`
+  feeds the CLI; framework adapters, ORM journal integration, and runner
+  handoffs are intentionally out of scope. Phase bundles are the forward
+  migration history.
 
 ### Known limitations
 
