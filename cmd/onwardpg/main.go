@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/freshness"
@@ -162,7 +163,20 @@ func runPRBundleStatus(repository gitbase.Repository, config workspace.Config, t
 		BundleRoot:     config.BundleRoot,
 		PlannerOptions: options, Ignores: artifact.Manifest.Planner.IgnoreSelectors,
 	}
-	analysis, err := prflow.Analyze(context.Background(), input)
+	var analysis prflow.Analysis
+	if data, exists := artifact.Files["answers.json"]; exists {
+		var previous protocol.Answers
+		if err := json.Unmarshal(data, &previous); err != nil {
+			return writeError("invalid_bundle", fmt.Errorf("decode bundled answers: %w", err))
+		}
+		questions, err := bundle.DecisionQuestions(artifact)
+		if err != nil {
+			return writeError("invalid_bundle", err)
+		}
+		analysis, err = prflow.AnalyzeWithReboundAnswers(context.Background(), input, previous, questions)
+	} else {
+		analysis, err = prflow.Analyze(context.Background(), input)
+	}
 	if err != nil {
 		return writeError("pr_analysis_error", err)
 	}
@@ -170,19 +184,6 @@ func runPRBundleStatus(repository gitbase.Repository, config workspace.Config, t
 		report := prStatusReport{ProtocolVersion: prStatusVersion, Outcome: "blocked", Repository: status, Analysis: &analysis}
 		_ = json.NewEncoder(os.Stdout).Encode(report)
 		return 4
-	}
-	if data, exists := artifact.Files["answers.json"]; exists &&
-		analysis.Plan.CurrentFingerprint == artifact.Manifest.BaselineSource.Fingerprint &&
-		analysis.Plan.DesiredFingerprint == artifact.Manifest.DesiredSource.Fingerprint {
-		var answers protocol.Answers
-		if err := json.Unmarshal(data, &answers); err != nil {
-			return writeError("invalid_bundle", fmt.Errorf("decode bundled answers: %w", err))
-		}
-		input.Answers = answers
-		analysis, err = prflow.Analyze(context.Background(), input)
-		if err != nil {
-			return writeError("pr_analysis_error", err)
-		}
 	}
 	resultDigest, err := bundle.ResultDigest(*analysis.Plan)
 	if err != nil {
@@ -257,6 +258,10 @@ func runPRRegenerateAt(arguments []string, start string) int {
 	if devURL == "" {
 		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv))
 	}
+	destination, err := config.BundlePath(repository.Root, *targetName, *bundleID)
+	if err != nil {
+		return writeError("invalid_bundle", err)
+	}
 	answers, err := readAnswers(*answerFile)
 	if err != nil {
 		return writeError("invalid_answers", err)
@@ -265,9 +270,11 @@ func runPRRegenerateAt(arguments []string, start string) int {
 		ConcurrentIndexes: *concurrentIndexes, IfNotExists: *ifNotExists,
 		IfExists: *ifExists, CascadeDrops: *cascadeDrops,
 	}
+	excludedPaths := []string{config.BundleRoot}
+	excludedPaths = append(excludedPaths, repositoryReceiptPaths(repository.Root, *answerFile, *intentFile)...)
 	status, err := repository.Inspect(context.Background(), gitbase.Options{
 		BaseRef: *base, HeadRef: *head, HistoryPath: filepath.ToSlash(filepath.Join(config.BundleRoot, *targetName)),
-		IncludeWorkingTree: *workingTree, ExcludePaths: []string{config.BundleRoot},
+		IncludeWorkingTree: *workingTree, ExcludePaths: excludedPaths,
 	})
 	if err != nil {
 		return writeError("git_status_error", err)
@@ -286,13 +293,41 @@ func runPRRegenerateAt(arguments []string, start string) int {
 		return writeError("git_status_error", err)
 	}
 	defer headTree.Close()
-	analysis, err := prflow.Analyze(context.Background(), prflow.Input{
+	input := prflow.Input{
 		BaseRoot: baseTree.Root, HeadRoot: headTree.Root,
 		BaseRevision: status.BaseCommit, HeadRevision: status.HeadRevision,
 		TargetName: *targetName, Target: target, DevDatabaseURL: devURL,
 		BundleRoot: config.BundleRoot,
 		Ignores:    ignores, Answers: answers, PlannerOptions: options,
-	})
+	}
+	var analysis prflow.Analysis
+	if *answerFile == "" {
+		previous, readErr := bundle.Read(destination)
+		switch {
+		case readErr == nil && previous.Manifest.BundleID == *bundleID && previous.Manifest.Target == *targetName && previous.Manifest.Mode == "pr":
+			if data, exists := previous.Files["answers.json"]; exists {
+				var previousAnswers protocol.Answers
+				if err := json.Unmarshal(data, &previousAnswers); err != nil {
+					return writeError("invalid_bundle", fmt.Errorf("decode bundled answers: %w", err))
+				}
+				questions, err := bundle.DecisionQuestions(previous)
+				if err != nil {
+					return writeError("invalid_bundle", err)
+				}
+				analysis, err = prflow.AnalyzeWithReboundAnswers(context.Background(), input, previousAnswers, questions)
+			} else {
+				analysis, err = prflow.Analyze(context.Background(), input)
+			}
+		case readErr == nil:
+			return writeError("invalid_bundle", errors.New("existing bundle identity does not match the requested target"))
+		case os.IsNotExist(readErr):
+			analysis, err = prflow.Analyze(context.Background(), input)
+		default:
+			return writeError("invalid_bundle", readErr)
+		}
+	} else {
+		analysis, err = prflow.Analyze(context.Background(), input)
+	}
 	if err != nil {
 		return writeError("pr_analysis_error", err)
 	}
@@ -303,10 +338,6 @@ func runPRRegenerateAt(arguments []string, start string) int {
 	if analysis.Plan == nil {
 		return writeError("pr_analysis_error", errors.New("PR analysis did not return a planner result"))
 	}
-	destination, err := config.BundlePath(repository.Root, *targetName, *bundleID)
-	if err != nil {
-		return writeError("invalid_bundle", err)
-	}
 	intent, err := readOptionalFile(*intentFile)
 	if err != nil {
 		return writeError("invalid_bundle", err)
@@ -314,6 +345,9 @@ func runPRRegenerateAt(arguments []string, start string) int {
 	var answerReceipt *protocol.Answers
 	if *answerFile != "" {
 		answerReceipt = &answers
+	} else if analysis.Rebind != nil && len(analysis.Rebind.Answers.Answers) > 0 {
+		rebound := analysis.Rebind.Answers
+		answerReceipt = &rebound
 	}
 	metadata := bundle.Metadata{
 		BundleID: *bundleID, Target: *targetName, Purpose: *purpose, Mode: "pr",
@@ -578,6 +612,25 @@ func sortedUniqueStrings(values []string) []string {
 		write++
 	}
 	return result[:write]
+}
+
+func repositoryReceiptPaths(root string, names ...string) []string {
+	var paths []string
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		absolute, err := filepath.Abs(name)
+		if err != nil {
+			continue
+		}
+		relative, err := filepath.Rel(root, absolute)
+		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		paths = append(paths, filepath.ToSlash(relative))
+	}
+	return sortedUniqueStrings(paths)
 }
 
 type stringsFlag []string

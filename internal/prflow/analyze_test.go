@@ -78,6 +78,52 @@ func TestAnalyzeBlocksUnhealthyBaseOnPostgreSQL(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRebindsRenameAcrossUnrelatedBaseErosionOnPostgreSQL(t *testing.T) {
+	devURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if devURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	oldBase, oldHead := t.TempDir(), t.TempDir()
+	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.old_users (id bigint PRIMARY KEY);\n"
+	desiredDDL := "CREATE SCHEMA app; CREATE TABLE app.users (id bigint PRIMARY KEY);\n"
+	write(t, oldBase, "schema.sql", baseDDL)
+	writeHistoryBundle(t, oldBase, devURL, "genesis", baseDDL)
+	write(t, oldHead, "schema.sql", desiredDDL)
+	target := workspace.Target{SchemaFile: "schema.sql", DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16}
+	previous, err := Analyze(context.Background(), Input{
+		BaseRoot: oldBase, HeadRoot: oldHead, BaseRevision: "old-base", HeadRevision: "old-head",
+		TargetName: "primary", Target: target, BundleRoot: "onward-bundles", DevDatabaseURL: devURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous.Plan == nil || previous.Plan.Status != protocol.NeedsInput || len(previous.Plan.Questions) != 1 || previous.Plan.Questions[0].ScopeFingerprint == "" {
+		t.Fatalf("previous analysis = %#v", previous)
+	}
+	question := previous.Plan.Questions[0]
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: previous.Plan.CurrentFingerprint, DesiredFingerprint: previous.Plan.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: question.Choices[0], QuestionFingerprint: question.ScopeFingerprint}},
+	}
+
+	newBase, newHead := t.TempDir(), t.TempDir()
+	erodedBaseDDL := baseDDL + "CREATE TABLE app.audit_log (id bigint PRIMARY KEY);\n"
+	erodedHeadDDL := desiredDDL + "CREATE TABLE app.audit_log (id bigint PRIMARY KEY);\n"
+	write(t, newBase, "schema.sql", erodedBaseDDL)
+	writeHistoryBundle(t, newBase, devURL, "genesis", erodedBaseDDL)
+	write(t, newHead, "schema.sql", erodedHeadDDL)
+	rebound, err := AnalyzeWithReboundAnswers(context.Background(), Input{
+		BaseRoot: newBase, HeadRoot: newHead, BaseRevision: "new-base", HeadRevision: "new-head",
+		TargetName: "primary", Target: target, BundleRoot: "onward-bundles", DevDatabaseURL: devURL,
+	}, answers, previous.Plan.Questions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebound.Outcome != "ready" || rebound.Rebind == nil || len(rebound.Rebind.Carried) != 1 || len(rebound.Rebind.Invalidated) != 0 {
+		t.Fatalf("rebound analysis = %#v", rebound)
+	}
+}
+
 func planSQL(analysis Analysis) string {
 	var statements []string
 	for _, statement := range analysis.Plan.Statements {

@@ -4,6 +4,7 @@ package graphplan
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -166,6 +167,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		result.Status, result.Questions = protocol.NeedsInput, tableRenameQuestions
+		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
 	changes, viewRenames, viewRenameQuestions, err := resolveViewRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint)
@@ -177,6 +179,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		result.Status, result.Questions = protocol.NeedsInput, viewRenameQuestions
+		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
 	changes, routineRenames, routineRenameQuestions, err := resolveRoutineRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint)
@@ -188,6 +191,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		result.Status, result.Questions = protocol.NeedsInput, routineRenameQuestions
+		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
 	changes, triggerRenames, triggerRenameQuestions, err := resolveTriggerRenames(changes, resolver, currentFingerprint, desiredFingerprint)
@@ -199,6 +203,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		result.Status, result.Questions = protocol.NeedsInput, triggerRenameQuestions
+		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
 	changes, enumRenames, enumRenameQuestions, err := resolveEnumRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint)
@@ -210,6 +215,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		result.Status, result.Questions = protocol.NeedsInput, enumRenameQuestions
+		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
 	changes, extensionMoves := resolveExtensionMoves(changes)
@@ -225,6 +231,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		result.Status, result.Questions = protocol.NeedsInput, columnRenameQuestions
+		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
 	changes, indexRenames, renameQuestions, err := resolveIndexRenames(changes, resolver, currentFingerprint, desiredFingerprint)
@@ -236,6 +243,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		result.Status, result.Questions = protocol.NeedsInput, renameQuestions
+		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
 	droppingSchemas, droppingTables := droppingParents(changes)
@@ -253,6 +261,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		result.Status, result.Questions = protocol.NeedsInput, questions
+		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
 	// These statements must precede same-phase work that refers to the desired
@@ -429,6 +438,122 @@ func unsupportedResult(result protocol.Result, resolver *protocol.Resolver, unsu
 	result.Unsupported = unionStrings(unsupported, nil)
 	result.Statements, result.Batches = nil, nil
 	return result, nil
+}
+
+type scopedQuestionObject struct {
+	ID           string          `json:"id"`
+	Definition   json.RawMessage `json:"definition"`
+	Dependencies []string        `json:"dependencies,omitempty"`
+}
+
+func scopeQuestions(questions []protocol.Question, current, desired *pgschema.Snapshot) {
+	for index := range questions {
+		questions[index].ScopeFingerprint = questionScopeFingerprint(questions[index], current, desired)
+	}
+}
+
+func questionScopeFingerprint(question protocol.Question, current, desired *pgschema.Snapshot) string {
+	document := struct {
+		Kind           string                 `json:"kind"`
+		Key            string                 `json:"key"`
+		Choices        []string               `json:"choices"`
+		AllowsFreeform bool                   `json:"allows_freeform"`
+		Current        []scopedQuestionObject `json:"current"`
+		Desired        []scopedQuestionObject `json:"desired"`
+	}{
+		Kind: question.Kind, Key: question.Key, Choices: append([]string(nil), question.Choices...),
+		AllowsFreeform: question.AllowsFreeform,
+		Current:        questionScopeObjects(current, question),
+		Desired:        questionScopeObjects(desired, question),
+	}
+	if len(document.Current) == 0 && len(document.Desired) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Question) []scopedQuestionObject {
+	selectedNames := map[string]bool{question.Key: true}
+	for _, choice := range question.Choices {
+		selectedNames[choice] = true
+	}
+	selected := make(map[pgschema.ID]bool)
+	ids := snapshot.IDs()
+	for _, id := range ids {
+		if selectedNames[id.String()] {
+			selected[id] = true
+		}
+	}
+
+	// First collect the complete dependent closure of the participating
+	// objects. Then include its dependency closure without walking back out
+	// through shared parents such as schemas; an unrelated table in the same
+	// schema must not invalidate an otherwise identical decision.
+	queue := make([]pgschema.ID, 0, len(selected))
+	for id := range selected {
+		queue = append(queue, id)
+	}
+	for len(queue) > 0 {
+		dependency := queue[0]
+		queue = queue[1:]
+		for _, candidate := range ids {
+			if selected[candidate] || !containsID(snapshot.Dependencies(candidate), dependency) {
+				continue
+			}
+			selected[candidate] = true
+			queue = append(queue, candidate)
+		}
+	}
+	queue = queue[:0]
+	for id := range selected {
+		queue = append(queue, id)
+	}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		for _, dependency := range snapshot.Dependencies(id) {
+			if selected[dependency] {
+				continue
+			}
+			selected[dependency] = true
+			queue = append(queue, dependency)
+		}
+	}
+
+	objects := make([]scopedQuestionObject, 0, len(selected))
+	for _, id := range ids {
+		if !selected[id] {
+			continue
+		}
+		object, _ := snapshot.Object(id)
+		definition, err := json.Marshal(object)
+		if err != nil {
+			definition = []byte("null")
+		}
+		dependencies := snapshot.Dependencies(id)
+		dependencyNames := make([]string, 0, len(dependencies))
+		for _, dependency := range dependencies {
+			if selected[dependency] {
+				dependencyNames = append(dependencyNames, dependency.String())
+			}
+		}
+		objects = append(objects, scopedQuestionObject{ID: id.String(), Definition: definition, Dependencies: dependencyNames})
+	}
+	return objects
+}
+
+func containsID(ids []pgschema.ID, wanted pgschema.ID) bool {
+	for _, id := range ids {
+		if id == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func assignStatementIDs(statements []protocol.Statement) {

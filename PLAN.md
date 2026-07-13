@@ -763,7 +763,7 @@ simple enough for developers and agents.
 | P0 lifecycle | Same base/head/schema/options stay in the same generation. Decision reruns increment attempts only when the decision document changes; a new generation represents changed source state or a forward successor. Idempotent reruns do not churn files. |
 | P0 integrity | Reject `.`/`..` identities, revalidate replacement immediately before swap, enforce bundle identity/generation compare-and-swap, recover or explicitly diagnose orphan backups, cross-check phase SQL against `plan.json`, and use length-framed digests. |
 | P0 history | Replace foreign/plain migration-path replay with an onwardpg-owned per-target hash chain and prove `BC == BM` / `HC == HM` from it. |
-| P1 decisions | Fingerprint questions from participating objects/operations, preserve unaffected answers across base erosion, and add an explicit answer-rebind flow that reports carried and invalidated decisions. |
+| P1 decisions | **Foundation complete:** questions fingerprint participating object/dependency scopes; PR status/regeneration carry exact matches and report carried, invalidated, unanswered, and deferred decisions. Extend scenario coverage as lifecycle work continues. |
 | P1 receipts | Reserve and validate execution, verification, and amendment receipt slots so strict bundle reads do not deadlock the documented lifecycle. |
 | P1 amendments | Represent edited SQL as typed, statement-ID-bound amendments with rationale and reverification; never make a reviewed bundle unrecoverable through undocumented edits. |
 | P1 DDL input | Stabilize `schema_file` and deterministic `schema_command`; do not build framework adapters. Equivalent exported DDL must produce equivalent graphs. |

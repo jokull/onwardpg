@@ -369,6 +369,36 @@ func ResultDigest(result protocol.Result) (string, error) {
 	return Digest(data), nil
 }
 
+// DecisionQuestions returns the unique staged questions recorded by a bundle.
+// Conflicting receipts within one generation are rejected rather than allowing
+// answer rebinding to choose one implicitly.
+func DecisionQuestions(artifact Artifact) ([]protocol.Question, error) {
+	questions := make(map[string]protocol.Question)
+	for _, receipt := range artifact.Manifest.Decisions {
+		var result protocol.Result
+		if err := json.Unmarshal(artifact.Files[receipt.Path], &result); err != nil {
+			return nil, fmt.Errorf("decode %s: %w", receipt.Path, err)
+		}
+		for _, question := range result.Questions {
+			id := question.Kind + ":" + question.Key
+			if previous, exists := questions[id]; exists && !reflect.DeepEqual(previous, question) {
+				return nil, fmt.Errorf("decision receipts contain conflicting question %s", id)
+			}
+			questions[id] = question
+		}
+	}
+	ids := make([]string, 0, len(questions))
+	for id := range questions {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	result := make([]protocol.Question, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, questions[id])
+	}
+	return result, nil
+}
+
 func jsonDocument(value any) ([]byte, error) {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {

@@ -64,10 +64,8 @@ func samePlanningContract(manifest Manifest, metadata Metadata) bool {
 		manifest.Purpose == metadata.Purpose &&
 		manifest.Mode == metadata.Mode &&
 		manifest.BaseRef == metadata.BaseRef &&
-		manifest.BaseCommit == metadata.BaseCommit &&
-		manifest.HeadRevision == metadata.HeadRevision &&
-		reflect.DeepEqual(manifest.BaselineSource, metadata.BaselineSource) &&
-		reflect.DeepEqual(manifest.DesiredSource, metadata.DesiredSource) &&
+		sameSourcePlanningContract(manifest.BaselineSource, metadata.BaselineSource) &&
+		sameSourcePlanningContract(manifest.DesiredSource, metadata.DesiredSource) &&
 		reflect.DeepEqual(manifest.Planner, metadata.Planner) &&
 		manifestHistoryParent(manifest) == metadata.HistoryParentDigest
 }
@@ -233,12 +231,16 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 func sameManifestPlanningContract(previous, next Manifest) bool {
 	return previous.BundleID == next.BundleID && previous.Target == next.Target &&
 		previous.Purpose == next.Purpose && previous.Mode == next.Mode &&
-		previous.BaseRef == next.BaseRef && previous.BaseCommit == next.BaseCommit &&
-		previous.HeadRevision == next.HeadRevision &&
-		reflect.DeepEqual(previous.BaselineSource, next.BaselineSource) &&
-		reflect.DeepEqual(previous.DesiredSource, next.DesiredSource) &&
+		previous.BaseRef == next.BaseRef &&
+		sameSourcePlanningContract(previous.BaselineSource, next.BaselineSource) &&
+		sameSourcePlanningContract(previous.DesiredSource, next.DesiredSource) &&
 		reflect.DeepEqual(previous.Planner, next.Planner) &&
 		manifestHistoryParent(previous) == manifestHistoryParent(next)
+}
+
+func sameSourcePlanningContract(previous, next SourceReceipt) bool {
+	previous.GitCommit, next.GitCommit = "", ""
+	return reflect.DeepEqual(previous, next)
 }
 
 func manifestHistoryParent(manifest Manifest) string {

@@ -118,15 +118,19 @@ question, and the answer binds to the current and desired schema fingerprints:
     {
       "kind": "rename_column",
       "key": "column:public:users:name",
-      "value": "column:public:users:full_name"
+      "value": "column:public:users:full_name",
+      "question_fingerprint": "sha256:..."
     }
   ]
 }
 ```
 
-Stale, contradictory, invalid, and unused answers are rejected. The same rule
-applies to destructive changes and type conversions: an agent can propose a
-plan, but it cannot smuggle in unproven intent.
+Stale, contradictory, invalid, and unused answers are rejected. During PR
+restacking, unchanged decisions can be carried only when their participating
+object/dependency scope fingerprint is identical; changed decisions are listed
+as invalidated. The same rule applies to destructive changes and type
+conversions: an agent can propose a plan, but it cannot smuggle in unproven
+intent.
 
 ## Intended developer workflow
 

@@ -58,8 +58,11 @@ validated `--ignore` selectors; it is not an assertion that their definitions
 are safe to change.
 
 Question fields are stable v1 keys: `id`, `kind`, `message`, `key`, `choices`,
-`allows_freeform`, `current_fingerprint`, and `desired_fingerprint`. `id` is
-diagnostic identity; answers are matched by the `(kind, key)` pair.
+`allows_freeform`, `current_fingerprint`, `desired_fingerprint`, and
+`scope_fingerprint`. `id` is diagnostic identity; answers are matched by the
+`(kind, key)` pair. The scope fingerprint commits to the participating typed
+objects and relevant dependency closure, excluding unrelated objects that
+merely share a schema.
 
 ## Answer document
 
@@ -74,7 +77,8 @@ Answers are a separate, fingerprint-bound input:
     {
       "kind": "rename_table",
       "key": "table:public:old_name",
-      "value": "table:public:new_name"
+      "value": "table:public:new_name",
+      "question_fingerprint": "sha256:..."
     }
   ]
 }
@@ -84,8 +88,16 @@ Generate this from the exact `needs_input` result, save it in the pull request,
 and pass it with `--answers answers.json`. The planner rejects a different
 protocol version, stale fingerprints, missing required fields, duplicate or
 contradictory entries, values outside a question's choices, and entries that
-are unused by the current plan. Do not carry answer files between independent
-schema revisions.
+are unused by the current plan. Copy `scope_fingerprint` from the exact
+question into the answer's `question_fingerprint`.
+
+Do not manually edit whole-schema fingerprints to carry an answer between
+revisions. `pr status` and `pr regenerate` use
+`onwardpg.answer-rebind/v1` to carry only answers whose question scope is
+byte-for-byte equivalent. Its report lists `carried`, `invalidated`,
+`unanswered`, and staged decisions that are `deferred` until their planner
+stage becomes reachable. The rebound answer document receives the new global
+fingerprints.
 
 ### Manual work contract
 
@@ -151,7 +163,7 @@ Current codes distinguish invocation, answers, source, ignore, planning,
 configuration, bundle, and Git-status failures.
 
 `pr regenerate` emits `onwardpg.pr-analysis/v1`. It contains prepared-tree
-revision receipts, partial schema-square fingerprints, the ordinary
+revision receipts, complete schema-square fingerprints, the ordinary
 `onwardpg.plan/v1` result, and the written bundle generation/path. A blocked
 base-integrity result omits `plan` and exits `4`; needs-input and unsupported
 planner results retain exits `2` and `3`. The optional Git CLI wrapper reports

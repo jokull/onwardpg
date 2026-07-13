@@ -37,14 +37,21 @@ onwardpg pr regenerate \
   --replace-draft
 ```
 
-Draft replacement is explicit. The same base/head/schema/planner contract stays
-in the same generation: an identical decision result reuses its attempt, while
-a changed decision result adds an attempt. A new generation is reserved for a
-changed source/planner contract or a forward successor. Prior decision receipts
+Draft replacement is explicit. The same schema/planner/history-parent contract
+stays in the same generation even when equivalent Git provenance receipts are
+refreshed: an identical decision result reuses its attempt, while a changed
+decision result adds an attempt. A new generation is reserved for a changed
+semantic source/planner contract or a forward successor. Prior decision receipts
 within the generation are preserved as the ready plan, answers, and phase
 artifacts are added. A directory
 without a valid onwardpg manifest is never replaced. A bundle containing an
 execution receipt is immutable and cannot be replaced as a draft.
+
+When the base or desired graph changes, regeneration does not rewrite answer
+fingerprints optimistically. It compares question-scoped object receipts,
+carries exact matches, invalidates affected decisions, and defers decisions
+from later planner stages until those stages are reachable. The complete
+`onwardpg.answer-rebind/v1` report is included in PR analysis output.
 
 ## Files and integrity
 

@@ -148,8 +148,13 @@ func TestWritePreservesDecisionHistoryAcrossDraftReplacement(t *testing.T) {
 	changed := metadata()
 	changed.HeadRevision = strings.Repeat("c", 40)
 	generation, attempt, err = NextCoordinates(destination, changed, plannedResult())
+	if err != nil || generation != 1 || attempt != 2 {
+		t.Fatalf("provenance-refresh coordinates = (%d, %d, %v), want (1, 2, nil)", generation, attempt, err)
+	}
+	changed.HistoryParentDigest = desiredFingerprint
+	generation, attempt, err = NextCoordinates(destination, changed, plannedResult())
 	if err != nil || generation != 2 || attempt != 1 {
-		t.Fatalf("changed-source coordinates = (%d, %d, %v), want (2, 1, nil)", generation, attempt, err)
+		t.Fatalf("changed-history coordinates = (%d, %d, %v), want (2, 1, nil)", generation, attempt, err)
 	}
 }
 

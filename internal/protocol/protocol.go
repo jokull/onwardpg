@@ -113,6 +113,10 @@ type Question struct {
 	AllowsFreeform     bool     `json:"allows_freeform,omitempty"`
 	CurrentFingerprint string   `json:"current_fingerprint,omitempty"`
 	DesiredFingerprint string   `json:"desired_fingerprint,omitempty"`
+	// ScopeFingerprint commits to the participating current/desired objects and
+	// their relevant dependency closure. It allows an unchanged decision to be
+	// carried across unrelated schema drift without trusting only kind/key text.
+	ScopeFingerprint string `json:"scope_fingerprint,omitempty"`
 }
 
 type Answers struct {
@@ -123,10 +127,11 @@ type Answers struct {
 }
 
 type Answer struct {
-	Kind   string      `json:"kind"`
-	Key    string      `json:"key"`
-	Value  string      `json:"value"`
-	Manual *ManualWork `json:"manual,omitempty"`
+	Kind                string      `json:"kind"`
+	Key                 string      `json:"key"`
+	Value               string      `json:"value"`
+	QuestionFingerprint string      `json:"question_fingerprint,omitempty"`
+	Manual              *ManualWork `json:"manual,omitempty"`
 }
 
 // Resolver validates and consumes a fingerprint-bound answer document. It is

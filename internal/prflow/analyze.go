@@ -62,17 +62,18 @@ type BundleOutput struct {
 }
 
 type Analysis struct {
-	ProtocolVersion string           `json:"protocol_version"`
-	Outcome         string           `json:"outcome"`
-	Inputs          InputReceipt     `json:"inputs"`
-	SchemaSquare    SchemaSquare     `json:"schema_square"`
-	Problems        []Problem        `json:"problems,omitempty"`
-	Plan            *protocol.Result `json:"plan,omitempty"`
-	BaseProvenance  string           `json:"base_provenance,omitempty"`
-	HeadProvenance  string           `json:"head_provenance,omitempty"`
-	HistoryDigest   string           `json:"history_digest,omitempty"`
-	HistoryFiles    []string         `json:"history_files,omitempty"`
-	Bundle          *BundleOutput    `json:"bundle,omitempty"`
+	ProtocolVersion string                 `json:"protocol_version"`
+	Outcome         string                 `json:"outcome"`
+	Inputs          InputReceipt           `json:"inputs"`
+	SchemaSquare    SchemaSquare           `json:"schema_square"`
+	Problems        []Problem              `json:"problems,omitempty"`
+	Plan            *protocol.Result       `json:"plan,omitempty"`
+	BaseProvenance  string                 `json:"base_provenance,omitempty"`
+	HeadProvenance  string                 `json:"head_provenance,omitempty"`
+	HistoryDigest   string                 `json:"history_digest,omitempty"`
+	HistoryFiles    []string               `json:"history_files,omitempty"`
+	Rebind          *protocol.RebindReport `json:"answer_rebind,omitempty"`
+	Bundle          *BundleOutput          `json:"bundle,omitempty"`
 }
 
 func Analyze(ctx context.Context, input Input) (Analysis, error) {

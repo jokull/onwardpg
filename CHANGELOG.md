@@ -43,6 +43,10 @@ claim and does not apply migrations automatically.
   digests, fork and missing-parent rejection, filename-independent replay, and
   complete `BC == BM` / `HC == HM` schema-square verification during PR
   regeneration.
+- Question-scoped answer fingerprints and staged answer rebinding across base
+  erosion, with explicit carried, invalidated, unanswered, and deferred
+  reports. Equivalent Git provenance refreshes no longer create a new bundle
+  generation when the schema/planner/history contract is unchanged.
 
 ### Known limitations
 
