@@ -39,6 +39,10 @@ claim and does not apply migrations automatically.
   feeds the CLI; framework adapters, ORM journal integration, and runner
   handoffs are intentionally out of scope. Phase bundles are the forward
   migration history.
+- Per-target content-addressed bundle history with canonical parent/entry
+  digests, fork and missing-parent rejection, filename-independent replay, and
+  complete `BC == BM` / `HC == HM` schema-square verification during PR
+  regeneration.
 
 ### Known limitations
 

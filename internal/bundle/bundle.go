@@ -5,6 +5,7 @@ package bundle
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,10 @@ import (
 )
 
 const Version = "onwardpg.bundle/v1"
+
+var rootHistoryDigest = digestFrames([]byte("onwardpg.history/v1"), []byte("root"))
+
+func HistoryRootDigest() string { return rootHistoryDigest }
 
 var (
 	fingerprintPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -57,6 +62,15 @@ type SchemaSquareReceipt struct {
 	HeadHistoryFidelity    string `json:"head_history_fidelity"`
 }
 
+// HistoryReceipt links a bundle to the exact protected history head it was
+// planned from. EntryDigest commits to the complete manifest receipt (with the
+// entry digest itself cleared), so directory names and filesystem ordering are
+// never part of migration order.
+type HistoryReceipt struct {
+	ParentDigest string `json:"parent_digest"`
+	EntryDigest  string `json:"entry_digest"`
+}
+
 type Lineage struct {
 	Relationship string `json:"relationship"`
 	BundleID     string `json:"bundle_id"`
@@ -91,6 +105,7 @@ type Manifest struct {
 	DesiredSource  SourceReceipt        `json:"desired_source"`
 	Planner        PlannerReceipt       `json:"planner"`
 	SchemaSquare   *SchemaSquareReceipt `json:"schema_square,omitempty"`
+	History        *HistoryReceipt      `json:"history,omitempty"`
 
 	ResultDigest  string                   `json:"result_digest"`
 	PlanDigest    string                   `json:"plan_digest,omitempty"`
@@ -102,19 +117,20 @@ type Manifest struct {
 }
 
 type Metadata struct {
-	BundleID       string
-	Generation     int
-	Target         string
-	Purpose        string
-	Mode           string
-	BaseRef        string
-	BaseCommit     string
-	HeadRevision   string
-	BaselineSource SourceReceipt
-	DesiredSource  SourceReceipt
-	Planner        PlannerReceipt
-	SchemaSquare   *SchemaSquareReceipt
-	Lineage        *Lineage
+	BundleID            string
+	Generation          int
+	Target              string
+	Purpose             string
+	Mode                string
+	BaseRef             string
+	BaseCommit          string
+	HeadRevision        string
+	BaselineSource      SourceReceipt
+	DesiredSource       SourceReceipt
+	Planner             PlannerReceipt
+	SchemaSquare        *SchemaSquareReceipt
+	HistoryParentDigest string
+	Lineage             *Lineage
 }
 
 type Input struct {
@@ -286,6 +302,14 @@ func Build(input Input) (Artifact, error) {
 		files["intent.md"] = intent
 		manifest.IntentDigest = Digest(intent)
 	}
+	if input.Metadata.HistoryParentDigest != "" {
+		manifest.History = &HistoryReceipt{ParentDigest: input.Metadata.HistoryParentDigest}
+		entryDigest, err := HistoryEntryDigest(manifest)
+		if err != nil {
+			return Artifact{}, fmt.Errorf("compute history entry digest: %w", err)
+		}
+		manifest.History.EntryDigest = entryDigest
+	}
 	if err := manifest.Validate(); err != nil {
 		return Artifact{}, err
 	}
@@ -304,6 +328,35 @@ func Build(input Input) (Artifact, error) {
 func Digest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func digestFrames(parts ...[]byte) string {
+	hash := sha256.New()
+	var size [8]byte
+	for _, part := range parts {
+		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write(part)
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+// HistoryEntryDigest returns the canonical hash-chain identity for a manifest.
+// The manifest must already contain a parent digest; the entry digest field is
+// cleared before encoding to avoid a recursive hash.
+func HistoryEntryDigest(manifest Manifest) (string, error) {
+	if manifest.History == nil || !fingerprintPattern.MatchString(manifest.History.ParentDigest) {
+		return "", fmt.Errorf("history parent digest is required")
+	}
+	copy := manifest
+	history := *manifest.History
+	history.EntryDigest = ""
+	copy.History = &history
+	data, err := json.Marshal(copy)
+	if err != nil {
+		return "", err
+	}
+	return digestFrames([]byte(Version), []byte(history.ParentDigest), data), nil
 }
 
 // ResultDigest returns the canonical digest used by bundle manifests and
@@ -400,6 +453,30 @@ func renderPhases(result protocol.Result) (map[string]PhaseArtifact, map[string]
 	return phases, files, nil
 }
 
+// RenderReplaySQL renders phase artifacts exactly as bundle history will replay
+// them, in lifecycle order. It is used to prove the proposed side of the
+// schema square before a ready bundle is written.
+func RenderReplaySQL(result protocol.Result) ([]byte, error) {
+	_, files, err := renderPhases(result)
+	if err != nil {
+		return nil, err
+	}
+	var sql strings.Builder
+	for _, phase := range []string{"expand", "migrate", "manual", "contract"} {
+		name := path.Join("phases", phase+".sql")
+		body, exists := files[name]
+		if !exists {
+			continue
+		}
+		sql.WriteString("\n-- onwardpg proposed phase: " + phase + "\n")
+		sql.Write(body)
+		if len(body) == 0 || body[len(body)-1] != '\n' {
+			sql.WriteByte('\n')
+		}
+	}
+	return []byte(sql.String()), nil
+}
+
 func (m Manifest) Validate() error {
 	if m.ProtocolVersion != Version {
 		return fmt.Errorf("bundle protocol_version is %q, want %q", m.ProtocolVersion, Version)
@@ -443,6 +520,21 @@ func (m Manifest) Validate() error {
 	if m.SchemaSquare != nil {
 		if err := m.SchemaSquare.Validate(m.BaselineSource.Fingerprint, m.DesiredSource.Fingerprint); err != nil {
 			return fmt.Errorf("schema_square: %w", err)
+		}
+	}
+	if m.History != nil {
+		if !fingerprintPattern.MatchString(m.History.ParentDigest) || !fingerprintPattern.MatchString(m.History.EntryDigest) {
+			return fmt.Errorf("history parent and entry digests must be SHA-256 fingerprints")
+		}
+		expected, err := HistoryEntryDigest(m)
+		if err != nil {
+			return fmt.Errorf("history: %w", err)
+		}
+		if m.History.EntryDigest != expected {
+			return fmt.Errorf("history entry digest does not match manifest receipts")
+		}
+		if m.History.EntryDigest == m.History.ParentDigest {
+			return fmt.Errorf("history entry cannot be its own parent")
 		}
 	}
 	if !fingerprintPattern.MatchString(m.ResultDigest) {

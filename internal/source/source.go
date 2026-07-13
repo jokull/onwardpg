@@ -38,15 +38,15 @@ func LoadGraphForComparison(ctx context.Context, spec Spec, devURL string, ignor
 	return loadGraph(ctx, spec, devURL, ignores, false)
 }
 
-// LoadDDLGraphForComparison materializes adapter-produced CREATE statements
+// LoadDDLGraphForComparison materializes exported CREATE statements
 // directly, avoiding an unreceipted intermediate file while retaining the
 // same PostgreSQL catalog authority as a file:// source.
 func LoadDDLGraphForComparison(ctx context.Context, ddl []byte, provenance, devURL string, ignores []string) (*pgschema.Snapshot, error) {
 	if devURL == "" {
-		return nil, fmt.Errorf("adapter DDL requires a dev database URL")
+		return nil, fmt.Errorf("exported DDL requires a dev database URL")
 	}
 	if strings.TrimSpace(provenance) == "" || strings.Contains(provenance, "://") {
-		return nil, fmt.Errorf("adapter DDL provenance must be non-secret")
+		return nil, fmt.Errorf("exported DDL provenance must be non-secret")
 	}
 	return materializeDDLBytesGraph(ctx, ddl, provenance, devURL, ignores, false)
 }

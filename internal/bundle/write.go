@@ -68,7 +68,8 @@ func samePlanningContract(manifest Manifest, metadata Metadata) bool {
 		manifest.HeadRevision == metadata.HeadRevision &&
 		reflect.DeepEqual(manifest.BaselineSource, metadata.BaselineSource) &&
 		reflect.DeepEqual(manifest.DesiredSource, metadata.DesiredSource) &&
-		reflect.DeepEqual(manifest.Planner, metadata.Planner)
+		reflect.DeepEqual(manifest.Planner, metadata.Planner) &&
+		manifestHistoryParent(manifest) == metadata.HistoryParentDigest
 }
 
 // Read loads and verifies every file in an existing bundle. It is deliberately
@@ -236,7 +237,15 @@ func sameManifestPlanningContract(previous, next Manifest) bool {
 		previous.HeadRevision == next.HeadRevision &&
 		reflect.DeepEqual(previous.BaselineSource, next.BaselineSource) &&
 		reflect.DeepEqual(previous.DesiredSource, next.DesiredSource) &&
-		reflect.DeepEqual(previous.Planner, next.Planner)
+		reflect.DeepEqual(previous.Planner, next.Planner) &&
+		manifestHistoryParent(previous) == manifestHistoryParent(next)
+}
+
+func manifestHistoryParent(manifest Manifest) string {
+	if manifest.History == nil {
+		return ""
+	}
+	return manifest.History.ParentDigest
 }
 
 func preserveDecisionHistory(destination string, next Artifact) (Artifact, error) {
@@ -260,6 +269,13 @@ func preserveDecisionHistory(destination string, next Artifact) (Artifact, error
 	next.Manifest.Decisions = next.Manifest.Decisions[:0]
 	for _, name := range sortedReceiptPaths(byPath) {
 		next.Manifest.Decisions = append(next.Manifest.Decisions, byPath[name])
+	}
+	if next.Manifest.History != nil {
+		digest, err := HistoryEntryDigest(next.Manifest)
+		if err != nil {
+			return Artifact{}, err
+		}
+		next.Manifest.History.EntryDigest = digest
 	}
 	manifestBytes, err := jsonDocument(next.Manifest)
 	if err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -9,7 +10,10 @@ import (
 	"testing"
 
 	"github.com/jokull/onwardpg/internal/bundle"
+	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/prflow"
+	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/source"
 )
 
 func TestPlanCLIWritesVersionedBundleOnPostgreSQL(t *testing.T) {
@@ -73,13 +77,12 @@ func TestPRRegenerateWritesVerifiedBaseToSyntheticHeadBundle(t *testing.T) {
 bundle_root = "onward-bundles"
 [targets.primary]
 schema_file = "schema.sql"
-migration_path = "migrations"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 postgres_major = 16
 `)
 	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.users (id bigint PRIMARY KEY);\n"
 	writeTestFile(t, repository, "schema.sql", baseDDL)
-	writeTestFile(t, repository, "migrations/0001.sql", baseDDL)
+	writeHistoryFixture(t, repository, url, "genesis", baseDDL)
 	git(t, repository, "add", "-A")
 	git(t, repository, "commit", "-m", "base")
 	git(t, repository, "checkout", "-b", "feature")
@@ -105,8 +108,11 @@ postgres_major = 16
 	if err != nil {
 		t.Fatal(err)
 	}
-	if artifact.Manifest.SchemaSquare == nil || artifact.Manifest.SchemaSquare.BaseCodeFingerprint != artifact.Manifest.SchemaSquare.BaseHistoryFingerprint || artifact.Manifest.SchemaSquare.HeadHistoryFidelity != "not_replayed" {
+	if artifact.Manifest.SchemaSquare == nil || artifact.Manifest.SchemaSquare.BaseCodeFingerprint != artifact.Manifest.SchemaSquare.BaseHistoryFingerprint || artifact.Manifest.SchemaSquare.HeadHistoryFidelity != "matched" || artifact.Manifest.SchemaSquare.HeadCodeFingerprint != artifact.Manifest.SchemaSquare.HeadHistoryFingerprint {
 		t.Fatalf("bundle schema square = %#v", artifact.Manifest.SchemaSquare)
+	}
+	if artifact.Manifest.History == nil || artifact.Manifest.History.ParentDigest == bundle.HistoryRootDigest() {
+		t.Fatalf("bundle history receipt = %#v", artifact.Manifest.History)
 	}
 	if !strings.Contains(string(artifact.Files["phases/expand.sql"]), `CREATE TABLE "app"."projects"`) {
 		t.Fatalf("expand phase = %s", artifact.Files["phases/expand.sql"])
@@ -142,6 +148,37 @@ postgres_major = 16
 		t.Fatalf("freshness status = %#v", status)
 	}
 
+}
+
+func writeHistoryFixture(t *testing.T, root, devURL, id, desiredDDL string) {
+	t.Helper()
+	ctx := context.Background()
+	current, err := source.LoadDDLGraphForComparison(ctx, nil, "empty-history", devURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadDDLGraphForComparison(ctx, []byte(desiredDDL), "history-fixture", devURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := bundle.Metadata{
+		BundleID: id, Generation: 1, Target: "primary", Purpose: "feature", Mode: "pr",
+		BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
+		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "empty history", Fingerprint: result.CurrentFingerprint, PostgresMajor: 16},
+		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "fixture schema", Fingerprint: result.DesiredFingerprint, PostgresMajor: 16},
+		Planner:        bundle.PlannerReceipt{Version: "test"}, HistoryParentDigest: bundle.HistoryRootDigest(),
+	}
+	artifact, err := bundle.Build(bundle.Input{Metadata: metadata, Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Write(filepath.Join(root, "onward-bundles", "primary", id), artifact, bundle.WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type captured struct {

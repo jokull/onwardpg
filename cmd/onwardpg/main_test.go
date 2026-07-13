@@ -49,16 +49,15 @@ func TestPRStatusCLIBlocksBaseMigrationEdits(t *testing.T) {
 bundle_root = "onward-bundles"
 [targets.primary]
 schema_file = "schema.sql"
-migration_path = "migrations"
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 postgres_major = 16
 `)
 	writeTestFile(t, repository, "schema.sql", "CREATE TABLE users (id bigint);\n")
-	writeTestFile(t, repository, "migrations/0001.sql", "SELECT 1;\n")
+	writeTestFile(t, repository, "onward-bundles/primary/base/plan.json", "SELECT 1;\n")
 	git(t, repository, "add", "-A")
 	git(t, repository, "commit", "-m", "base")
 	git(t, repository, "checkout", "-b", "feature")
-	writeTestFile(t, repository, "migrations/0001.sql", "SELECT 2;\n")
+	writeTestFile(t, repository, "onward-bundles/primary/base/plan.json", "SELECT 2;\n")
 	git(t, repository, "add", "-A")
 	git(t, repository, "commit", "-m", "edit history")
 

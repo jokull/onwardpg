@@ -192,7 +192,7 @@ JSON and exit codes. See [migration bundles](docs/bundles.md).
 `onwardpg pr status --base origin/main --target NAME` provides the first
 Git-aware guardrail. It resolves exact commits, distinguishes the PR-owned
 merge-base patch from an eroded current base, fingerprints dirty checkout
-state, and blocks edits to base-reachable migration history or migration-path
+state, and blocks edits to base-reachable migration history or history-path
 collisions. Adding `--bundle FEATURE` makes the same read-only command compile
 the prepared base/head trees and classify the bundle as fresh or stale, with
 typed findings and remediation. It never regenerates as a side effect.
@@ -204,8 +204,8 @@ and writes the fingerprinted PR bundle. It runs the configured DDL export
 twice and rejects nondeterminism or undeclared filesystem output. onwardpg does
 not integrate with framework migration journals or runners. The bundle's phase files
 are the reviewed migration history, and the developer or coding agent
-orchestrates their timing. Per-target hash-chain replay, durable execution
-receipts, CI fidelity checks, and clone execution receipts remain upcoming.
+orchestrates their timing. Durable execution receipts, CI fidelity checks, and
+clone execution receipts remain upcoming.
 
 ## Developer preview: what works now
 

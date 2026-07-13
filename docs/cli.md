@@ -97,7 +97,7 @@ onwardpg pr regenerate \
 Regeneration performs the currently implemented portions of the PR schema
 square:
 
-1. classify protected and branch-owned migration files;
+1. classify protected and branch-owned onwardpg bundle files;
 2. compile the declarative schema from the exact base commit twice;
 3. replay the base migration history in disposable PostgreSQL and require
    `BC == BM`;
@@ -111,14 +111,13 @@ square:
 The configured `dev_database_env` must contain a disposable PostgreSQL admin
 URL. A second decision pass uses `--answers` and `--replace-draft`; prior
 question receipts are retained without advancing the generation when the
-source/planner contract is unchanged. The bundle root is excluded from dirty source
-fingerprints, and configuration rejects overlap between `bundle_root` and the
-legacy plain-SQL `migration_path`.
+source/planner contract is unchanged. The bundle root is excluded from dirty
+source fingerprints, and configuration rejects placing the DDL schema file
+inside `bundle_root`.
 
-Regeneration records `head_history_fidelity: "not_replayed"` today. The next
-history wave replaces the legacy migration path with a per-target,
-content-addressed onwardpg bundle chain and proves `HC == HM` by replaying that
-chain plus the proposed phase artifacts on disposable PostgreSQL.
+Regeneration validates and replays the per-target, content-addressed onwardpg
+bundle chain as its base, then replays the proposed plan on top and requires
+both `BC == BM` and `HC == HM` before writing a ready bundle.
 
 There is intentionally no migration-runner handoff command. Drizzle and other
 frameworks may compile declarative schemas to DDL, but onwardpg does not read

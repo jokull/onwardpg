@@ -22,31 +22,31 @@ const Version = "onwardpg.git-status/v1"
 type Options struct {
 	BaseRef            string
 	HeadRef            string
-	MigrationPath      string
+	HistoryPath        string
 	IncludeWorkingTree bool
 	ExcludePaths       []string
 }
 
 type Status struct {
-	ProtocolVersion     string            `json:"protocol_version"`
-	Outcome             string            `json:"outcome"`
-	BaseRef             string            `json:"base_ref"`
-	BaseCommit          string            `json:"base_commit"`
-	HeadRef             string            `json:"head_ref"`
-	HeadCommit          string            `json:"head_commit"`
-	HeadRevision        string            `json:"head_revision"`
-	MergeBase           string            `json:"merge_base"`
-	Relationship        string            `json:"relationship"`
-	MigrationPath       string            `json:"migration_path"`
-	WorkingTreeIncluded bool              `json:"working_tree_included"`
-	Dirty               bool              `json:"dirty"`
-	SyntheticHeadNeeded bool              `json:"synthetic_head_needed"`
-	ExcludedPaths       []string          `json:"excluded_paths,omitempty"`
-	MigrationChanges    []MigrationChange `json:"migration_changes,omitempty"`
-	Problems            []Problem         `json:"problems,omitempty"`
+	ProtocolVersion     string          `json:"protocol_version"`
+	Outcome             string          `json:"outcome"`
+	BaseRef             string          `json:"base_ref"`
+	BaseCommit          string          `json:"base_commit"`
+	HeadRef             string          `json:"head_ref"`
+	HeadCommit          string          `json:"head_commit"`
+	HeadRevision        string          `json:"head_revision"`
+	MergeBase           string          `json:"merge_base"`
+	Relationship        string          `json:"relationship"`
+	HistoryPath         string          `json:"history_path"`
+	WorkingTreeIncluded bool            `json:"working_tree_included"`
+	Dirty               bool            `json:"dirty"`
+	SyntheticHeadNeeded bool            `json:"synthetic_head_needed"`
+	ExcludedPaths       []string        `json:"excluded_paths,omitempty"`
+	HistoryChanges      []HistoryChange `json:"history_changes,omitempty"`
+	Problems            []Problem       `json:"problems,omitempty"`
 }
 
-type MigrationChange struct {
+type HistoryChange struct {
 	Origin    string `json:"origin"`
 	Status    string `json:"status"`
 	Path      string `json:"path"`
@@ -87,8 +87,8 @@ func (r Repository) Inspect(ctx context.Context, options Options) (Status, error
 	if options.HeadRef == "" {
 		options.HeadRef = "HEAD"
 	}
-	if err := validateRepositoryPath(options.MigrationPath); err != nil {
-		return Status{}, fmt.Errorf("migration path: %w", err)
+	if err := validateRepositoryPath(options.HistoryPath); err != nil {
+		return Status{}, fmt.Errorf("history path: %w", err)
 	}
 	excluded, err := normalizePaths(options.ExcludePaths)
 	if err != nil {
@@ -111,13 +111,13 @@ func (r Repository) Inspect(ctx context.Context, options Options) (Status, error
 	}
 	mergeBase := mergeBases[0]
 
-	baseFiles, err := r.treeFiles(ctx, base, options.MigrationPath)
+	baseFiles, err := r.treeFiles(ctx, base, options.HistoryPath)
 	if err != nil {
-		return Status{}, fmt.Errorf("list base migrations: %w", err)
+		return Status{}, fmt.Errorf("list base history: %w", err)
 	}
-	ancestorFiles, err := r.treeFiles(ctx, mergeBase, options.MigrationPath)
+	ancestorFiles, err := r.treeFiles(ctx, mergeBase, options.HistoryPath)
 	if err != nil {
-		return Status{}, fmt.Errorf("list merge-base migrations: %w", err)
+		return Status{}, fmt.Errorf("list merge-base history: %w", err)
 	}
 	protected := make(map[string]bool, len(baseFiles)+len(ancestorFiles))
 	for name := range baseFiles {
@@ -127,7 +127,7 @@ func (r Repository) Inspect(ctx context.Context, options Options) (Status, error
 		protected[name] = true
 	}
 
-	committed, err := r.diff(ctx, mergeBase, head, options.MigrationPath)
+	committed, err := r.diff(ctx, mergeBase, head, options.HistoryPath)
 	if err != nil {
 		return Status{}, fmt.Errorf("classify committed migration changes: %w", err)
 	}
@@ -138,19 +138,19 @@ func (r Repository) Inspect(ctx context.Context, options Options) (Status, error
 	headRevision := head
 	dirty := false
 	if options.IncludeWorkingTree {
-		working, err := r.diff(ctx, head, "", options.MigrationPath)
+		working, err := r.diff(ctx, head, "", options.HistoryPath)
 		if err != nil {
 			return Status{}, fmt.Errorf("classify working-tree migration changes: %w", err)
 		}
 		for i := range working {
 			working[i].Origin = "working_tree"
 		}
-		untracked, err := r.untracked(ctx, options.MigrationPath, nil)
+		untracked, err := r.untracked(ctx, options.HistoryPath, nil)
 		if err != nil {
-			return Status{}, fmt.Errorf("list untracked migrations: %w", err)
+			return Status{}, fmt.Errorf("list untracked history files: %w", err)
 		}
 		for _, name := range untracked {
-			working = append(working, MigrationChange{Origin: "working_tree", Status: "A", Path: name})
+			working = append(working, HistoryChange{Origin: "working_tree", Status: "A", Path: name})
 		}
 		changes = append(changes, working...)
 		headRevision, dirty, err = r.workingRevision(ctx, head, excluded)
@@ -183,10 +183,10 @@ func (r Repository) Inspect(ctx context.Context, options Options) (Status, error
 		ProtocolVersion: Version, Outcome: outcome,
 		BaseRef: options.BaseRef, BaseCommit: base, HeadRef: options.HeadRef,
 		HeadCommit: head, HeadRevision: headRevision, MergeBase: mergeBase,
-		Relationship: relationship(base, head, mergeBase), MigrationPath: options.MigrationPath,
+		Relationship: relationship(base, head, mergeBase), HistoryPath: options.HistoryPath,
 		WorkingTreeIncluded: options.IncludeWorkingTree, Dirty: dirty,
 		SyntheticHeadNeeded: base != mergeBase, ExcludedPaths: excluded,
-		MigrationChanges: changes, Problems: problems,
+		HistoryChanges: changes, Problems: problems,
 	}, nil
 }
 
@@ -203,7 +203,7 @@ func relationship(base, head, mergeBase string) string {
 	}
 }
 
-func classify(changes []MigrationChange, protected, baseFiles map[string]bool) []Problem {
+func classify(changes []HistoryChange, protected, baseFiles map[string]bool) []Problem {
 	var problems []Problem
 	seenProblems := make(map[string]bool)
 	addProblem := func(problem Problem) {
@@ -221,14 +221,14 @@ func classify(changes []MigrationChange, protected, baseFiles map[string]bool) [
 		switch {
 		case collision:
 			change.Ownership, change.Problem = "base_reachable", "base_path_collision"
-			addProblem(Problem{Code: change.Problem, Path: change.Path, Message: "branch migration path collides with a migration now reachable from the PR base"})
+			addProblem(Problem{Code: change.Problem, Path: change.Path, Message: "branch history path collides with a bundle now reachable from the PR base"})
 		case oldProtected || pathProtected:
 			change.Ownership, change.Problem = "base_reachable", "base_history_modified"
 			path := change.Path
 			if oldProtected {
 				path = change.OldPath
 			}
-			addProblem(Problem{Code: change.Problem, Path: path, Message: "branch changes migration history reachable from the PR base or merge base"})
+			addProblem(Problem{Code: change.Problem, Path: path, Message: "branch changes onwardpg history reachable from the PR base or merge base"})
 		default:
 			change.Ownership = "branch_draft"
 		}
@@ -277,7 +277,7 @@ func (r Repository) treeFiles(ctx context.Context, commit, directory string) (ma
 	return files, nil
 }
 
-func (r Repository) diff(ctx context.Context, from, to, directory string) ([]MigrationChange, error) {
+func (r Repository) diff(ctx context.Context, from, to, directory string) ([]HistoryChange, error) {
 	arguments := []string{"diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", from}
 	if to != "" {
 		arguments = append(arguments, to)
@@ -290,9 +290,9 @@ func (r Repository) diff(ctx context.Context, from, to, directory string) ([]Mig
 	return parseNameStatus(output)
 }
 
-func parseNameStatus(output []byte) ([]MigrationChange, error) {
+func parseNameStatus(output []byte) ([]HistoryChange, error) {
 	fields := splitNUL(output)
-	changes := make([]MigrationChange, 0, len(fields)/2)
+	changes := make([]HistoryChange, 0, len(fields)/2)
 	for index := 0; index < len(fields); {
 		status := fields[index]
 		index++
@@ -303,11 +303,11 @@ func parseNameStatus(output []byte) ([]MigrationChange, error) {
 			if index+1 >= len(fields) {
 				return nil, fmt.Errorf("invalid git rename/copy output")
 			}
-			changes = append(changes, MigrationChange{Status: status, OldPath: fields[index], Path: fields[index+1]})
+			changes = append(changes, HistoryChange{Status: status, OldPath: fields[index], Path: fields[index+1]})
 			index += 2
 			continue
 		}
-		changes = append(changes, MigrationChange{Status: status, Path: fields[index]})
+		changes = append(changes, HistoryChange{Status: status, Path: fields[index]})
 		index++
 	}
 	return changes, nil

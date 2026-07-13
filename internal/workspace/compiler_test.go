@@ -16,7 +16,7 @@ func TestTargetCompilerReadsSchemaFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	compiler := TargetCompiler{TargetName: "primary", Target: Target{
-		SchemaFile: "schema.sql", MigrationPath: "migrations",
+		SchemaFile:     "schema.sql",
 		DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16,
 	}}
 	artifact, err := compiler.Compile(context.Background(), adapter.CompileRequest{Root: root, Target: "primary", Revision: "test"})
@@ -31,8 +31,8 @@ func TestTargetCompilerReadsSchemaFile(t *testing.T) {
 func TestTargetCompilerCapturesCommandStdout(t *testing.T) {
 	root := t.TempDir()
 	compiler := TargetCompiler{TargetName: "primary", Target: Target{
-		SchemaCommand: []string{"printf", "CREATE TABLE users (id bigint);\\n"},
-		MigrationPath: "migrations", DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16,
+		SchemaCommand:  []string{"printf", "CREATE TABLE users (id bigint);\\n"},
+		DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16,
 	}}
 	artifact, err := compiler.Compile(context.Background(), adapter.CompileRequest{Root: root, Target: "primary"})
 	if err != nil {
@@ -46,8 +46,8 @@ func TestTargetCompilerCapturesCommandStdout(t *testing.T) {
 func TestTargetCompilerRejectsUndeclaredCommandOutputs(t *testing.T) {
 	root := t.TempDir()
 	compiler := TargetCompiler{TargetName: "primary", Target: Target{
-		SchemaCommand: []string{"sh", "-c", "mkdir cache && printf 'CREATE TABLE users (id bigint);'"},
-		MigrationPath: "migrations", DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16,
+		SchemaCommand:  []string{"sh", "-c", "mkdir cache && printf 'CREATE TABLE users (id bigint);'"},
+		DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16,
 	}}
 	_, err := compiler.Compile(context.Background(), adapter.CompileRequest{Root: root, Target: "primary"})
 	if err == nil || !strings.Contains(err.Error(), "modified its isolated input tree") {

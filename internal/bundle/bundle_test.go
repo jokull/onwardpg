@@ -60,6 +60,29 @@ func TestBuildPlannedBundleWritesDeterministicPhaseReceipts(t *testing.T) {
 	}
 }
 
+func TestBuildHistoryReceiptCommitsToParentAndManifest(t *testing.T) {
+	meta := metadata()
+	meta.HistoryParentDigest = HistoryRootDigest()
+	artifact, err := Build(Input{Metadata: meta, Result: plannedResult(statement("CREATE TABLE app.users (id bigint);", "expand", true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.History == nil || artifact.Manifest.History.ParentDigest != HistoryRootDigest() || artifact.Manifest.History.EntryDigest == "" {
+		t.Fatalf("history receipt = %#v", artifact.Manifest.History)
+	}
+	again, err := Build(Input{Metadata: meta, Result: plannedResult(statement("CREATE TABLE app.users (id bigint);", "expand", true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Manifest.History.EntryDigest != artifact.Manifest.History.EntryDigest {
+		t.Fatal("identical bundle inputs produced different history entry digests")
+	}
+	artifact.Manifest.HeadRevision = strings.Repeat("c", 40)
+	if err := artifact.Manifest.Validate(); err == nil || !strings.Contains(err.Error(), "history entry digest") {
+		t.Fatalf("expected changed manifest to invalidate history receipt, got %v", err)
+	}
+}
+
 func TestBuildNeedsInputStoresDecisionWithoutExecutablePlan(t *testing.T) {
 	result := protocol.Result{
 		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,

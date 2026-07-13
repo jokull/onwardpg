@@ -29,7 +29,7 @@ func TestInspectKeepsBaseErosionOutOfTheBranchContribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", HeadRef: "HEAD", MigrationPath: "migrations", IncludeWorkingTree: true})
+	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", HeadRef: "HEAD", HistoryPath: "migrations", IncludeWorkingTree: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,8 +39,8 @@ func TestInspectKeepsBaseErosionOutOfTheBranchContribution(t *testing.T) {
 	if status.BaseCommit != base || status.HeadCommit != feature || status.Dirty || status.HeadRevision != feature {
 		t.Fatalf("provenance = %#v", status)
 	}
-	if len(status.MigrationChanges) != 1 || status.MigrationChanges[0].Path != "migrations/0002_feature.sql" || status.MigrationChanges[0].Ownership != "branch_draft" {
-		t.Fatalf("main migration was mistaken for a branch change: %#v", status.MigrationChanges)
+	if len(status.HistoryChanges) != 1 || status.HistoryChanges[0].Path != "migrations/0002_feature.sql" || status.HistoryChanges[0].Ownership != "branch_draft" {
+		t.Fatalf("main migration was mistaken for a branch change: %#v", status.HistoryChanges)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestInspectBlocksBaseHistoryMutationAndConcurrentPathCollision(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", MigrationPath: "migrations"})
+	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", HistoryPath: "migrations"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,15 +88,15 @@ func TestInspectIncludesDirtyDraftsAndContentInHeadRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", MigrationPath: "migrations", IncludeWorkingTree: true})
+	first, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", HistoryPath: "migrations", IncludeWorkingTree: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.Dirty || !strings.HasPrefix(first.HeadRevision, "dirty-sha256:") || len(first.MigrationChanges) != 3 {
+	if !first.Dirty || !strings.HasPrefix(first.HeadRevision, "dirty-sha256:") || len(first.HistoryChanges) != 3 {
 		t.Fatalf("dirty status = %#v", first)
 	}
 	write(t, repository, "migrations/0003_untracked.sql", "SELECT 33;\n")
-	second, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", MigrationPath: "migrations", IncludeWorkingTree: true})
+	second, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", HistoryPath: "migrations", IncludeWorkingTree: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestPreparePRTreeMaterializesBaseErosionAndFeatureContribution(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", MigrationPath: "migrations", IncludeWorkingTree: true})
+	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", HistoryPath: "migrations", IncludeWorkingTree: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestPreparePRTreeOverlaysDirtyFilesWithoutWritingTheirObjects(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", MigrationPath: "migrations", IncludeWorkingTree: true})
+	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", HistoryPath: "migrations", IncludeWorkingTree: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestPreparePRTreeReportsMergeConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", MigrationPath: "migrations"})
+	status, err := gitRepository.Inspect(context.Background(), Options{BaseRef: "main", HistoryPath: "migrations"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestInspectExcludesGeneratedReceiptRootFromDirtyRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := gitRepository.Inspect(context.Background(), Options{
-		BaseRef: "main", MigrationPath: "migrations", IncludeWorkingTree: true,
+		BaseRef: "main", HistoryPath: "migrations", IncludeWorkingTree: true,
 		ExcludePaths: []string{"onward-bundles", "migrations"},
 	})
 	if err != nil {

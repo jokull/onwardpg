@@ -1,36 +1,26 @@
 # Migration bundles
 
 An onwardpg bundle is the durable receipt for one logical migration generation.
-The first bundle implementation wraps the existing explicit-source `plan`
-command. `pr regenerate` can now resolve and compile exact Git base/head schema
-state. Phase artifacts are the onwardpg migration history; no ORM runner
-handoff is planned.
+`pr regenerate` resolves exact Git base/head schema state and links the new
+bundle to the validated per-target history head. Phase artifacts are the
+onwardpg migration history; no ORM runner handoff is planned.
 
 ## Current command
 
-Supply the exact current and desired sources as usual, then opt into a bundle:
+Regenerate one logical feature bundle from the latest PR base:
 
 ```sh
-onwardpg plan \
-  --from "$CLONE_DATABASE_URL" \
-  --to "file://$PWD/schema.sql" \
-  --dev-url "$DEV_POSTGRES_URL" \
-  --bundle migrations/onward/primary-postgres/customer-profile \
-  --bundle-id customer-profile \
+onwardpg pr regenerate \
+  --base origin/main \
   --target primary-postgres \
-  --base-ref origin/main \
-  --base-commit "$BASE_SHA" \
-  --head-revision "$HEAD_SHA"
+  --bundle customer-profile
 ```
 
-The command preserves the normal planner JSON on stdout and the normal exit
-codes. The bundle is an additional filesystem receipt. Database URLs and
-absolute DDL paths are not stored in it.
-
-For `bundle-mode=pr` (the default), `base-ref`, a full 40- or 64-character
-lowercase Git object ID, and `head-revision` are required. Until the Git-aware PR layer is
-implemented, these values are explicit caller assertions; the bundle does not
-yet materialize or verify the Git refs itself.
+The command writes under `bundle_root/TARGET/BUNDLE_ID`, preserves planner JSON
+on stdout, and keeps the normal exit codes. Database URLs and absolute DDL
+paths are not stored in the receipt. The lower-level `plan --bundle` option can
+write a standalone planning receipt, but it has no history parent and must not
+be placed in the configured history root.
 
 ## Decision regeneration
 
@@ -39,17 +29,11 @@ If the first call exits `2`, it writes the exact result under
 then rerun:
 
 ```sh
-onwardpg plan \
-  --from "$CLONE_DATABASE_URL" \
-  --to "file://$PWD/schema.sql" \
-  --dev-url "$DEV_POSTGRES_URL" \
-  --answers migrations/onward/primary-postgres/customer-profile/answers.json \
-  --bundle migrations/onward/primary-postgres/customer-profile \
-  --bundle-id customer-profile \
+onwardpg pr regenerate \
+  --base origin/main \
   --target primary-postgres \
-  --base-ref origin/main \
-  --base-commit "$BASE_SHA" \
-  --head-revision "$HEAD_SHA" \
+  --bundle customer-profile \
+  --answers migrations/onward/primary-postgres/customer-profile/answers.json \
   --replace-draft
 ```
 
@@ -96,14 +80,14 @@ The manifest is `onwardpg.bundle/v1`. It records:
 - explicit base ref/commit and head revision;
 - redacted source descriptions and graph fingerprints;
 - planner build version and normalized options;
+- history parent and canonical entry digest;
 - decision history; and
 - plan, answer, intent, and phase digests.
 
-Bundles produced by `pr regenerate` also record the partial schema square:
-base declarative fingerprint, replayed base-history fingerprint, synthetic
-head declarative fingerprint, and `head_history_fidelity: "not_replayed"`.
-Regeneration refuses to bundle an unhealthy base. Hash-chained onwardpg history
-replay will prove `HC == HM`; it is not implemented yet.
+Bundles produced by `pr regenerate` record the complete schema square: base
+declarative fingerprint, replayed base-history fingerprint, synthetic head
+declarative fingerprint, and replayed proposed-history fingerprint.
+Regeneration refuses to bundle unless both `BC == BM` and `HC == HM`.
 
 The phase files are the migration history. onwardpg does not copy or translate
 them into Drizzle, Django, Prisma, Alembic, or another migration runner. A

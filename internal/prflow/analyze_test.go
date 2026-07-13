@@ -9,6 +9,10 @@ import (
 	"testing"
 
 	"github.com/jokull/onwardpg/adapter"
+	"github.com/jokull/onwardpg/internal/bundle"
+	"github.com/jokull/onwardpg/internal/graphplan"
+	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/workspace"
 )
 
@@ -31,15 +35,15 @@ func TestAnalyzeProvesBaseIntegrityAndPlansSyntheticHeadOnPostgreSQL(t *testing.
 	baseRoot, headRoot := t.TempDir(), t.TempDir()
 	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.users (id bigint PRIMARY KEY);\n"
 	write(t, baseRoot, "schema.sql", baseDDL)
-	write(t, baseRoot, "migrations/0001.sql", baseDDL)
+	writeHistoryBundle(t, baseRoot, devURL, "genesis", baseDDL)
 	write(t, headRoot, "schema.sql", baseDDL+"CREATE TABLE app.projects (id bigint PRIMARY KEY);\n")
 	target := workspace.Target{
-		SchemaFile: "schema.sql", MigrationPath: "migrations",
+		SchemaFile:     "schema.sql",
 		DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16,
 	}
 	analysis, err := Analyze(context.Background(), Input{
 		BaseRoot: baseRoot, HeadRoot: headRoot, BaseRevision: "base-tree", HeadRevision: "head-tree",
-		TargetName: "primary", Target: target, DevDatabaseURL: devURL,
+		TargetName: "primary", Target: target, BundleRoot: "onward-bundles", DevDatabaseURL: devURL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -59,12 +63,12 @@ func TestAnalyzeBlocksUnhealthyBaseOnPostgreSQL(t *testing.T) {
 	}
 	baseRoot, headRoot := t.TempDir(), t.TempDir()
 	write(t, baseRoot, "schema.sql", "CREATE TABLE users (id bigint);\n")
-	write(t, baseRoot, "migrations/0001.sql", "CREATE TABLE accounts (id bigint);\n")
+	writeHistoryBundle(t, baseRoot, devURL, "genesis", "CREATE TABLE accounts (id bigint);\n")
 	write(t, headRoot, "schema.sql", "CREATE TABLE users (id bigint);\n")
-	target := workspace.Target{SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16}
+	target := workspace.Target{SchemaFile: "schema.sql", DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16}
 	analysis, err := Analyze(context.Background(), Input{
 		BaseRoot: baseRoot, HeadRoot: headRoot, BaseRevision: "base-tree", HeadRevision: "head-tree",
-		TargetName: "primary", Target: target, DevDatabaseURL: devURL,
+		TargetName: "primary", Target: target, BundleRoot: "onward-bundles", DevDatabaseURL: devURL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +93,37 @@ func write(t *testing.T, root, name, contents string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(full, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeHistoryBundle(t *testing.T, root, devURL, id, desiredDDL string) {
+	t.Helper()
+	ctx := context.Background()
+	current, err := source.LoadDDLGraphForComparison(ctx, nil, "empty-history", devURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadDDLGraphForComparison(ctx, []byte(desiredDDL), "history-fixture", devURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := bundle.Metadata{
+		BundleID: id, Generation: 1, Target: "primary", Purpose: "feature", Mode: "pr",
+		BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
+		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "empty history", Fingerprint: result.CurrentFingerprint, PostgresMajor: 16},
+		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "fixture schema", Fingerprint: result.DesiredFingerprint, PostgresMajor: 16},
+		Planner:        bundle.PlannerReceipt{Version: "test"}, HistoryParentDigest: bundle.HistoryRootDigest(),
+	}
+	artifact, err := bundle.Build(bundle.Input{Metadata: metadata, Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Write(filepath.Join(root, "onward-bundles", "primary", id), artifact, bundle.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }

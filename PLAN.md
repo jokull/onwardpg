@@ -480,7 +480,7 @@ onwardpg ci check --base origin/main --head HEAD
 ```
 
 The repository supplies `.onwardpg.toml` (or equivalent) with targets, DDL
-files or export commands, migration paths, and policy. Commands
+files or export commands, bundle paths, and policy. Commands
 resolve refs to full SHAs and record them. They do not silently fetch, rebase,
 checkout, commit, push, or apply production SQL.
 
@@ -727,11 +727,10 @@ receipt.
   fingerprints dirty checkout state, separates PR-owned changes from base
   erosion, and blocks base-history edits and concurrent migration-path
   collisions.
-- `pr regenerate` now materializes the exact base and synthetic would-be merge
+- `pr regenerate` materializes the exact base and synthetic would-be merge
   tree, overlays fingerprinted dirty state without staging it, runs the
-  configured DDL export deterministically, replays plain-SQL base history
-  in PostgreSQL, requires `BC == BM`, and records the partial schema square in
-  the bundle.
+  configured DDL export deterministically, validates and replays hash-chained
+  onwardpg history in PostgreSQL, and requires both `BC == BM` and `HC == HM`.
 - The discarded generic runner/handoff experiment never entered committed
   history. In the accepted model, phase artifacts inside the bundle are the
   migration history; no ORM runner translation is planned.
@@ -881,14 +880,13 @@ feature bundle.
 explicit tree inputs and from the optional Git wrapper; status is read-only and
 idempotent reruns do not churn a bundle.
 
-### Wave 3 — onwardpg-owned history chain and replay
+### Wave 3 — onwardpg-owned history chain and replay (foundation complete)
 
-- Add per-target parent/entry digests and reject forks, cycles, stale parents,
+- Maintain per-target parent/entry digests and reject forks, cycles, stale parents,
   missing entries, and altered merged history.
-- Replay the protected base chain and proposed PR bundle in disposable
+- Replay the protected base chain and proposed PR plan in disposable
   PostgreSQL, proving both sides of the schema square.
-- Replace `migration_path` and Drizzle/plain-SQL migration replay with the
-  onwardpg bundle chain as the sole history source.
+- Keep the onwardpg bundle chain as the sole history source.
 - Keep one external-tool DDL export as a black-box fixture, not an integration.
 
 **Exit:** In a fixture repo, a multi-day feature branch can absorb new main

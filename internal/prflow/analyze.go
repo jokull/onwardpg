@@ -1,5 +1,5 @@
-// Package prflow composes prepared source trees, declarative compilation,
-// migration replay, and graph planning for the PR comparison boundary. It is
+// Package prflow composes prepared source trees, DDL export, onwardpg history
+// replay, and graph planning for the PR comparison boundary. It is
 // deliberately unaware of how callers obtained those trees.
 package prflow
 
@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 
 	"github.com/jokull/onwardpg/adapter"
+	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/graphplan"
+	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/workspace"
@@ -26,6 +28,7 @@ type Input struct {
 	HeadRevision   string
 	TargetName     string
 	Target         workspace.Target
+	BundleRoot     string
 	DevDatabaseURL string
 	Ignores        []string
 	Answers        protocol.Answers
@@ -76,6 +79,9 @@ func Analyze(ctx context.Context, input Input) (Analysis, error) {
 	if input.TargetName == "" {
 		return Analysis{}, fmt.Errorf("target name is required")
 	}
+	if input.BundleRoot == "" {
+		return Analysis{}, fmt.Errorf("bundle root is required")
+	}
 	if input.BaseRoot == "" || !filepath.IsAbs(input.BaseRoot) || input.HeadRoot == "" || !filepath.IsAbs(input.HeadRoot) {
 		return Analysis{}, fmt.Errorf("prepared base and head roots must be absolute paths")
 	}
@@ -105,13 +111,17 @@ func Analyze(ctx context.Context, input Input) (Analysis, error) {
 	if err != nil {
 		return Analysis{}, fmt.Errorf("materialize head declarative schema: %w", err)
 	}
-	history, err := workspace.LoadMigrationHistory(input.BaseRoot, input.Target)
+	chain, err := history.Load(input.BaseRoot, input.BundleRoot, input.TargetName)
 	if err != nil {
-		return Analysis{}, fmt.Errorf("load base migration history: %w", err)
+		return Analysis{}, fmt.Errorf("load base onwardpg history: %w", err)
 	}
-	baseHistory, err := source.LoadDDLGraphForComparison(ctx, history.DDL, history.Provenance, input.DevDatabaseURL, input.Ignores)
+	replay, err := chain.Replay()
 	if err != nil {
-		return Analysis{}, fmt.Errorf("replay base migration history: %w", err)
+		return Analysis{}, fmt.Errorf("render base onwardpg history: %w", err)
+	}
+	baseHistory, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, input.DevDatabaseURL, input.Ignores)
+	if err != nil {
+		return Analysis{}, fmt.Errorf("replay base onwardpg history: %w", err)
 	}
 	if err := source.ValidateIgnoreSelectors(input.Ignores, baseCode, baseHistory, headCode); err != nil {
 		return Analysis{}, err
@@ -133,7 +143,7 @@ func Analyze(ctx context.Context, input Input) (Analysis, error) {
 		HeadCodeFingerprint: headCodeFingerprint, BaseIntegrity: "matched", HeadHistoryFidelity: "not_replayed",
 	}
 	analysis.BaseProvenance, analysis.HeadProvenance = baseArtifact.Provenance, headArtifact.Provenance
-	analysis.HistoryDigest, analysis.HistoryFiles = history.Digest, history.Files
+	analysis.HistoryDigest, analysis.HistoryFiles = replay.Digest, replay.Files
 	if baseCodeFingerprint != baseHistoryFingerprint {
 		analysis.SchemaSquare.BaseIntegrity = "mismatched"
 		analysis.Problems = append(analysis.Problems, Problem{
@@ -149,6 +159,36 @@ func Analyze(ctx context.Context, input Input) (Analysis, error) {
 	analysis.Plan = &result
 	switch result.Status {
 	case protocol.Planned:
+		proposedDDL := append([]byte(nil), replay.DDL...)
+		phaseDDL, err := bundle.RenderReplaySQL(result)
+		if err != nil {
+			return Analysis{}, fmt.Errorf("render proposed bundle phases: %w", err)
+		}
+		proposedDDL = append(proposedDDL, phaseDDL...)
+		headHistory, replayErr := source.LoadDDLGraphForComparison(ctx, proposedDDL, "proposed-onwardpg-history", input.DevDatabaseURL, input.Ignores)
+		if replayErr != nil {
+			analysis.SchemaSquare.HeadHistoryFidelity = "mismatched"
+			analysis.Problems = append(analysis.Problems, Problem{
+				Code: "head_history_replay_failed", Message: "the proposed bundle could not be replayed on top of base history: " + replayErr.Error(),
+			})
+			return analysis, nil
+		}
+		if err := source.ValidateIgnoreSelectors(input.Ignores, baseCode, baseHistory, headCode, headHistory); err != nil {
+			return Analysis{}, err
+		}
+		headHistoryFingerprint, err := headHistory.Fingerprint()
+		if err != nil {
+			return Analysis{}, err
+		}
+		analysis.SchemaSquare.HeadHistoryFingerprint = headHistoryFingerprint
+		if headHistoryFingerprint != headCodeFingerprint {
+			analysis.SchemaSquare.HeadHistoryFidelity = "mismatched"
+			analysis.Problems = append(analysis.Problems, Problem{
+				Code: "head_history_mismatch", Message: "replayed base history plus the proposed bundle does not equal the desired head schema",
+			})
+			return analysis, nil
+		}
+		analysis.SchemaSquare.HeadHistoryFidelity = "matched"
 		analysis.Outcome = "ready"
 	case protocol.NeedsInput:
 		analysis.Outcome = "needs_input"
@@ -180,7 +220,7 @@ func compileDeterministic(ctx context.Context, compiler adapter.Compiler, reques
 		return adapter.Artifact{}, fmt.Errorf("fingerprint compiler snapshot for revision %s: %w", request.Revision, err)
 	}
 	if first.Provenance != second.Provenance || !bytes.Equal(first.DDL, second.DDL) || !snapshotsEqual {
-		return adapter.Artifact{}, fmt.Errorf("schema compiler is nondeterministic for revision %s", request.Revision)
+		return adapter.Artifact{}, fmt.Errorf("DDL export is nondeterministic for revision %s", request.Revision)
 	}
 	return first, nil
 }

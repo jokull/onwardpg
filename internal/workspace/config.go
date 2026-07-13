@@ -27,7 +27,6 @@ type Config struct {
 type Target struct {
 	SchemaFile     string   `toml:"schema_file" json:"schema_file,omitempty"`
 	SchemaCommand  []string `toml:"schema_command" json:"schema_command,omitempty"`
-	MigrationPath  string   `toml:"migration_path" json:"migration_path"`
 	DevDatabaseEnv string   `toml:"dev_database_env" json:"dev_database_env"`
 	PostgresMajor  int      `toml:"postgres_major" json:"postgres_major"`
 }
@@ -62,7 +61,6 @@ func (c Config) Validate() error {
 	if len(c.Targets) == 0 {
 		return fmt.Errorf("at least one target is required")
 	}
-	migrationOwners := make(map[string]string, len(c.Targets))
 	for name, target := range c.Targets {
 		if !safeName(name) {
 			return fmt.Errorf("target name %q is invalid", name)
@@ -70,23 +68,16 @@ func (c Config) Validate() error {
 		if err := target.Validate(); err != nil {
 			return fmt.Errorf("target %s: %w", name, err)
 		}
-		if pathsOverlap(c.BundleRoot, target.MigrationPath) {
-			return fmt.Errorf("target %s: bundle_root and migration_path must not overlap", name)
+		if target.SchemaFile != "" && pathsOverlap(target.SchemaFile, c.BundleRoot) {
+			return fmt.Errorf("target %s: schema_file and bundle_root must not overlap", name)
 		}
-		if target.SchemaFile != "" && pathsOverlap(target.SchemaFile, target.MigrationPath) {
-			return fmt.Errorf("target %s: schema_file must not be inside migration_path", name)
-		}
-		migrationKey := strings.ToLower(target.MigrationPath)
-		if owner, exists := migrationOwners[migrationKey]; exists {
-			return fmt.Errorf("targets %s and %s share migration_path %q", owner, name, target.MigrationPath)
-		}
-		migrationOwners[migrationKey] = name
 	}
 	return nil
 }
 
 func pathsOverlap(first, second string) bool {
-	first, second = strings.ToLower(first), strings.ToLower(second)
+	first = strings.ToLower(filepath.ToSlash(filepath.Clean(first)))
+	second = strings.ToLower(filepath.ToSlash(filepath.Clean(second)))
 	return first == second || strings.HasPrefix(first, second+"/") || strings.HasPrefix(second, first+"/")
 }
 
@@ -106,9 +97,6 @@ func (t Target) Validate() error {
 				return fmt.Errorf("schema_command contains an empty or invalid argument")
 			}
 		}
-	}
-	if err := validateRepositoryPath(t.MigrationPath); err != nil {
-		return fmt.Errorf("migration_path: %w", err)
 	}
 	if !envNamePattern.MatchString(t.DevDatabaseEnv) {
 		return fmt.Errorf("dev_database_env must name an environment variable, not contain a URL")

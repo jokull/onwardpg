@@ -93,8 +93,8 @@ func runPRStatusAt(arguments []string, start string) int {
 		return writeError("invalid_config", err)
 	}
 	status, err := repository.Inspect(context.Background(), gitbase.Options{
-		BaseRef: *base, HeadRef: *head, MigrationPath: target.MigrationPath,
-		IncludeWorkingTree: *workingTree, ExcludePaths: []string{config.BundleRoot, target.MigrationPath},
+		BaseRef: *base, HeadRef: *head, HistoryPath: filepath.ToSlash(filepath.Join(config.BundleRoot, *targetName)),
+		IncludeWorkingTree: *workingTree, ExcludePaths: []string{config.BundleRoot},
 	})
 	if err != nil {
 		return writeError("git_status_error", err)
@@ -159,6 +159,7 @@ func runPRBundleStatus(repository gitbase.Repository, config workspace.Config, t
 		BaseRoot: baseTree.Root, HeadRoot: headTree.Root,
 		BaseRevision: status.BaseCommit, HeadRevision: status.HeadRevision,
 		TargetName: targetName, Target: target, DevDatabaseURL: devURL,
+		BundleRoot:     config.BundleRoot,
 		PlannerOptions: options, Ignores: artifact.Manifest.Planner.IgnoreSelectors,
 	}
 	analysis, err := prflow.Analyze(context.Background(), input)
@@ -265,8 +266,8 @@ func runPRRegenerateAt(arguments []string, start string) int {
 		IfExists: *ifExists, CascadeDrops: *cascadeDrops,
 	}
 	status, err := repository.Inspect(context.Background(), gitbase.Options{
-		BaseRef: *base, HeadRef: *head, MigrationPath: target.MigrationPath,
-		IncludeWorkingTree: *workingTree, ExcludePaths: []string{config.BundleRoot, target.MigrationPath},
+		BaseRef: *base, HeadRef: *head, HistoryPath: filepath.ToSlash(filepath.Join(config.BundleRoot, *targetName)),
+		IncludeWorkingTree: *workingTree, ExcludePaths: []string{config.BundleRoot},
 	})
 	if err != nil {
 		return writeError("git_status_error", err)
@@ -289,7 +290,8 @@ func runPRRegenerateAt(arguments []string, start string) int {
 		BaseRoot: baseTree.Root, HeadRoot: headTree.Root,
 		BaseRevision: status.BaseCommit, HeadRevision: status.HeadRevision,
 		TargetName: *targetName, Target: target, DevDatabaseURL: devURL,
-		Ignores: ignores, Answers: answers, PlannerOptions: options,
+		BundleRoot: config.BundleRoot,
+		Ignores:    ignores, Answers: answers, PlannerOptions: options,
 	})
 	if err != nil {
 		return writeError("pr_analysis_error", err)
@@ -337,6 +339,7 @@ func runPRRegenerateAt(arguments []string, start string) int {
 			BaseIntegrity:          analysis.SchemaSquare.BaseIntegrity,
 			HeadHistoryFidelity:    analysis.SchemaSquare.HeadHistoryFidelity,
 		},
+		HistoryParentDigest: analysis.HistoryDigest,
 	}
 	generation, attempt, err := bundle.NextCoordinates(destination, metadata, *analysis.Plan)
 	if err != nil {

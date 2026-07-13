@@ -13,7 +13,6 @@ bundle_root = "migrations/onward"
 
 [targets.primary-postgres]
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
-migration_path = "packages/db/migrations"
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 postgres_major = 16
 ```
