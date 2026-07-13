@@ -26,9 +26,20 @@ CREATE TABLE app.accounts (
   id bigint,
   occurred_at timestamp
 );
+CREATE TABLE app.profile_kinds (
+  id bigint PRIMARY KEY
+);
 EOF
 
 cd "$fixture"
+
+set +e
+"$binary" apply >no-apply.json
+apply_exit=$?
+set -e
+test "$apply_exit" -eq 1
+grep -q '"code":"invalid_invocation"' no-apply.json
+grep -q 'unknown command.*apply' no-apply.json
 
 "$binary" config check >config-check.json
 grep -q '"status":"valid"' config-check.json
@@ -46,6 +57,16 @@ CREATE TABLE app.customers (
   id bigint,
   occurred_at date
 );
+CREATE TABLE app.profile_kinds (
+  id bigint PRIMARY KEY
+);
+CREATE TABLE app.customer_profiles (
+  id bigint PRIMARY KEY,
+  kind_id bigint NOT NULL REFERENCES app.profile_kinds (id),
+  biography text
+);
+CREATE INDEX customer_profiles_kind_id_idx
+  ON app.customer_profiles (kind_id);
 EOF
 
 set +e
@@ -54,7 +75,11 @@ decision_exit=$?
 set -e
 test "$decision_exit" -eq 2
 grep -q '"status":"needs_decisions"' decisions.json
-grep -q '"kind":"rename"' decisions.json
+if ! grep -q '"kind":"rename"' decisions.json; then
+  echo "draft did not offer the expected rename decision" >&2
+  sed -n '1,160p' decisions.json >&2
+  exit 1
+fi
 
 set +e
 "$binary" draft \

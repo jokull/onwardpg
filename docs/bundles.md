@@ -115,8 +115,7 @@ Generated and receipted bundles are strict receipts:
 - plan, answers, questions, intent, and phases must match their digests;
 - generated phase SQL must match plan.json;
 - the history entry digest commits to its parent and manifest;
-- forks, gaps, disconnected entries, and altered parents are rejected;
-- a bundle with an execution receipt is immutable.
+- forks, gaps, disconnected entries, and altered parents are rejected.
 
 Direct phase edits make strict reads fail until onwardpg verify succeeds. The
 verifier prepares refreshed receipts in memory, executes the exact phase files

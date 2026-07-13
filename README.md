@@ -509,6 +509,10 @@ or return unsupported.
 
 Current notable gaps include:
 
+- a table rename is offered only when retained child identities are provably
+  compatible; exports that regenerate table-derived primary-key, constraint,
+  or index names can currently appear as destructive replacement unless those
+  child names are kept stable explicitly;
 - explicitly inventoried blockers for domains, composite/range types,
   standalone collations, aggregates, and foreign tables;
 - catalog families now blocked rather than discarded—including explicit

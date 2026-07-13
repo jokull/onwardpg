@@ -39,8 +39,9 @@ tar -xzf onwardpg_VERSION_OS_ARCH.tar.gz
 
 On macOS, use `shasum -a 256 --check checksums.txt`.
 
-The archives include README, changelog, and third-party notices. The embedded
-version must equal the release tag.
+The archives include README, changelog, third-party notices, and the project
+license required by the release workflow. The embedded version must equal the
+release tag.
 
 ## Reproduce a release build
 

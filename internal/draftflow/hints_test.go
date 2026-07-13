@@ -32,6 +32,64 @@ func TestBuildPlanConsumesAheadOfTimeRenameHint(t *testing.T) {
 	}
 }
 
+func TestBuildPlanSelectsOneOfMultipleRenameCandidatesBeforeOrAfterQuestion(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "public"}
+	accounts := pgschema.Table{Schema: "public", Name: "accounts"}
+	customers := pgschema.Table{Schema: "public", Name: "customers"}
+	prospects := pgschema.Table{Schema: "public", Name: "prospects"}
+	for _, object := range []pgschema.Object{schema, accounts, pgschema.Column{Table: accounts.ObjectID(), Name: "id", Position: 1, Type: "bigint"}} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, table := range []pgschema.Table{customers, prospects} {
+		if err := desired.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := desired.Add(pgschema.Column{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := desired.Add(schema); err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range [][2]pgschema.ID{
+		{accounts.ObjectID(), schema.ObjectID()},
+		{(pgschema.Column{Table: accounts.ObjectID(), Name: "id"}).ObjectID(), accounts.ObjectID()},
+	} {
+		if err := current.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, table := range []pgschema.Table{customers, prospects} {
+		if err := desired.AddDependency(table.ObjectID(), schema.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+		if err := desired.AddDependency((pgschema.Column{Table: table.ObjectID(), Name: "id"}).ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pending, _, _, _, _, err := buildPlan(current, desired, Input{PlannerOptions: graphplan.Options{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || len(pending.Questions[0].Choices) != 3 {
+		t.Fatalf("multiple-candidate question = %#v", pending)
+	}
+	hint := protocol.Hint{Kind: "rename", Object: "table", From: []string{"public", "accounts"}, To: []string{"public", "prospects"}}
+	planned, _, _, _, hints, err := buildPlan(current, desired, Input{
+		Hints: []protocol.Hint{hint}, HintsGiven: true, PlannerOptions: graphplan.Options{},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned || len(hints) != 1 || !planContains(planned, `RENAME TO "prospects"`) || !planContains(planned, `CREATE TABLE "public"."customers"`) {
+		t.Fatalf("selected multiple-candidate rename = %#v", planned)
+	}
+}
+
 func TestBuildPlanAcceptsResendingAnAlreadyReceiptedHint(t *testing.T) {
 	current, desired := columnRenameSnapshots(t)
 	hint := protocol.Hint{

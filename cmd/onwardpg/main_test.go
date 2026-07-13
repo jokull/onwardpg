@@ -57,6 +57,10 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	if err := writeDraftReport(&output, report, "json"); err != nil {
 		t.Fatal(err)
 	}
+	want := "{\"protocol\":\"onwardpg/draft/2\",\"status\":\"needs_decisions\",\"decisions\":[{\"choices\":[{\"hint\":{\"kind\":\"drop\",\"object\":\"column\",\"name\":[\"public\",\"users\",\"legacy\"]},\"hazards\":[\"data_loss\"]}]}]}\n"
+	if output.String() != want {
+		t.Fatalf("decision protocol bytes changed:\n got: %s\nwant: %s", output.String(), want)
+	}
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatal(err)

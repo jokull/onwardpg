@@ -39,6 +39,9 @@ for target in "${targets[@]}"; do
     -ldflags "-s -w -X main.buildVersion=$version" \
     -o "$directory/$binary" ./cmd/onwardpg
   cp README.md CHANGELOG.md THIRD_PARTY_NOTICES.md "$directory/"
+  if [[ -f LICENSE ]]; then
+    cp LICENSE "$directory/"
+  fi
   find "$directory" -exec touch -t 197001010000 {} +
   if tar --version 2>/dev/null | grep -q 'GNU tar'; then
     (

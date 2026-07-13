@@ -87,6 +87,14 @@ internal security review now exist. The vulnerability scan is clean with Go
 1.26.5 and pgx 5.9.2. Publishing remains deliberately blocked until the
 project has an explicit license.
 
+The final workflow audit adds exact golden bytes for the minimal decision
+protocol; real-PostgreSQL additive draft, convergence, and byte-stability
+acceptance; multiple-candidate semantic rename selection; an executable
+no-apply assertion; and removal of the abandoned execution-receipt lifecycle.
+The complete suite, pinned Atlas/Stripe corpus, and black-box README workflow
+pass on PostgreSQL 14–18 from clean disposable servers. The remaining release
+decision is the project license; onwardpg must not choose it implicitly.
+
 ## North star walkthrough
 
 ### 1. Configure desired DDL and disposable PostgreSQL
@@ -719,7 +727,7 @@ workflow that implies Git intelligence, JSON orchestration, or database apply.
 
 ### B. Rename with multiple credible candidates
 
-- Remove one column and add two compatible replacement candidates.
+- Remove one table and add two structurally compatible replacement candidates.
 - JSON lists every credible rename plus deliberate drop-and-create.
 - Supplying the semantic rename before or after the question produces the same
   intended rename.
@@ -734,8 +742,8 @@ workflow that implies Git intelligence, JSON orchestration, or database apply.
 
 ### D. Product-specific backfill
 
-- Add a date replacement for a timestamp column.
-- Select a staged structural strategy.
+- Change a timestamp column to the desired date representation.
+- Select the bounded `manual_sql` handoff rather than inventing a cast.
 - Receive a migrate TODO rather than invented business SQL.
 - Replace it with agent-authored SQL and boolean assertions.
 - Verify exact SQL and final convergence on disposable PostgreSQL.
@@ -803,13 +811,14 @@ receipts, CI verification, and empty final residual.
 ## Immediate next slice
 
 Do not expand PostgreSQL feature coverage in this slice. The implementation is
-at the release-candidate boundary:
+at the release-candidate boundary. Cold-read documentation review, exact
+README execution, PostgreSQL 14–18 differential verification, and reproducible
+archive builds are complete. What remains is deliberately human-owned:
 
 1. choose and add the project license;
-2. cold-read the README and run its exact commands from a clean checkout;
-3. rerun the real PostgreSQL 14–18 matrix and deterministic archive build at
-   the release candidate; and
-4. publish the first preview tag only if the generated artifacts and observed
+2. include that license in the release archives and perform the clean-checkout
+   release build; and
+3. publish the first preview tag only if the generated artifacts and observed
    CLI output still match the documentation.
 
 This is the junction for every future proposal: if it does not make

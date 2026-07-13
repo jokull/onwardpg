@@ -133,6 +133,10 @@ association and its catalog `ON relation` clause are the sole changes. It
 normalizes only that one deparsed clause, never text inside the trigger’s
 routine or `WHEN` expression. Any actual trigger-definition or routine change
 continues through its independent reviewed lifecycle.
+Constraint and index child identities must currently retain their names across
+the table rename. A declarative export that regenerates names such as
+`old_table_pkey` as `new_table_pkey` does not receive a rename choice; use
+stable explicit child names rather than approving destructive replacement.
 Direct ordinary and materialized view dependencies are retained by the same
 confirmed table rename when their catalog definitions differ only at protected
 relation references. PostgreSQL preserves their relation identity and stored

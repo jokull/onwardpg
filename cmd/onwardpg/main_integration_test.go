@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +103,88 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	}
 	if clean.Outcome != "drift_free" || len(clean.Differences) != 0 {
 		t.Fatalf("clean drift report = %#v", clean)
+	}
+}
+
+func TestOrdinaryAdditiveDraftIsStableAndConvergesOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA app;
+CREATE TABLE app.accounts (id bigint PRIMARY KEY);
+`)
+	initialized := captureStdout(t, func() int {
+		return runInitAt([]string{"--target", "primary"}, repository)
+	})
+	if initialized.code != 0 {
+		t.Fatalf("init exit = %d, stdout = %s", initialized.code, initialized.stdout)
+	}
+	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA app;
+CREATE TABLE app.accounts (id bigint PRIMARY KEY);
+CREATE TABLE app.customer_profiles (
+  id bigint PRIMARY KEY,
+  account_id bigint NOT NULL REFERENCES app.accounts (id),
+  biography text
+);
+CREATE INDEX customer_profiles_account_id_idx ON app.customer_profiles (account_id);
+`)
+	drafted := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-profiles"}, repository)
+	})
+	if drafted.code != 0 {
+		t.Fatalf("additive draft exit = %d, stdout = %s", drafted.code, drafted.stdout)
+	}
+	var report draftflow.Report
+	if err := json.Unmarshal([]byte(drafted.stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != string(protocol.Planned) || len(report.Decisions) != 0 || report.Verification == nil || report.Verification.Outcome != "verified" {
+		t.Fatalf("additive draft = %#v", report)
+	}
+	destination := filepath.Join(repository, "onward-bundles", "primary", "customer-profiles")
+	first, err := bundle.Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, phase := range []string{"expand", "migrate", "contract"} {
+		if receipt, exists := first.Manifest.Phases[phase]; exists {
+			joined += string(first.Files[receipt.Path])
+		}
+	}
+	for _, fragment := range []string{`CREATE TABLE "app"."customer_profiles"`, `ADD CONSTRAINT`, `FOREIGN KEY`, `CREATE INDEX`} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("additive bundle missing %q:\n%s", fragment, joined)
+		}
+	}
+
+	redrafted := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-profiles"}, repository)
+	})
+	if redrafted.code != 0 {
+		t.Fatalf("identical redraft exit = %d, stdout = %s", redrafted.code, redrafted.stdout)
+	}
+	second, err := bundle.Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("identical additive redraft changed the receipted bundle bytes or manifest")
+	}
+	checked := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-profiles", "--check"}, repository)
+	})
+	if checked.code != 0 {
+		t.Fatalf("additive verify --check exit = %d, stdout = %s", checked.code, checked.stdout)
 	}
 }
 

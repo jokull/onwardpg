@@ -260,15 +260,6 @@ func TestWriteRequiresExplicitSafeDraftReplacement(t *testing.T) {
 	if err := Write(destination, artifact, WriteOptions{ReplaceDraft: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(destination, "verification"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(destination, "verification", "execution.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := Write(destination, artifact, WriteOptions{ReplaceDraft: true}); err == nil || !strings.Contains(err.Error(), "immutable") {
-		t.Fatalf("expected execution receipt immutability, got %v", err)
-	}
 }
 
 func TestArtifactValidationRejectsTamperedPhase(t *testing.T) {

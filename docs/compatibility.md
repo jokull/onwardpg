@@ -45,7 +45,7 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | Extension version / schema changes | Version changes; no verified schema-move family | **Plannable** | Extension-owned objects remain a boundary risk. |
 | Tables create/drop | Yes | **Plannable** | Drops require approval. |
 | Table comments | No verified diff family | **Plannable** | |
-| Table rename | Drop/create-oriented diff | **Decision required** | Preserves proven retained FKs, triggers, and direct view dependencies. |
+| Table rename | Drop/create-oriented diff | **Decision required** | Preserves proven retained FKs, triggers, and direct view dependencies. Retained child constraint/index names must currently remain stable; regenerated table-derived names suppress rename candidacy. |
 | Table persistence | Partial | **Plannable** | Includes logged/unlogged transitions; ownership is separate. |
 | Columns add/drop/null/default | Yes | **Plannable** | Drops require approval. |
 | Column comments | No verified diff family | **Plannable** | |

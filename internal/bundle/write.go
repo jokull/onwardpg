@@ -153,7 +153,7 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 	if _, err := os.Stat(destination); err == nil {
 		replacing = true
 		if !options.ReplaceDraft {
-			return fmt.Errorf("bundle destination %s already exists; rerun with --replace-draft after reviewing the replacement", destination)
+			return fmt.Errorf("bundle destination %s already exists and replacement was not authorized by the owning workflow", destination)
 		}
 		if err := validateReplaceableBundle(destination); err != nil {
 			return err
@@ -378,16 +378,6 @@ func validateArtifactPath(name string) error {
 }
 
 func validateReplaceableBundle(destination string) error {
-	if _, err := os.Stat(filepath.Join(destination, "execution.json")); err == nil {
-		return fmt.Errorf("bundle has an execution receipt and is immutable")
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if _, err := os.Stat(filepath.Join(destination, "verification", "execution.json")); err == nil {
-		return fmt.Errorf("bundle has an execution receipt and is immutable")
-	} else if !os.IsNotExist(err) {
-		return err
-	}
 	artifact, err := Read(destination)
 	if err != nil {
 		return fmt.Errorf("refuse to replace invalid bundle: %w", err)
