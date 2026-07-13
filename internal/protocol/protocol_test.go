@@ -2,9 +2,35 @@ package protocol
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestStableStatementIDUsesCompleteNormalizedContract(t *testing.T) {
+	left := Statement{SQL: "CREATE INDEX idx ON items (id);", Safety: "review", Phase: "expand", Hazards: []string{"lock", "rewrite"}}
+	right := left
+	right.Hazards = []string{"rewrite", "lock"}
+	if StableStatementID(left) != StableStatementID(right) {
+		t.Fatal("hazard insertion order changed stable statement identity")
+	}
+	right.SQL = "CREATE INDEX idx ON items (other_id);"
+	if StableStatementID(left) == StableStatementID(right) {
+		t.Fatal("different SQL received the same stable statement identity")
+	}
+	right = left
+	right.NonTransactional = true
+	if StableStatementID(left) == StableStatementID(right) {
+		t.Fatal("transaction boundary did not affect stable statement identity")
+	}
+}
+
+func TestErrorDiagnosticHasVersionedStableShape(t *testing.T) {
+	diagnostic := ErrorDiagnostic("invalid_config", errors.New("bad config"))
+	if diagnostic.ProtocolVersion != DiagnosticVersion || diagnostic.Status != "error" || diagnostic.Code != "invalid_config" || diagnostic.Message == "" {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
 
 func TestResultJSONV1ContractIncludesExecutionMetadata(t *testing.T) {
 	result := Result{

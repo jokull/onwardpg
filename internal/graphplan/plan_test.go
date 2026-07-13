@@ -443,6 +443,17 @@ func TestBuildDefaultsToTransactionalQualifiedBatchesAndStructuredUnsupported(t 
 	if result.Status != protocol.Unsupported || len(result.Unsupported) != 1 || result.Unsupported[0] != "routine_render:routine:app:orders_routine" {
 		t.Fatalf("expected structured unsupported result %#v", result)
 	}
+	answers := protocol.Answers{
+		ProtocolVersion:    protocol.Version,
+		CurrentFingerprint: result.CurrentFingerprint,
+		DesiredFingerprint: result.DesiredFingerprint,
+		Answers: []protocol.Answer{{
+			Kind: "rename_table", Key: "table:app:old->table:app:new", Value: "rename",
+		}},
+	}
+	if _, err := Build(current, unsupported, answers, Options{}); err == nil || !strings.Contains(err.Error(), "unused answer") {
+		t.Fatalf("unsupported planning must reject unused answers, got %v", err)
+	}
 }
 
 func TestBuildUnsortedDumpPreservesCallerOrder(t *testing.T) {

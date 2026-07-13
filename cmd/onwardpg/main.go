@@ -7,19 +7,35 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 
+	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
+	"github.com/jokull/onwardpg/internal/workspace"
 )
+
+var buildVersion = "dev"
 
 func main() { os.Exit(run()) }
 
 func run() int {
-	if len(os.Args) < 2 || os.Args[1] != "plan" {
-		fmt.Fprintln(os.Stderr, "usage: onwardpg plan --from SOURCE --to SOURCE [--dev-url URL] [--answers FILE] [--ignore SELECTOR] [--schema-qualifier SCHEMA]")
-		return 1
+	if len(os.Args) < 2 {
+		return writeError("invalid_invocation", errors.New("usage: onwardpg <plan|config>"))
 	}
+	switch os.Args[1] {
+	case "plan":
+		return runPlan(os.Args[2:])
+	case "config":
+		return runConfig(os.Args[2:])
+	default:
+		return writeError("invalid_invocation", fmt.Errorf("unknown command %q", os.Args[1]))
+	}
+}
+
+func runPlan(arguments []string) int {
 	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	from, to, devURL, answerFile := flags.String("from", "", ""), flags.String("to", "", ""), flags.String("dev-url", "", ""), flags.String("answers", "", "")
@@ -30,31 +46,45 @@ func run() int {
 	sqlOutput := flags.Bool("sql", false, "print planned SQL instead of JSON")
 	indent := flags.String("indent", "", "prefix each rendered SQL line")
 	unsortedDump := flags.Bool("unsorted-dump", false, "preserve dump order instead of dependency sorting")
+	bundleDir := flags.String("bundle", "", "write a versioned migration receipt bundle to this directory")
+	bundleID := flags.String("bundle-id", "", "stable logical bundle identifier")
+	target := flags.String("target", "", "configured database target name")
+	bundlePurpose := flags.String("bundle-purpose", "feature", "feature, repair, or contract")
+	bundleMode := flags.String("bundle-mode", "pr", "develop, pr, release, or verify")
+	baseRef := flags.String("base-ref", "", "exact logical PR base ref recorded in the bundle")
+	baseCommit := flags.String("base-commit", "", "full PR base commit SHA recorded in the bundle")
+	headRevision := flags.String("head-revision", "", "full head commit SHA or dirty-tree digest")
+	intentFile := flags.String("intent", "", "Markdown intent receipt to include in the bundle")
+	replaceDraft := flags.Bool("replace-draft", false, "replace only a validated unexecuted draft bundle")
 	var schemaQualifier optionalString
 	flags.Var(&schemaQualifier, "schema-qualifier", "scope to one schema and render names using this qualifier (empty means unqualified)")
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "selector to exclude")
-	if err := flags.Parse(os.Args[2:]); err != nil || *from == "" || *to == "" {
-		return 1
+	if err := flags.Parse(arguments); err != nil {
+		return writeError("invalid_invocation", err)
+	}
+	if *from == "" || *to == "" {
+		return writeError("invalid_invocation", errors.New("plan requires --from and --to"))
 	}
 	if *unsortedDump {
-		return writeError(errors.New("--unsorted-dump requires an adapter-supplied object order and is unavailable for CLI URL/DDL sources"))
+		return writeError("invalid_invocation", errors.New("--unsorted-dump requires an adapter-supplied object order and is unavailable for CLI URL/DDL sources"))
 	}
 	answers, err := readAnswers(*answerFile)
 	if err != nil {
-		return writeError(err)
+		return writeError("invalid_answers", err)
 	}
 	ctx := context.Background()
-	current, err := source.LoadGraphForComparison(ctx, source.Parse(*from), *devURL, ignores)
+	fromSpec, toSpec := source.Parse(*from), source.Parse(*to)
+	current, err := source.LoadGraphForComparison(ctx, fromSpec, *devURL, ignores)
 	if err != nil {
-		return writeError(err)
+		return writeError("source_error", err)
 	}
-	desired, err := source.LoadGraphForComparison(ctx, source.Parse(*to), *devURL, ignores)
+	desired, err := source.LoadGraphForComparison(ctx, toSpec, *devURL, ignores)
 	if err != nil {
-		return writeError(err)
+		return writeError("source_error", err)
 	}
 	if err := source.ValidateIgnoreSelectors(ignores, current, desired); err != nil {
-		return writeError(err)
+		return writeError("invalid_ignore", err)
 	}
 	options := graphplan.Options{ConcurrentIndexes: *concurrentIndexes, IfNotExists: *ifNotExists, IfExists: *ifExists, CascadeDrops: *cascadeDrops, UnsortedDump: *unsortedDump}
 	if schemaQualifier.set {
@@ -62,7 +92,45 @@ func run() int {
 	}
 	result, err := graphplan.Build(current, desired, answers, options)
 	if err != nil {
-		return writeError(err)
+		return writeError("planning_error", err)
+	}
+	if *bundleDir != "" {
+		if *bundleID == "" || *target == "" {
+			return writeError("invalid_bundle", errors.New("--bundle requires --bundle-id and --target"))
+		}
+		generation, attempt, err := bundle.NextCoordinates(*bundleDir)
+		if err != nil {
+			return writeError("invalid_bundle", err)
+		}
+		intent, err := readOptionalFile(*intentFile)
+		if err != nil {
+			return writeError("invalid_bundle", err)
+		}
+		var answerReceipt *protocol.Answers
+		if *answerFile != "" {
+			answerReceipt = &answers
+		}
+		artifact, err := bundle.Build(bundle.Input{
+			Metadata: bundle.Metadata{
+				BundleID: *bundleID, Generation: generation, Target: *target,
+				Purpose: *bundlePurpose, Mode: *bundleMode, BaseRef: *baseRef,
+				BaseCommit: *baseCommit, HeadRevision: *headRevision,
+				BaselineSource: sourceReceipt(fromSpec, result.CurrentFingerprint, "current"),
+				DesiredSource:  sourceReceipt(toSpec, result.DesiredFingerprint, "desired"),
+				Planner: bundle.PlannerReceipt{Version: buildVersion, Options: bundle.PlannerOptions{
+					ConcurrentIndexes: options.ConcurrentIndexes, IfNotExists: options.IfNotExists,
+					IfExists: options.IfExists, CascadeDrops: options.CascadeDrops,
+					SchemaQualifier: options.SchemaQualifier,
+				}},
+			},
+			Result: result, Answers: answerReceipt, Intent: intent, Attempt: attempt,
+		})
+		if err != nil {
+			return writeError("invalid_bundle", err)
+		}
+		if err := bundle.Write(*bundleDir, artifact, bundle.WriteOptions{ReplaceDraft: *replaceDraft}); err != nil {
+			return writeError("bundle_write_failed", err)
+		}
 	}
 	if *sqlOutput && result.Status == protocol.Planned {
 		_, _ = fmt.Fprintln(os.Stdout, protocol.RenderSQL(result, *indent))
@@ -81,6 +149,33 @@ func run() int {
 	}
 }
 
+func runConfig(arguments []string) int {
+	if len(arguments) == 0 || arguments[0] != "check" {
+		return writeError("invalid_invocation", errors.New("usage: onwardpg config check [--config .onwardpg.toml]"))
+	}
+	flags := flag.NewFlagSet("config check", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	name := flags.String("config", ".onwardpg.toml", "repository configuration path")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return writeError("invalid_invocation", err)
+	}
+	config, err := workspace.Load(*name)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	targets := make([]string, 0, len(config.Targets))
+	for target := range config.Targets {
+		targets = append(targets, target)
+	}
+	sort.Strings(targets)
+	_ = json.NewEncoder(os.Stdout).Encode(struct {
+		Status        string   `json:"status"`
+		ConfigVersion int      `json:"config_version"`
+		Targets       []string `json:"targets"`
+	}{Status: "valid", ConfigVersion: config.Version, Targets: targets})
+	return 0
+}
+
 func readAnswers(path string) (protocol.Answers, error) {
 	if path == "" {
 		return protocol.Answers{}, nil
@@ -96,8 +191,28 @@ func readAnswers(path string) (protocol.Answers, error) {
 	return answers, nil
 }
 
-func writeError(err error) int {
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "error", "error": err.Error()})
+func readOptionalFile(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read intent file: %w", err)
+	}
+	return string(data), nil
+}
+
+func sourceReceipt(spec source.Spec, fingerprint, role string) bundle.SourceReceipt {
+	description, kind := role+" database", "database"
+	if spec.Kind == "ddl" {
+		kind = "ddl"
+		description = role + " DDL " + filepath.Base(spec.Value)
+	}
+	return bundle.SourceReceipt{Kind: kind, Description: description, Fingerprint: fingerprint}
+}
+
+func writeError(code string, err error) int {
+	_ = json.NewEncoder(os.Stdout).Encode(protocol.ErrorDiagnostic(code, err))
 	return 1
 }
 

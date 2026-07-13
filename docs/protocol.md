@@ -34,7 +34,9 @@ catalog graphs used for the decision. A fingerprint change means a new planning
 input, even if an object name appears unchanged.
 
 `planned` contains forward SQL. Each statement has `sql`, `safety`, `phase`,
-and optional `hazards`. `phase` is one of:
+optional `hazards`, and a deterministic content-derived `id`. Bundle amendments
+will bind to the ID rather than a fragile statement-array index. `phase` is one
+of:
 
 - `expand`: compatible additions to run before the application relies on them;
 - `migrate`: reviewed schema work between compatible application releases;
@@ -126,9 +128,20 @@ operator-chosen `REFRESH MATERIALIZED VIEW` form and any required verification.
 | `0` | `planned` | v1 result JSON, or SQL with `--sql` |
 | `2` | `needs_input` | v1 result JSON |
 | `3` | `unsupported` | v1 result JSON |
-| `1` | invocation, input, connection, or internal planning error | diagnostic JSON with `status: "error"` and `error` |
+| `1` | invocation, input, connection, configuration, bundle, or internal planning error | `onwardpg.diagnostic/v1` JSON |
 
-The `status: "error"` diagnostic envelope is useful to operators but is not
-yet a versioned v1 result document. Treat it as an error message rather than a
-stable machine contract; formalizing a versioned error/diagnostic envelope is
-an outstanding production-readiness item.
+Errors outside a normal plan result use a stable diagnostic envelope:
+
+```json
+{
+  "protocol_version": "onwardpg.diagnostic/v1",
+  "status": "error",
+  "code": "invalid_config",
+  "message": "..."
+}
+```
+
+Consumers should branch on `protocol_version` and `code`; `message` is
+human-readable context and may become more specific without a protocol change.
+Current codes distinguish invocation, answers, source, ignore, planning,
+configuration, and bundle failures.

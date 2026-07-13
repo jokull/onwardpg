@@ -661,6 +661,20 @@ receipt.
   is unclear, the authenticated Atlas CLI may be used against disposable
   schemas as evidence; onwardpg's safety policy is decided independently.
 
+### DX implementation progress
+
+- Wave 0/1 foundation now includes deterministic statement IDs,
+  `onwardpg.bundle/v1`, canonical artifact digests, preserved decision history,
+  explicit safe draft replacement, strict `.onwardpg.toml` validation, and
+  `onwardpg.diagnostic/v1` errors.
+- Low-level `plan --bundle` writes non-empty phase files without changing the
+  normal plan JSON or exit behavior. Source descriptions are redacted, and a
+  real-PostgreSQL CLI integration test covers bundle creation.
+- Git ref resolution, schema-square validation, ORM compiler/materializer/
+  writer execution, amendments, clone receipts, and `pr`/`ci` commands remain
+  upcoming work; explicit base/head flags are receipts, not yet independently
+  verified provenance.
+
 ## Safety and code-quality debt carried from REVIEW.md
 
 The detailed colleague review remains in `REVIEW.md`. Fixed findings require

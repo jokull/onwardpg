@@ -1,0 +1,166 @@
+// Package workspace owns repository-level onwardpg configuration. It keeps
+// schema-tool commands, migration paths, and policy separate from the typed
+// PostgreSQL planner.
+package workspace
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/pelletier/go-toml/v2"
+)
+
+const ConfigVersion = 1
+
+var envNamePattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+type Config struct {
+	Version    int               `toml:"version" json:"version"`
+	BundleRoot string            `toml:"bundle_root" json:"bundle_root"`
+	Targets    map[string]Target `toml:"targets" json:"targets"`
+	Policy     Policy            `toml:"policy" json:"policy"`
+}
+
+type Target struct {
+	Adapter        string   `toml:"adapter" json:"adapter"`
+	SchemaFile     string   `toml:"schema_file" json:"schema_file,omitempty"`
+	SchemaCommand  []string `toml:"schema_command" json:"schema_command,omitempty"`
+	MigrationPath  string   `toml:"migration_path" json:"migration_path"`
+	DevDatabaseEnv string   `toml:"dev_database_env" json:"dev_database_env"`
+	PostgresMajor  int      `toml:"postgres_major" json:"postgres_major"`
+}
+
+type Policy struct {
+	RequireOneBundlePerPR bool     `toml:"require_one_bundle_per_pr" json:"require_one_bundle_per_pr"`
+	AllowDeferredContract bool     `toml:"allow_deferred_contract" json:"allow_deferred_contract"`
+	ApprovalHazards       []string `toml:"approval_hazards" json:"approval_hazards,omitempty"`
+}
+
+func Load(name string) (Config, error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return Config{}, fmt.Errorf("open onwardpg config: %w", err)
+	}
+	defer file.Close()
+	limited := io.LimitReader(file, 1<<20)
+	var config Config
+	if err := toml.NewDecoder(limited).DisallowUnknownFields().Decode(&config); err != nil {
+		return Config{}, fmt.Errorf("decode onwardpg config: %w", err)
+	}
+	if err := config.Validate(); err != nil {
+		return Config{}, err
+	}
+	return config, nil
+}
+
+func (c Config) Validate() error {
+	if c.Version != ConfigVersion {
+		return fmt.Errorf("config version is %d, want %d", c.Version, ConfigVersion)
+	}
+	if c.BundleRoot == "" {
+		return fmt.Errorf("bundle_root is required")
+	}
+	if err := validateRepositoryPath(c.BundleRoot); err != nil {
+		return fmt.Errorf("bundle_root: %w", err)
+	}
+	if len(c.Targets) == 0 {
+		return fmt.Errorf("at least one target is required")
+	}
+	for name, target := range c.Targets {
+		if !safeName(name) {
+			return fmt.Errorf("target name %q is invalid", name)
+		}
+		if err := target.Validate(); err != nil {
+			return fmt.Errorf("target %s: %w", name, err)
+		}
+	}
+	seenHazards := make(map[string]bool, len(c.Policy.ApprovalHazards))
+	for _, hazard := range c.Policy.ApprovalHazards {
+		if !safeName(hazard) || seenHazards[hazard] {
+			return fmt.Errorf("approval_hazards contains invalid or duplicate value %q", hazard)
+		}
+		seenHazards[hazard] = true
+	}
+	return nil
+}
+
+func (t Target) Validate() error {
+	if !safeName(t.Adapter) {
+		return fmt.Errorf("adapter is required and must be a safe name")
+	}
+	hasFile, hasCommand := t.SchemaFile != "", len(t.SchemaCommand) > 0
+	if hasFile == hasCommand {
+		return fmt.Errorf("exactly one of schema_file or schema_command is required")
+	}
+	if hasFile {
+		if err := validateRepositoryPath(t.SchemaFile); err != nil {
+			return fmt.Errorf("schema_file: %w", err)
+		}
+	}
+	if hasCommand {
+		for _, argument := range t.SchemaCommand {
+			if strings.TrimSpace(argument) == "" || strings.ContainsRune(argument, '\x00') || strings.Contains(argument, "://") {
+				return fmt.Errorf("schema_command contains an empty or invalid argument")
+			}
+		}
+	}
+	if err := validateRepositoryPath(t.MigrationPath); err != nil {
+		return fmt.Errorf("migration_path: %w", err)
+	}
+	if !envNamePattern.MatchString(t.DevDatabaseEnv) {
+		return fmt.Errorf("dev_database_env must name an environment variable, not contain a URL")
+	}
+	if t.PostgresMajor < 14 || t.PostgresMajor > 18 {
+		return fmt.Errorf("postgres_major must be between 14 and 18")
+	}
+	return nil
+}
+
+func (c Config) Target(name string) (Target, error) {
+	target, ok := c.Targets[name]
+	if !ok {
+		return Target{}, fmt.Errorf("target %q is not configured", name)
+	}
+	return target, nil
+}
+
+func (c Config) BundlePath(repositoryRoot, target, bundleID string) (string, error) {
+	if _, err := c.Target(target); err != nil {
+		return "", err
+	}
+	if !safeName(bundleID) {
+		return "", fmt.Errorf("bundle id %q is invalid", bundleID)
+	}
+	return filepath.Join(repositoryRoot, filepath.FromSlash(c.BundleRoot), target, bundleID), nil
+}
+
+func validateRepositoryPath(value string) error {
+	if value == "" {
+		return fmt.Errorf("path is required")
+	}
+	if filepath.IsAbs(value) || strings.ContainsRune(value, '\x00') || strings.Contains(value, `\`) {
+		return fmt.Errorf("path must be a slash-separated repository-relative path")
+	}
+	clean := filepath.ToSlash(filepath.Clean(value))
+	if clean != value || clean == "." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("path must be normalized and remain within the repository")
+	}
+	return nil
+}
+
+func safeName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}

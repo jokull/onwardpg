@@ -22,6 +22,9 @@ claim and does not apply migrations automatically.
   transactional/non-transactional execution batches.
 - Conservative rename handling and explicit unsupported results instead of
   guessed casts, backfills, destructive operations, or unknown catalog state.
+- Deterministic statement IDs, `onwardpg.bundle/v1` receipt directories,
+  phase-specific SQL artifacts, preserved decision history, strict repository
+  configuration, and versioned diagnostic errors.
 
 ### Known limitations
 

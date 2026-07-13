@@ -1,0 +1,257 @@
+package bundle
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/jokull/onwardpg/internal/protocol"
+)
+
+const (
+	currentFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	desiredFingerprint = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+func TestBuildPlannedBundleWritesDeterministicPhaseReceipts(t *testing.T) {
+	expand := statement("CREATE TABLE app.users (id bigint);", "expand", true)
+	index := statement("CREATE INDEX CONCURRENTLY users_id_idx ON app.users (id);", "expand", false)
+	contract := statement("DROP TABLE app.old_users;", "contract", true)
+	result := plannedResult(expand, index, contract)
+	input := Input{Metadata: metadata(), Result: result, Intent: "# Intent\n\nAdd users safely.", Answers: &protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint, Answers: []protocol.Answer{},
+	}}
+	artifact, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.State != "planned" || artifact.Manifest.PlanDigest == "" || len(artifact.Manifest.Phases) != 2 {
+		t.Fatalf("manifest = %#v", artifact.Manifest)
+	}
+	phase := artifact.Manifest.Phases["expand"]
+	if phase.Transactional != nil {
+		t.Fatalf("mixed expand phase should not claim one transaction mode: %#v", phase)
+	}
+	expandSQL := string(artifact.Files["phases/expand.sql"])
+	if !strings.Contains(expandSQL, "CREATE TABLE") || !strings.Contains(expandSQL, "outside BEGIN/COMMIT") {
+		t.Fatalf("expand phase lost statements or batch guidance: %s", expandSQL)
+	}
+	if got := Digest(artifact.Files[phase.Path]); got != phase.Digest {
+		t.Fatalf("phase digest = %q, want %q", phase.Digest, got)
+	}
+	var roundTrip Manifest
+	if err := json.Unmarshal(artifact.Files["manifest.json"], &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if err := roundTrip.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, first := range artifact.Files {
+		if string(first) != string(again.Files[name]) {
+			t.Fatalf("artifact %s is not deterministic", name)
+		}
+	}
+}
+
+func TestBuildNeedsInputStoresDecisionWithoutExecutablePlan(t *testing.T) {
+	result := protocol.Result{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		Status: protocol.NeedsInput, Questions: []protocol.Question{{ID: "rename", Kind: "rename_table", Key: "table:app:old", Choices: []string{"table:app:new"}}},
+	}
+	artifact, err := Build(Input{Metadata: metadata(), Result: result, Attempt: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.State != "needs_input" || len(artifact.Manifest.Decisions) != 1 {
+		t.Fatalf("manifest = %#v", artifact.Manifest)
+	}
+	if _, ok := artifact.Files["decisions/attempt-007.json"]; !ok {
+		t.Fatalf("decision receipt missing: %v", SortedFiles(artifact.Files))
+	}
+	if _, ok := artifact.Files["plan.json"]; ok {
+		t.Fatal("needs_input bundle exposed an executable plan")
+	}
+}
+
+func TestWritePreservesDecisionHistoryAcrossDraftReplacement(t *testing.T) {
+	decisionResult := protocol.Result{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		Status: protocol.NeedsInput, Questions: []protocol.Question{{ID: "rename", Kind: "rename_table", Key: "table:app:old", Choices: []string{"table:app:new"}}},
+	}
+	decision, err := Build(Input{Metadata: metadata(), Result: decisionResult, Attempt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "bundle")
+	if err := Write(destination, decision, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := Build(Input{Metadata: metadata(), Result: plannedResult()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(destination, ready, WriteOptions{ReplaceDraft: true}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(destination, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.State != "planned" || len(manifest.Decisions) != 1 || manifest.Decisions[0].Path != "decisions/attempt-001.json" {
+		t.Fatalf("decision history was not preserved: %#v", manifest)
+	}
+	generation, attempt, err := NextCoordinates(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 || attempt != 2 {
+		t.Fatalf("next coordinates = (%d, %d), want (2, 2)", generation, attempt)
+	}
+}
+
+func TestBuildRejectsMismatchedReceiptAndIncompletePlan(t *testing.T) {
+	meta := metadata()
+	meta.DesiredSource.Fingerprint = currentFingerprint
+	if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err == nil {
+		t.Fatal("expected desired fingerprint mismatch")
+	}
+	meta = metadata()
+	bad := protocol.Statement{SQL: "SELECT 1;", Phase: "expand", Safety: "safe"}
+	if _, err := Build(Input{Metadata: meta, Result: protocol.Result{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		Status: protocol.Planned, Statements: []protocol.Statement{bad}, Batches: []protocol.Batch{{ID: "batch-001", Phase: "expand", Transactional: true, Statements: []protocol.Statement{bad}}},
+	}}); err == nil {
+		t.Fatal("expected missing stable statement id")
+	}
+}
+
+func TestWriteRequiresExplicitSafeDraftReplacement(t *testing.T) {
+	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "bundle")
+	if err := Write(destination, artifact, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(destination, artifact, WriteOptions{}); err == nil {
+		t.Fatal("expected implicit replacement rejection")
+	}
+	if err := Write(destination, artifact, WriteOptions{ReplaceDraft: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destination, "verification"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "verification", "execution.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(destination, artifact, WriteOptions{ReplaceDraft: true}); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("expected execution receipt immutability, got %v", err)
+	}
+}
+
+func TestArtifactValidationRejectsTamperedPhase(t *testing.T) {
+	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult(statement("CREATE TABLE app.users (id bigint);", "expand", true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact.Files["phases/expand.sql"] = []byte("DROP DATABASE production;\n")
+	if err := artifact.Validate(); err == nil || !strings.Contains(err.Error(), "does not match manifest digest") {
+		t.Fatalf("expected tamper rejection, got %v", err)
+	}
+}
+
+func TestWriteRefusesToReplaceUnownedDirectory(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "bundle")
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "notes.txt"), []byte("user data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(destination, artifact, WriteOptions{ReplaceDraft: true}); err == nil || !strings.Contains(err.Error(), "invalid bundle") {
+		t.Fatalf("expected unowned directory rejection, got %v", err)
+	}
+}
+
+func TestWriteRefusesToReplaceTamperedOrAugmentedBundle(t *testing.T) {
+	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult(statement("CREATE TABLE app.users (id bigint);", "expand", true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []struct {
+		name string
+		call func(string) error
+	}{
+		{name: "tampered", call: func(destination string) error {
+			return os.WriteFile(filepath.Join(destination, "phases", "expand.sql"), []byte("SELECT 1;\n"), 0o644)
+		}},
+		{name: "extra-file", call: func(destination string) error {
+			return os.WriteFile(filepath.Join(destination, "notes.txt"), []byte("unrecorded"), 0o644)
+		}},
+	} {
+		t.Run(mutate.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "bundle")
+			if err := Write(destination, artifact, WriteOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := mutate.call(destination); err != nil {
+				t.Fatal(err)
+			}
+			if err := Write(destination, artifact, WriteOptions{ReplaceDraft: true}); err == nil || !strings.Contains(err.Error(), "invalid bundle") {
+				t.Fatalf("expected invalid existing bundle rejection, got %v", err)
+			}
+			if _, _, err := NextCoordinates(destination); err == nil {
+				t.Fatal("coordinate calculation accepted an invalid existing bundle")
+			}
+		})
+	}
+}
+
+func metadata() Metadata {
+	return Metadata{
+		BundleID: "customer-profile", Generation: 1, Target: "primary-postgres", Purpose: "feature", Mode: "pr",
+		BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
+		BaselineSource: SourceReceipt{Kind: "git_migrations", Description: "origin/main migrations", Fingerprint: currentFingerprint, GitCommit: strings.Repeat("a", 40), PostgresMajor: 16},
+		DesiredSource:  SourceReceipt{Kind: "adapter", Description: "drizzle primary schema", Fingerprint: desiredFingerprint, PostgresMajor: 16},
+		Planner:        PlannerReceipt{Version: "dev", Options: PlannerOptions{ConcurrentIndexes: true}},
+	}
+}
+
+func statement(sql, phase string, transactional bool) protocol.Statement {
+	result := protocol.Statement{SQL: sql, Phase: phase, Safety: "review", NonTransactional: !transactional}
+	result.ID = protocol.StableStatementID(result)
+	return result
+}
+
+func plannedResult(statements ...protocol.Statement) protocol.Result {
+	result := protocol.Result{ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint, Status: protocol.Planned, Statements: statements}
+	for _, item := range statements {
+		transactional := !item.NonTransactional
+		if len(result.Batches) > 0 {
+			last := &result.Batches[len(result.Batches)-1]
+			if last.Phase == item.Phase && last.Transactional == transactional {
+				last.Statements = append(last.Statements, item)
+				continue
+			}
+		}
+		result.Batches = append(result.Batches, protocol.Batch{ID: "batch-" + string(rune('1'+len(result.Batches))), Phase: item.Phase, Transactional: transactional, Statements: []protocol.Statement{item}})
+	}
+	return result
+}

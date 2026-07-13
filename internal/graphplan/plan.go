@@ -125,16 +125,15 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		Ignored: unionStrings(current.Ignored(), desired.Ignored()),
 	}
-	if unsupported := unionStrings(current.Unsupported(), desired.Unsupported()); len(unsupported) > 0 {
-		result.Status, result.Unsupported = protocol.Unsupported, unsupported
-		return result, nil
-	}
 	if answers.ProtocolVersion == "" && answers.CurrentFingerprint == "" && answers.DesiredFingerprint == "" && len(answers.Answers) == 0 {
 		answers.ProtocolVersion, answers.CurrentFingerprint, answers.DesiredFingerprint = protocol.Version, currentFingerprint, desiredFingerprint
 	}
 	resolver, err := answers.Resolver(currentFingerprint, desiredFingerprint)
 	if err != nil {
 		return protocol.Result{}, err
+	}
+	if unsupported := unionStrings(current.Unsupported(), desired.Unsupported()); len(unsupported) > 0 {
+		return unsupportedResult(result, resolver, unsupported)
 	}
 
 	changes := change.Between(current, desired)
@@ -153,16 +152,14 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return protocol.Result{}, err
 	}
 	if rejected := rejectedConstraintRenames(changes); len(rejected) > 0 {
-		result.Status, result.Unsupported = protocol.Unsupported, rejected
-		return result, nil
+		return unsupportedResult(result, resolver, rejected)
 	}
 	changes, tableRenames, tableRenameQuestions, tableRenameUnsupported, err := resolveTableRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint)
 	if err != nil {
 		return protocol.Result{}, err
 	}
 	if len(tableRenameUnsupported) > 0 {
-		result.Status, result.Unsupported = protocol.Unsupported, unionStrings(tableRenameUnsupported, nil)
-		return result, nil
+		return unsupportedResult(result, resolver, tableRenameUnsupported)
 	}
 	if len(tableRenameQuestions) > 0 {
 		if err := resolver.ValidateAllUsed(); err != nil {
@@ -221,8 +218,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return protocol.Result{}, err
 	}
 	if len(columnRenameUnsupported) > 0 {
-		result.Status, result.Unsupported = protocol.Unsupported, unionStrings(columnRenameUnsupported, nil)
-		return result, nil
+		return unsupportedResult(result, resolver, columnRenameUnsupported)
 	}
 	if len(columnRenameQuestions) > 0 {
 		if err := resolver.ValidateAllUsed(); err != nil {
@@ -327,9 +323,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 	}
 	if len(dynamicUnsupported) > 0 {
-		result.Status, result.Unsupported = protocol.Unsupported, unionStrings(dynamicUnsupported, nil)
-		result.Statements, result.Batches = nil, nil
-		return result, nil
+		return unsupportedResult(result, resolver, dynamicUnsupported)
 	}
 	// PostgreSQL indexes share a schema-level relation namespace. A same-named
 	// index moved to another table must be dropped before its replacement is
@@ -340,9 +334,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		if len(unsupported) > 0 {
-			result.Status, result.Unsupported = protocol.Unsupported, unsupported
-			result.Statements, result.Batches = nil, nil
-			return result, nil
+			return unsupportedResult(result, resolver, unsupported)
 		}
 		for _, statement := range withPhase(statements, "contract", "review", "index_name_collision") {
 			appendStatement(&result, statement)
@@ -356,9 +348,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			return protocol.Result{}, err
 		}
 		if len(unsupported) > 0 {
-			result.Status, result.Unsupported = protocol.Unsupported, unsupported
-			result.Statements, result.Batches = nil, nil
-			return result, nil
+			return unsupportedResult(result, resolver, unsupported)
 		}
 		for _, statement := range withPhase(statements, "contract", "review", "constraint_index_detach") {
 			appendStatement(&result, statement)
@@ -417,16 +407,40 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	}
 	if options.UnsortedDump {
 		markUnsortedDump(&result)
+		assignStatementIDs(result.Statements)
 		if err := rebuildUnsortedBatches(&result); err != nil {
 			return protocol.Result{}, err
 		}
 	} else {
+		assignStatementIDs(result.Statements)
 		if err := rebuildBatches(&result); err != nil {
 			return protocol.Result{}, err
 		}
 	}
 	result.Status = protocol.Planned
 	return result, nil
+}
+
+func unsupportedResult(result protocol.Result, resolver *protocol.Resolver, unsupported []string) (protocol.Result, error) {
+	if err := resolver.ValidateAllUsed(); err != nil {
+		return protocol.Result{}, err
+	}
+	result.Status = protocol.Unsupported
+	result.Unsupported = unionStrings(unsupported, nil)
+	result.Statements, result.Batches = nil, nil
+	return result, nil
+}
+
+func assignStatementIDs(statements []protocol.Statement) {
+	seen := make(map[string]int, len(statements))
+	for i := range statements {
+		base := protocol.StableStatementID(statements[i])
+		seen[base]++
+		statements[i].ID = base
+		if seen[base] > 1 {
+			statements[i].ID = fmt.Sprintf("%s-%d", base, seen[base])
+		}
+	}
 }
 
 // markUnsortedDump makes the non-executable nature of caller-selected order

@@ -151,6 +151,12 @@ The review checklist is simple:
 CI may detect drift and verify a reviewed plan. It must not auto-apply a new
 schema diff to production.
 
+The first durable bundle layer is also available: `onwardpg plan --bundle ...`
+writes a versioned manifest, preserved decision attempts, answers, the ready
+plan, and separate non-empty phase SQL files while keeping the normal planner
+JSON and exit codes. See [migration bundles](docs/bundles.md). Git-aware
+`pr regenerate` and CI policy commands remain the next implementation wave.
+
 ## Developer preview: what works now
 
 onwardpg is PostgreSQL-only and supports PostgreSQL 14–18. This is a developer
@@ -257,6 +263,7 @@ is retained as test research, not a product-completeness promise. See
 - [Adapter API](docs/adapter.md)
 - [Forward-only migration workflow](docs/migration-workflow.md)
 - [Agent-assisted migration walkthrough](docs/agent-workflow.md)
+- [Migration bundles and repository configuration](docs/bundles.md)
 - [Safety model](docs/safety-model.md)
 - [Architecture](docs/architecture.md)
 - [Reference behavior study](docs/atlas-postgres-parity.md)

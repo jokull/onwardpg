@@ -2,7 +2,10 @@ module github.com/jokull/onwardpg
 
 go 1.26.0
 
-require github.com/jackc/pgx/v5 v5.8.0
+require (
+	github.com/jackc/pgx/v5 v5.8.0
+	github.com/pelletier/go-toml/v2 v2.2.4
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

@@ -2,6 +2,9 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -30,6 +33,10 @@ type Result struct {
 }
 
 type Statement struct {
+	// ID is a deterministic identity derived from the complete generated
+	// statement contract. Bundle amendments bind to this value rather than a
+	// fragile array position.
+	ID      string   `json:"id,omitempty"`
 	SQL     string   `json:"sql"`
 	Safety  string   `json:"safety"`
 	Hazards []string `json:"hazards,omitempty"`
@@ -44,6 +51,36 @@ type Statement struct {
 	// Manual is present only for operator-authored work. onwardpg records it
 	// verbatim instead of inventing a data transformation from schema state.
 	Manual *ManualWork `json:"manual,omitempty"`
+}
+
+// StableStatementID returns a content-derived identity for a statement. The
+// ID deliberately excludes Statement.ID itself and normalizes hazard order so
+// equivalent planner metadata does not change identity through insertion
+// order alone. Callers disambiguate identical repeated statements with a
+// deterministic occurrence suffix.
+func StableStatementID(statement Statement) string {
+	hazards := append([]string(nil), statement.Hazards...)
+	sort.Strings(hazards)
+	canonical := struct {
+		SQL              string      `json:"sql"`
+		Safety           string      `json:"safety"`
+		Hazards          []string    `json:"hazards,omitempty"`
+		Phase            string      `json:"phase"`
+		NonTransactional bool        `json:"non_transactional"`
+		Manual           *ManualWork `json:"manual,omitempty"`
+	}{
+		SQL: statement.SQL, Safety: statement.Safety, Hazards: hazards,
+		Phase: statement.Phase, NonTransactional: statement.NonTransactional,
+		Manual: statement.Manual,
+	}
+	data, err := json.Marshal(canonical)
+	if err != nil {
+		// The canonical contract contains only JSON-native values. Keep the
+		// function total while making an impossible encoding failure distinct.
+		data = []byte(fmt.Sprintf("unencodable:%#v", canonical))
+	}
+	sum := sha256.Sum256(data)
+	return "stmt-sha256-" + hex.EncodeToString(sum[:])
 }
 
 // ManualWork is a fingerprint-bound, operator-authored migration contract.
