@@ -42,6 +42,7 @@ type Options struct {
 type decisions struct {
 	typeUsing       map[pgschema.ID]string
 	notNullStrategy map[pgschema.ID]string
+	notNullBackfill map[pgschema.ID]protocol.ManualWork
 	matViewRebuild  map[pgschema.ID]bool
 	matViewRefresh  map[pgschema.ID]protocol.ManualWork
 	partitionManual map[pgschema.ID]protocol.ManualWork
@@ -3268,7 +3269,7 @@ func addEnumValues(before, after pgschema.Enum) ([]protocol.Statement, error) {
 }
 
 func mutationQuestions(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, decisions, error) {
-	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork)}
+	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork)}
 	var questions []protocol.Question
 	refreshes := dependentMaterializedViewsNeedingRefresh(changes, current, desired)
 	for _, view := range refreshes {
@@ -3355,8 +3356,8 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 		if !before.NotNull && after.NotNull {
 			question := protocol.Question{
 				ID: "set_not_null:" + item.ID.String(), Kind: "set_not_null", Key: item.ID.String(),
-				Message:            "Column " + item.ID.String() + " becomes NOT NULL. Choose a direct lock/scan or a staged NOT VALID check, validation, and contract.",
-				Choices:            []string{"direct", "staged"},
+				Message:            "Column " + item.ID.String() + " becomes NOT NULL. Choose a direct lock/scan, a staged validation for already-clean data, or staged validation with an explicit application-owned backfill.",
+				Choices:            []string{"direct", "staged", "staged_with_backfill"},
 				CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 			}
 			answer, found, err := resolver.Resolve(question)
@@ -3367,6 +3368,23 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 				questions = append(questions, question)
 			} else {
 				decisions.notNullStrategy[item.ID] = answer
+				if answer == "staged_with_backfill" {
+					backfillQuestion := protocol.Question{
+						ID: "backfill_not_null:" + item.ID.String(), Kind: "backfill_not_null", Key: item.ID.String(),
+						Message:            "Supply the reviewed application-owned backfill and a boolean postcondition proving " + item.ID.String() + " contains no NULL values before contract validation.",
+						Choices:            []string{"provided"},
+						CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+					}
+					work, provided, err := resolver.ResolveManual(backfillQuestion)
+					if err != nil {
+						return nil, decisions, err
+					}
+					if !provided {
+						questions = append(questions, backfillQuestion)
+					} else {
+						decisions.notNullBackfill[item.ID] = work
+					}
+				}
 			}
 		}
 	}
@@ -3546,6 +3564,19 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 				statements = append(statements,
 					statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "expand", "review", true, "share_row_exclusive_lock"),
 					statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "migrate", "review", true, "table_scan"),
+					statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
+					statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
+				)
+			case "staged_with_backfill":
+				work, exists := choices.notNullBackfill[after.ObjectID()]
+				if !exists {
+					return nil, nil, nil, fmt.Errorf("missing NOT NULL backfill for %s", after.ObjectID())
+				}
+				check := notNullCheckName(after.ObjectID())
+				statements = append(statements,
+					statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "expand", "review", true, "share_row_exclusive_lock"),
+					manualWorkStatement(work, "application_backfill", "data_movement"),
+					statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
 					statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
 					statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
 				)
@@ -3962,7 +3993,7 @@ func appendStatement(result *protocol.Result, item protocol.Statement) {
 }
 
 func rebuildBatches(result *protocol.Result) error {
-	orderedPhases := []string{"expand", "migrate", "contract", "manual"}
+	orderedPhases := []string{"expand", "migrate", "manual", "contract"}
 	byPhase := make(map[string][]protocol.Statement, len(orderedPhases))
 	for _, item := range result.Statements {
 		if item.Phase != "expand" && item.Phase != "migrate" && item.Phase != "contract" && item.Phase != "manual" {

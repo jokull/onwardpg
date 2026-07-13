@@ -94,6 +94,23 @@ func TestLoadEmptyHistoryUsesStableRoot(t *testing.T) {
 	}
 }
 
+func TestChainThroughReturnsExactPrefix(t *testing.T) {
+	root := t.TempDir()
+	first := writeBundle(t, root, "first", bundle.HistoryRootDigest(), "SELECT 1;", "expand")
+	writeBundle(t, root, "second", first, "SELECT 2;", "contract")
+	chain, err := Load(root, "migrations/onward", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := chain.Through("first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prefix.Entries) != 1 || prefix.HeadDigest != first {
+		t.Fatalf("prefix = %#v", prefix)
+	}
+}
+
 func writeBundle(t *testing.T, root, id, parent, sql, phase string) string {
 	t.Helper()
 	statement := protocol.Statement{SQL: sql, Phase: phase, Safety: "safe"}

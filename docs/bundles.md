@@ -61,6 +61,7 @@ A ready bundle currently looks like:
 customer-profile/
 ├── manifest.json
 ├── intent.md                 # when --intent is supplied
+├── questions.json            # canonical staged questions behind the answers
 ├── decisions/
 │   └── attempt-001.json      # preserved from earlier needs_input runs
 ├── answers.json
@@ -96,10 +97,25 @@ declarative fingerprint, replayed base-history fingerprint, synthetic head
 declarative fingerprint, and replayed proposed-history fingerprint.
 Regeneration refuses to bundle unless both `BC == BM` and `HC == HM`.
 
-The phase files are the migration history. onwardpg does not copy or translate
-them into Drizzle, Django, Prisma, Alembic, or another migration runner. A
-developer or coding agent explicitly orchestrates phase execution, and future
-execution receipts plus residual catalog diff make that rollout checkable.
+The phase files are the migration history. Verify a selected checkpoint or the
+complete bundle without granting any production-apply surface:
+
+```sh
+onwardpg bundle verify --target primary-postgres --bundle customer-profile
+onwardpg bundle verify --target primary-postgres --bundle customer-profile --through expand
+```
+
+The command creates a random disposable database, executes the validated hash
+chain through the requested phase, inspects its catalog, compares it with a
+separate full-chain execution, emits `onwardpg.verify/v1`, and destroys both
+databases. A partial checkpoint may intentionally report `outcome: residual`;
+the full contract checkpoint must converge. Transactional batches roll back on
+failure. Manual verification queries must each return one boolean `true` row.
+
+onwardpg does not copy or translate phase files into Drizzle, Django, Prisma,
+Alembic, or another migration runner. A developer or coding agent explicitly
+orchestrates their execution timing; residual catalog diff makes that rollout
+checkable.
 
 ## Repository configuration
 
@@ -113,6 +129,8 @@ onwardpg config check --config .onwardpg.toml
 See [the example configuration](../.onwardpg.example.toml). Configuration is
 strict: unknown fields, absolute/escaping paths, literal URLs, ambiguous schema
 sources, overlapping configured paths, unsupported PostgreSQL majors, and
-duplicate policy hazards are rejected. `pr status` and the top-edge/base-integrity portion of
-`pr regenerate` use this configuration today. Onwardpg-owned chain replay,
-durable execution receipts, and `ci check` are not implemented yet.
+duplicate policy hazards are rejected. `dev plan`, `pr status`, `pr
+regenerate`, `bundle verify`, and `ci check` use this configuration. The
+per-target history is ordered only by its parent and entry digests; filenames
+never choose execution order. Forks, missing parents, disconnected entries,
+altered receipts, and unrecorded files are rejected.

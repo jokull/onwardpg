@@ -134,25 +134,16 @@ intent.
 
 ## Intended developer workflow
 
-During feature work, repeatedly export the schema described by the code and
-diff it against the developer database:
+Configure the schema export once, then repeatedly diff the schema described by
+the working tree against the developer database:
 
 ```sh
-# Any tool is fine if it emits PostgreSQL CREATE-statement DDL.
-pnpm db:schema:export > schema.sql
-
-onwardpg plan \
-  --from "$DEV_DATABASE_URL" \
-  --to "file://$PWD/schema.sql" \
-  --dev-url "$DEV_POSTGRES_URL" \
-  --concurrent-indexes \
-  > plan.json
+# .onwardpg.toml points at schema_file or a schema_command argv.
+onwardpg dev plan --target primary-postgres > plan.json
 
 # Exit 2 means: record explicit intent in an answer file, then rerun.
-onwardpg plan \
-  --from "$DEV_DATABASE_URL" \
-  --to "file://$PWD/schema.sql" \
-  --dev-url "$DEV_POSTGRES_URL" \
+onwardpg dev plan \
+  --target primary-postgres \
   --answers migration.answers.json \
   --concurrent-indexes \
   --sql > dev-plan.sql
@@ -169,6 +160,8 @@ latest base to the would-be merged feature schema:
 git fetch origin
 onwardpg pr status --base origin/main --target primary-postgres --bundle account-profile
 onwardpg pr regenerate --base origin/main --target primary-postgres --bundle account-profile
+onwardpg bundle verify --target primary-postgres --bundle account-profile
+onwardpg ci check --base origin/main --target primary-postgres --bundle account-profile
 ```
 
 If regeneration returns questions, the agent records the developer's intent in
@@ -185,13 +178,13 @@ The review checklist is simple:
 - Is `CONTRACT` deferred until the compatibility window is over?
 - Has the reviewed plan converged to an empty diff on a representative clone?
 
-CI may detect drift and verify a reviewed plan. It must not auto-apply a new
-schema diff to production.
+`onwardpg ci check` detects drift and clone-verifies a reviewed plan. It never
+auto-applies a new schema diff to production.
 
-The first durable bundle layer is also available: `onwardpg plan --bundle ...`
-writes a versioned manifest, preserved decision attempts, answers, the ready
-plan, and separate non-empty phase SQL files while keeping the normal planner
-JSON and exit codes. See [migration bundles](docs/bundles.md).
+The durable bundle layer writes a versioned manifest, canonical staged
+questions, preserved decision attempts, answers, the ready plan, and separate
+non-empty phase SQL files while keeping the normal planner JSON and exit
+codes. See [migration bundles](docs/bundles.md).
 
 `onwardpg pr status --base origin/main --target NAME` provides the first
 Git-aware guardrail. It resolves exact commits, distinguishes the PR-owned
@@ -206,10 +199,12 @@ now compiles the exact base and the would-be merged head in isolated trees,
 replays base migrations in PostgreSQL, requires base code and history to match,
 and writes the fingerprinted PR bundle. It runs the configured DDL export
 twice and rejects nondeterminism or undeclared filesystem output. onwardpg does
-not integrate with framework migration journals or runners. The bundle's phase files
-are the reviewed migration history, and the developer or coding agent
-orchestrates their timing. Durable execution receipts, CI fidelity checks, and
-clone execution receipts remain upcoming.
+not integrate with framework migration journals or runners. The bundle's phase
+files are the reviewed migration history, and the developer or coding agent
+orchestrates their timing. `bundle verify` executes only in databases it
+creates and destroys itself; `ci check` composes history integrity, one-bundle
+ownership, freshness, schema-square fidelity, and clone convergence without
+editing the checkout or applying to a caller-supplied database.
 
 ## Developer preview: what works now
 
@@ -219,7 +214,7 @@ boundary matches your schema, and it is intentionally loud when it does not.
 
 | Area | Preview behavior |
 | --- | --- |
-| Inputs | Live PostgreSQL URLs and `file://` declarative DDL materialized in disposable PostgreSQL databases. |
+| Inputs | Live PostgreSQL URLs plus `schema_file`, `schema_command`, and `file://` declarative DDL materialized in disposable PostgreSQL databases. |
 | Core relations | Schemas, tables, columns, defaults, identity/generated columns, collations, comments, indexes, sequences, enums, and common constraints. |
 | Dependencies | Typed ordering for tables, constraints, indexes, enums, views, materialized views, routines, triggers, and partition children. |
 | Intent | Fingerprint-bound questions for credible renames, destructive drops, type conversions, and manual operational work. |

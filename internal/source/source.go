@@ -38,6 +38,17 @@ func LoadGraphForComparison(ctx context.Context, spec Spec, devURL string, ignor
 	return loadGraph(ctx, spec, devURL, ignores, false)
 }
 
+// LoadDatabaseGraphForComparison inspects an already parsed connection
+// configuration. This is the safe path for callers that deliberately replace
+// Config.Database: pgx ConnString retains the original input string and must
+// not be used to recover that mutation.
+func LoadDatabaseGraphForComparison(ctx context.Context, config *pgx.ConnConfig, ignores []string) (*pgschema.Snapshot, error) {
+	if config == nil {
+		return nil, fmt.Errorf("database connection configuration is required")
+	}
+	return inspectGraphConfig(ctx, config, ignores, false)
+}
+
 // LoadDDLGraphForComparison materializes exported CREATE statements
 // directly, avoiding an unreceipted intermediate file while retaining the
 // same PostgreSQL catalog authority as a file:// source.

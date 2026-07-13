@@ -750,6 +750,66 @@ func TestBuildRequiresAndRendersColumnMutationChoices(t *testing.T) {
 	}
 }
 
+func TestBuildStagesApplicationBackfillBeforeNotNullContract(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "events"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "occurred_on", Position: 1, Type: "date"}
+	after := before
+	after.NotNull = true
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.Add(after); err != nil {
+		t.Fatal(err)
+	}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.AddDependency(before.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategyAnswers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "set_not_null", Key: after.ObjectID().String(), Value: "staged_with_backfill"}},
+	}
+	manualPending, err := Build(current, desired, strategyAnswers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualPending.Status != protocol.NeedsInput || len(manualPending.Questions) != 1 || manualPending.Questions[0].Kind != "backfill_not_null" {
+		t.Fatalf("manual pending = %#v", manualPending)
+	}
+	strategyAnswers.Answers = append(strategyAnswers.Answers, protocol.Answer{
+		Kind: "backfill_not_null", Key: after.ObjectID().String(), Value: "provided",
+		Manual: &protocol.ManualWork{
+			Summary: "fill missing event dates", ExecutionMode: "transactional",
+			Statements:      []string{`UPDATE "public"."events" SET "occurred_on" = CURRENT_DATE WHERE "occurred_on" IS NULL;`},
+			VerificationSQL: []string{`SELECT count(*) = 0 FROM "public"."events" WHERE "occurred_on" IS NULL;`},
+		},
+	})
+	planned, err := Build(current, desired, strategyAnswers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned || len(planned.Batches) != 3 {
+		t.Fatalf("planned = %#v", planned)
+	}
+	if planned.Batches[0].Phase != "expand" || planned.Batches[1].Phase != "manual" || planned.Batches[2].Phase != "contract" {
+		t.Fatalf("phase order = %#v", planned.Batches)
+	}
+	if planned.Batches[1].Statements[0].Manual == nil || !strings.Contains(planned.Batches[2].Statements[0].SQL, "VALIDATE CONSTRAINT") {
+		t.Fatalf("backfill/contract = %#v", planned.Batches)
+	}
+}
+
 func TestBuildRequiresFingerprintBoundIndexRenameAnswer(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "public", Name: "orders"}

@@ -22,6 +22,31 @@ type TargetCompiler struct {
 	Target     Target
 }
 
+type CompiledDDL struct {
+	DDL        []byte
+	Provenance string
+}
+
+// CompileDDL runs the configured schema export twice and requires byte-for-
+// byte deterministic output. It is the narrow CLI boundary for schema_file
+// and schema_command; it does not expose a framework integration API.
+func CompileDDL(ctx context.Context, root, targetName string, target Target) (CompiledDDL, error) {
+	compiler := TargetCompiler{TargetName: targetName, Target: target}
+	request := adapter.CompileRequest{Root: root, Target: targetName, Revision: "working-tree"}
+	first, err := compiler.Compile(ctx, request)
+	if err != nil {
+		return CompiledDDL{}, err
+	}
+	second, err := compiler.Compile(ctx, request)
+	if err != nil {
+		return CompiledDDL{}, err
+	}
+	if first.Provenance != second.Provenance || !bytes.Equal(first.DDL, second.DDL) {
+		return CompiledDDL{}, fmt.Errorf("DDL export is nondeterministic")
+	}
+	return CompiledDDL{DDL: append([]byte(nil), first.DDL...), Provenance: first.Provenance}, nil
+}
+
 func (c TargetCompiler) Compile(ctx context.Context, request adapter.CompileRequest) (adapter.Artifact, error) {
 	if request.Root == "" || !filepath.IsAbs(request.Root) {
 		return adapter.Artifact{}, fmt.Errorf("compiler root must be absolute")

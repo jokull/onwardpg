@@ -744,10 +744,12 @@ receipt.
   retain their attempt, and replacement checks bundle identity, generation,
   phase/plan fidelity, lifecycle races, unsafe path tokens, and secret-bearing
   source descriptions.
-- Hash-chained bundle ordering/replay, execution/amendment/clone receipts, and
-  `ci` remain upcoming work. Low-level
-  `plan --bundle` base/head flags are still caller receipts rather than
-  independently verified provenance.
+- Hash-chained bundle ordering/replay, config-driven `dev plan`, disposable
+  clone verification, and strict `ci check` are implemented. Canonical staged
+  question receipts now let scoped answers survive repeated generation and
+  base-history changes. Execution/amendment receipts remain future work.
+  Low-level `plan --bundle` base/head flags are still caller receipts rather
+  than independently verified provenance.
 
 ## REVIEW.md round-two decisions and work queue
 
@@ -947,30 +949,29 @@ that PostgreSQL DDL cannot satisfy.
 
 ## Developer-preview milestone
 
-The next developer preview should be considered successful when a real Drizzle
-DDL-export fixture demonstrates all of the following:
+The developer-preview acceptance suite now uses only the public CLI boundary
+(`schema_file` / `schema_command`) and real PostgreSQL. It proves:
 
-1. A feature branch changes its declarative schema repeatedly while retaining
-   one replaceable onwardpg draft bundle.
-2. Two unrelated onwardpg bundles land on its base branch.
-3. `onwardpg pr status` explains that the existing feature bundle has a stale
-   history parent.
-4. `onwardpg pr regenerate` compiles the final head schema, materializes the
-   exact new base, asks an explicit rename decision, and produces one logical
-   onwardpg history entry without touching Drizzle migration metadata.
-5. The bundle separates a concurrent index, manual/data work, and deferred
-   contract from transactional expand work.
-6. The base declarative schema equals replayed base history, and the committed
-   bundle reaches either the head schema or a fingerprinted expand checkpoint
-   with an explicit deferred residual plan.
-7. Clone verification applies the committed onwardpg phase artifacts and produces the
-   expected checkpoint/final fingerprints with empty residual diff where the
-   selected phases promise convergence.
-8. A subsequent base or schema change makes the bundle fail freshness checks.
-9. CI rejects a forked history parent, an unreceipted generated-SQL edit, a
-   stale answer, and an attempted rewrite of base history.
-10. No command applies production SQL, modifies Git history, fetches/rebases, or
-   commits/pushes without an explicit surrounding developer workflow.
+1. `dev plan` asks a scoped rename question, never applies its SQL, and reaches
+   an empty residual after deliberate local application.
+2. A feature schema evolves while retaining one replaceable logical bundle.
+3. Rename, staged `NOT NULL`, and application-owned backfill decisions survive
+   an unrelated feature edit and two new base-history migrations.
+4. The per-target parent/entry hash chain—not filenames—orders genesis, both
+   base migrations, and the final feature bundle without a fork.
+5. The final receipt contains canonical questions, fingerprinted answers,
+   plan JSON, hazards, and separate expand/manual/contract SQL.
+6. `bundle verify` proves the full chain converges and reports a residual when
+   only a deliberately incomplete checkpoint is selected.
+7. `ci check` accepts the committed one-bundle PR and rejects an incorrectly
+   stacked PR before database execution.
+8. Transactional clone work rolls back when a manual boolean postcondition
+   fails, and disposable verification databases are removed.
+9. No command applies production SQL, modifies Git history, fetches/rebases,
+   or commits/pushes without an explicit surrounding developer workflow.
+
+Execution/amendment receipts and post-merge delayed-contract lifecycle are
+later milestones; they are not hidden inside the developer-preview claim.
 
 ## Explicit non-goals
 

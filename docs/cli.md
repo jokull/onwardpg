@@ -43,6 +43,21 @@ planner question; record intended answers in the answer file.
 
 See [the protocol](protocol.md) for exit codes and JSON fields.
 
+## Development loop
+
+```sh
+onwardpg dev plan --target primary-postgres
+onwardpg dev plan --target primary-postgres --answers answers.json --sql
+```
+
+`dev plan` reads `.onwardpg.toml`, runs the target's `schema_file` or
+`schema_command` export twice, rejects nondeterministic output, materializes the
+DDL in disposable PostgreSQL, and compares it with the live database named by
+`dev_database_env`. It has the same planner questions, answer validation,
+options, JSON, SQL, and exit codes as `plan`. It never executes the emitted SQL
+against the developer database. After deliberate local application, rerun it
+without stale answers to see the residual diff.
+
 Repository configuration can be checked with:
 
 ```sh
@@ -75,15 +90,18 @@ the protected migration lineage. This distinction prevents an unrelated
 migration newly landed on main from appearing as a branch deletion. Existing
 base-history edits and concurrent path collisions produce `outcome: "blocked"`
 and exit `4`. An advanced base produces `relationship: "base_advanced"` and
-`synthetic_head_needed: true`.
+`synthetic_head_needed: true`. If the PR contribution cannot be applied to the
+exact base, status returns `outcome: "conflicting"` with a `merge_conflict`
+problem instead of guessing a desired schema.
 
 Without `--bundle`, status reports repository/migration-history classification
 only. With `--bundle`, it remains read-only but also compiles the prepared base
 and desired trees, replays base history, reruns the recorded planner contract,
 and emits `onwardpg.freshness/v1`.
-Findings distinguish `provenance_stale`, `schema_stale`, `decision_stale`, and
-`artifact_stale`, and each carries remediation text. Freshness checks never
-replace a draft.
+Findings distinguish `history_stale`, `schema_stale`, `decision_stale`, and
+`artifact_stale`, and each carries remediation text. A receipt-only commit or
+no-op rebase with equivalent schemas and history is fresh with a
+`provenance_changed` notice. Freshness checks never replace a draft.
 
 ## PR regeneration
 
@@ -124,6 +142,32 @@ frameworks may compile declarative schemas to DDL, but onwardpg does not read
 or write their journals. Developers and agents run reviewed phase artifacts at
 the appropriate rollout points; the live catalog and residual diff show what
 work remains.
+
+## Clone verification and CI
+
+```sh
+onwardpg bundle verify --target primary-postgres --bundle customer-profile
+onwardpg bundle verify --target primary-postgres --bundle customer-profile --through manual
+
+onwardpg ci check \
+  --base origin/main \
+  --target primary-postgres \
+  --bundle customer-profile
+```
+
+`bundle verify` accepts `expand`, `migrate`, `manual`, or `contract` as the
+last phase. It can only create and destroy randomly named disposable databases
+through the configured admin URL; there is no flag for applying to an existing
+database. Exit `0` means the selected checkpoint has no residual relative to
+the full bundle; exit `4` reports a residual or execution failure.
+
+`ci check` is the strict, read-only checkout gate. It requires committed input,
+exactly one PR-owned bundle directory for the requested target, a fresh and
+answer-complete schema-square analysis, a valid hash-chain head, and full clone
+convergence. It rejects protected-history edits, forks, altered/unrecorded
+artifacts, stale parents, incorrect stacks, unanswered decisions, dirty source
+inputs, and non-convergent plans. It writes no repository files and cannot
+apply to production.
 
 ## Integration boundary
 

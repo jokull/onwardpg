@@ -118,7 +118,7 @@ operator-owned contract instead of an acknowledgement. Its answer uses
       "ALTER TABLE \"app\".\"events\" ATTACH PARTITION \"app\".\"events_2026\" FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');"
     ],
     "verification_sql": [
-      "SELECT 1;"
+      "SELECT count(*) = 0 FROM \"app\".\"events_2026\";"
     ]
   }
 }
@@ -127,14 +127,19 @@ operator-owned contract instead of an acknowledgement. Its answer uses
 `execution_mode` is required and is either `transactional` or
 `non_transactional`; onwardpg uses it to form the manual batch. `summary` and
 each verification query must be one line because they are rendered as SQL
-comments. `statements` are the only executable, operator-supplied text and
-may contain multi-line SQL. The contract is still fingerprint-bound, checked
-for usage, and shown in the resulting statement's `manual` metadata.
+comments. During clone verification each query must return exactly one boolean
+row, and every value must be true. `statements` are the only executable,
+operator-supplied text and may contain multi-line SQL. The contract is still
+fingerprint-bound, checked for usage, and shown in the resulting statement's
+`manual` metadata.
 
-Current manual-work questions include `partition_reconfiguration` and
-`refresh_materialized_view`. The latter is emitted when a typed changed-view
-dependency can leave materialized rows stale; an answer must provide the
-operator-chosen `REFRESH MATERIALIZED VIEW` form and any required verification.
+Current manual-work questions include `partition_reconfiguration`,
+`refresh_materialized_view`, and `backfill_not_null`. The last is a second
+stage after choosing `staged_with_backfill` for `set_not_null`: onwardpg emits
+the `NOT VALID` structural guard, executes only the supplied application-owned
+backfill in the manual phase, requires its boolean postcondition, and leaves
+validation plus `SET NOT NULL` for contract. A plain `staged` choice remains
+available when the developer has separately proved the data is already clean.
 
 ## Exit codes and diagnostics
 
@@ -143,7 +148,7 @@ operator-chosen `REFRESH MATERIALIZED VIEW` form and any required verification.
 | `0` | `planned` | v1 result JSON, or SQL with `--sql` |
 | `2` | `needs_input` | v1 result JSON |
 | `3` | `unsupported` | v1 result JSON |
-| `4` | repository policy blocked | command-specific versioned status JSON |
+| `4` | policy blocked, stale, residual, or clone execution failed | command-specific versioned status JSON |
 | `1` | invocation, input, connection, configuration, bundle, or internal planning error | `onwardpg.diagnostic/v1` JSON |
 
 Errors outside a normal plan result use a stable diagnostic envelope:
@@ -173,3 +178,10 @@ blocked.
 `pr status --bundle` emits `onwardpg.pr-status/v1` with repository,
 PR-analysis, and `onwardpg.freshness/v1` receipts. It is read-only. Stale
 findings carry stable codes and remediation text and exit `4`.
+
+`bundle verify` emits `onwardpg.verify/v1` with the selected phase checkpoint,
+executed batch count, observed/full fingerprints, and residual plan or typed
+execution failure. `ci check` emits `onwardpg.ci-check/v1`, composing repository
+classification, PR freshness/schema-square receipts, and full clone
+verification. Both exit `4` for an expected non-success outcome; neither has a
+production-apply surface.

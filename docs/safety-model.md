@@ -1,7 +1,8 @@
 # Safety model
 
-onwardpg is a planner, not a deployment agent. It writes a plan and exits; it
-does not connect to a target to execute the plan.
+onwardpg is a planner, not a deployment agent. It never executes a plan on a
+caller-supplied target. Clone verification is the only execution surface, and
+it creates and destroys its own randomly named disposable databases.
 
 The planner's core safety rules are:
 
@@ -23,9 +24,11 @@ statement safety/hazard metadata for review.
 
 Manual-work SQL is operator-owned and is never invented from catalog state.
 Only a question that explicitly requests manual work may carry that payload;
-ordinary answer types reject it. Summaries and verification queries are
-one-line non-executable metadata, while the reviewed statement list is placed
-in its own `MANUAL` batch with the declared execution boundary.
+ordinary answer types reject it. Summaries are one-line metadata. Verification
+queries are one-line postconditions that must each return one boolean `true`
+row during clone verification. The reviewed statement list is placed in its
+own `MANUAL` batch with the declared execution boundary; a failed transactional
+postcondition rolls that batch back.
 
 Transactional batches are intended to be atomic execution boundaries. The real
 PostgreSQL integration suite includes a failure case that proves an earlier

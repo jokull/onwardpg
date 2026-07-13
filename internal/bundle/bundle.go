@@ -107,13 +107,14 @@ type Manifest struct {
 	SchemaSquare   *SchemaSquareReceipt `json:"schema_square,omitempty"`
 	History        *HistoryReceipt      `json:"history,omitempty"`
 
-	ResultDigest  string                   `json:"result_digest"`
-	PlanDigest    string                   `json:"plan_digest,omitempty"`
-	Decisions     []FileReceipt            `json:"decisions,omitempty"`
-	AnswersDigest string                   `json:"answers_digest,omitempty"`
-	IntentDigest  string                   `json:"intent_digest,omitempty"`
-	Phases        map[string]PhaseArtifact `json:"phases,omitempty"`
-	Lineage       *Lineage                 `json:"lineage,omitempty"`
+	ResultDigest    string                   `json:"result_digest"`
+	PlanDigest      string                   `json:"plan_digest,omitempty"`
+	Decisions       []FileReceipt            `json:"decisions,omitempty"`
+	AnswersDigest   string                   `json:"answers_digest,omitempty"`
+	QuestionsDigest string                   `json:"questions_digest,omitempty"`
+	IntentDigest    string                   `json:"intent_digest,omitempty"`
+	Phases          map[string]PhaseArtifact `json:"phases,omitempty"`
+	Lineage         *Lineage                 `json:"lineage,omitempty"`
 }
 
 type Metadata struct {
@@ -134,11 +135,12 @@ type Metadata struct {
 }
 
 type Input struct {
-	Metadata Metadata
-	Result   protocol.Result
-	Answers  *protocol.Answers
-	Intent   string
-	Attempt  int
+	Metadata  Metadata
+	Result    protocol.Result
+	Answers   *protocol.Answers
+	Questions []protocol.Question
+	Intent    string
+	Attempt   int
 }
 
 type Artifact struct {
@@ -195,8 +197,32 @@ func (a Artifact) Validate() error {
 	for _, decision := range a.Manifest.Decisions {
 		required[decision.Path] = decision.Digest
 	}
+	var answers *protocol.Answers
 	if a.Manifest.AnswersDigest != "" {
 		required["answers.json"] = a.Manifest.AnswersDigest
+		var decoded protocol.Answers
+		if err := json.Unmarshal(a.Files["answers.json"], &decoded); err != nil {
+			return fmt.Errorf("decode answers.json: %w", err)
+		}
+		if decoded.ProtocolVersion != protocol.Version || decoded.CurrentFingerprint != a.Manifest.BaselineSource.Fingerprint || decoded.DesiredFingerprint != a.Manifest.DesiredSource.Fingerprint {
+			return fmt.Errorf("answers.json does not match the bundle fingerprints")
+		}
+		answers = &decoded
+	}
+	if a.Manifest.QuestionsDigest != "" {
+		required["questions.json"] = a.Manifest.QuestionsDigest
+		var questions []protocol.Question
+		if err := json.Unmarshal(a.Files["questions.json"], &questions); err != nil {
+			return fmt.Errorf("decode questions.json: %w", err)
+		}
+		if err := validateQuestions(questions, a.Manifest.BaselineSource.Fingerprint, a.Manifest.DesiredSource.Fingerprint); err != nil {
+			return fmt.Errorf("validate questions.json: %w", err)
+		}
+		if answers != nil {
+			if err := validateAnswerQuestions(*answers, questions); err != nil {
+				return fmt.Errorf("validate answer questions: %w", err)
+			}
+		}
 	}
 	if a.Manifest.IntentDigest != "" {
 		required["intent.md"] = a.Manifest.IntentDigest
@@ -297,6 +323,17 @@ func Build(input Input) (Artifact, error) {
 		files["answers.json"] = answerBytes
 		manifest.AnswersDigest = Digest(answerBytes)
 	}
+	if len(input.Questions) > 0 {
+		if err := validateQuestions(input.Questions, input.Result.CurrentFingerprint, input.Result.DesiredFingerprint); err != nil {
+			return Artifact{}, err
+		}
+		questionBytes, err := jsonDocument(input.Questions)
+		if err != nil {
+			return Artifact{}, fmt.Errorf("encode questions: %w", err)
+		}
+		files["questions.json"] = questionBytes
+		manifest.QuestionsDigest = Digest(questionBytes)
+	}
 	if strings.TrimSpace(input.Intent) != "" {
 		intent := []byte(strings.TrimRight(input.Intent, "\n") + "\n")
 		files["intent.md"] = intent
@@ -373,6 +410,16 @@ func ResultDigest(result protocol.Result) (string, error) {
 // Conflicting receipts within one generation are rejected rather than allowing
 // answer rebinding to choose one implicitly.
 func DecisionQuestions(artifact Artifact) ([]protocol.Question, error) {
+	if artifact.Manifest.QuestionsDigest != "" {
+		var questions []protocol.Question
+		if err := json.Unmarshal(artifact.Files["questions.json"], &questions); err != nil {
+			return nil, fmt.Errorf("decode questions.json: %w", err)
+		}
+		if err := validateQuestions(questions, artifact.Manifest.BaselineSource.Fingerprint, artifact.Manifest.DesiredSource.Fingerprint); err != nil {
+			return nil, err
+		}
+		return questions, nil
+	}
 	questions := make(map[string]protocol.Question)
 	for _, receipt := range artifact.Manifest.Decisions {
 		var result protocol.Result
@@ -397,6 +444,42 @@ func DecisionQuestions(artifact Artifact) ([]protocol.Question, error) {
 		result = append(result, questions[id])
 	}
 	return result, nil
+}
+
+func validateQuestions(questions []protocol.Question, currentFingerprint, desiredFingerprint string) error {
+	seen := make(map[string]bool, len(questions))
+	for _, question := range questions {
+		id := question.Kind + ":" + question.Key
+		if question.Kind == "" || question.Key == "" || question.ScopeFingerprint == "" {
+			return fmt.Errorf("question kind, key, and scope fingerprint are required")
+		}
+		if seen[id] {
+			return fmt.Errorf("question %s is duplicated", id)
+		}
+		if question.CurrentFingerprint != currentFingerprint || question.DesiredFingerprint != desiredFingerprint {
+			return fmt.Errorf("question %s fingerprints do not match the bundle", id)
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+func validateAnswerQuestions(answers protocol.Answers, questions []protocol.Question) error {
+	byID := make(map[string]protocol.Question, len(questions))
+	for _, question := range questions {
+		byID[question.Kind+":"+question.Key] = question
+	}
+	for _, answer := range answers.Answers {
+		id := answer.Kind + ":" + answer.Key
+		question, exists := byID[id]
+		if !exists {
+			return fmt.Errorf("answer %s has no canonical question", id)
+		}
+		if answer.QuestionFingerprint != "" && answer.QuestionFingerprint != question.ScopeFingerprint {
+			return fmt.Errorf("answer %s has a stale question fingerprint", id)
+		}
+	}
+	return nil
 }
 
 func jsonDocument(value any) ([]byte, error) {
@@ -572,7 +655,7 @@ func (m Manifest) Validate() error {
 	}
 	for name, digest := range map[string]string{
 		"result": m.ResultDigest, "plan": m.PlanDigest,
-		"answers": m.AnswersDigest, "intent": m.IntentDigest,
+		"answers": m.AnswersDigest, "questions": m.QuestionsDigest, "intent": m.IntentDigest,
 	} {
 		if digest != "" && !fingerprintPattern.MatchString(digest) {
 			return fmt.Errorf("%s digest %q is invalid", name, digest)

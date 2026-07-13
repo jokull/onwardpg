@@ -35,6 +35,24 @@ type Replay struct {
 	Provenance string
 }
 
+// Through returns the chain prefix ending at bundleID. It is used by
+// verification so a historical bundle can be checked without applying later
+// entries that happen to exist in the working tree.
+func (c Chain) Through(bundleID string) (Chain, error) {
+	if !safeName(bundleID) {
+		return Chain{}, fmt.Errorf("bundle id %q is invalid", bundleID)
+	}
+	prefix := Chain{Target: c.Target, RootDigest: c.RootDigest, HeadDigest: c.RootDigest}
+	for _, entry := range c.Entries {
+		prefix.Entries = append(prefix.Entries, entry)
+		prefix.HeadDigest = entry.Artifact.Manifest.History.EntryDigest
+		if entry.Artifact.Manifest.BundleID == bundleID {
+			return prefix, nil
+		}
+	}
+	return Chain{}, fmt.Errorf("bundle %s is not in target history", bundleID)
+}
+
 // Load validates all bundle directories for target and orders them by their
 // hash links. It rejects forks and disconnected entries instead of choosing a
 // filename, timestamp, or directory order.

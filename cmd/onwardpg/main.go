@@ -15,9 +15,11 @@ import (
 	"github.com/jokull/onwardpg/internal/freshness"
 	"github.com/jokull/onwardpg/internal/gitbase"
 	"github.com/jokull/onwardpg/internal/graphplan"
+	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/prflow"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
+	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
 )
 
@@ -27,18 +29,345 @@ func main() { os.Exit(run()) }
 
 func run() int {
 	if len(os.Args) < 2 {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg <plan|config|pr>"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg <plan|dev|bundle|config|pr|ci>"))
 	}
 	switch os.Args[1] {
 	case "plan":
 		return runPlan(os.Args[2:])
+	case "dev":
+		return runDev(os.Args[2:])
 	case "config":
 		return runConfig(os.Args[2:])
+	case "bundle":
+		return runBundle(os.Args[2:])
+	case "ci":
+		return runCI(os.Args[2:])
 	case "pr":
 		return runPR(os.Args[2:])
 	default:
 		return writeError("invalid_invocation", fmt.Errorf("unknown command %q", os.Args[1]))
 	}
+}
+
+func runDev(arguments []string) int { return runDevAt(arguments, ".") }
+
+func runDevAt(arguments []string, start string) int {
+	if len(arguments) == 0 || arguments[0] != "plan" {
+		return writeError("invalid_invocation", errors.New("usage: onwardpg dev plan --target NAME [--answers FILE] [--sql]"))
+	}
+	flags := flag.NewFlagSet("dev plan", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	targetName := flags.String("target", "", "configured database target name")
+	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
+	answerFile := flags.String("answers", "", "fingerprint-bound planner answers")
+	sqlOutput := flags.Bool("sql", false, "print planned SQL instead of JSON")
+	indent := flags.String("indent", "", "prefix each rendered SQL line")
+	concurrentIndexes := flags.Bool("concurrent-indexes", false, "create standalone indexes concurrently")
+	ifNotExists := flags.Bool("if-not-exists", false, "emit IF NOT EXISTS for schema and table creation")
+	ifExists := flags.Bool("if-exists", false, "emit IF EXISTS for schema and table drops")
+	cascadeDrops := flags.Bool("cascade-drops", false, "emit CASCADE for schema and table drops")
+	var schemaQualifier optionalString
+	flags.Var(&schemaQualifier, "schema-qualifier", "scope to one schema and render names using this qualifier")
+	var ignores stringsFlag
+	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return writeError("invalid_invocation", err)
+	}
+	if *targetName == "" {
+		return writeError("invalid_invocation", errors.New("dev plan requires --target"))
+	}
+	configPath := *configName
+	if !filepath.IsAbs(configPath) {
+		configPath = filepath.Join(start, configPath)
+	}
+	configPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	config, err := workspace.Load(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	target, err := config.Target(*targetName)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	devURL := os.Getenv(target.DevDatabaseEnv)
+	if devURL == "" {
+		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv))
+	}
+	answers, err := readAnswers(*answerFile)
+	if err != nil {
+		return writeError("invalid_answers", err)
+	}
+	ctx := context.Background()
+	compiled, err := workspace.CompileDDL(ctx, filepath.Dir(configPath), *targetName, target)
+	if err != nil {
+		return writeError("source_error", err)
+	}
+	current, err := source.LoadGraphForComparison(ctx, source.Parse(devURL), "", ignores)
+	if err != nil {
+		return writeError("source_error", err)
+	}
+	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, devURL, ignores)
+	if err != nil {
+		return writeError("source_error", err)
+	}
+	if err := source.ValidateIgnoreSelectors(ignores, current, desired); err != nil {
+		return writeError("invalid_ignore", err)
+	}
+	options := graphplan.Options{
+		ConcurrentIndexes: *concurrentIndexes, IfNotExists: *ifNotExists,
+		IfExists: *ifExists, CascadeDrops: *cascadeDrops,
+	}
+	if schemaQualifier.set {
+		options.SchemaQualifier = &schemaQualifier.value
+	}
+	result, err := graphplan.Build(current, desired, answers, options)
+	if err != nil {
+		return writeError("planning_error", err)
+	}
+	if *sqlOutput && result.Status == protocol.Planned {
+		_, _ = fmt.Fprintln(os.Stdout, protocol.RenderSQL(result, *indent))
+	} else {
+		_ = json.NewEncoder(os.Stdout).Encode(result)
+	}
+	return resultExitCode(result.Status)
+}
+
+func runBundle(arguments []string) int {
+	return runBundleAt(arguments, ".")
+}
+
+func runBundleAt(arguments []string, start string) int {
+	if len(arguments) == 0 || arguments[0] != "verify" {
+		return writeError("invalid_invocation", errors.New("usage: onwardpg bundle verify --target NAME --bundle ID [--through PHASE]"))
+	}
+	flags := flag.NewFlagSet("bundle verify", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	targetName := flags.String("target", "", "configured database target name")
+	bundleID := flags.String("bundle", "", "bundle to verify")
+	through := flags.String("through", "contract", "last phase to execute: expand, migrate, manual, or contract")
+	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return writeError("invalid_invocation", err)
+	}
+	if *targetName == "" || *bundleID == "" {
+		return writeError("invalid_invocation", errors.New("bundle verify requires --target and --bundle"))
+	}
+	configPath := *configName
+	if !filepath.IsAbs(configPath) {
+		configPath = filepath.Join(start, configPath)
+	}
+	configPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	config, err := workspace.Load(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	target, err := config.Target(*targetName)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	adminURL := os.Getenv(target.DevDatabaseEnv)
+	if adminURL == "" {
+		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv))
+	}
+	chain, err := history.Load(filepath.Dir(configPath), config.BundleRoot, *targetName)
+	if err != nil {
+		return writeError("invalid_history", err)
+	}
+	prefix, err := chain.Through(*bundleID)
+	if err != nil {
+		return writeError("invalid_history", err)
+	}
+	manifest := prefix.Entries[len(prefix.Entries)-1].Artifact.Manifest
+	options := graphplan.Options{
+		ConcurrentIndexes: manifest.Planner.Options.ConcurrentIndexes,
+		IfNotExists:       manifest.Planner.Options.IfNotExists,
+		IfExists:          manifest.Planner.Options.IfExists,
+		CascadeDrops:      manifest.Planner.Options.CascadeDrops,
+		SchemaQualifier:   manifest.Planner.Options.SchemaQualifier,
+	}
+	report, err := verify.Run(context.Background(), verify.Input{
+		AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: *through,
+		Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+	})
+	if err != nil {
+		return writeError("verification_error", err)
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(report)
+	if report.Outcome == "verified" {
+		return 0
+	}
+	return 4
+}
+
+const ciVersion = "onwardpg.ci-check/v1"
+
+type ciFinding struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type ciReport struct {
+	ProtocolVersion string          `json:"protocol_version"`
+	Outcome         string          `json:"outcome"`
+	Target          string          `json:"target"`
+	BundleID        string          `json:"bundle_id"`
+	Repository      gitbase.Status  `json:"repository"`
+	PRStatus        *prStatusReport `json:"pr_status,omitempty"`
+	Verification    *verify.Report  `json:"verification,omitempty"`
+	Findings        []ciFinding     `json:"findings,omitempty"`
+}
+
+func runCI(arguments []string) int { return runCIAt(arguments, ".") }
+
+func runCIAt(arguments []string, start string) int {
+	if len(arguments) == 0 || arguments[0] != "check" {
+		return writeError("invalid_invocation", errors.New("usage: onwardpg ci check --base REF --target NAME --bundle ID"))
+	}
+	flags := flag.NewFlagSet("ci check", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	base := flags.String("base", "", "exact PR base ref")
+	targetName := flags.String("target", "", "configured database target name")
+	bundleID := flags.String("bundle", "", "single logical bundle owned by this PR")
+	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return writeError("invalid_invocation", err)
+	}
+	if *base == "" || *targetName == "" || *bundleID == "" {
+		return writeError("invalid_invocation", errors.New("ci check requires --base, --target, and --bundle"))
+	}
+	ctx := context.Background()
+	repository, err := gitbase.Open(ctx, start)
+	if err != nil {
+		return writeError("git_status_error", err)
+	}
+	configPath := *configName
+	if !filepath.IsAbs(configPath) {
+		configPath = filepath.Join(repository.Root, configPath)
+	}
+	config, err := workspace.Load(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	target, err := config.Target(*targetName)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	historyPath := filepath.ToSlash(filepath.Join(config.BundleRoot, *targetName))
+	status, err := repository.Inspect(ctx, gitbase.Options{
+		BaseRef: *base, HeadRef: "HEAD", HistoryPath: historyPath,
+		IncludeWorkingTree: true, ExcludePaths: []string{config.BundleRoot},
+	})
+	if err != nil {
+		return writeError("git_status_error", err)
+	}
+	report := ciReport{
+		ProtocolVersion: ciVersion, Outcome: "failed", Target: *targetName,
+		BundleID: *bundleID, Repository: status,
+	}
+	add := func(code, message string) {
+		report.Findings = append(report.Findings, ciFinding{Code: code, Message: message})
+	}
+	for _, problem := range status.Problems {
+		add(problem.Code, problem.Message)
+	}
+	if status.Dirty {
+		add("dirty_working_tree", "CI verification requires committed schema and configuration inputs")
+	}
+	ids, hasWorkingHistory := branchBundleIDs(status)
+	if hasWorkingHistory {
+		add("uncommitted_bundle", "the logical migration bundle must be committed before CI verification")
+	}
+	if len(ids) != 1 || ids[0] != *bundleID {
+		add("incorrect_bundle_stack", fmt.Sprintf("PR must own exactly bundle %q for target %q; found %v", *bundleID, *targetName, ids))
+	}
+	if len(report.Findings) > 0 {
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return 4
+	}
+	prStatus, err := assessPRBundle(ctx, repository, config, *targetName, *bundleID, target, status)
+	if err != nil {
+		var conflict *gitbase.MergeConflictError
+		if errors.As(err, &conflict) {
+			add("merge_conflict", conflict.Error())
+			_ = json.NewEncoder(os.Stdout).Encode(report)
+			return 4
+		}
+		return writeError("pr_analysis_error", err)
+	}
+	report.PRStatus = &prStatus
+	if prStatus.Outcome != "fresh" || prStatus.Analysis == nil || prStatus.Analysis.Outcome != "ready" {
+		add("pr_bundle_not_fresh", "the bundle is stale, unanswered, unsupported, or does not converge to the prepared PR schema")
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return 4
+	}
+	chain, err := history.Load(repository.Root, config.BundleRoot, *targetName)
+	if err != nil {
+		add("invalid_history", err.Error())
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return 4
+	}
+	manifest := chain.Entries[len(chain.Entries)-1].Artifact.Manifest
+	if manifest.BundleID != *bundleID {
+		add("incorrect_history_head", fmt.Sprintf("history head is bundle %q, want PR bundle %q", manifest.BundleID, *bundleID))
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return 4
+	}
+	adminURL := os.Getenv(target.DevDatabaseEnv)
+	if adminURL == "" {
+		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv))
+	}
+	verification, err := verify.Run(ctx, verify.Input{
+		AdminURL: adminURL, Chain: chain, BundleID: *bundleID,
+		Ignores: manifest.Planner.IgnoreSelectors,
+		Options: graphplan.Options{
+			ConcurrentIndexes: manifest.Planner.Options.ConcurrentIndexes,
+			IfNotExists:       manifest.Planner.Options.IfNotExists,
+			IfExists:          manifest.Planner.Options.IfExists,
+			CascadeDrops:      manifest.Planner.Options.CascadeDrops,
+			SchemaQualifier:   manifest.Planner.Options.SchemaQualifier,
+		},
+	})
+	if err != nil {
+		return writeError("verification_error", err)
+	}
+	report.Verification = &verification
+	if verification.Outcome != "verified" {
+		add("clone_not_convergent", "executing the complete bundle chain in disposable PostgreSQL did not converge")
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return 4
+	}
+	report.Outcome = "passed"
+	_ = json.NewEncoder(os.Stdout).Encode(report)
+	return 0
+}
+
+func branchBundleIDs(status gitbase.Status) ([]string, bool) {
+	prefix := strings.TrimSuffix(status.HistoryPath, "/") + "/"
+	seen := make(map[string]bool)
+	working := false
+	for _, change := range status.HistoryChanges {
+		if change.Ownership != "branch_draft" || !strings.HasPrefix(change.Path, prefix) {
+			continue
+		}
+		relative := strings.TrimPrefix(change.Path, prefix)
+		id := strings.SplitN(relative, "/", 2)[0]
+		if id != "" {
+			seen[id] = true
+		}
+		working = working || change.Origin == "working_tree"
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, working
 }
 
 func runPR(arguments []string) int {
@@ -100,11 +429,25 @@ func runPRStatusAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("git_status_error", err)
 	}
+	if status.Outcome == "ready" {
+		prepared, prepareErr := repository.PreparePRTree(context.Background(), status)
+		if prepareErr != nil {
+			var conflict *gitbase.MergeConflictError
+			if errors.As(prepareErr, &conflict) {
+				status.Outcome = "conflicting"
+				status.Problems = append(status.Problems, gitbase.Problem{Code: "merge_conflict", Message: conflict.Error()})
+			} else {
+				return writeError("git_status_error", prepareErr)
+			}
+		} else {
+			_ = prepared.Close()
+		}
+	}
 	if *bundleID != "" && status.Outcome == "ready" {
 		return runPRBundleStatus(repository, config, *targetName, *bundleID, target, status)
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(status)
-	if status.Outcome == "blocked" {
+	if status.Outcome != "ready" {
 		return 4
 	}
 	return 0
@@ -121,32 +464,43 @@ type prStatusReport struct {
 }
 
 func runPRBundleStatus(repository gitbase.Repository, config workspace.Config, targetName, bundleID string, target workspace.Target, status gitbase.Status) int {
+	report, err := assessPRBundle(context.Background(), repository, config, targetName, bundleID, target, status)
+	if err != nil {
+		return writeError("pr_analysis_error", err)
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(report)
+	if report.Outcome == "fresh" {
+		return 0
+	}
+	return 4
+}
+
+func assessPRBundle(ctx context.Context, repository gitbase.Repository, config workspace.Config, targetName, bundleID string, target workspace.Target, status gitbase.Status) (prStatusReport, error) {
 	destination, err := config.BundlePath(repository.Root, targetName, bundleID)
 	if err != nil {
-		return writeError("invalid_bundle", err)
+		return prStatusReport{}, err
 	}
 	artifact, err := bundle.Read(destination)
 	if err != nil {
 		fresh := freshness.ArtifactStale(err)
 		report := prStatusReport{ProtocolVersion: prStatusVersion, Outcome: fresh.Outcome, Repository: status, Freshness: &fresh}
-		_ = json.NewEncoder(os.Stdout).Encode(report)
-		return 4
+		return report, nil
 	}
 	if artifact.Manifest.Target != targetName || artifact.Manifest.BundleID != bundleID || artifact.Manifest.Mode != "pr" {
-		return writeError("invalid_bundle", errors.New("bundle identity or mode does not match the requested PR target"))
+		return prStatusReport{}, errors.New("bundle identity or mode does not match the requested PR target")
 	}
 	devURL := os.Getenv(target.DevDatabaseEnv)
 	if devURL == "" {
-		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv))
+		return prStatusReport{}, fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv)
 	}
-	baseTree, err := repository.PrepareCommitTree(context.Background(), status.BaseCommit)
+	baseTree, err := repository.PrepareCommitTree(ctx, status.BaseCommit)
 	if err != nil {
-		return writeError("git_status_error", err)
+		return prStatusReport{}, err
 	}
 	defer baseTree.Close()
-	headTree, err := repository.PreparePRTree(context.Background(), status)
+	headTree, err := repository.PreparePRTree(ctx, status)
 	if err != nil {
-		return writeError("git_status_error", err)
+		return prStatusReport{}, err
 	}
 	defer headTree.Close()
 	options := graphplan.Options{
@@ -167,27 +521,26 @@ func runPRBundleStatus(repository gitbase.Repository, config workspace.Config, t
 	if data, exists := artifact.Files["answers.json"]; exists {
 		var previous protocol.Answers
 		if err := json.Unmarshal(data, &previous); err != nil {
-			return writeError("invalid_bundle", fmt.Errorf("decode bundled answers: %w", err))
+			return prStatusReport{}, fmt.Errorf("decode bundled answers: %w", err)
 		}
 		questions, err := bundle.DecisionQuestions(artifact)
 		if err != nil {
-			return writeError("invalid_bundle", err)
+			return prStatusReport{}, err
 		}
-		analysis, err = prflow.AnalyzeWithReboundAnswers(context.Background(), input, previous, questions)
+		analysis, err = prflow.AnalyzeWithReboundAnswers(ctx, input, previous, questions)
 	} else {
-		analysis, err = prflow.Analyze(context.Background(), input)
+		analysis, err = prflow.Analyze(ctx, input)
 	}
 	if err != nil {
-		return writeError("pr_analysis_error", err)
+		return prStatusReport{}, err
 	}
-	if analysis.Outcome == "blocked" || analysis.Plan == nil {
+	if analysis.Outcome != "ready" || analysis.Plan == nil {
 		report := prStatusReport{ProtocolVersion: prStatusVersion, Outcome: "blocked", Repository: status, Analysis: &analysis}
-		_ = json.NewEncoder(os.Stdout).Encode(report)
-		return 4
+		return report, nil
 	}
 	resultDigest, err := bundle.ResultDigest(*analysis.Plan)
 	if err != nil {
-		return writeError("invalid_bundle", err)
+		return prStatusReport{}, err
 	}
 	currentPlanner := bundle.PlannerReceipt{
 		Version: buildVersion, Options: artifact.Manifest.Planner.Options,
@@ -197,17 +550,14 @@ func runPRBundleStatus(repository gitbase.Repository, config workspace.Config, t
 		BaselineRef: status.BaseRef, BaselineRevision: status.BaseCommit, DesiredRevision: status.HeadRevision,
 		BaselineFingerprint: analysis.SchemaSquare.BaseCodeFingerprint,
 		DesiredFingerprint:  analysis.SchemaSquare.HeadCodeFingerprint,
+		HistoryParentDigest: analysis.HistoryDigest,
 		Planner:             currentPlanner, ResultDigest: resultDigest,
 	})
 	if err != nil {
-		return writeError("freshness_error", err)
+		return prStatusReport{}, err
 	}
 	report := prStatusReport{ProtocolVersion: prStatusVersion, Outcome: fresh.Outcome, Repository: status, Analysis: &analysis, Freshness: &fresh}
-	_ = json.NewEncoder(os.Stdout).Encode(report)
-	if fresh.Outcome == "fresh" {
-		return 0
-	}
-	return 4
+	return report, nil
 }
 
 func runPRRegenerateAt(arguments []string, start string) int {
@@ -349,6 +699,18 @@ func runPRRegenerateAt(arguments []string, start string) int {
 		rebound := analysis.Rebind.Answers
 		answerReceipt = &rebound
 	}
+	var questionReceipt []protocol.Question
+	if analysis.Rebind != nil {
+		questionReceipt = append(questionReceipt, analysis.Rebind.Questions...)
+	} else if previous, readErr := bundle.Read(destination); readErr == nil {
+		questionReceipt, err = bundle.DecisionQuestions(previous)
+		if err != nil {
+			return writeError("invalid_bundle", err)
+		}
+	} else if !os.IsNotExist(readErr) {
+		return writeError("invalid_bundle", readErr)
+	}
+	questionReceipt = mergeQuestions(questionReceipt, analysis.Plan.Questions)
 	metadata := bundle.Metadata{
 		BundleID: *bundleID, Target: *targetName, Purpose: *purpose, Mode: "pr",
 		BaseRef: *base, BaseCommit: status.BaseCommit, HeadRevision: status.HeadRevision,
@@ -382,7 +744,7 @@ func runPRRegenerateAt(arguments []string, start string) int {
 	metadata.Generation = generation
 	artifact, err := bundle.Build(bundle.Input{
 		Metadata: metadata,
-		Result:   *analysis.Plan, Answers: answerReceipt, Intent: intent, Attempt: attempt,
+		Result:   *analysis.Plan, Answers: answerReceipt, Questions: questionReceipt, Intent: intent, Attempt: attempt,
 	})
 	if err != nil {
 		return writeError("invalid_bundle", err)
@@ -503,7 +865,7 @@ func runPlan(arguments []string) int {
 		metadata.Generation = generation
 		artifact, err := bundle.Build(bundle.Input{
 			Metadata: metadata,
-			Result:   result, Answers: answerReceipt, Intent: intent, Attempt: attempt,
+			Result:   result, Answers: answerReceipt, Questions: result.Questions, Intent: intent, Attempt: attempt,
 		})
 		if err != nil {
 			return writeError("invalid_bundle", err)
@@ -517,7 +879,11 @@ func runPlan(arguments []string) int {
 	} else {
 		_ = json.NewEncoder(os.Stdout).Encode(result)
 	}
-	switch result.Status {
+	return resultExitCode(result.Status)
+}
+
+func resultExitCode(status protocol.Status) int {
+	switch status {
 	case protocol.Planned:
 		return 0
 	case protocol.NeedsInput:
@@ -612,6 +978,25 @@ func sortedUniqueStrings(values []string) []string {
 		write++
 	}
 	return result[:write]
+}
+
+func mergeQuestions(first, second []protocol.Question) []protocol.Question {
+	result := append([]protocol.Question(nil), first...)
+	seen := make(map[string]bool, len(result))
+	for _, question := range result {
+		seen[question.Kind+":"+question.Key] = true
+	}
+	for _, question := range second {
+		id := question.Kind + ":" + question.Key
+		if !seen[id] {
+			result = append(result, question)
+			seen[id] = true
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Kind+":"+result[i].Key < result[j].Kind+":"+result[j].Key
+	})
+	return result
 }
 
 func repositoryReceiptPaths(root string, names ...string) []string {

@@ -28,7 +28,7 @@ claim and does not apply migrations automatically.
 - Read-only `pr status` Git provenance with base-erosion, protected migration
   history, concurrent path-collision, and dirty-revision classification.
 - Isolated synthetic PR trees, deterministic DDL export commands,
-  ordered-SQL base-history replay, `BC == BM` enforcement, and Git-aware
+  hash-chained base-history replay, `BC == BM` enforcement, and Git-aware
   `pr regenerate` bundle generation.
 - Git-free PR-analysis core fed by prepared directories and
   explicit receipts, with Git retained as optional CLI orchestration.
@@ -47,6 +47,20 @@ claim and does not apply migrations automatically.
   erosion, with explicit carried, invalidated, unanswered, and deferred
   reports. Equivalent Git provenance refreshes no longer create a new bundle
   generation when the schema/planner/history contract is unchanged.
+- Config-driven `dev plan` for the deliberate local database loop, including
+  deterministic `schema_file` / `schema_command` export and the same typed
+  questions, answer files, phase SQL, and residual diff as the low-level CLI.
+- Canonical staged-question receipts in ready bundles, allowing rename and
+  manual-work answers to survive repeated feature edits and multiple base
+  history changes instead of disappearing at generation boundaries.
+- A `staged_with_backfill` NOT NULL strategy that records application-owned
+  manual SQL and boolean verification without inventing data logic.
+- `bundle verify`, which executes selected phases only in self-created
+  disposable databases, checks manual postconditions, and reports residual or
+  full convergence; failed transactional postconditions roll back.
+- Strict read-only `ci check` composition for committed one-bundle ownership,
+  freshness, hash-chain integrity, schema-square fidelity, and clone
+  convergence.
 
 ### Known limitations
 
@@ -57,3 +71,6 @@ claim and does not apply migrations automatically.
   [docs/supported-features.md](docs/supported-features.md).
 - The real-PostgreSQL convergence corpus is growing and is not yet a complete
   production compatibility certification.
+- Execution/amendment receipts and the post-merge delayed-contract lifecycle
+  remain future work; the developer preview does not include a production
+  migration apply command.

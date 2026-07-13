@@ -117,8 +117,16 @@ mode, reviewed SQL statements, and optional verification SQL. onwardpg emits
 that contract in its own `MANUAL` batch and never invents
 a detach/attach sequence, cast, or data movement. An acknowledgement without
 the actual contract is rejected. Summaries and verification queries are
-single-line metadata; only the explicitly supplied work statements are
-executable SQL.
+single-line receipt fields; verification queries execute only during
+self-created clone verification and must each return one boolean `true` row.
+Only explicitly supplied work statements change schema or data.
+
+A nullable-to-`NOT NULL` transition offers `direct`, `staged`, and
+`staged_with_backfill`. The last option asks a second fingerprint-bound
+`backfill_not_null` question. Its application-owned SQL runs in the manual
+phase after the `NOT VALID` guard is installed and before contract validation,
+`SET NOT NULL`, and helper-constraint removal. onwardpg never derives the
+backfill expression from the schema.
 
 PostgreSQL's propagated parent/child indexes and constraints are graph-modeled
 with typed child→parent edges. This includes primary/unique constraints and

@@ -15,6 +15,7 @@ type RebindFinding struct {
 type RebindReport struct {
 	ProtocolVersion string          `json:"protocol_version"`
 	Answers         Answers         `json:"answers"`
+	Questions       []Question      `json:"questions,omitempty"`
 	Carried         []string        `json:"carried,omitempty"`
 	Invalidated     []RebindFinding `json:"invalidated,omitempty"`
 	Unanswered      []string        `json:"unanswered,omitempty"`

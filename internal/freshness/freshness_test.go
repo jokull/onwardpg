@@ -31,7 +31,7 @@ func TestAssessClassifiesFreshProvenanceAndSchemaChanges(t *testing.T) {
 	}
 	observation.BaselineRevision = strings.Repeat("c", 40)
 	report, err = Assess(artifact, observation)
-	if err != nil || report.Outcome != "stale" || len(report.Findings) != 1 || report.Findings[0].Code != "provenance_stale" {
+	if err != nil || report.Outcome != "fresh" || len(report.Notices) != 1 || report.Notices[0].Code != "provenance_changed" {
 		t.Fatalf("provenance report = %#v, %v", report, err)
 	}
 	observation.BaselineFingerprint = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -41,13 +41,26 @@ func TestAssessClassifiesFreshProvenanceAndSchemaChanges(t *testing.T) {
 	}
 }
 
+func TestAssessRejectsChangedHistoryParentDespiteEquivalentSchema(t *testing.T) {
+	artifact, result := testArtifactWithHistory(t)
+	digest, _ := bundle.ResultDigest(result)
+	report, err := Assess(artifact, Observation{
+		BaselineRef: "main", BaselineRevision: strings.Repeat("a", 40), DesiredRevision: strings.Repeat("b", 40),
+		BaselineFingerprint: current, DesiredFingerprint: desired, Planner: artifact.Manifest.Planner,
+		ResultDigest: digest, HistoryParentDigest: strings.Repeat("c", 71),
+	})
+	if err != nil || report.Outcome != "stale" || len(report.Findings) != 1 || report.Findings[0].Code != "history_stale" {
+		t.Fatalf("history report = %#v, %v", report, err)
+	}
+}
+
 func TestAssessRequiresSuccessorForExecutedStaleBundle(t *testing.T) {
 	artifact, result := testArtifact(t)
 	digest, _ := bundle.ResultDigest(result)
 	report, err := Assess(artifact, Observation{
 		BaselineRef:      "main",
 		BaselineRevision: strings.Repeat("a", 40), DesiredRevision: strings.Repeat("c", 40),
-		BaselineFingerprint: current, DesiredFingerprint: desired, Planner: artifact.Manifest.Planner,
+		BaselineFingerprint: current, DesiredFingerprint: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Planner: artifact.Manifest.Planner,
 		ResultDigest: digest, Executed: true,
 	})
 	if err != nil || report.Outcome != "successor_required" || report.Findings[len(report.Findings)-1].Code != "immutable_successor_required" {
@@ -56,6 +69,14 @@ func TestAssessRequiresSuccessorForExecutedStaleBundle(t *testing.T) {
 }
 
 func testArtifact(t *testing.T) (bundle.Artifact, protocol.Result) {
+	return buildTestArtifact(t, "")
+}
+
+func testArtifactWithHistory(t *testing.T) (bundle.Artifact, protocol.Result) {
+	return buildTestArtifact(t, bundle.HistoryRootDigest())
+}
+
+func buildTestArtifact(t *testing.T, historyParent string) (bundle.Artifact, protocol.Result) {
 	t.Helper()
 	statement := protocol.Statement{SQL: "CREATE TABLE users (id bigint);", Phase: "expand", Safety: "safe"}
 	statement.ID = protocol.StableStatementID(statement)
@@ -70,7 +91,7 @@ func testArtifact(t *testing.T) (bundle.Artifact, protocol.Result) {
 		BaseRef: "main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
 		BaselineSource: bundle.SourceReceipt{Kind: "ddl_export", Description: "base tree", Fingerprint: current},
 		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "desired tree", Fingerprint: desired},
-		Planner:        bundle.PlannerReceipt{Version: "test"},
+		Planner:        bundle.PlannerReceipt{Version: "test"}, HistoryParentDigest: historyParent,
 	}, Result: result})
 	if err != nil {
 		t.Fatal(err)

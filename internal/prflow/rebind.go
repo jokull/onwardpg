@@ -44,6 +44,7 @@ func AnalyzeWithReboundAnswers(ctx context.Context, input Input, previous protoc
 			analysis.Rebind = &report
 			return analysis, nil
 		}
+		appendRebindQuestions(&report, analysis.Plan.Questions)
 
 		candidates := protocol.Answers{
 			ProtocolVersion: previous.ProtocolVersion, CurrentFingerprint: previous.CurrentFingerprint,
@@ -76,6 +77,20 @@ func AnalyzeWithReboundAnswers(ctx context.Context, input Input, previous protoc
 		}
 	}
 	return Analysis{}, fmt.Errorf("answer rebinding did not converge")
+}
+
+func appendRebindQuestions(report *protocol.RebindReport, questions []protocol.Question) {
+	seen := make(map[string]bool, len(report.Questions))
+	for _, question := range report.Questions {
+		seen[question.Kind+":"+question.Key] = true
+	}
+	for _, question := range questions {
+		id := question.Kind + ":" + question.Key
+		if !seen[id] {
+			report.Questions = append(report.Questions, question)
+			seen[id] = true
+		}
+	}
 }
 
 func finalizeRebindReport(report *protocol.RebindReport, carried protocol.Answers, remaining map[string]protocol.Answer, questions []protocol.Question, final bool) {
