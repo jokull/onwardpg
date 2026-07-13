@@ -46,6 +46,8 @@ type decisions struct {
 	matViewRebuild  map[pgschema.ID]bool
 	matViewRefresh  map[pgschema.ID]protocol.ManualWork
 	partitionManual map[pgschema.ID]protocol.ManualWork
+	identityDrop    map[pgschema.ID]bool
+	authorization   map[pgschema.ID]bool
 }
 
 type renameIndex struct {
@@ -2478,7 +2480,7 @@ func renderChange(item change.Change, current, desired *pgschema.Snapshot, creat
 	case change.Drop:
 		return renderDropWithOptions(item.Before, options), nil, nil, nil
 	case change.Modify:
-		return renderModify(item.Before, item.After, choices, options, desired)
+		return renderModify(item.Before, item.After, choices, options, current, desired)
 	default:
 		return nil, nil, nil, fmt.Errorf("unknown change kind %q", item.Kind)
 	}
@@ -2515,6 +2517,13 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			parts = append(parts, "CYCLE")
 		} else {
 			parts = append(parts, "NO CYCLE")
+		}
+		if object.OwnedBy != nil {
+			ownedBy, unsupported := renderSequenceOwnedBy(object)
+			if unsupported != "" {
+				return nil, nil, []string{unsupported}, nil
+			}
+			parts = append(parts, ownedBy)
 		}
 		statements := []protocol.Statement{statement("CREATE SEQUENCE "+qualified(object.Schema, object.Name)+" "+strings.Join(parts, " ")+";", "expand", "safe", true)}
 		if object.Comment != nil {
@@ -2586,7 +2595,7 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		}
 		sql := "ALTER TABLE " + qualified(object.Table.Schema, object.Table.Name) + " ADD CONSTRAINT " + quote(object.Name) + " " + object.Definition + ";"
 		hazards := []string{"table_lock", "validation_scan_possible"}
-		return []protocol.Statement{statement(sql, "expand", "review", true, hazards...)}, nil, nil, nil
+		return []protocol.Statement{authorizationStatement(sql, "expand", "review", hazards...)}, nil, nil, nil
 	case pgschema.Index:
 		if object.Parent != nil {
 			// PostgreSQL propagates this index from the partitioned parent.
@@ -2655,6 +2664,36 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			statements = append(statements, statement(enabled, "expand", "review", true, "trigger_enable_state", "table_lock"))
 		}
 		return statements, nil, nil, nil
+	case pgschema.Policy:
+		sql, unsupported := renderPolicyCreate(object)
+		if unsupported != "" {
+			return nil, nil, []string{unsupported}, nil
+		}
+		hazards := []string{"row_security_policy_change", "authorization_change"}
+		if object.Permissive {
+			hazards = append(hazards, "permissive_policy_added")
+		} else {
+			hazards = append(hazards, "restrictive_policy_added", "availability_risk")
+		}
+		return []protocol.Statement{statement(sql, "expand", "review", true, hazards...)}, nil, nil, nil
+	case pgschema.RowSecurity:
+		if object.Table.Kind != pgschema.KindTable || object.Table.Schema == "" || object.Table.Name == "" || (!object.Enabled && !object.Forced) {
+			return nil, nil, []string{"row_security_render:" + object.ObjectID().String()}, nil
+		}
+		var statements []protocol.Statement
+		if object.Enabled {
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" ENABLE ROW LEVEL SECURITY;", "expand", "review", "row_security_enabled", "authorization_change", "availability_risk", "table_lock"))
+		}
+		if object.Forced {
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" FORCE ROW LEVEL SECURITY;", "expand", "review", "row_security_forced", "authorization_change", "availability_risk", "table_lock"))
+		}
+		return statements, nil, nil, nil
+	case pgschema.TablePrivilege:
+		sql, unsupported := renderTablePrivilege(object, "GRANT")
+		if unsupported != "" {
+			return nil, nil, []string{unsupported}, nil
+		}
+		return []protocol.Statement{authorizationStatement(sql, "expand", "review", "privilege_granted", "authorization_change")}, nil, nil, nil
 	default:
 		return nil, nil, []string{"create:" + object.ObjectID().String()}, nil
 	}
@@ -2772,6 +2811,60 @@ func renderIndex(index pgschema.Index) (string, string) {
 	return sql, ""
 }
 
+// replacementIndexName is stable for the complete old/new typed index pair.
+// The hash-only suffix avoids byte-truncation bugs for quoted Unicode names
+// while staying comfortably below PostgreSQL's 63-byte identifier limit.
+func replacementIndexName(before, after pgschema.Index) (string, error) {
+	before.Definition, after.Definition = "", ""
+	encoded, err := json.Marshal(struct {
+		Before pgschema.Index `json:"before"`
+		After  pgschema.Index `json:"after"`
+	}{Before: before, After: after})
+	if err != nil {
+		return "", fmt.Errorf("fingerprint replacement index %s: %w", after.ObjectID(), err)
+	}
+	digest := sha256.Sum256(encoded)
+	return "onwardpg_tmpidx_" + hex.EncodeToString(digest[:8]), nil
+}
+
+// PostgreSQL indexes share the pg_class relation-name namespace with tables,
+// sequences, views, and materialized views. Checking only typed index IDs
+// would permit a temporary name that CREATE/ALTER INDEX cannot actually use.
+func relationNameExists(snapshot *pgschema.Snapshot, schema, name string) bool {
+	for _, object := range snapshot.Objects() {
+		switch object := object.(type) {
+		case pgschema.Table:
+			if object.Schema == schema && object.Name == name {
+				return true
+			}
+		case pgschema.Sequence:
+			if object.Schema == schema && object.Name == name {
+				return true
+			}
+		case pgschema.View:
+			if object.Schema == schema && object.Name == name {
+				return true
+			}
+		case pgschema.Index:
+			if object.Table.Schema == schema && object.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func renderSequenceOwnedBy(sequence pgschema.Sequence) (string, string) {
+	if sequence.OwnedBy == nil {
+		return "", ""
+	}
+	ownedBy := *sequence.OwnedBy
+	if ownedBy.Kind != pgschema.KindColumn || ownedBy.Schema == "" || ownedBy.Name == "" || ownedBy.Part == "" {
+		return "", "sequence_owned_by_invalid:" + sequence.ObjectID().String()
+	}
+	return "OWNED BY " + qualified(ownedBy.Schema, ownedBy.Name) + "." + quote(ownedBy.Part), ""
+}
+
 func renderViewCreate(view pgschema.View, replace bool) (string, string) {
 	if view.Schema == "" || view.Name == "" || strings.TrimSpace(view.Definition) == "" {
 		return "", "view_render:" + view.ObjectID().String()
@@ -2839,6 +2932,165 @@ func renderTriggerEnabled(trigger pgschema.Trigger) (string, string) {
 		return "", "trigger_enabled_invalid:" + trigger.ObjectID().String()
 	}
 	return "ALTER TABLE " + qualified(trigger.Table.Schema, trigger.Table.Name) + " " + mode + " TRIGGER " + quote(trigger.Name) + ";", ""
+}
+
+func renderPolicyCreate(policy pgschema.Policy) (string, string) {
+	if policy.Table.Kind != pgschema.KindTable || policy.Table.Schema == "" || policy.Table.Name == "" || policy.Name == "" || len(policy.Roles) == 0 {
+		return "", "policy_render:" + policy.ObjectID().String()
+	}
+	command, unsupported := renderPolicyCommand(policy.Command, policy.ObjectID())
+	if unsupported != "" {
+		return "", unsupported
+	}
+	if unsupported := validatePolicyExpressions(policy); unsupported != "" {
+		return "", unsupported
+	}
+	roles, unsupported := renderRoles(policy.Roles, policy.ObjectID())
+	if unsupported != "" {
+		return "", unsupported
+	}
+	mode := "RESTRICTIVE"
+	if policy.Permissive {
+		mode = "PERMISSIVE"
+	}
+	sql := "CREATE POLICY " + quote(policy.Name) + " ON " + qualified(policy.Table.Schema, policy.Table.Name) + " AS " + mode + " FOR " + command + " TO " + roles
+	if policy.Using != nil {
+		if strings.TrimSpace(*policy.Using) == "" {
+			return "", "policy_using_empty:" + policy.ObjectID().String()
+		}
+		sql += " USING (" + *policy.Using + ")"
+	}
+	if policy.Check != nil {
+		if strings.TrimSpace(*policy.Check) == "" {
+			return "", "policy_check_empty:" + policy.ObjectID().String()
+		}
+		sql += " WITH CHECK (" + *policy.Check + ")"
+	}
+	return sql + ";", ""
+}
+
+func validatePolicyExpressions(policy pgschema.Policy) string {
+	switch policy.Command {
+	case "SELECT", "DELETE":
+		if policy.Check != nil {
+			return "policy_check_not_allowed:" + policy.ObjectID().String()
+		}
+	case "INSERT":
+		if policy.Using != nil {
+			return "policy_using_not_allowed:" + policy.ObjectID().String()
+		}
+	case "ALL", "UPDATE":
+		// Both expressions are legal.
+	default:
+		return "policy_command_invalid:" + policy.ObjectID().String()
+	}
+	return ""
+}
+
+func renderPolicyAlter(before, after pgschema.Policy) (string, string) {
+	if policyRequiresReplacement(before, after) {
+		return "", "policy_replacement_required:" + after.ObjectID().String()
+	}
+	if unsupported := validatePolicyExpressions(after); unsupported != "" {
+		return "", unsupported
+	}
+	var parts []string
+	if !reflect.DeepEqual(before.Roles, after.Roles) {
+		roles, unsupported := renderRoles(after.Roles, after.ObjectID())
+		if unsupported != "" {
+			return "", unsupported
+		}
+		parts = append(parts, "TO "+roles)
+	}
+	if !reflect.DeepEqual(before.Using, after.Using) {
+		if after.Using == nil || strings.TrimSpace(*after.Using) == "" {
+			return "", "policy_using_reset:" + after.ObjectID().String()
+		}
+		parts = append(parts, "USING ("+*after.Using+")")
+	}
+	if !reflect.DeepEqual(before.Check, after.Check) {
+		if after.Check == nil || strings.TrimSpace(*after.Check) == "" {
+			return "", "policy_check_reset:" + after.ObjectID().String()
+		}
+		parts = append(parts, "WITH CHECK ("+*after.Check+")")
+	}
+	if len(parts) == 0 {
+		return "", ""
+	}
+	return "ALTER POLICY " + quote(after.Name) + " ON " + qualified(after.Table.Schema, after.Table.Name) + " " + strings.Join(parts, " ") + ";", ""
+}
+
+func policyRequiresReplacement(before, after pgschema.Policy) bool {
+	return before.Table != after.Table || before.Name != after.Name || before.Permissive != after.Permissive || before.Command != after.Command || before.Using != nil && after.Using == nil || before.Check != nil && after.Check == nil
+}
+
+func renderPolicyCommand(command string, id pgschema.ID) (string, string) {
+	switch command {
+	case "ALL", "SELECT", "INSERT", "UPDATE", "DELETE":
+		return command, ""
+	default:
+		return "", "policy_command_invalid:" + id.String()
+	}
+}
+
+func renderRoles(roles []string, id pgschema.ID) (string, string) {
+	if len(roles) == 0 {
+		return "", "role_list_empty:" + id.String()
+	}
+	rendered := make([]string, len(roles))
+	for i, role := range roles {
+		var unsupported string
+		rendered[i], unsupported = renderRole(role, id)
+		if unsupported != "" {
+			return "", unsupported
+		}
+	}
+	return strings.Join(rendered, ", "), ""
+}
+
+func renderRole(role string, id pgschema.ID) (string, string) {
+	if role == "" || strings.IndexByte(role, 0) >= 0 {
+		return "", "role_invalid:" + id.String()
+	}
+	if role == "PUBLIC" {
+		return "PUBLIC", ""
+	}
+	return quote(role), ""
+}
+
+func renderPrivilege(privilege string, id pgschema.ID) (string, string) {
+	switch privilege {
+	case "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN":
+		return privilege, ""
+	default:
+		return "", "table_privilege_invalid:" + id.String()
+	}
+}
+
+func renderTablePrivilege(privilege pgschema.TablePrivilege, operation string) (string, string) {
+	if privilege.Table.Kind != pgschema.KindTable || privilege.Table.Schema == "" || privilege.Table.Name == "" || privilege.Grantor != "@owner" {
+		return "", "table_privilege_render:" + privilege.ObjectID().String()
+	}
+	renderedPrivilege, unsupported := renderPrivilege(privilege.Privilege, privilege.ObjectID())
+	if unsupported != "" {
+		return "", unsupported
+	}
+	role, unsupported := renderRole(privilege.Grantee, privilege.ObjectID())
+	if unsupported != "" {
+		return "", unsupported
+	}
+	switch operation {
+	case "GRANT":
+		sql := "GRANT " + renderedPrivilege + " ON TABLE " + qualified(privilege.Table.Schema, privilege.Table.Name) + " TO " + role
+		if privilege.Grantable {
+			sql += " WITH GRANT OPTION"
+		}
+		return sql + ";", ""
+	case "REVOKE":
+		return "REVOKE " + renderedPrivilege + " ON TABLE " + qualified(privilege.Table.Schema, privilege.Table.Name) + " FROM " + role + ";", ""
+	default:
+		return "", "table_privilege_operation:" + privilege.ObjectID().String()
+	}
 }
 
 func renderViewOptions(options []pgschema.Option, id pgschema.ID) (string, string) {
@@ -2979,13 +3231,36 @@ func renderDropWithOptions(object pgschema.Object, options Options) []protocol.S
 		sql = "DROP " + kind + " " + qualified(object.Schema, object.Name) + "(" + object.Signature + ");"
 	case pgschema.Trigger:
 		sql = "DROP TRIGGER " + quote(object.Name) + " ON " + qualified(object.Table.Schema, object.Table.Name) + ";"
+	case pgschema.Policy:
+		sql = "DROP POLICY " + quote(object.Name) + " ON " + qualified(object.Table.Schema, object.Table.Name) + ";"
+		hazards = []string{"authorization_change", "row_security_policy_change", "availability_risk"}
+	case pgschema.RowSecurity:
+		var statements []protocol.Statement
+		if object.Enabled {
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" DISABLE ROW LEVEL SECURITY;", "contract", "dangerous", "row_security_disabled", "authorization_relaxation", "table_lock"))
+		}
+		if object.Forced {
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" NO FORCE ROW LEVEL SECURITY;", "contract", "dangerous", "row_security_unforced", "authorization_relaxation", "table_lock"))
+		}
+		return statements
+	case pgschema.TablePrivilege:
+		var unsupported string
+		sql, unsupported = renderTablePrivilege(object, "REVOKE")
+		if unsupported != "" {
+			return nil
+		}
+		hazards = []string{"privilege_revoked", "authorization_change", "availability_risk"}
 	default:
 		return nil
 	}
-	return []protocol.Statement{statement(sql, "contract", "dangerous", transactional, hazards...)}
+	result := statement(sql, "contract", "dangerous", transactional, hazards...)
+	if object.ObjectID().Kind == pgschema.KindPolicy || object.ObjectID().Kind == pgschema.KindPrivilege {
+		result = withTimeoutGuidance(result, 30000, 3000)
+	}
+	return []protocol.Statement{result}
 }
 
-func renderModify(before, after pgschema.Object, choices decisions, options Options, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
+func renderModify(before, after pgschema.Object, choices decisions, options Options, current, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	switch before := before.(type) {
 	case pgschema.Schema:
 		next := after.(pgschema.Schema)
@@ -3036,6 +3311,19 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		return renderColumnModify(before, next, choices)
 	case pgschema.Index:
 		next := after.(pgschema.Index)
+		if before.Parent == nil && next.Parent != nil {
+			if partitionConstraintAttachmentOwned(before, next, current, desired) {
+				// The newly-created local constraint must claim the existing
+				// index before that constraint-owned index can be attached. The
+				// constraint Create change emits both statements in that order.
+				return nil, nil, nil, nil
+			}
+			statements, unsupported := renderPartitionIndexAttachment(before, next, desired)
+			if unsupported != "" {
+				return nil, nil, []string{unsupported}, nil
+			}
+			return statements, nil, nil, nil
+		}
 		if before.Parent != nil || next.Parent != nil {
 			return nil, nil, []string{"partitioned_index_modify:" + next.ObjectID().String()}, nil
 		}
@@ -3060,6 +3348,39 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		if !reflect.DeepEqual(beforeNoComment, nextNoComment) {
 			if next.Constraint != "" || before.Constraint != "" {
 				return nil, nil, []string{"constraint_backed_index_modify:" + next.ObjectID().String()}, nil
+			}
+			if options.ConcurrentIndexes {
+				if table, ok := desired.Object(next.Table); ok {
+					if table, ok := table.(pgschema.Table); ok && table.Partition != nil {
+						statements, unsupported, err := renderContinuousPartitionedIndexReplacement(before, next, current, desired)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						return statements, nil, unsupported, nil
+					}
+				}
+				temporaryName, err := replacementIndexName(before, next)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if relationNameExists(current, before.Table.Schema, temporaryName) || relationNameExists(desired, next.Table.Schema, temporaryName) {
+					return nil, nil, []string{"continuous_index_temporary_name_collision:" + next.ObjectID().String()}, nil
+				}
+				createSQL, unsupported := renderIndex(next)
+				if unsupported != "" {
+					return nil, nil, []string{unsupported}, nil
+				}
+				createSQL = strings.Replace(createSQL, "CREATE INDEX", "CREATE INDEX CONCURRENTLY", 1)
+				createSQL = strings.Replace(createSQL, "CREATE UNIQUE INDEX", "CREATE UNIQUE INDEX CONCURRENTLY", 1)
+				statements := []protocol.Statement{
+					withTimeoutGuidance(statement("ALTER INDEX "+qualified(before.Table.Schema, before.Name)+" RENAME TO "+quote(temporaryName)+";", "expand", "review", true, "continuous_index_replacement", "brief_lock"), 3000, 3000),
+					withTimeoutGuidance(statement(strings.TrimSuffix(createSQL, ";")+";", "expand", "review", false, "continuous_index_replacement", "index_build", "table_lock_possible"), 1200000, 3000),
+				}
+				if next.Comment != nil {
+					statements = append(statements, statement("COMMENT ON INDEX "+qualified(next.Table.Schema, next.Name)+" IS "+literal(*next.Comment)+";", "expand", "safe", true))
+				}
+				statements = append(statements, withTimeoutGuidance(statement("DROP INDEX CONCURRENTLY "+qualified(before.Table.Schema, temporaryName)+";", "contract", "review", false, "continuous_index_replacement", "index_cleanup"), 1200000, 3000))
+				return statements, nil, nil, nil
 			}
 			statements := withPhase(renderDropWithOptions(before, options), "migrate", "review", "index_rebuild")
 			created, _, unsupported, err := renderCreate(next, pgschema.New(), nil, options)
@@ -3088,6 +3409,11 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		if before.Schema != next.Schema || before.Name != next.Name || next.Type == "" {
 			return nil, nil, []string{"sequence_modify:" + after.ObjectID().String()}, nil
 		}
+		beforeNoComment, nextNoComment := before, next
+		beforeNoComment.Comment, nextNoComment.Comment = nil, nil
+		if reflect.DeepEqual(beforeNoComment, nextNoComment) {
+			return commentModification("SEQUENCE", qualified(next.Schema, next.Name), before.Comment, next.Comment), nil, nil, nil
+		}
 		parts := []string{
 			"AS " + next.Type,
 			"START WITH " + fmt.Sprint(next.Start),
@@ -3101,8 +3427,25 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		} else {
 			parts = append(parts, "NO CYCLE")
 		}
+		if !reflect.DeepEqual(before.OwnedBy, next.OwnedBy) {
+			if next.OwnedBy == nil {
+				parts = append(parts, "OWNED BY NONE")
+			} else {
+				ownedBy, unsupported := renderSequenceOwnedBy(next)
+				if unsupported != "" {
+					return nil, nil, []string{unsupported}, nil
+				}
+				parts = append(parts, ownedBy)
+			}
+		}
 		sql := "ALTER SEQUENCE " + qualified(next.Schema, next.Name) + " " + strings.Join(parts, " ") + ";"
-		return []protocol.Statement{statement(sql, "migrate", "review", true, "sequence_parameter_change")}, nil, nil, nil
+		hazards := []string{"sequence_parameter_change"}
+		if !reflect.DeepEqual(before.OwnedBy, next.OwnedBy) {
+			hazards = append(hazards, "sequence_ownership_change", "drop_cascade_behavior")
+		}
+		statements := []protocol.Statement{statement(sql, "migrate", "review", true, hazards...)}
+		statements = append(statements, commentModification("SEQUENCE", qualified(next.Schema, next.Name), before.Comment, next.Comment)...)
+		return statements, nil, nil, nil
 	case pgschema.View:
 		next := after.(pgschema.View)
 		if before.Materialized != next.Materialized {
@@ -3184,6 +3527,83 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 			statements = append(statements, statement(enabled, "migrate", "review", true, "trigger_enable_state", "table_lock", "application_contract"))
 		}
 		return statements, nil, nil, nil
+	case pgschema.Policy:
+		next := after.(pgschema.Policy)
+		if !choices.authorization[next.ObjectID()] {
+			return nil, nil, []string{"policy_change_unconfirmed:" + next.ObjectID().String()}, nil
+		}
+		if policyRequiresReplacement(before, next) {
+			created, unsupported := renderPolicyCreate(next)
+			if unsupported != "" {
+				return nil, nil, []string{unsupported}, nil
+			}
+			statements := []protocol.Statement{
+				authorizationStatement("DROP POLICY "+quote(before.Name)+" ON "+qualified(before.Table.Schema, before.Table.Name)+";", "migrate", "dangerous", "policy_replacement", "authorization_change", "availability_risk"),
+				authorizationStatement(created, "migrate", "review", "policy_replacement", "authorization_change", "availability_risk"),
+			}
+			return statements, nil, nil, nil
+		}
+		sql, unsupported := renderPolicyAlter(before, next)
+		if unsupported != "" {
+			return nil, nil, []string{unsupported}, nil
+		}
+		if sql == "" {
+			return nil, nil, nil, nil
+		}
+		return []protocol.Statement{authorizationStatement(sql, "migrate", "review", "policy_altered", "authorization_change", "availability_risk")}, nil, nil, nil
+	case pgschema.RowSecurity:
+		next := after.(pgschema.RowSecurity)
+		if (before.Enabled && !next.Enabled || before.Forced && !next.Forced) && !choices.authorization[next.ObjectID()] {
+			return nil, nil, []string{"row_security_relaxation_unconfirmed:" + next.ObjectID().String()}, nil
+		}
+		if before.Table != next.Table || (!next.Enabled && !next.Forced) {
+			return nil, nil, []string{"row_security_modify:" + next.ObjectID().String()}, nil
+		}
+		var statements []protocol.Statement
+		if before.Enabled != next.Enabled {
+			mode, phase, safety := "ENABLE", "expand", "review"
+			hazards := []string{"row_security_enabled", "authorization_change", "availability_risk", "table_lock"}
+			if !next.Enabled {
+				mode, phase, safety = "DISABLE", "contract", "dangerous"
+				hazards = []string{"row_security_disabled", "authorization_relaxation", "table_lock"}
+			}
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(next.Table.Schema, next.Table.Name)+" "+mode+" ROW LEVEL SECURITY;", phase, safety, hazards...))
+		}
+		if before.Forced != next.Forced {
+			mode, phase, safety := "FORCE", "expand", "review"
+			hazards := []string{"row_security_forced", "authorization_change", "availability_risk", "table_lock"}
+			if !next.Forced {
+				mode, phase, safety = "NO FORCE", "contract", "dangerous"
+				hazards = []string{"row_security_unforced", "authorization_relaxation", "table_lock"}
+			}
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(next.Table.Schema, next.Table.Name)+" "+mode+" ROW LEVEL SECURITY;", phase, safety, hazards...))
+		}
+		return statements, nil, nil, nil
+	case pgschema.TablePrivilege:
+		next := after.(pgschema.TablePrivilege)
+		if before.Table != next.Table || before.Grantee != next.Grantee || before.Grantor != next.Grantor || before.Privilege != next.Privilege {
+			return nil, nil, []string{"table_privilege_identity_change:" + next.ObjectID().String()}, nil
+		}
+		if before.Grantable == next.Grantable {
+			return nil, nil, nil, nil
+		}
+		if !next.Grantable && !choices.authorization[next.ObjectID()] {
+			return nil, nil, []string{"grant_option_revoke_unconfirmed:" + next.ObjectID().String()}, nil
+		}
+		role, unsupported := renderRole(next.Grantee, next.ObjectID())
+		if unsupported != "" {
+			return nil, nil, []string{unsupported}, nil
+		}
+		privilege, unsupported := renderPrivilege(next.Privilege, next.ObjectID())
+		if unsupported != "" {
+			return nil, nil, []string{unsupported}, nil
+		}
+		if next.Grantable {
+			sql := "GRANT " + privilege + " ON TABLE " + qualified(next.Table.Schema, next.Table.Name) + " TO " + role + " WITH GRANT OPTION;"
+			return []protocol.Statement{authorizationStatement(sql, "expand", "review", "grant_option_added", "authorization_change")}, nil, nil, nil
+		}
+		sql := "REVOKE GRANT OPTION FOR " + privilege + " ON TABLE " + qualified(next.Table.Schema, next.Table.Name) + " FROM " + role + ";"
+		return []protocol.Statement{authorizationStatement(sql, "contract", "dangerous", "grant_option_revoked", "authorization_change", "availability_risk")}, nil, nil, nil
 	case pgschema.Constraint:
 		next := after.(pgschema.Constraint)
 		if before.Parent != nil || next.Parent != nil {
@@ -3202,6 +3622,16 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 			return []protocol.Statement{statement(sql, "migrate", "review", true, "table_scan", "share_update_exclusive_lock")}, nil, nil, nil
 		}
 		if !reflect.DeepEqual(beforeNoComment, nextNoComment) {
+			if options.ConcurrentIndexes && (before.Type == pgschema.ConstraintPrimary || before.Type == pgschema.ConstraintUnique) && (next.Type == pgschema.ConstraintPrimary || next.Type == pgschema.ConstraintUnique) {
+				statements, unsupported, err := renderContinuousConstraintReplacement(before, next, current, desired)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if len(unsupported) == 0 {
+					return statements, nil, nil, nil
+				}
+				return nil, nil, unsupported, nil
+			}
 			drop := withPhase(renderDrop(before), "migrate", "review", "constraint_rebuild", "blocking_lock")
 			add := withPhase(renderConstraintCreate(next), "migrate", "review", "constraint_rebuild")
 			return append(drop, add...), nil, nil, nil
@@ -3210,6 +3640,359 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 	default:
 		return nil, nil, []string{"modify:" + after.ObjectID().String()}, nil
 	}
+}
+
+func renderPartitionIndexAttachment(before, after pgschema.Index, desired *pgschema.Snapshot) ([]protocol.Statement, string) {
+	if before.Parent != nil || after.Parent == nil || before.Table != after.Table || before.Name != after.Name || before.Constraint != "" || after.Constraint != "" || before.Primary || after.Primary || before.Exclusion || after.Exclusion {
+		return nil, "partition_index_attach_unsupported:" + after.ObjectID().String()
+	}
+	beforeComparable, afterComparable := before, after
+	beforeComparable.Parent, afterComparable.Parent = nil, nil
+	beforeComparable.Comment, afterComparable.Comment = nil, nil
+	beforeComparable.Definition, afterComparable.Definition = "", ""
+	beforeComparable.Concurrent, afterComparable.Concurrent = false, false
+	if !reflect.DeepEqual(beforeComparable, afterComparable) {
+		return nil, "partition_index_attach_rebuild:" + after.ObjectID().String()
+	}
+	parentObject, exists := desired.Object(*after.Parent)
+	parent, ok := parentObject.(pgschema.Index)
+	if !exists || !ok || parent.Constraint != "" || parent.Primary || parent.Exclusion {
+		return nil, "partition_index_attach_parent:" + after.ObjectID().String()
+	}
+	childTableObject, childExists := desired.Object(after.Table)
+	parentTableObject, parentExists := desired.Object(parent.Table)
+	childTable, childOK := childTableObject.(pgschema.Table)
+	parentTable, parentOK := parentTableObject.(pgschema.Table)
+	if !childExists || !parentExists || !childOK || !parentOK || childTable.PartitionOf == nil || childTable.PartitionOf.Parent != parent.Table || parentTable.Partition == nil {
+		return nil, "partition_index_attach_table_hierarchy:" + after.ObjectID().String()
+	}
+	if !equivalentPartitionAttachmentIndex(after, parent) {
+		return nil, "partition_index_attach_structure:" + after.ObjectID().String()
+	}
+	sql := "ALTER INDEX " + qualified(parent.Table.Schema, parent.Name) + " ATTACH PARTITION " + qualified(after.Table.Schema, after.Name) + ";"
+	statements := []protocol.Statement{
+		withTimeoutGuidance(statement(sql, "expand", "review", true, "partition_index_attach", "brief_lock"), 30000, 3000),
+	}
+	statements = append(statements, commentModification("INDEX", qualified(after.Table.Schema, after.Name), before.Comment, after.Comment)...)
+	return statements, ""
+}
+
+func equivalentPartitionAttachmentIndex(child, parent pgschema.Index) bool {
+	return child.Unique == parent.Unique && child.Method == parent.Method &&
+		reflect.DeepEqual(child.Parts, parent.Parts) && reflect.DeepEqual(child.Include, parent.Include) &&
+		child.Predicate == parent.Predicate && child.NullsNotDistinct == parent.NullsNotDistinct
+}
+
+func partitionConstraintAttachmentOwned(before, after pgschema.Index, current, desired *pgschema.Snapshot) bool {
+	if current == nil || desired == nil || before.Parent != nil || after.Parent == nil || before.Constraint != "" || after.Constraint == "" || before.Name != after.Name || before.Table != after.Table {
+		return false
+	}
+	constraintID := (pgschema.Constraint{Table: after.Table, Name: after.Constraint}).ObjectID()
+	if _, exists := current.Object(constraintID); exists {
+		return false
+	}
+	object, exists := desired.Object(constraintID)
+	constraint, ok := object.(pgschema.Constraint)
+	if !exists || !ok || constraint.Parent == nil || constraint.UsingIndex != after.Name {
+		return false
+	}
+	return partitionConstraintAttachmentValid(constraint, before, after, desired)
+}
+
+func partitionConstraintAttachmentValid(constraint pgschema.Constraint, before, after pgschema.Index, desired *pgschema.Snapshot) bool {
+	if desired == nil || constraint.Parent == nil || (constraint.Type != pgschema.ConstraintPrimary && constraint.Type != pgschema.ConstraintUnique) ||
+		before.Parent != nil || after.Parent == nil || before.Constraint != "" || after.Constraint != constraint.Name || before.Name != constraint.Name || after.Name != constraint.Name ||
+		!before.Unique || !after.Unique || before.Table != constraint.Table || after.Table != constraint.Table {
+		return false
+	}
+	parentConstraintObject, exists := desired.Object(*constraint.Parent)
+	parentConstraint, ok := parentConstraintObject.(pgschema.Constraint)
+	if !exists || !ok || parentConstraint.Type != constraint.Type || parentConstraint.Table == constraint.Table {
+		return false
+	}
+	parentIndex, exists := backingIndexForConstraint(desired, parentConstraint)
+	if !exists || parentIndex.ObjectID() != *after.Parent {
+		return false
+	}
+	beforeComparable, afterComparable := before, after
+	beforeComparable.Parent, afterComparable.Parent = nil, nil
+	beforeComparable.Constraint, afterComparable.Constraint = "", ""
+	beforeComparable.Primary, afterComparable.Primary = false, false
+	beforeComparable.Definition, afterComparable.Definition = "", ""
+	beforeComparable.Concurrent, afterComparable.Concurrent = false, false
+	return reflect.DeepEqual(beforeComparable, afterComparable) && equivalentPartitionAttachmentIndex(after, parentIndex)
+}
+
+func renderContinuousConstraintReplacement(before, after pgschema.Constraint, current, desired *pgschema.Snapshot) ([]protocol.Statement, []string, error) {
+	if before.Parent != nil || after.Parent != nil || before.Table != after.Table || before.Name != after.Name || before.Type != after.Type {
+		return nil, []string{"continuous_constraint_replacement:" + after.ObjectID().String()}, nil
+	}
+	tableObject, exists := desired.Object(after.Table)
+	table, ok := tableObject.(pgschema.Table)
+	if !exists || !ok || table.Partition != nil || table.PartitionOf != nil {
+		return nil, []string{"continuous_partitioned_constraint_replacement:" + after.ObjectID().String()}, nil
+	}
+	if hasChangedDependents(current, desired, before.ObjectID()) {
+		return nil, []string{"continuous_constraint_replacement_dependents:" + after.ObjectID().String()}, nil
+	}
+	oldIndex, oldExists := backingIndexForConstraint(current, before)
+	newIndex, newExists := backingIndexForConstraint(desired, after)
+	if !oldExists || !newExists || oldIndex.Parent != nil || newIndex.Parent != nil || !oldIndex.Unique || !newIndex.Unique {
+		return nil, []string{"continuous_constraint_backing_index:" + after.ObjectID().String()}, nil
+	}
+	temporaryName, err := replacementIndexName(oldIndex, newIndex)
+	if err != nil {
+		return nil, nil, err
+	}
+	if relationNameExists(current, oldIndex.Table.Schema, temporaryName) || relationNameExists(desired, newIndex.Table.Schema, temporaryName) {
+		return nil, []string{"continuous_index_temporary_name_collision:" + newIndex.ObjectID().String()}, nil
+	}
+	replacement := newIndex
+	replacement.Name = temporaryName
+	replacement.Constraint = ""
+	replacement.Primary = false
+	replacement.Comment = nil
+	createSQL, unsupported := renderIndex(replacement)
+	if unsupported != "" {
+		return nil, []string{unsupported}, nil
+	}
+	createSQL = strings.Replace(createSQL, "CREATE INDEX", "CREATE INDEX CONCURRENTLY", 1)
+	createSQL = strings.Replace(createSQL, "CREATE UNIQUE INDEX", "CREATE UNIQUE INDEX CONCURRENTLY", 1)
+	statements := []protocol.Statement{
+		withTimeoutGuidance(statement(strings.TrimSuffix(createSQL, ";")+";", "expand", "review", false, "continuous_constraint_replacement", "index_build", "table_lock_possible"), 1200000, 3000),
+	}
+	if newIndex.Comment != nil {
+		statements = append(statements, withTimeoutGuidance(statement("COMMENT ON INDEX "+qualified(newIndex.Table.Schema, temporaryName)+" IS "+literal(*newIndex.Comment)+";", "expand", "safe", true, "continuous_constraint_replacement"), 30000, 3000))
+	}
+	dropSQL := "ALTER TABLE " + qualified(before.Table.Schema, before.Table.Name) + " DROP CONSTRAINT " + quote(before.Name) + ";"
+	addSQL, unsupported := renderConstraintUsingReplacementIndex(after, temporaryName)
+	if unsupported != "" {
+		return nil, []string{unsupported}, nil
+	}
+	statements = append(statements,
+		withTimeoutGuidance(statement(dropSQL, "contract", "review", true, "continuous_constraint_replacement", "brief_constraint_swap", "access_exclusive_lock"), 30000, 3000),
+		withTimeoutGuidance(statement(addSQL, "contract", "review", true, "continuous_constraint_replacement", "brief_constraint_swap", "access_exclusive_lock"), 30000, 3000),
+	)
+	if after.Comment != nil {
+		statements = append(statements, withTimeoutGuidance(statement("COMMENT ON CONSTRAINT "+quote(after.Name)+" ON "+qualified(after.Table.Schema, after.Table.Name)+" IS "+literal(*after.Comment)+";", "contract", "safe", true, "continuous_constraint_replacement"), 30000, 3000))
+	}
+	return statements, nil, nil
+}
+
+func backingIndexForConstraint(snapshot *pgschema.Snapshot, constraint pgschema.Constraint) (pgschema.Index, bool) {
+	if snapshot == nil {
+		return pgschema.Index{}, false
+	}
+	for _, object := range snapshot.Objects() {
+		index, ok := object.(pgschema.Index)
+		if ok && index.Table == constraint.Table && index.Constraint == constraint.Name {
+			return index, true
+		}
+	}
+	return pgschema.Index{}, false
+}
+
+func hasChangedDependents(current, desired *pgschema.Snapshot, dependency pgschema.ID) bool {
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if snapshot == nil {
+			continue
+		}
+		for _, id := range snapshot.IDs() {
+			if id == dependency || !containsID(snapshot.Dependencies(id), dependency) {
+				continue
+			}
+			// Any external dependent can prevent DROP CONSTRAINT or observe the
+			// identity swap. It needs its own typed coordinated strategy.
+			if id.Kind != pgschema.KindIndex {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func renderConstraintUsingReplacementIndex(constraint pgschema.Constraint, indexName string) (string, string) {
+	kind := ""
+	switch constraint.Type {
+	case pgschema.ConstraintPrimary:
+		kind = "PRIMARY KEY"
+	case pgschema.ConstraintUnique:
+		kind = "UNIQUE"
+	default:
+		return "", "continuous_constraint_type:" + constraint.ObjectID().String()
+	}
+	sql := "ALTER TABLE " + qualified(constraint.Table.Schema, constraint.Table.Name) + " ADD CONSTRAINT " + quote(constraint.Name) + " " + kind + " USING INDEX " + quote(indexName)
+	if constraint.Deferrable {
+		sql += " DEFERRABLE"
+		if constraint.Deferred {
+			sql += " INITIALLY DEFERRED"
+		}
+	}
+	return sql + ";", ""
+}
+
+func renderContinuousPartitionedIndexReplacement(before, after pgschema.Index, current, desired *pgschema.Snapshot) ([]protocol.Statement, []string, error) {
+	if before.Parent != nil || after.Parent != nil || before.Constraint != "" || after.Constraint != "" || before.Primary || after.Primary || before.Exclusion || after.Exclusion {
+		return nil, []string{"continuous_partitioned_index_replacement:" + after.ObjectID().String()}, nil
+	}
+	parentTemporaryName, err := replacementIndexName(before, after)
+	if err != nil {
+		return nil, nil, err
+	}
+	if relationNameExists(current, before.Table.Schema, parentTemporaryName) || relationNameExists(desired, after.Table.Schema, parentTemporaryName) {
+		return nil, []string{"continuous_index_temporary_name_collision:" + after.ObjectID().String()}, nil
+	}
+	root := partitionIndexReplacement{before: before, after: after, temporaryName: parentTemporaryName, partitioned: true}
+	children, unsupported, err := buildPartitionIndexReplacementChildren(before, after, current, desired)
+	if err != nil {
+		return nil, nil, err
+	}
+	if unsupported != "" {
+		return nil, []string{unsupported}, nil
+	}
+	root.children = children
+	parentSQL, unsupported := renderPartitionedIndexShell(after)
+	if unsupported != "" {
+		return nil, []string{unsupported}, nil
+	}
+	statements := []protocol.Statement{
+		withTimeoutGuidance(statement("ALTER INDEX "+qualified(before.Table.Schema, before.Name)+" RENAME TO "+quote(parentTemporaryName)+";", "expand", "review", true, "continuous_partitioned_index_replacement", "brief_lock"), 3000, 3000),
+	}
+	for _, child := range flattenPartitionIndexReplacements(root.children) {
+		statements = append(statements, withTimeoutGuidance(statement("ALTER INDEX "+qualified(child.before.Table.Schema, child.before.Name)+" RENAME TO "+quote(child.temporaryName)+";", "expand", "review", true, "continuous_partitioned_index_replacement", "brief_lock"), 3000, 3000))
+	}
+	statements = append(statements, withTimeoutGuidance(statement(strings.TrimSuffix(parentSQL, ";")+";", "expand", "review", true, "continuous_partitioned_index_replacement", "partitioned_index_shell", "brief_lock"), 30000, 3000))
+	if after.Comment != nil {
+		statements = append(statements, withTimeoutGuidance(statement("COMMENT ON INDEX "+qualified(after.Table.Schema, after.Name)+" IS "+literal(*after.Comment)+";", "expand", "safe", true, "continuous_partitioned_index_replacement"), 30000, 3000))
+	}
+	for _, child := range root.children {
+		built, unsupported := renderPartitionIndexReplacement(child, root.after)
+		if unsupported != "" {
+			return nil, []string{unsupported}, nil
+		}
+		statements = append(statements, built...)
+	}
+	statements = append(statements, withTimeoutGuidance(statement("DROP INDEX "+qualified(before.Table.Schema, parentTemporaryName)+";", "contract", "review", true, "continuous_partitioned_index_replacement", "index_cleanup", "brief_lock"), 30000, 3000))
+	return statements, nil, nil
+}
+
+type partitionIndexReplacement struct {
+	before        pgschema.Index
+	after         pgschema.Index
+	temporaryName string
+	partitioned   bool
+	children      []partitionIndexReplacement
+}
+
+func buildPartitionIndexReplacementChildren(before, after pgschema.Index, current, desired *pgschema.Snapshot) ([]partitionIndexReplacement, string, error) {
+	oldChildren := partitionIndexChildren(current, before.ObjectID())
+	newChildren := partitionIndexChildren(desired, after.ObjectID())
+	if len(oldChildren) != len(newChildren) {
+		return nil, "continuous_partitioned_index_children_changed:" + after.ObjectID().String(), nil
+	}
+	oldByTable := make(map[pgschema.ID]pgschema.Index, len(oldChildren))
+	for _, child := range oldChildren {
+		oldByTable[child.Table] = child
+	}
+	result := make([]partitionIndexReplacement, 0, len(newChildren))
+	for _, child := range newChildren {
+		old, exists := oldByTable[child.Table]
+		if !exists || old.Parent == nil || child.Parent == nil || old.Constraint != "" || child.Constraint != "" || old.Primary || child.Primary || old.Exclusion || child.Exclusion {
+			return nil, "continuous_partitioned_index_child_mismatch:" + child.ObjectID().String(), nil
+		}
+		oldTableObject, oldExists := current.Object(old.Table)
+		newTableObject, newExists := desired.Object(child.Table)
+		oldTable, oldOK := oldTableObject.(pgschema.Table)
+		newTable, newOK := newTableObject.(pgschema.Table)
+		if !oldExists || !newExists || !oldOK || !newOK || (oldTable.Partition != nil) != (newTable.Partition != nil) {
+			return nil, "continuous_partitioned_index_child_table_mismatch:" + child.ObjectID().String(), nil
+		}
+		temporaryName, err := replacementIndexName(old, child)
+		if err != nil {
+			return nil, "", err
+		}
+		if relationNameExists(current, old.Table.Schema, temporaryName) || relationNameExists(desired, child.Table.Schema, temporaryName) {
+			return nil, "continuous_index_temporary_name_collision:" + child.ObjectID().String(), nil
+		}
+		node := partitionIndexReplacement{before: old, after: child, temporaryName: temporaryName, partitioned: newTable.Partition != nil}
+		nested, unsupported, err := buildPartitionIndexReplacementChildren(old, child, current, desired)
+		if err != nil || unsupported != "" {
+			return nil, unsupported, err
+		}
+		node.children = nested
+		if !node.partitioned && len(node.children) != 0 {
+			return nil, "continuous_partitioned_index_leaf_has_children:" + child.ObjectID().String(), nil
+		}
+		result = append(result, node)
+	}
+	return result, "", nil
+}
+
+func flattenPartitionIndexReplacements(nodes []partitionIndexReplacement) []partitionIndexReplacement {
+	var result []partitionIndexReplacement
+	for _, node := range nodes {
+		result = append(result, node)
+		result = append(result, flattenPartitionIndexReplacements(node.children)...)
+	}
+	return result
+}
+
+func renderPartitionedIndexShell(index pgschema.Index) (string, string) {
+	sql, unsupported := renderIndex(index)
+	if unsupported != "" {
+		return "", unsupported
+	}
+	needle := " ON " + qualified(index.Table.Schema, index.Table.Name)
+	if !strings.Contains(sql, needle) {
+		return "", "partitioned_index_only_render:" + index.ObjectID().String()
+	}
+	return strings.Replace(sql, needle, " ON ONLY "+qualified(index.Table.Schema, index.Table.Name), 1), ""
+}
+
+func renderPartitionIndexReplacement(node partitionIndexReplacement, parent pgschema.Index) ([]protocol.Statement, string) {
+	var statements []protocol.Statement
+	if node.partitioned {
+		sql, unsupported := renderPartitionedIndexShell(node.after)
+		if unsupported != "" {
+			return nil, unsupported
+		}
+		statements = append(statements, withTimeoutGuidance(statement(strings.TrimSuffix(sql, ";")+";", "expand", "review", true, "continuous_partitioned_index_replacement", "partitioned_index_shell", "brief_lock"), 30000, 3000))
+	} else {
+		sql, unsupported := renderIndex(node.after)
+		if unsupported != "" {
+			return nil, unsupported
+		}
+		sql = strings.Replace(sql, "CREATE INDEX", "CREATE INDEX CONCURRENTLY", 1)
+		sql = strings.Replace(sql, "CREATE UNIQUE INDEX", "CREATE UNIQUE INDEX CONCURRENTLY", 1)
+		statements = append(statements, withTimeoutGuidance(statement(strings.TrimSuffix(sql, ";")+";", "expand", "review", false, "continuous_partitioned_index_replacement", "index_build", "table_lock_possible"), 1200000, 3000))
+	}
+	if node.after.Comment != nil {
+		statements = append(statements, withTimeoutGuidance(statement("COMMENT ON INDEX "+qualified(node.after.Table.Schema, node.after.Name)+" IS "+literal(*node.after.Comment)+";", "expand", "safe", true, "continuous_partitioned_index_replacement"), 30000, 3000))
+	}
+	for _, child := range node.children {
+		built, unsupported := renderPartitionIndexReplacement(child, node.after)
+		if unsupported != "" {
+			return nil, unsupported
+		}
+		statements = append(statements, built...)
+	}
+	statements = append(statements, withTimeoutGuidance(statement("ALTER INDEX "+qualified(parent.Table.Schema, parent.Name)+" ATTACH PARTITION "+qualified(node.after.Table.Schema, node.after.Name)+";", "expand", "review", true, "continuous_partitioned_index_replacement", "partition_index_attach", "brief_lock"), 30000, 3000))
+	return statements, ""
+}
+
+func partitionIndexChildren(snapshot *pgschema.Snapshot, parent pgschema.ID) []pgschema.Index {
+	if snapshot == nil {
+		return nil
+	}
+	var result []pgschema.Index
+	for _, object := range snapshot.Objects() {
+		index, ok := object.(pgschema.Index)
+		if ok && index.Parent != nil && *index.Parent == parent {
+			result = append(result, index)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Table.String() < result[j].Table.String() })
+	return result
 }
 
 func partitionReconfiguration(before, after *pgschema.PartitionOf) bool {
@@ -3269,7 +4052,7 @@ func addEnumValues(before, after pgschema.Enum) ([]protocol.Statement, error) {
 }
 
 func mutationQuestions(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, decisions, error) {
-	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork)}
+	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool)}
 	var questions []protocol.Question
 	refreshes := dependentMaterializedViewsNeedingRefresh(changes, current, desired)
 	for _, view := range refreshes {
@@ -3290,6 +4073,71 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 		}
 	}
 	for _, item := range changes {
+		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindPolicy {
+			before, after := item.Before.(pgschema.Policy), item.After.(pgschema.Policy)
+			kind, choice, action := "alter_policy", "alter", "changes roles or policy expressions"
+			if policyRequiresReplacement(before, after) {
+				kind, choice, action = "replace_policy", "replace", "changes an immutable policy attribute or removes an expression, requiring DROP POLICY followed by CREATE POLICY"
+			}
+			question := protocol.Question{
+				ID: kind + ":" + item.ID.String(), Kind: kind, Key: item.ID.String(),
+				Message:            "Policy " + item.ID.String() + " " + action + ". Confirm the reviewed authorization transition.",
+				Choices:            []string{choice},
+				CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+			}
+			_, found, err := resolver.Resolve(question)
+			if err != nil {
+				return nil, decisions, err
+			}
+			if !found {
+				questions = append(questions, question)
+			} else {
+				decisions.authorization[item.ID] = true
+			}
+			continue
+		}
+		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindRowSecurity {
+			before, after := item.Before.(pgschema.RowSecurity), item.After.(pgschema.RowSecurity)
+			if before.Enabled && !after.Enabled || before.Forced && !after.Forced {
+				question := protocol.Question{
+					ID: "relax_row_security:" + item.ID.String(), Kind: "relax_row_security", Key: item.ID.String(),
+					Message:            "Row security on " + item.ID.String() + " is being disabled or unforced. Confirm this reviewed authorization relaxation.",
+					Choices:            []string{"relax"},
+					CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+				}
+				_, found, err := resolver.Resolve(question)
+				if err != nil {
+					return nil, decisions, err
+				}
+				if !found {
+					questions = append(questions, question)
+				} else {
+					decisions.authorization[item.ID] = true
+				}
+			}
+			continue
+		}
+		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindPrivilege {
+			before, after := item.Before.(pgschema.TablePrivilege), item.After.(pgschema.TablePrivilege)
+			if before.Grantable && !after.Grantable {
+				question := protocol.Question{
+					ID: "revoke_grant_option:" + item.ID.String(), Kind: "revoke_grant_option", Key: item.ID.String(),
+					Message:            "Privilege " + item.ID.String() + " loses WITH GRANT OPTION. Confirm this reviewed authorization contraction.",
+					Choices:            []string{"revoke"},
+					CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+				}
+				_, found, err := resolver.Resolve(question)
+				if err != nil {
+					return nil, decisions, err
+				}
+				if !found {
+					questions = append(questions, question)
+				} else {
+					decisions.authorization[item.ID] = true
+				}
+			}
+			continue
+		}
 		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindTable {
 			before, after := item.Before.(pgschema.Table), item.After.(pgschema.Table)
 			if partitionReconfiguration(before.PartitionOf, after.PartitionOf) {
@@ -3336,6 +4184,23 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 			continue
 		}
 		before, after := item.Before.(pgschema.Column), item.After.(pgschema.Column)
+		if before.Identity != nil && after.Identity == nil {
+			question := protocol.Question{
+				ID: "drop_identity:" + item.ID.String(), Kind: "drop_identity", Key: item.ID.String(),
+				Message:            "Column " + item.ID.String() + " drops its identity and owned sequence state. Confirm this destructive forward transition.",
+				Choices:            []string{"drop"},
+				CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+			}
+			_, found, err := resolver.Resolve(question)
+			if err != nil {
+				return nil, decisions, err
+			}
+			if !found {
+				questions = append(questions, question)
+			} else {
+				decisions.identityDrop[item.ID] = true
+			}
+		}
 		if before.Serial == nil && after.Serial == nil && before.Type != after.Type {
 			question := protocol.Question{
 				ID: "type_change:" + item.ID.String(), Kind: "type_change", Key: item.ID.String(),
@@ -3508,19 +4373,40 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 			return nil, nil, []string{"generated_column_rewrite:" + after.ObjectID().String()}, nil
 		}
 	}
+	identityHandledDefault := false
 	if !reflect.DeepEqual(before.Identity, after.Identity) {
-		if before.Identity == nil || after.Identity == nil {
-			return nil, nil, []string{"identity_add_drop:" + after.ObjectID().String()}, nil
-		}
-		if before.Identity.Generation != after.Identity.Generation {
-			statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET GENERATED "+after.Identity.Generation+";", "migrate", "review", true, "table_lock"))
-		}
-		if before.Identity.Start != after.Identity.Start || before.Identity.Increment != after.Identity.Increment {
-			sql := "ALTER TABLE " + table + " ALTER COLUMN " + column + " SET START WITH " + fmt.Sprint(after.Identity.Start) + " SET INCREMENT BY " + fmt.Sprint(after.Identity.Increment) + ";"
-			statements = append(statements, statement(sql, "migrate", "review", true, "sequence_state"))
-		}
-		if !reflect.DeepEqual(before.Identity.Min, after.Identity.Min) || !reflect.DeepEqual(before.Identity.Max, after.Identity.Max) || before.Identity.Cache != after.Identity.Cache || before.Identity.Cycle != after.Identity.Cycle {
-			return nil, nil, []string{"identity_option_modify:" + after.ObjectID().String()}, nil
+		switch {
+		case before.Identity == nil && after.Identity != nil:
+			if before.Default != nil {
+				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP DEFAULT;", "migrate", "review", true, "identity_replaces_default"))
+				identityHandledDefault = true
+			}
+			options, unsupported := renderIdentityOptions(*after.Identity, false)
+			if unsupported != "" {
+				return nil, nil, []string{unsupported + ":" + after.ObjectID().String()}, nil
+			}
+			sql := "ALTER TABLE " + table + " ALTER COLUMN " + column + " ADD GENERATED " + after.Identity.Generation + " AS IDENTITY (" + options + ");"
+			statements = append(statements, statement(sql, "migrate", "review", true, "identity_sequence_create", "table_lock"))
+		case before.Identity != nil && after.Identity == nil:
+			if !choices.identityDrop[after.ObjectID()] {
+				return nil, nil, []string{"identity_drop_unconfirmed:" + after.ObjectID().String()}, nil
+			}
+			statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP IDENTITY;", "contract", "dangerous", true, "identity_sequence_drop", "data_loss", "table_lock"))
+			if after.Default != nil {
+				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET DEFAULT "+*after.Default+";", "contract", "review", true, "identity_replacement_default"))
+			}
+			identityHandledDefault = true
+		case before.Identity != nil && after.Identity != nil:
+			if before.Identity.Generation != after.Identity.Generation {
+				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET GENERATED "+after.Identity.Generation+";", "migrate", "review", true, "table_lock"))
+			}
+			if before.Identity.Start != after.Identity.Start || before.Identity.Increment != after.Identity.Increment || !reflect.DeepEqual(before.Identity.Min, after.Identity.Min) || !reflect.DeepEqual(before.Identity.Max, after.Identity.Max) || before.Identity.Cache != after.Identity.Cache || before.Identity.Cycle != after.Identity.Cycle {
+				options, unsupported := renderIdentityOptions(*after.Identity, true)
+				if unsupported != "" {
+					return nil, nil, []string{unsupported + ":" + after.ObjectID().String()}, nil
+				}
+				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" "+options+";", "migrate", "review", true, "sequence_state"))
+			}
 		}
 	}
 	if before.Serial == nil && after.Serial == nil && before.Type != after.Type {
@@ -3534,7 +4420,7 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 		}
 		statements = append(statements, statement(sql+";", "migrate", "review", true, "table_rewrite_possible", "access_exclusive_lock"))
 	}
-	if reflect.DeepEqual(before.Serial, after.Serial) && !reflect.DeepEqual(before.Default, after.Default) {
+	if !identityHandledDefault && reflect.DeepEqual(before.Serial, after.Serial) && !reflect.DeepEqual(before.Default, after.Default) {
 		phase := "expand"
 		// PostgreSQL validates/coerces a default against the column's current
 		// type. Keep it in the same ordered migration phase after TYPE so a
@@ -3655,7 +4541,10 @@ func constraintUsesMatchPartial(object pgschema.Constraint) bool {
 }
 
 func renderConstraintCreateUsingExistingIndex(object pgschema.Constraint, current, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
-	if object.Parent != nil || constraintPropagatedByPartitionParent(object, desired) {
+	if object.Parent != nil {
+		return renderPartitionConstraintAttachment(object, current, desired)
+	}
+	if constraintPropagatedByPartitionParent(object, desired) {
 		return nil, nil, nil, nil
 	}
 	if constraintUsesMatchPartial(object) {
@@ -3691,6 +4580,36 @@ func renderConstraintCreateUsingExistingIndex(object pgschema.Constraint, curren
 	}
 	sql += ";"
 	return []protocol.Statement{statement(sql, "expand", "review", true, "table_lock")}, nil, nil, nil
+}
+
+func renderPartitionConstraintAttachment(object pgschema.Constraint, current, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
+	if object.UsingIndex == "" || object.Name != object.UsingIndex {
+		return nil, nil, []string{"partition_constraint_attach_index_identity:" + object.ObjectID().String()}, nil
+	}
+	indexID := (pgschema.Index{Table: object.Table, Name: object.UsingIndex}).ObjectID()
+	currentObject, currentExists := current.Object(indexID)
+	desiredObject, desiredExists := desired.Object(indexID)
+	before, beforeOK := currentObject.(pgschema.Index)
+	after, afterOK := desiredObject.(pgschema.Index)
+	if !currentExists || !desiredExists || !beforeOK || !afterOK || !partitionConstraintAttachmentValid(object, before, after, desired) {
+		return nil, nil, []string{"partition_constraint_attach_structure:" + object.ObjectID().String()}, nil
+	}
+	parentConstraintObject, _ := desired.Object(*object.Parent)
+	parentConstraint := parentConstraintObject.(pgschema.Constraint)
+	parentIndex, _ := backingIndexForConstraint(desired, parentConstraint)
+	addSQL, unsupported := renderConstraintUsingReplacementIndex(object, before.Name)
+	if unsupported != "" {
+		return nil, nil, []string{unsupported}, nil
+	}
+	attachSQL := "ALTER INDEX " + qualified(parentIndex.Table.Schema, parentIndex.Name) + " ATTACH PARTITION " + qualified(after.Table.Schema, after.Name) + ";"
+	statements := []protocol.Statement{
+		withTimeoutGuidance(statement(addSQL, "expand", "review", true, "partition_constraint_attach", "brief_constraint_claim", "access_exclusive_lock"), 30000, 3000),
+		withTimeoutGuidance(statement(attachSQL, "expand", "review", true, "partition_constraint_attach", "partition_index_attach", "brief_lock"), 30000, 3000),
+	}
+	if object.Comment != nil {
+		statements = append(statements, withTimeoutGuidance(statement("COMMENT ON CONSTRAINT "+quote(object.Name)+" ON "+qualified(object.Table.Schema, object.Table.Name)+" IS "+literal(*object.Comment)+";", "expand", "safe", true, "partition_constraint_attach"), 30000, 3000))
+	}
+	return statements, nil, nil, nil
 }
 
 func equivalentIndexForConstraintAttachment(current, desired pgschema.Index) bool {
@@ -3961,6 +4880,40 @@ func renderColumn(column pgschema.Column) string {
 	return strings.Join(parts, " ")
 }
 
+func renderIdentityOptions(identity pgschema.Identity, alter bool) (string, string) {
+	if identity.Generation != "ALWAYS" && identity.Generation != "BY DEFAULT" {
+		return "", "identity_generation_invalid"
+	}
+	if identity.Increment == 0 || identity.Cache < 1 {
+		return "", "identity_sequence_option_invalid"
+	}
+	prefix := ""
+	if alter {
+		prefix = "SET "
+	}
+	options := []string{
+		prefix + "START WITH " + fmt.Sprint(identity.Start),
+		prefix + "INCREMENT BY " + fmt.Sprint(identity.Increment),
+	}
+	if identity.Min == nil {
+		options = append(options, prefix+"NO MINVALUE")
+	} else {
+		options = append(options, prefix+"MINVALUE "+fmt.Sprint(*identity.Min))
+	}
+	if identity.Max == nil {
+		options = append(options, prefix+"NO MAXVALUE")
+	} else {
+		options = append(options, prefix+"MAXVALUE "+fmt.Sprint(*identity.Max))
+	}
+	options = append(options, prefix+"CACHE "+fmt.Sprint(identity.Cache))
+	if identity.Cycle {
+		options = append(options, prefix+"CYCLE")
+	} else {
+		options = append(options, prefix+"NO CYCLE")
+	}
+	return strings.Join(options, " "), ""
+}
+
 func commentModification(kind, identifier string, before, after *string) []protocol.Statement {
 	if reflect.DeepEqual(before, after) {
 		return nil
@@ -3974,6 +4927,16 @@ func commentModification(kind, identifier string, before, after *string) []proto
 
 func statement(sql, phase, safety string, transactional bool, hazards ...string) protocol.Statement {
 	return protocol.Statement{SQL: sql, Phase: phase, Safety: safety, Hazards: hazards, NonTransactional: !transactional}
+}
+
+func authorizationStatement(sql, phase, safety string, hazards ...string) protocol.Statement {
+	return withTimeoutGuidance(statement(sql, phase, safety, true, hazards...), 30000, 3000)
+}
+
+func withTimeoutGuidance(statement protocol.Statement, statementTimeoutMS, lockTimeoutMS int64) protocol.Statement {
+	statement.StatementTimeoutMS = statementTimeoutMS
+	statement.LockTimeoutMS = lockTimeoutMS
+	return statement
 }
 
 func manualWorkStatement(work protocol.ManualWork, hazards ...string) protocol.Statement {

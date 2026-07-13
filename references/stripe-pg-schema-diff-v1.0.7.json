@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/stripe/pg-schema-diff",
+  "tag": "v1.0.7",
+  "tag_object": "4f6c46614000fc9b0f91028e848d375f08c04ef8",
+  "commit": "6208f8f3ceccae8ca634055dc47907a6a864cb76",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2023- Stripe, Inc. (https://stripe.com)",
+  "production_dependency": false,
+  "production_planning_authority": false,
+  "uses": [
+    "test-only executable differential reference",
+    "acceptance-corpus capability inventory",
+    "architectural and online-migration design reference"
+  ]
+}

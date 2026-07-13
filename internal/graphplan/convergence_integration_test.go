@@ -760,6 +760,462 @@ func TestPartitionedParentIndexRebuildConvergesOnPostgreSQL(t *testing.T) {
 	assertGraphConverges(t, ctx, url, desired)
 }
 
+func TestContinuousMaterializedViewAndLocalPartitionIndexReplacementConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_continuous_special_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (id bigint, tenant_id bigint);
+CREATE MATERIALIZED VIEW "` + schemaName + `".account_cache AS SELECT id, tenant_id FROM "` + schemaName + `".accounts;
+CREATE INDEX account_cache_lookup_idx ON "` + schemaName + `".account_cache (id);
+CREATE TABLE "` + schemaName + `".events (id bigint, created_at timestamptz) PARTITION BY RANGE (created_at);
+CREATE TABLE "` + schemaName + `".events_2026 PARTITION OF "` + schemaName + `".events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+CREATE INDEX events_2026_lookup_idx ON "` + schemaName + `".events_2026 (id);`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (id bigint, tenant_id bigint);
+CREATE MATERIALIZED VIEW "` + schemaName + `".account_cache AS SELECT id, tenant_id FROM "` + schemaName + `".accounts;
+CREATE INDEX account_cache_lookup_idx ON "` + schemaName + `".account_cache (id, tenant_id);
+CREATE TABLE "` + schemaName + `".events (id bigint, created_at timestamptz) PARTITION BY RANGE (created_at);
+CREATE TABLE "` + schemaName + `".events_2026 PARTITION OF "` + schemaName + `".events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+CREATE INDEX events_2026_lookup_idx ON "` + schemaName + `".events_2026 (id, created_at DESC);`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("continuous special-index plan=%#v err=%v", plan, err)
+	}
+	joined := joinPlan(plan)
+	for _, index := range []string{"account_cache_lookup_idx", "events_2026_lookup_idx"} {
+		if !strings.Contains(joined, "ALTER INDEX "+qualified(schemaName, index)+" RENAME TO \"onwardpg_tmpidx_") ||
+			!strings.Contains(joined, "CREATE INDEX CONCURRENTLY "+quote(index)) ||
+			!strings.Contains(joined, "DROP INDEX CONCURRENTLY "+quote(schemaName)+".\"onwardpg_tmpidx_") {
+			t.Fatalf("index %s did not receive continuous replacement:\n%s", index, joined)
+		}
+	}
+	for _, statement := range plan.Statements {
+		if statement.StatementTimeoutMS <= 0 || statement.LockTimeoutMS <= 0 {
+			t.Fatalf("continuous statement lacks timeout guidance: %#v", statement)
+		}
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestContinuousPartitionedParentIndexReplacementConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_continuous_parent_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	base := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".events (account_id bigint, created_at timestamptz) PARTITION BY RANGE (created_at);
+CREATE TABLE "` + schemaName + `".events_2025 PARTITION OF "` + schemaName + `".events FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+CREATE TABLE "` + schemaName + `".events_2026 PARTITION OF "` + schemaName + `".events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');`
+	currentDDL := base + `CREATE INDEX events_lookup_idx ON "` + schemaName + `".events (account_id);`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := base + `CREATE INDEX events_lookup_idx ON "` + schemaName + `".events (account_id, created_at DESC);`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned || len(plan.Statements) != 9 {
+		t.Fatalf("continuous partition-parent plan=%#v err=%v", plan, err)
+	}
+	joined := joinPlan(plan)
+	for _, fragment := range []string{
+		`CREATE INDEX "events_lookup_idx" ON ONLY "` + schemaName + `"."events"`,
+		`CREATE INDEX CONCURRENTLY "events_2025_account_id_created_at_idx"`,
+		`CREATE INDEX CONCURRENTLY "events_2026_account_id_created_at_idx"`,
+		`ALTER INDEX "` + schemaName + `"."events_lookup_idx" ATTACH PARTITION`,
+	} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("partition-parent plan missing %q:\n%s", fragment, joined)
+		}
+	}
+	relations := []string{"events", "events_2025", "events_2026"}
+	assertUsable := func(queryer rowQuerier) {
+		for _, relation := range relations {
+			var count int
+			if err := queryer.QueryRow(ctx, `
+SELECT count(*) FROM pg_index i
+JOIN pg_class c ON c.oid = i.indrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relname = $2 AND i.indisvalid AND i.indisready`, schemaName, relation).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count < 1 {
+				t.Fatalf("committed replacement boundary left %s.%s without a usable index", schemaName, relation)
+			}
+		}
+	}
+	assertUsable(conn)
+	for _, batch := range plan.Batches {
+		if !batch.Transactional {
+			for _, statement := range batch.Statements {
+				if _, err := conn.Exec(ctx, statement.SQL); err != nil {
+					t.Fatalf("apply %q: %v", statement.SQL, err)
+				}
+				assertUsable(conn)
+			}
+			continue
+		}
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, statement := range batch.Statements {
+			if _, err := tx.Exec(ctx, statement.SQL); err != nil {
+				_ = tx.Rollback(ctx)
+				t.Fatalf("apply %q: %v", statement.SQL, err)
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		assertUsable(conn)
+	}
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestContinuousNestedPartitionedIndexReplacementConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_nested_index_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	base := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".events (account_id bigint, created_at timestamptz) PARTITION BY RANGE (created_at);
+CREATE TABLE "` + schemaName + `".events_2026 PARTITION OF "` + schemaName + `".events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY HASH (account_id);
+CREATE TABLE "` + schemaName + `".events_2026_0 PARTITION OF "` + schemaName + `".events_2026 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE "` + schemaName + `".events_2026_1 PARTITION OF "` + schemaName + `".events_2026 FOR VALUES WITH (MODULUS 2, REMAINDER 1);`
+	if _, err := conn.Exec(ctx, base+`CREATE INDEX events_lookup_idx ON "`+schemaName+`".events (account_id);`); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := base + `CREATE INDEX events_lookup_idx ON "` + schemaName + `".events (account_id, created_at DESC);`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("nested continuous plan=%#v err=%v", plan, err)
+	}
+	joined := joinPlan(plan)
+	if strings.Count(joined, " ON ONLY ") != 2 || strings.Count(joined, "CREATE INDEX CONCURRENTLY") != 2 || strings.Count(joined, "ATTACH PARTITION") != 3 {
+		t.Fatalf("nested hierarchy did not receive recursive shell/build/attach planning:\n%s", joined)
+	}
+	for _, statement := range plan.Statements {
+		if statement.StatementTimeoutMS <= 0 || statement.LockTimeoutMS <= 0 {
+			t.Fatalf("nested replacement statement lacks timeout guidance: %#v", statement)
+		}
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+// Adapted from Stripe pg-schema-diff v1.0.7's MIT-licensed
+// "Attach an unnattached, invalid index" acceptance case. The typo is retained
+// in the source-case name only; onwardpg's assertion is semantic convergence.
+func TestAttachExistingPartitionIndexConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_attach_index_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	base := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `"."Foobar" (id integer, foo varchar(255), PRIMARY KEY (foo)) PARTITION BY LIST (foo);
+CREATE TABLE "` + schemaName + `".foobar_1 PARTITION OF "` + schemaName + `"."Foobar" FOR VALUES IN ('foo_1');
+CREATE TABLE "` + schemaName + `".foobar_2 PARTITION OF "` + schemaName + `"."Foobar" FOR VALUES IN ('foo_2');
+CREATE TABLE "` + schemaName + `"."Foobar_3" PARTITION OF "` + schemaName + `"."Foobar" FOR VALUES IN ('foo_3');
+CREATE INDEX "Partitioned_Idx" ON ONLY "` + schemaName + `"."Foobar" (foo);
+CREATE INDEX foobar_1_part ON "` + schemaName + `".foobar_1 (foo);
+ALTER INDEX "` + schemaName + `"."Partitioned_Idx" ATTACH PARTITION "` + schemaName + `".foobar_1_part;
+CREATE INDEX foobar_2_part ON "` + schemaName + `".foobar_2 (foo);
+ALTER INDEX "` + schemaName + `"."Partitioned_Idx" ATTACH PARTITION "` + schemaName + `".foobar_2_part;
+CREATE INDEX "Foobar_3_Part" ON "` + schemaName + `"."Foobar_3" (foo);`
+	if _, err := conn.Exec(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := base + `ALTER INDEX "` + schemaName + `"."Partitioned_Idx" ATTACH PARTITION "` + schemaName + `"."Foobar_3_Part";`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unsupported := current.Unsupported(); len(unsupported) != 0 {
+		t.Fatalf("incomplete partitioned index must be represented by attachment topology, not blocked: %#v", unsupported)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned || len(plan.Statements) != 1 {
+		t.Fatalf("partition attach plan=%#v err=%v", plan, err)
+	}
+	if got := plan.Statements[0].SQL; got != `ALTER INDEX "`+schemaName+`"."Partitioned_Idx" ATTACH PARTITION "`+schemaName+`"."Foobar_3_Part";` {
+		t.Fatalf("attach SQL=%q", got)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+// Adapted from Stripe pg-schema-diff v1.0.7's MIT-licensed "Add primary key
+// to partition using existing index" and unique-constraint sibling cases.
+func TestAttachExistingPartitionConstraintIndexesConvergeOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_attach_constraint_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".pk_events (id integer NOT NULL, bucket text NOT NULL) PARTITION BY LIST (bucket);
+CREATE TABLE "` + schemaName + `".pk_events_1 PARTITION OF "` + schemaName + `".pk_events FOR VALUES IN ('one');
+ALTER TABLE ONLY "` + schemaName + `".pk_events ADD CONSTRAINT pk_events_pkey PRIMARY KEY (bucket, id);
+CREATE UNIQUE INDEX pk_events_1_pkey ON "` + schemaName + `".pk_events_1 (bucket, id);
+CREATE TABLE "` + schemaName + `".uq_events (id integer NOT NULL, bucket text NOT NULL) PARTITION BY LIST (bucket);
+CREATE TABLE "` + schemaName + `".uq_events_1 PARTITION OF "` + schemaName + `".uq_events FOR VALUES IN ('one');
+ALTER TABLE ONLY "` + schemaName + `".uq_events ADD CONSTRAINT uq_events_key UNIQUE (bucket, id);
+CREATE UNIQUE INDEX uq_events_1_key ON "` + schemaName + `".uq_events_1 (bucket, id);`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := currentDDL + `
+ALTER TABLE "` + schemaName + `".pk_events_1 ADD CONSTRAINT pk_events_1_pkey PRIMARY KEY USING INDEX pk_events_1_pkey;
+ALTER INDEX "` + schemaName + `".pk_events_pkey ATTACH PARTITION "` + schemaName + `".pk_events_1_pkey;
+ALTER TABLE "` + schemaName + `".uq_events_1 ADD CONSTRAINT uq_events_1_key UNIQUE USING INDEX uq_events_1_key;
+ALTER INDEX "` + schemaName + `".uq_events_key ATTACH PARTITION "` + schemaName + `".uq_events_1_key;`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned || len(plan.Statements) != 4 {
+		t.Fatalf("partition constraint attachment plan=%#v err=%v", plan, err)
+	}
+	joined := joinPlan(plan)
+	if strings.Count(joined, "ADD CONSTRAINT") != 2 || strings.Count(joined, "ATTACH PARTITION") != 2 {
+		t.Fatalf("constraint claim/attach ordering is invalid:\n%s", joined)
+	}
+	for i := 0; i < len(plan.Statements); i += 2 {
+		if !strings.Contains(plan.Statements[i].SQL, " ADD CONSTRAINT ") || !strings.Contains(plan.Statements[i+1].SQL, " ATTACH PARTITION ") {
+			t.Fatalf("constraint claim must immediately precede its attachment: %#v", plan.Statements)
+		}
+	}
+	for _, statement := range plan.Statements {
+		if statement.StatementTimeoutMS <= 0 || statement.LockTimeoutMS <= 0 {
+			t.Fatalf("constraint attachment lacks timeout guidance: %#v", statement)
+		}
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+type rowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func TestContinuousPrimaryAndUniqueConstraintReplacementConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_continuous_constraint_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (
+  id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  email text NOT NULL,
+  CONSTRAINT accounts_pkey PRIMARY KEY (id),
+  CONSTRAINT accounts_email_key UNIQUE (email)
+);
+COMMENT ON CONSTRAINT accounts_pkey ON "` + schemaName + `".accounts IS 'stable primary identity';`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (
+  id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  email text NOT NULL,
+  CONSTRAINT accounts_pkey PRIMARY KEY (id, tenant_id),
+  CONSTRAINT accounts_email_key UNIQUE (email, tenant_id)
+);
+COMMENT ON CONSTRAINT accounts_pkey ON "` + schemaName + `".accounts IS 'stable primary identity';`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("continuous constraint plan=%#v err=%v", plan, err)
+	}
+	joined := joinPlan(plan)
+	if strings.Count(joined, "CREATE UNIQUE INDEX CONCURRENTLY") != 2 || strings.Count(joined, "DROP CONSTRAINT") != 2 || strings.Count(joined, "USING INDEX \"onwardpg_tmpidx_") != 2 {
+		t.Fatalf("constraints did not receive continuous index swaps:\n%s", joined)
+	}
+	for _, statement := range plan.Statements {
+		if statement.StatementTimeoutMS <= 0 || statement.LockTimeoutMS <= 0 {
+			t.Fatalf("continuous constraint statement lacks timeout guidance: %#v", statement)
+		}
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestContinuousConstraintReplacementRejectsForeignKeyDependents(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_constraint_dependent_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (id bigint NOT NULL, tenant_id bigint NOT NULL, CONSTRAINT accounts_pkey PRIMARY KEY (id));
+CREATE TABLE "` + schemaName + `".orders (account_id bigint REFERENCES "` + schemaName + `".accounts(id));`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (id bigint NOT NULL, tenant_id bigint NOT NULL, CONSTRAINT accounts_pkey PRIMARY KEY (id, tenant_id));
+CREATE TABLE "` + schemaName + `".orders (account_id bigint);`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || pending.Status != protocol.NeedsInput {
+		t.Fatalf("foreign-key drop should ask before strategy rejection: plan=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	for _, question := range pending.Questions {
+		if question.Kind != "drop" {
+			t.Fatalf("unexpected dependent-constraint question: %#v", question)
+		}
+		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
+	}
+	result, err := Build(current, desired, answers, Options{ConcurrentIndexes: true})
+	if err != nil || result.Status != protocol.Unsupported || len(result.Unsupported) == 0 || !strings.Contains(strings.Join(result.Unsupported, ","), "continuous_constraint_replacement_dependents") {
+		t.Fatalf("foreign-key dependent swap must reject explicitly: plan=%#v err=%v", result, err)
+	}
+}
+
 func TestPartitionedParentPrimaryKeyRebuildConvergesOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -1174,7 +1630,7 @@ func TestRoutineViewDependencyOrderingConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	sql := joinSQL(plan)
-	if plan.Status != protocol.Planned || strings.Index(sql, "CREATE OR REPLACE FUNCTION") < 0 || strings.Index(sql, "CREATE VIEW") < 0 || strings.Index(sql, "CREATE MATERIALIZED VIEW") < 0 || strings.Index(sql, "CREATE OR REPLACE FUNCTION") > strings.Index(sql, "CREATE VIEW") || strings.Index(sql, "CREATE OR REPLACE FUNCTION") > strings.Index(sql, "CREATE MATERIALIZED VIEW") {
+	if plan.Status != protocol.Planned || !strings.Contains(sql, "CREATE OR REPLACE FUNCTION") || !strings.Contains(sql, "CREATE VIEW") || !strings.Contains(sql, "CREATE MATERIALIZED VIEW") || strings.Index(sql, "CREATE OR REPLACE FUNCTION") > strings.Index(sql, "CREATE VIEW") || strings.Index(sql, "CREATE OR REPLACE FUNCTION") > strings.Index(sql, "CREATE MATERIALIZED VIEW") {
 		t.Fatalf("expected routine before dependent views, got %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -1208,7 +1664,7 @@ func TestRoutineViewDependencyOrderingConvergesOnPostgreSQL(t *testing.T) {
 	}
 	sql = joinSQL(plan)
 	functionDrop := strings.Index(sql, "DROP FUNCTION")
-	if plan.Status != protocol.Planned || functionDrop < 0 || strings.Index(sql, "DROP VIEW") < 0 || strings.Index(sql, "DROP MATERIALIZED VIEW") < 0 || functionDrop < strings.Index(sql, "DROP VIEW") || functionDrop < strings.Index(sql, "DROP MATERIALIZED VIEW") {
+	if plan.Status != protocol.Planned || functionDrop < 0 || !strings.Contains(sql, "DROP VIEW") || !strings.Contains(sql, "DROP MATERIALIZED VIEW") || functionDrop < strings.Index(sql, "DROP VIEW") || functionDrop < strings.Index(sql, "DROP MATERIALIZED VIEW") {
 		t.Fatalf("expected dependent views before routine drop, got %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -1261,7 +1717,7 @@ func TestEnumViewDependencyDropOrderingConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	sql := joinSQL(plan)
-	if plan.Status != protocol.Planned || strings.Index(sql, "DROP VIEW") < 0 || strings.Index(sql, "DROP TYPE") < 0 || strings.Index(sql, "DROP VIEW") > strings.Index(sql, "DROP TYPE") {
+	if plan.Status != protocol.Planned || !strings.Contains(sql, "DROP VIEW") || !strings.Contains(sql, "DROP TYPE") || strings.Index(sql, "DROP VIEW") > strings.Index(sql, "DROP TYPE") {
 		t.Fatalf("expected view before enum drop, got %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -4061,6 +4517,149 @@ ALTER TABLE "` + schemaName + `".profiles ADD CONSTRAINT profiles_account_fkey F
 	}
 }
 
+func TestSequenceOwnedByTransitionsConvergeOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_seq_owned_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".old_owner (id bigint);
+CREATE TABLE "` + schemaName + `".new_owner (id bigint);
+CREATE SEQUENCE "` + schemaName + `".ticket_seq AS bigint START WITH 10 INCREMENT BY 2 MINVALUE 1 MAXVALUE 999 CACHE 3 NO CYCLE;
+ALTER SEQUENCE "` + schemaName + `".ticket_seq OWNED BY "` + schemaName + `".old_owner.id;`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	loadDesired := func(ddl string) *pgschema.Snapshot {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "desired.sql")
+		if err := os.WriteFile(path, []byte(ddl), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	desired := loadDesired(`CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".old_owner (id bigint);
+CREATE TABLE "` + schemaName + `".new_owner (id bigint);
+CREATE SEQUENCE "` + schemaName + `".ticket_seq AS bigint START WITH 10 INCREMENT BY 2 MINVALUE 1 MAXVALUE 999 CACHE 3 NO CYCLE;
+ALTER SEQUENCE "` + schemaName + `".ticket_seq OWNED BY "` + schemaName + `".new_owner.id;`)
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || plan.Status != protocol.Planned || !strings.Contains(joinPlan(plan), `OWNED BY "`+schemaName+`"."new_owner"."id"`) {
+		t.Fatalf("owned-by move plan=%#v err=%v", plan, err)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+
+	desired = loadDesired(`CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".old_owner (id bigint);
+CREATE TABLE "` + schemaName + `".new_owner (id bigint);
+CREATE SEQUENCE "` + schemaName + `".ticket_seq AS bigint START WITH 10 INCREMENT BY 2 MINVALUE 1 MAXVALUE 999 CACHE 3 NO CYCLE OWNED BY NONE;`)
+	current, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || plan.Status != protocol.Planned || !strings.Contains(joinPlan(plan), "OWNED BY NONE") {
+		t.Fatalf("owned-by-none plan=%#v err=%v", plan, err)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestIdentityAddAllOptionsAndConfirmedDropConvergeOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_identity_full_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
+	if _, err := conn.Exec(ctx, `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".items (id bigint NOT NULL DEFAULT 5);`); err != nil {
+		t.Fatal(err)
+	}
+	loadDesired := func(ddl string) *pgschema.Snapshot {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "desired.sql")
+		if err := os.WriteFile(path, []byte(ddl), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	desired := loadDesired(`CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".items (
+  id bigint GENERATED ALWAYS AS IDENTITY (MINVALUE 2 MAXVALUE 90 START WITH 3 INCREMENT BY 4 CACHE 5 NO CYCLE)
+);`)
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || plan.Status != protocol.Planned || strings.Index(joinPlan(plan), "DROP DEFAULT") > strings.Index(joinPlan(plan), "ADD GENERATED ALWAYS AS IDENTITY") {
+		t.Fatalf("identity-add plan=%#v err=%v", plan, err)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+
+	desired = loadDesired(`CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".items (
+  id bigint GENERATED BY DEFAULT AS IDENTITY (MINVALUE 1 MAXVALUE 900 START WITH 30 INCREMENT BY 40 CACHE 50 CYCLE)
+);`)
+	current, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("identity-options plan=%#v err=%v", plan, err)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+
+	desired = loadDesired(`CREATE SCHEMA "` + schemaName + `"; CREATE TABLE "` + schemaName + `".items (id bigint NOT NULL DEFAULT 9);`)
+	current, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "drop_identity" {
+		t.Fatalf("identity drop must ask explicit intent: plan=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop_identity", Key: pending.Questions[0].Key, Value: "drop", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	plan, err = Build(current, desired, answers, Options{})
+	if err != nil || plan.Status != protocol.Planned || strings.Index(joinPlan(plan), "DROP IDENTITY") > strings.Index(joinPlan(plan), "SET DEFAULT 9") {
+		t.Fatalf("identity-drop plan=%#v err=%v", plan, err)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
 func lockGraphPlanIntegration(t *testing.T, ctx context.Context, conn *pgx.Conn) {
 	t.Helper()
 	const integrationLock int64 = 731095702114
@@ -4068,6 +4667,123 @@ func lockGraphPlanIntegration(t *testing.T, ctx context.Context, conn *pgx.Conn)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) })
+}
+
+func TestRowSecurityPoliciesAndTablePrivilegesConvergeOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	suffix := time.Now().UTC().Format("20060102150405")
+	schemaName := "onwardpg_rls_" + suffix
+	roleName := `onwardpg_reader_` + suffix
+	if _, err := conn.Exec(ctx, "CREATE ROLE "+quote(roleName)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(roleName)) }()
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+
+	loadDesired := func(ddl string) *pgschema.Snapshot {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "schema.sql")
+		if err := os.WriteFile(path, []byte(ddl), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	base := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, tenant_id bigint NOT NULL, amount bigint NOT NULL);`
+	desired := loadDesired(base + `
+CREATE POLICY tenant_access ON "` + schemaName + `".orders AS PERMISSIVE FOR ALL TO PUBLIC, "` + roleName + `" USING (tenant_id > 0);
+ALTER TABLE "` + schemaName + `".orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "` + schemaName + `".orders FORCE ROW LEVEL SECURITY;
+GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `" WITH GRANT OPTION;
+GRANT INSERT ON TABLE "` + schemaName + `".orders TO PUBLIC;`)
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("initial authorization plan=%#v err=%v", plan, err)
+	}
+	initialSQL := joinPlan(plan)
+	if strings.Index(initialSQL, "CREATE POLICY") > strings.Index(initialSQL, "ENABLE ROW LEVEL SECURITY") || strings.Index(initialSQL, "ENABLE ROW LEVEL SECURITY") > strings.Index(initialSQL, "FORCE ROW LEVEL SECURITY") {
+		t.Fatalf("unsafe initial RLS order:\n%s", initialSQL)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+
+	desired = loadDesired(base + `
+CREATE POLICY tenant_access ON "` + schemaName + `".orders AS PERMISSIVE FOR ALL TO "` + roleName + `" USING (tenant_id > 10) WITH CHECK (amount >= 0);
+ALTER TABLE "` + schemaName + `".orders ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
+	current, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput {
+		t.Fatalf("authorization contraction must ask: plan=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answerValues := map[string]string{"alter_policy": "alter", "relax_row_security": "relax", "revoke_grant_option": "revoke", "drop": "drop"}
+	for _, question := range pending.Questions {
+		value, exists := answerValues[question.Kind]
+		if !exists {
+			t.Fatalf("unexpected authorization question: %#v", question)
+		}
+		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
+	}
+	plan, err = Build(current, desired, answers, Options{})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("answered authorization plan=%#v err=%v", plan, err)
+	}
+	for _, fragment := range []string{"ALTER POLICY", "NO FORCE ROW LEVEL SECURITY", "REVOKE GRANT OPTION FOR SELECT", "REVOKE INSERT"} {
+		if !strings.Contains(joinPlan(plan), fragment) {
+			t.Fatalf("authorization plan missing %q:\n%s", fragment, joinPlan(plan))
+		}
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+
+	desired = loadDesired(base)
+	current, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err = Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput {
+		t.Fatalf("RLS removal must ask: plan=%#v err=%v", pending, err)
+	}
+	answers = protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	for _, question := range pending.Questions {
+		if question.Kind != "drop" {
+			t.Fatalf("unexpected RLS-removal question: %#v", question)
+		}
+		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
+	}
+	plan, err = Build(current, desired, answers, Options{})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("RLS-removal plan=%#v err=%v", plan, err)
+	}
+	removalSQL := joinPlan(plan)
+	if !strings.Contains(removalSQL, "DISABLE ROW LEVEL SECURITY") || !strings.Contains(removalSQL, "DROP POLICY") || strings.Index(removalSQL, "DISABLE ROW LEVEL SECURITY") > strings.Index(removalSQL, "DROP POLICY") {
+		t.Fatalf("RLS must be disabled before policy removal:\n%s", removalSQL)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
 }
 
 func applyPlan(t *testing.T, ctx context.Context, conn *pgx.Conn, plan protocol.Result) {

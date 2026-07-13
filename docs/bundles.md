@@ -5,6 +5,18 @@ An onwardpg bundle is the durable receipt for one logical migration generation.
 bundle to the validated per-target history head. Phase artifacts are the
 onwardpg migration history; no ORM runner handoff is planned.
 
+Create the target's root entry once with:
+
+```sh
+onwardpg history init --target primary-postgres
+```
+
+The command produces a clone-verified `baseline` bundle from empty PostgreSQL
+to the current declarative schema and refuses any non-empty target history.
+For an existing application database, this is replay genesis, not SQL to apply
+to that database. Merge the baseline into the protected base before creating
+ordinary PR bundles.
+
 ## Current command
 
 Regenerate one logical feature bundle from the latest PR base:

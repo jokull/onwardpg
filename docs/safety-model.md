@@ -10,8 +10,8 @@ The planner's core safety rules are:
   transaction;
 - materialize DDL in a disposable PostgreSQL database rather than parse a
   subset of SQL;
-- block unknown or unmodeled catalog state unless a validated narrow ignore
-  selector explicitly accounts for it;
+- block catalog state in the preview's explicit unsupported-family inventory
+  unless a validated narrow ignore selector accounts for it;
 - bind ambiguity answers to both source and desired graph fingerprints;
 - reject stale, invalid, contradictory, duplicate, and unused answers;
 - require an explicit, fingerprint-bound manual-work contract—including its
@@ -20,7 +20,38 @@ The planner's core safety rules are:
 - emit no plan when status is `needs_input` or `unsupported`;
 - preserve execution constraints through explicit transactional batches; and
 - surface destructive, lock, rewrite, validation, and availability concerns as
-statement safety/hazard metadata for review.
+  statement safety/hazard metadata for review.
+
+Every PostgreSQL 14–18 `pg_catalog` table is classified in the developer
+preview inventory. The attribute-level audit remains in progress. The current
+blockers include domains, composites, aggregates, standalone collations,
+range/multirange types, foreign tables, explicit ownership deviations,
+non-table and column ACL/default-privilege state, non-owner grant chains,
+replica identity, clustered or invalid indexes, relation and column physical
+options, explicit relation tablespaces, traditional inheritance, rules,
+text-search objects, event triggers, publications and subscriptions, extended
+statistics, FDWs/servers/user mappings, custom access methods/operators/casts/
+conversions/languages/transforms, security labels, and comments whose typed
+object does not yet retain them. PostgreSQL 18's canonical generated `NOT
+NULL` identities normalize to the existing column flag; custom/noncanonical
+or commented `NOT NULL`, unenforced and period constraints, and virtual
+generated columns are version-gated blockers.
+Subscription connection strings and security-label values are never included
+in diagnostics.
+Extension-owned members are represented atomically by the typed extension
+name/version/schema boundary and are not independently planned. The
+machine-readable [catalog-family inventory](../parity/postgres-catalog-families.json)
+records the per-major catalog-table evidence separately from its still-open
+attribute audit. “No unsupported result” is not a catalog-completeness
+certification until that second milestone closes.
+
+RLS enable/force state, policies, and table privileges are modeled rather than
+ignored. Graph edges place policies before RLS enable and RLS disable before
+policy removal. Policy replacement, policy alteration, RLS relaxation,
+privilege revocation, and removal of grant options remain reviewable and, when
+destructive or authorization-relaxing, fingerprint-bound. Every emitted
+authorization statement carries lock/statement timeout guidance; onwardpg
+does not set those values on a caller session.
 
 Manual-work SQL is operator-owned and is never invented from catalog state.
 Only a question that explicitly requests manual work may carry that payload;

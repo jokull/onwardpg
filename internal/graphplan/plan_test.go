@@ -73,6 +73,146 @@ func FuzzQuoteIdentifierRoundTrip(f *testing.F) {
 	})
 }
 
+func TestBuildOrdersPoliciesBeforeRLSAndQuotesRolesAndPrivileges(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "orders"}
+	column := pgschema.Column{Table: table.ObjectID(), Name: "tenant_id", Position: 1, Type: "bigint"}
+	using := `tenant_id = current_setting('app.tenant_id')::bigint`
+	policy := pgschema.Policy{Table: table.ObjectID(), Name: `tenant"access`, Permissive: true, Command: "SELECT", Roles: []string{"PUBLIC", `role"; DROP TABLE nope; --`}, Using: &using}
+	rls := pgschema.RowSecurity{Table: table.ObjectID(), Enabled: true, Forced: true}
+	privilege := pgschema.TablePrivilege{Table: table.ObjectID(), Grantee: `role"; DROP TABLE nope; --`, Grantor: "@owner", Privilege: "SELECT", Grantable: true}
+	for _, object := range []pgschema.Object{schema, table, column, policy, rls, privilege} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{
+		{table.ObjectID(), schema.ObjectID()}, {column.ObjectID(), table.ObjectID()},
+		{policy.ObjectID(), table.ObjectID()}, {policy.ObjectID(), column.ObjectID()},
+		{rls.ObjectID(), table.ObjectID()}, {rls.ObjectID(), policy.ObjectID()},
+		{privilege.ObjectID(), table.ObjectID()},
+	} {
+		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Planned {
+		t.Fatalf("result = %#v", result)
+	}
+	joined := joinSQL(result)
+	policySQL := `CREATE POLICY "tenant""access" ON "app"."orders" AS PERMISSIVE FOR SELECT TO PUBLIC, "role""; DROP TABLE nope; --" USING (`
+	grantSQL := `GRANT SELECT ON TABLE "app"."orders" TO "role""; DROP TABLE nope; --" WITH GRANT OPTION;`
+	for _, fragment := range []string{policySQL, grantSQL, `ENABLE ROW LEVEL SECURITY`, `FORCE ROW LEVEL SECURITY`} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("plan missing %q:\n%s", fragment, joined)
+		}
+	}
+	if strings.Index(joined, "CREATE POLICY") > strings.Index(joined, "ENABLE ROW LEVEL SECURITY") || strings.Index(joined, "ENABLE ROW LEVEL SECURITY") > strings.Index(joined, "FORCE ROW LEVEL SECURITY") {
+		t.Fatalf("unsafe RLS order:\n%s", joined)
+	}
+}
+
+func TestBuildRequiresAuthorizationAnswersForPolicyAndGrantOptionContractions(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "orders"}
+	oldUsing, newUsing := "tenant_id > 0", "tenant_id > 10"
+	oldPolicy := pgschema.Policy{Table: table.ObjectID(), Name: "tenant", Permissive: true, Command: "SELECT", Roles: []string{"PUBLIC"}, Using: &oldUsing}
+	newPolicy := oldPolicy
+	newPolicy.Using = &newUsing
+	oldRLS := pgschema.RowSecurity{Table: table.ObjectID(), Enabled: true, Forced: true}
+	newRLS := pgschema.RowSecurity{Table: table.ObjectID(), Enabled: true, Forced: false}
+	oldPrivilege := pgschema.TablePrivilege{Table: table.ObjectID(), Grantee: "reader", Grantor: "@owner", Privilege: "SELECT", Grantable: true}
+	newPrivilege := oldPrivilege
+	newPrivilege.Grantable = false
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{oldPolicy, oldRLS, oldPrivilege} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{newPolicy, newRLS, newPrivilege} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 3 {
+		t.Fatalf("expected three authorization questions: %#v", pending)
+	}
+	values := map[string]string{"alter_policy": "alter", "relax_row_security": "relax", "revoke_grant_option": "revoke"}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	for _, question := range pending.Questions {
+		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: values[question.Kind], QuestionFingerprint: question.ScopeFingerprint})
+	}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := joinSQL(planned)
+	for _, fragment := range []string{"ALTER POLICY", "NO FORCE ROW LEVEL SECURITY", "REVOKE GRANT OPTION FOR SELECT"} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("plan missing %q:\n%s", fragment, joined)
+		}
+	}
+}
+
+func TestBuildRequiresPolicyReplacementIntentAndRejectsInvalidExpressions(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "orders"}
+	using := "tenant_id > 0"
+	before := pgschema.Policy{Table: table.ObjectID(), Name: "tenant", Permissive: true, Command: "ALL", Roles: []string{"PUBLIC"}, Using: &using}
+	after := before
+	after.Permissive = false
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.Add(after); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "replace_policy" {
+		t.Fatalf("policy replacement must ask: plan=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "replace_policy", Key: pending.Questions[0].Key, Value: "replace", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil || planned.Status != protocol.Planned || strings.Index(joinSQL(planned), "DROP POLICY") > strings.Index(joinSQL(planned), "CREATE POLICY") {
+		t.Fatalf("policy replacement plan=%#v err=%v", planned, err)
+	}
+
+	invalid := pgschema.New()
+	check := "true"
+	bad := pgschema.Policy{Table: table.ObjectID(), Name: "bad", Permissive: true, Command: "SELECT", Roles: []string{"PUBLIC"}, Check: &check}
+	if err := invalid.Add(table); err != nil {
+		t.Fatal(err)
+	}
+	if err := invalid.Add(bad); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Build(pgschema.New(), invalid, protocol.Answers{}, Options{})
+	if err != nil || result.Status != protocol.Unsupported || len(result.Unsupported) != 1 || !strings.HasPrefix(result.Unsupported[0], "policy_check_not_allowed:") {
+		t.Fatalf("invalid policy expression must be unsupported: plan=%#v err=%v", result, err)
+	}
+}
+
 func TestBuildRequiresFingerprintBoundDestructiveAnswer(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "public", Name: "orders"}
@@ -239,17 +379,17 @@ func TestBuildRendersPartitionAttachDetachAndRejectsReconfiguration(t *testing.T
 	base := pgschema.Table{Schema: "app", Name: "events_2026"}
 	attached := base
 	attached.PartitionOf = &pgschema.PartitionOf{Parent: parent, Bound: "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"}
-	attach, _, unsupported, err := renderModify(base, attached, decisions{}, Options{}, nil)
+	attach, _, unsupported, err := renderModify(base, attached, decisions{}, Options{}, nil, nil)
 	if err != nil || len(unsupported) != 0 || len(attach) != 1 || attach[0].SQL != `ALTER TABLE "app"."events" ATTACH PARTITION "app"."events_2026" FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');` || attach[0].Phase != "migrate" {
 		t.Fatalf("partition attach = %#v, unsupported=%#v, err=%v", attach, unsupported, err)
 	}
-	detach, _, unsupported, err := renderModify(attached, base, decisions{}, Options{}, nil)
+	detach, _, unsupported, err := renderModify(attached, base, decisions{}, Options{}, nil, nil)
 	if err != nil || len(unsupported) != 0 || len(detach) != 1 || detach[0].SQL != `ALTER TABLE "app"."events" DETACH PARTITION "app"."events_2026";` || detach[0].Phase != "migrate" {
 		t.Fatalf("partition detach = %#v, unsupported=%#v, err=%v", detach, unsupported, err)
 	}
 	moved := attached
 	moved.PartitionOf = &pgschema.PartitionOf{Parent: parent, Bound: "FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')"}
-	_, _, unsupported, err = renderModify(attached, moved, decisions{}, Options{}, nil)
+	_, _, unsupported, err = renderModify(attached, moved, decisions{}, Options{}, nil, nil)
 	if err != nil || len(unsupported) != 1 || unsupported[0] != "partition_reconfiguration:table:app:events_2026" {
 		t.Fatalf("partition reconfiguration = %#v, err=%v", unsupported, err)
 	}
@@ -1390,6 +1530,211 @@ func TestBuildSeparatesConcurrentIndexIntoNonTransactionalBatch(t *testing.T) {
 	}
 	if got := result.Statements[0].SQL; got != `CREATE INDEX CONCURRENTLY "orders_id_idx" ON "public"."orders" USING "btree" ("id" NULLS LAST);` {
 		t.Fatalf("concurrent SQL = %q", got)
+	}
+}
+
+func TestBuildContinuouslyReplacesSameNameIndex(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "orders"}
+	before := pgschema.Index{Table: table.ObjectID(), Name: "orders_lookup_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "account_id"}}}
+	after := pgschema.Index{Table: table.ObjectID(), Name: "orders_lookup_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "account_id"}, {Column: "created_at", Descending: true}}}
+	for _, pair := range []struct {
+		snapshot *pgschema.Snapshot
+		index    pgschema.Index
+	}{{current, before}, {desired, after}} {
+		if err := pair.snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := pair.snapshot.Add(pair.index); err != nil {
+			t.Fatal(err)
+		}
+		if err := pair.snapshot.AddDependency(pair.index.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary, err := replacementIndexName(before, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`ALTER INDEX "public"."orders_lookup_idx" RENAME TO "` + temporary + `";`,
+		`CREATE INDEX CONCURRENTLY "orders_lookup_idx" ON "public"."orders" USING "btree" ("account_id", "created_at" DESC);`,
+		`DROP INDEX CONCURRENTLY "public"."` + temporary + `";`,
+	}
+	if result.Status != protocol.Planned || len(result.Statements) != len(want) {
+		t.Fatalf("unexpected continuous replacement plan: %#v", result)
+	}
+	for i, sql := range want {
+		if result.Statements[i].SQL != sql {
+			t.Fatalf("statement %d = %q, want %q", i, result.Statements[i].SQL, sql)
+		}
+	}
+	if result.Statements[0].Phase != "expand" || result.Statements[0].NonTransactional || !result.Statements[1].NonTransactional || result.Statements[2].Phase != "contract" || !result.Statements[2].NonTransactional {
+		t.Fatalf("invalid phased transaction boundaries: %#v", result.Statements)
+	}
+	if result.Statements[0].StatementTimeoutMS != 3000 || result.Statements[0].LockTimeoutMS != 3000 || result.Statements[1].StatementTimeoutMS != 1200000 || result.Statements[1].LockTimeoutMS != 3000 || result.Statements[2].StatementTimeoutMS != 1200000 || result.Statements[2].LockTimeoutMS != 3000 {
+		t.Fatalf("invalid timeout guidance: %#v", result.Statements)
+	}
+	if len(result.Batches) != 3 || !result.Batches[0].Transactional || result.Batches[1].Transactional || result.Batches[2].Transactional {
+		t.Fatalf("invalid continuous replacement batches: %#v", result.Batches)
+	}
+}
+
+func TestBuildContinuouslyReplacesEmptyPartitionedParentIndex(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "events", Partition: &pgschema.Partition{Strategy: "RANGE", Raw: "RANGE (created_at)"}}
+	before := pgschema.Index{Table: table.ObjectID(), Name: "events_lookup_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "account_id"}}}
+	after := pgschema.Index{Table: table.ObjectID(), Name: "events_lookup_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "account_id"}, {Column: "created_at"}}}
+	for _, pair := range []struct {
+		snapshot *pgschema.Snapshot
+		index    pgschema.Index
+	}{{current, before}, {desired, after}} {
+		if err := pair.snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := pair.snapshot.Add(pair.index); err != nil {
+			t.Fatal(err)
+		}
+		if err := pair.snapshot.AddDependency(pair.index.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Planned || len(result.Statements) != 3 || !strings.Contains(result.Statements[1].SQL, ` ON ONLY "public"."events" `) || result.Statements[2].Phase != "contract" {
+		t.Fatalf("expected empty partitioned-parent shell replacement, got %#v", result)
+	}
+}
+
+func TestBuildContinuouslyReplacesNestedEmptyPartitionedIndex(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	parent := pgschema.Table{Schema: "public", Name: "events", Partition: &pgschema.Partition{Strategy: "RANGE", Raw: "RANGE (created_at)"}}
+	child := pgschema.Table{Schema: "public", Name: "events_2026", Partition: &pgschema.Partition{Strategy: "HASH", Raw: "HASH (account_id)"}, PartitionOf: &pgschema.PartitionOf{Parent: parent.ObjectID(), Bound: "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"}}
+	before := pgschema.Index{Table: parent.ObjectID(), Name: "events_lookup_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "account_id"}}}
+	after := before
+	after.Parts = []pgschema.IndexPart{{Column: "account_id"}, {Column: "created_at"}}
+	beforeParentID, afterParentID := before.ObjectID(), after.ObjectID()
+	beforeChild := pgschema.Index{Table: child.ObjectID(), Name: "events_2026_account_id_idx", Parent: &beforeParentID, Method: "btree", Parts: before.Parts}
+	afterChild := pgschema.Index{Table: child.ObjectID(), Name: "events_2026_account_id_created_at_idx", Parent: &afterParentID, Method: "btree", Parts: after.Parts}
+	for _, fixture := range []struct {
+		snapshot *pgschema.Snapshot
+		parent   pgschema.Index
+		child    pgschema.Index
+	}{{current, before, beforeChild}, {desired, after, afterChild}} {
+		for _, object := range []pgschema.Object{parent, child, fixture.parent, fixture.child} {
+			if err := fixture.snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := fixture.snapshot.AddDependency(fixture.child.ObjectID(), fixture.parent.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || result.Status != protocol.Planned || len(result.Statements) != 6 {
+		t.Fatalf("nested hierarchy must plan recursively: plan=%#v err=%v", result, err)
+	}
+	if !strings.Contains(result.Statements[2].SQL, ` ON ONLY "public"."events" `) ||
+		!strings.Contains(result.Statements[3].SQL, ` ON ONLY "public"."events_2026" `) ||
+		!strings.Contains(result.Statements[4].SQL, `"events_lookup_idx" ATTACH PARTITION "public"."events_2026_account_id_created_at_idx"`) ||
+		result.Statements[5].Phase != "contract" {
+		t.Fatalf("nested shell/build/attach/retire order is invalid: %#v", result.Statements)
+	}
+}
+
+func TestBuildAttachesExistingLocalIndexToPartitionedParent(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	parentTable := pgschema.Table{Schema: "public", Name: "events", Partition: &pgschema.Partition{Strategy: "RANGE", Raw: "RANGE (created_at)"}}
+	childTable := pgschema.Table{Schema: "public", Name: "events_2026", PartitionOf: &pgschema.PartitionOf{Parent: parentTable.ObjectID(), Bound: "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"}}
+	parentIndex := pgschema.Index{Table: parentTable.ObjectID(), Name: "events_lookup_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "created_at"}}}
+	childBefore := pgschema.Index{Table: childTable.ObjectID(), Name: "events_2026_lookup_idx", Method: "btree", Parts: parentIndex.Parts}
+	childAfter := childBefore
+	parentID := parentIndex.ObjectID()
+	childAfter.Parent = &parentID
+	for _, fixture := range []struct {
+		snapshot *pgschema.Snapshot
+		child    pgschema.Index
+	}{{current, childBefore}, {desired, childAfter}} {
+		for _, object := range []pgschema.Object{parentTable, childTable, parentIndex, fixture.child} {
+			if err := fixture.snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, edge := range [][2]pgschema.ID{
+			{childTable.ObjectID(), parentTable.ObjectID()},
+			{parentIndex.ObjectID(), parentTable.ObjectID()},
+			{fixture.child.ObjectID(), childTable.ObjectID()},
+		} {
+			if err := fixture.snapshot.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := desired.AddDependency(childAfter.ObjectID(), parentID); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || result.Status != protocol.Planned || len(result.Statements) != 1 {
+		t.Fatalf("attach plan=%#v err=%v", result, err)
+	}
+	statement := result.Statements[0]
+	if statement.SQL != `ALTER INDEX "public"."events_lookup_idx" ATTACH PARTITION "public"."events_2026_lookup_idx";` || statement.Phase != "expand" || statement.NonTransactional || statement.StatementTimeoutMS != 30000 || statement.LockTimeoutMS != 3000 {
+		t.Fatalf("unexpected attach statement: %#v", statement)
+	}
+}
+
+func TestBuildRejectsPartitionIndexDetachOrStructuralAttach(t *testing.T) {
+	parent := pgschema.Index{Table: (pgschema.Table{Schema: "public", Name: "events"}).ObjectID(), Name: "events_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "id"}}}
+	parentID := parent.ObjectID()
+	attached := pgschema.Index{Table: (pgschema.Table{Schema: "public", Name: "events_1"}).ObjectID(), Name: "events_1_idx", Parent: &parentID, Method: "btree", Parts: parent.Parts}
+	detached := attached
+	detached.Parent = nil
+	_, _, unsupported, err := renderModify(attached, detached, decisions{}, Options{}, nil, nil)
+	if err != nil || len(unsupported) != 1 || !strings.Contains(unsupported[0], "partitioned_index_modify") {
+		t.Fatalf("detach must reject: unsupported=%#v err=%v", unsupported, err)
+	}
+	structural := detached
+	structural.Parent = &parentID
+	structural.Parts = []pgschema.IndexPart{{Column: "id"}, {Column: "created_at"}}
+	_, _, unsupported, err = renderModify(detached, structural, decisions{}, Options{}, nil, nil)
+	if err != nil || len(unsupported) != 1 || !strings.Contains(unsupported[0], "partition_index_attach_rebuild") {
+		t.Fatalf("structural attach must reject: unsupported=%#v err=%v", unsupported, err)
+	}
+}
+
+func TestPartitionConstraintAttachmentRejectsMismatchedExistingIndex(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	parentTable := (pgschema.Table{Schema: "public", Name: "events"}).ObjectID()
+	childTable := (pgschema.Table{Schema: "public", Name: "events_1"}).ObjectID()
+	parentConstraint := pgschema.Constraint{Table: parentTable, Name: "events_pkey", Type: pgschema.ConstraintPrimary, UsingIndex: "events_pkey"}
+	parentConstraintID := parentConstraint.ObjectID()
+	parentIndex := pgschema.Index{Table: parentTable, Name: "events_pkey", Unique: true, Primary: true, Constraint: "events_pkey", Method: "btree", Parts: []pgschema.IndexPart{{Column: "bucket"}, {Column: "id"}}}
+	parentIndexID := parentIndex.ObjectID()
+	before := pgschema.Index{Table: childTable, Name: "events_1_pkey", Unique: true, Method: "btree", Parts: []pgschema.IndexPart{{Column: "bucket"}}}
+	after := before
+	after.Parent = &parentIndexID
+	after.Primary = true
+	after.Constraint = "events_1_pkey"
+	constraint := pgschema.Constraint{Table: childTable, Name: "events_1_pkey", Parent: &parentConstraintID, Type: pgschema.ConstraintPrimary, UsingIndex: "events_1_pkey"}
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range []pgschema.Object{parentConstraint, parentIndex, after, constraint} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, unsupported, err := renderPartitionConstraintAttachment(constraint, current, desired)
+	if err != nil || len(unsupported) != 1 || !strings.Contains(unsupported[0], "partition_constraint_attach_structure") {
+		t.Fatalf("mismatched constraint attachment must reject: unsupported=%#v err=%v", unsupported, err)
 	}
 }
 

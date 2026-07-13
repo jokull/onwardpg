@@ -29,8 +29,8 @@ The current Go implementation is graph-native but still an evolving developer
 preview. It snapshots its supported objects directly from a repeatable-read
 PostgreSQL catalog transaction and has initial pinned-Atlas differential
 convergence tests. The matrix remains incomplete; it is not a coverage claim.
-Objects outside the modeled boundary are explicit blockers rather than silently
-discarded state.
+Explicitly inventoried outside-core families are blockers, but the
+developer-preview catalog inventory is not yet exhaustive.
 
 | Capability | Reference-study status | Current onwardpg status |
 | --- | --- | --- |
@@ -45,19 +45,25 @@ discarded state.
 | Standalone sequences | extension scope | Typed snapshot, create/drop, and parameter updates |
 | Extensions | onwardpg extension scope | Typed create/drop/version update/schema move |
 | Views, routines, domains, composites | onwardpg extension scope | Views and basic routines are graph-modeled; domains/composites blocked |
-| Policies, triggers, rules, grants, text-search, foreign tables | Outside current scope | Basic triggers are graph-modeled; other objects blocked |
+| Policies, triggers, rules, grants, text-search, foreign tables | Mixed | Triggers, RLS/policies, and ordinary/partitioned-table grants are typed; foreign tables, rules, default/column/non-table ACLs, and text-search objects explicitly block until their verticals exist |
 
 ## Safety gate
 
-Before snapshotting modeled objects, catalog inspection detects objects
-that the planner cannot faithfully preserve. Any such object makes the plan
-`unsupported`; `--ignore kind:name` is an explicit user acceptance of that
-blind spot. The gate intentionally blocks an unchanged unknown object too: a
-name-only comparison cannot establish that the object's definition is unchanged.
+Before snapshotting modeled objects, catalog inspection detects several known
+families that the planner cannot faithfully preserve. A detected object makes
+the plan `unsupported`; `--ignore kind:name` is an explicit user acceptance of
+that blind spot. The gate intentionally blocks an unchanged detected object
+too: a name-only comparison cannot establish that its definition is
+unchanged. This gate is not yet a complete PostgreSQL catalog inventory.
 
 ## How this study is used
 
-1. Typed PostgreSQL graph snapshot with dependency edges and capabilities. **In progress:** schemas, enums, tables, columns, constraints and structured indexes, plus standalone sequences, load directly from a consistent catalog snapshot; unmodeled objects are blockers. Remaining work is dependency coverage and differential verification.
+1. Typed PostgreSQL graph snapshot with dependency edges and capabilities.
+   **In progress:** schemas, enums, tables, columns, constraints and structured
+   indexes, plus standalone sequences, load directly from a consistent catalog
+   snapshot; known inventoried unmodeled objects are blockers. Remaining work
+   includes catalog-inventory completeness, dependency coverage, and
+   differential verification.
 2. Semantic change model, validated answer fingerprints, and a dependency DAG.
 3. Forward-only expand/contract hazard policy and transactional batches.
 4. Differential convergence tests against the pinned Atlas PostgreSQL planner

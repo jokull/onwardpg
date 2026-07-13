@@ -600,10 +600,10 @@ func (m Manifest) Validate() error {
 	if m.Generation < 1 {
 		return fmt.Errorf("bundle generation must be positive")
 	}
-	if m.Purpose != "feature" && m.Purpose != "repair" && m.Purpose != "contract" {
+	if m.Purpose != "feature" && m.Purpose != "repair" && m.Purpose != "contract" && m.Purpose != "baseline" {
 		return fmt.Errorf("bundle purpose %q is invalid", m.Purpose)
 	}
-	if m.Mode != "pr" && m.Mode != "release" && m.Mode != "verify" && m.Mode != "develop" {
+	if m.Mode != "pr" && m.Mode != "release" && m.Mode != "verify" && m.Mode != "develop" && m.Mode != "init" {
 		return fmt.Errorf("bundle mode %q is invalid", m.Mode)
 	}
 	if m.State != string(protocol.Planned) && m.State != string(protocol.NeedsInput) && m.State != string(protocol.Unsupported) {

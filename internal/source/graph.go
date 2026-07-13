@@ -98,6 +98,9 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 	if err := inspectGraphColumns(ctx, tx, snapshot, tracker, version); err != nil {
 		return nil, err
 	}
+	if err := addSequenceOwnershipDependencies(snapshot); err != nil {
+		return nil, err
+	}
 	if err := addConstraintColumnDependencies(ctx, tx, snapshot); err != nil {
 		return nil, err
 	}
@@ -114,6 +117,12 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 		return nil, err
 	}
 	if err := inspectGraphTriggers(ctx, tx, snapshot, tracker); err != nil {
+		return nil, err
+	}
+	if err := inspectGraphPolicies(ctx, tx, snapshot, tracker); err != nil {
+		return nil, err
+	}
+	if err := inspectGraphTablePrivileges(ctx, tx, snapshot, tracker); err != nil {
 		return nil, err
 	}
 	if err := inspectGraphBlockers(ctx, tx, snapshot, tracker, version); err != nil {
@@ -262,7 +271,7 @@ SELECT n.nspname, c.relname, c.relpersistence = 'u', obj_description(c.oid, 'pg_
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_partitioned_table pt ON pt.partrelid = c.oid
-LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
+LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
 LEFT JOIN pg_class pc ON pc.oid = i.inhparent
 LEFT JOIN pg_namespace pn ON pn.oid = pc.relnamespace
 WHERE c.relkind IN ('r', 'p') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
@@ -492,14 +501,34 @@ func serialTypeForCatalogType(typ string) (string, bool) {
 func inspectGraphSequences(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	rows, err := tx.Query(ctx, `
 SELECT n.nspname, c.relname, format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement,
-       s.seqmin, s.seqmax, s.seqcache, s.seqcycle, obj_description(c.oid, 'pg_class')
+       s.seqmin, s.seqmax, s.seqcache, s.seqcycle, obj_description(c.oid, 'pg_class'),
+       owned.schema_name, owned.table_name, owned.column_name
 FROM pg_sequence s
 JOIN pg_class c ON c.oid = s.seqrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN LATERAL (
+  SELECT tn.nspname AS schema_name, tc.relname AS table_name, a.attname AS column_name
+  FROM pg_depend d
+  JOIN pg_class tc ON tc.oid = d.refobjid
+  JOIN pg_namespace tn ON tn.oid = tc.relnamespace
+  JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+  WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid
+    AND d.refclassid = 'pg_class'::regclass AND d.deptype = 'a'
+  LIMIT 1
+) owned ON true
 WHERE c.relkind = 'S' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (
     SELECT 1 FROM pg_depend d
-    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('a', 'i')
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('i', 'e')
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_depend owner_dep
+    JOIN pg_attrdef ad ON ad.adrelid = owner_dep.refobjid AND ad.adnum = owner_dep.refobjsubid
+    JOIN pg_depend default_dep ON default_dep.classid = 'pg_attrdef'::regclass AND default_dep.objid = ad.oid
+      AND default_dep.refclassid = 'pg_class'::regclass AND default_dep.refobjid = c.oid
+    WHERE owner_dep.classid = 'pg_class'::regclass AND owner_dep.objid = c.oid
+      AND owner_dep.refclassid = 'pg_class'::regclass AND owner_dep.deptype = 'a'
   )
 ORDER BY n.nspname, c.relname`)
 	if err != nil {
@@ -508,8 +537,13 @@ ORDER BY n.nspname, c.relname`)
 	defer rows.Close()
 	for rows.Next() {
 		object := pgschema.Sequence{}
-		if err := rows.Scan(&object.Schema, &object.Name, &object.Type, &object.Start, &object.Increment, &object.Min, &object.Max, &object.Cache, &object.Cycle, &object.Comment); err != nil {
+		var ownedSchema, ownedTable, ownedColumn *string
+		if err := rows.Scan(&object.Schema, &object.Name, &object.Type, &object.Start, &object.Increment, &object.Min, &object.Max, &object.Cache, &object.Cycle, &object.Comment, &ownedSchema, &ownedTable, &ownedColumn); err != nil {
 			return err
+		}
+		if ownedSchema != nil && ownedTable != nil && ownedColumn != nil {
+			ownedBy := (pgschema.Column{Table: (pgschema.Table{Schema: *ownedSchema, Name: *ownedTable}).ObjectID(), Name: *ownedColumn}).ObjectID()
+			object.OwnedBy = &ownedBy
 		}
 		skip, err := tracker.Skip("sequence:"+object.Schema+"."+object.Name, snapshot)
 		if err != nil {
@@ -526,6 +560,22 @@ ORDER BY n.nspname, c.relname`)
 		}
 	}
 	return rows.Err()
+}
+
+func addSequenceOwnershipDependencies(snapshot *pgschema.Snapshot) error {
+	for _, candidate := range snapshot.Objects() {
+		sequence, ok := candidate.(pgschema.Sequence)
+		if !ok || sequence.OwnedBy == nil {
+			continue
+		}
+		if _, exists := snapshot.Object(*sequence.OwnedBy); !exists {
+			return fmt.Errorf("sequence %s owned by missing column %s", sequence.ObjectID(), *sequence.OwnedBy)
+		}
+		if err := snapshot.AddDependency(sequence.ObjectID(), *sequence.OwnedBy); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func inspectGraphConstraints(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
@@ -1245,6 +1295,242 @@ ORDER BY n.nspname, c.relname, tg.tgname, a.attnum`)
 	return rows.Err()
 }
 
+func inspectGraphPolicies(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
+	rows, err := tx.Query(ctx, `
+SELECT n.nspname, c.relname, p.polname, p.polpermissive,
+       CASE p.polcmd WHEN '*' THEN 'ALL' WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT'
+                     WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' END,
+       ARRAY(
+         SELECT CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE r.rolname END
+         FROM unnest(p.polroles) AS roles(role_oid)
+         LEFT JOIN pg_roles r ON r.oid = roles.role_oid
+         ORDER BY CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE r.rolname END
+       ),
+       pg_get_expr(p.polqual, p.polrelid, true),
+       pg_get_expr(p.polwithcheck, p.polrelid, true)
+FROM pg_policy p
+JOIN pg_class c ON c.oid = p.polrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p')
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY n.nspname, c.relname, p.polname`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	policiesByTable := make(map[pgschema.ID][]pgschema.ID)
+	for rows.Next() {
+		var schema, table string
+		object := pgschema.Policy{}
+		if err := rows.Scan(&schema, &table, &object.Name, &object.Permissive, &object.Command, &object.Roles, &object.Using, &object.Check); err != nil {
+			return err
+		}
+		object.Table = (pgschema.Table{Schema: schema, Name: table}).ObjectID()
+		selector := "policy:" + schema + "." + table + "." + object.Name
+		skip, err := tracker.Skip(selector, snapshot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if _, exists := snapshot.Object(object.Table); !exists {
+			if err := snapshot.AddUnsupported("policy_table:" + object.ObjectID().String()); err != nil {
+				return err
+			}
+			continue
+		}
+		if object.Command == "" || len(object.Roles) == 0 {
+			if err := snapshot.AddUnsupported("policy_catalog_state:" + object.ObjectID().String()); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := snapshot.Add(object); err != nil {
+			return err
+		}
+		if err := snapshot.AddDependency(object.ObjectID(), object.Table); err != nil {
+			return err
+		}
+		policiesByTable[object.Table] = append(policiesByTable[object.Table], object.ObjectID())
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+
+	if err := addPolicyDependencies(ctx, tx, snapshot); err != nil {
+		return err
+	}
+	rows, err = tx.Query(ctx, `
+SELECT n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND (c.relrowsecurity OR c.relforcerowsecurity)
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY n.nspname, c.relname`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var schema, table string
+		object := pgschema.RowSecurity{}
+		if err := rows.Scan(&schema, &table, &object.Enabled, &object.Forced); err != nil {
+			return err
+		}
+		object.Table = (pgschema.Table{Schema: schema, Name: table}).ObjectID()
+		selector := "row_level_security:" + schema + "." + table
+		skip, err := tracker.Skip(selector, snapshot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if _, exists := snapshot.Object(object.Table); !exists {
+			if err := snapshot.AddUnsupported("row_security_table:" + object.ObjectID().String()); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := snapshot.Add(object); err != nil {
+			return err
+		}
+		if err := snapshot.AddDependency(object.ObjectID(), object.Table); err != nil {
+			return err
+		}
+		for _, policyID := range policiesByTable[object.Table] {
+			if err := snapshot.AddDependency(object.ObjectID(), policyID); err != nil {
+				return err
+			}
+		}
+	}
+	return rows.Err()
+}
+
+// addPolicyDependencies records catalog-proven references to columns and
+// routines. Other dependency classes remain explicit blockers rather than
+// being discarded from the typed graph.
+func addPolicyDependencies(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot) error {
+	rows, err := tx.Query(ctx, `
+SELECT n.nspname, c.relname, p.polname,
+       d.refclassid = 'pg_class'::regclass,
+       rn.nspname, rc.relname, a.attname,
+       d.refclassid = 'pg_proc'::regclass,
+       pn.nspname, pr.proname, pg_get_function_identity_arguments(pr.oid),
+       d.refclassid::regclass::text
+FROM pg_policy p
+JOIN pg_class c ON c.oid = p.polrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_depend d ON d.classid = 'pg_policy'::regclass AND d.objid = p.oid AND d.deptype IN ('n', 'a')
+LEFT JOIN pg_class rc ON d.refclassid = 'pg_class'::regclass AND rc.oid = d.refobjid
+LEFT JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+LEFT JOIN pg_attribute a ON d.refclassid = 'pg_class'::regclass AND a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+LEFT JOIN pg_proc pr ON d.refclassid = 'pg_proc'::regclass AND pr.oid = d.refobjid
+LEFT JOIN pg_namespace pn ON pn.oid = pr.pronamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY n.nspname, c.relname, p.polname, d.refclassid, d.refobjid, d.refobjsubid`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var schema, table, policy, dependencyClass string
+		var isRelation, isRoutine bool
+		var relationSchema, relationName, column, routineSchema, routineName, routineSignature *string
+		if err := rows.Scan(&schema, &table, &policy, &isRelation, &relationSchema, &relationName, &column, &isRoutine, &routineSchema, &routineName, &routineSignature, &dependencyClass); err != nil {
+			return err
+		}
+		tableID := (pgschema.Table{Schema: schema, Name: table}).ObjectID()
+		policyID := (pgschema.Policy{Table: tableID, Name: policy}).ObjectID()
+		if _, exists := snapshot.Object(policyID); !exists {
+			continue
+		}
+		var dependencyID pgschema.ID
+		switch {
+		case isRelation && relationSchema != nil && relationName != nil && column != nil:
+			dependencyTable := (pgschema.Table{Schema: *relationSchema, Name: *relationName}).ObjectID()
+			dependencyID = (pgschema.Column{Table: dependencyTable, Name: *column}).ObjectID()
+		case isRelation && relationSchema != nil && relationName != nil && *relationSchema == schema && *relationName == table:
+			// The policy already has a typed edge to its owning table.
+			continue
+		case isRoutine && routineSchema != nil && routineName != nil && routineSignature != nil:
+			dependencyID = (pgschema.Routine{Schema: *routineSchema, Name: *routineName, Signature: *routineSignature}).ObjectID()
+		default:
+			if err := snapshot.AddUnsupported("policy_dependency:" + policyID.String() + ":" + dependencyClass); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, exists := snapshot.Object(dependencyID); !exists {
+			if err := snapshot.AddUnsupported("policy_dependency_missing:" + policyID.String() + ":" + dependencyID.String()); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := snapshot.AddDependency(policyID, dependencyID); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func inspectGraphTablePrivileges(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
+	rows, err := tx.Query(ctx, `
+SELECT n.nspname, c.relname,
+       CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END,
+       CASE WHEN x.grantor = c.relowner THEN '@owner' ELSE grantor.rolname END,
+       x.privilege_type, x.is_grantable
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) x
+LEFT JOIN pg_roles grantee ON grantee.oid = x.grantee
+LEFT JOIN pg_roles grantor ON grantor.oid = x.grantor
+WHERE c.relkind IN ('r', 'p') AND x.grantee <> c.relowner
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY n.nspname, c.relname, x.privilege_type,
+         CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var schema, table string
+		object := pgschema.TablePrivilege{}
+		if err := rows.Scan(&schema, &table, &object.Grantee, &object.Grantor, &object.Privilege, &object.Grantable); err != nil {
+			return err
+		}
+		object.Table = (pgschema.Table{Schema: schema, Name: table}).ObjectID()
+		selector := "table_privilege:" + schema + "." + table + "." + object.Privilege + "." + object.Grantee
+		skip, err := tracker.Skip(selector, snapshot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if object.Grantor != "@owner" {
+			if err := snapshot.AddUnsupported("table_privilege_grantor:" + object.ObjectID().String() + ":" + object.Grantor); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, exists := snapshot.Object(object.Table); !exists {
+			if err := snapshot.AddUnsupported("table_privilege_table:" + object.ObjectID().String()); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := snapshot.Add(object); err != nil {
+			return err
+		}
+		if err := snapshot.AddDependency(object.ObjectID(), object.Table); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 func addConstraintIndexDependencies(snapshot *pgschema.Snapshot) error {
 	for _, object := range snapshot.Objects() {
 		constraint, ok := object.(pgschema.Constraint)
@@ -1321,7 +1607,107 @@ func inspectGraphBlockers(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Sna
 			return err
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	return inspectCatalogSafetyBlockers(ctx, tx, snapshot, tracker, version)
+}
+
+// inspectCatalogSafetyBlockers covers catalog families whose state is not yet
+// represented by typed production nodes. Default ownership by the inspecting
+// session is normalized as contextual PostgreSQL creation ownership; every
+// explicit owner deviation is preserved as a blocker. Extension-owned members
+// are intentionally represented atomically by their typed Extension node and
+// excluded here through pg_depend.deptype='e'.
+func inspectCatalogSafetyBlockers(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker, version int) error {
+	rows, err := tx.Query(ctx, graphCatalogSafetyBlockersQuery)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var selector string
+		if err := rows.Scan(&selector); err != nil {
+			return err
+		}
+		if err := addBlocker(selector, snapshot, tracker); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	query := catalogVersionSafetyBlockersQuery(version)
+	if query == "" {
+		return nil
+	}
+	rows, err = tx.Query(ctx, query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var selector string
+		if err := rows.Scan(&selector); err != nil {
+			return err
+		}
+		if err := addBlocker(selector, snapshot, tracker); err != nil {
+			return err
+		}
+	}
 	return rows.Err()
+}
+
+func catalogVersionSafetyBlockersQuery(version int) string {
+	var queries []string
+	if version >= 150000 {
+		queries = append(queries, `
+SELECT 'parameter_acl:' || quote_ident(parname)
+FROM pg_parameter_acl
+WHERE paracl IS NOT NULL`)
+	}
+	if version >= 180000 {
+		// PostgreSQL 18 represents named NOT NULL constraints independently in
+		// pg_constraint. Column.NotNull retains the truth value, but not the
+		// constraint identity, inheritance, validation, or comment semantics.
+		queries = append(queries, `
+SELECT 'not_null_constraint:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(con.conname)
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1]
+WHERE con.contype = 'n' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND (obj_description(con.oid, 'pg_constraint') IS NOT NULL
+       OR NOT con.convalidated OR NOT con.conenforced OR con.connoinherit
+       OR (con.conislocal AND con.coninhcount = 0 AND
+           (array_length(con.conkey, 1) <> 1 OR a.attname IS NULL
+            OR con.conname <> c.relname || '_' || a.attname || '_not_null')))
+UNION ALL
+SELECT 'unenforced_constraint:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(con.conname)
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE NOT con.conenforced AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'period_constraint:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(con.conname)
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE con.conperiod AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'virtual_generated_column:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(a.attname)
+FROM pg_attribute a
+JOIN pg_class c ON c.oid = a.attrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE a.attgenerated = 'v' AND c.relkind IN ('r', 'p')
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'`)
+	}
+	if len(queries) == 0 {
+		return ""
+	}
+	return strings.Join(queries, "\nUNION ALL\n") + "\nORDER BY 1"
 }
 
 // inspectGraphBlockerSelectors is deliberately selector-only: graph blockers
@@ -1406,14 +1792,299 @@ FROM pg_foreign_table ft
 JOIN pg_class c ON c.oid = ft.ftrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY 1`
+
+const graphCatalogSafetyBlockersQuery = `
+SELECT 'ownership:schema:' || quote_ident(n.nspname) || '=' || quote_ident(r.rolname)
+FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND r.rolname <> current_user
+  AND NOT (n.nspname = 'public' AND (r.rolname = 'pg_database_owner' OR r.oid = (SELECT datdba FROM pg_database WHERE datname = current_database())))
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e')
 UNION ALL
-SELECT 'row_level_security:' || n.nspname || '.' || c.relname
+SELECT 'ownership:relation:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || quote_ident(r.rolname)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner
+WHERE c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND r.rolname <> current_user
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'ownership:type:' || quote_ident(n.nspname) || '.' || quote_ident(t.typname) || '=' || quote_ident(r.rolname)
+FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace JOIN pg_roles r ON r.oid = t.typowner
+WHERE t.typtype IN ('e', 'd', 'c', 'r', 'm') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND r.rolname <> current_user
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'ownership:routine:' || quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' || pg_get_function_identity_arguments(p.oid) || ')=' || quote_ident(r.rolname)
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND r.rolname <> current_user
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'ownership:extension:' || quote_ident(e.extname) || '=' || quote_ident(r.rolname)
+FROM pg_extension e JOIN pg_roles r ON r.oid = e.extowner
+WHERE r.rolname <> current_user
+UNION ALL
+SELECT 'acl:schema:' || quote_ident(n.nspname)
+FROM pg_namespace n
+WHERE n.nspacl IS NOT NULL AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_init_privs i
+    WHERE i.classoid = 'pg_namespace'::regclass AND i.objoid = n.oid AND i.objsubid = 0
+      AND i.initprivs IS NOT DISTINCT FROM n.nspacl
+  )
+UNION ALL
+SELECT 'acl:relation:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE (c.relrowsecurity OR c.relforcerowsecurity) AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+WHERE c.relacl IS NOT NULL AND c.relkind IN ('S', 'v', 'm', 'f')
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 UNION ALL
-SELECT 'policy:' || n.nspname || '.' || c.relname || '.' || p.polname
-FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+SELECT 'acl:table_owner:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND EXISTS (
+    SELECT 1 FROM (
+      (SELECT privilege_type, is_grantable
+       FROM aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner)))
+       WHERE grantee = c.relowner
+       EXCEPT
+       SELECT privilege_type, is_grantable
+       FROM aclexplode(acldefault('r', c.relowner))
+       WHERE grantee = c.relowner)
+      UNION ALL
+      (SELECT privilege_type, is_grantable
+       FROM aclexplode(acldefault('r', c.relowner))
+       WHERE grantee = c.relowner
+       EXCEPT
+       SELECT privilege_type, is_grantable
+       FROM aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner)))
+       WHERE grantee = c.relowner)
+    ) owner_acl_drift
+  )
+UNION ALL
+SELECT 'acl:column:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(a.attname)
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE a.attacl IS NOT NULL AND a.attnum > 0 AND NOT a.attisdropped
+  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'acl:type:' || quote_ident(n.nspname) || '.' || quote_ident(t.typname)
+FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE t.typacl IS NOT NULL AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'acl:routine:' || quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE p.proacl IS NOT NULL AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'acl:default:' || quote_ident(r.rolname) || ':' || COALESCE(quote_ident(n.nspname), '*') || ':' || d.defaclobjtype::text
+FROM pg_default_acl d JOIN pg_roles r ON r.oid = d.defaclrole LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+UNION ALL
+SELECT 'replica_identity:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || c.relreplident::text
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND c.relreplident <> 'd'
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'clustered_index:' || quote_ident(n.nspname) || '.' || quote_ident(i.relname)
+FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_class c ON c.oid = x.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE x.indisclustered AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = i.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'invalid_index:' || quote_ident(n.nspname) || '.' || quote_ident(i.relname)
+FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_class c ON c.oid = x.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE (NOT x.indisvalid OR NOT x.indisready OR NOT x.indislive) AND i.relkind <> 'I'
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = i.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'table_options:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND c.reloptions IS NOT NULL
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'relation_tablespace:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || quote_ident(t.spcname)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_tablespace t ON t.oid = c.reltablespace
+WHERE c.relkind IN ('r', 'p', 'S', 'm', 'i', 'I')
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'rule:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(r.rulename)
+FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE r.rulename <> '_RETURN' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'text_search_configuration:' || quote_ident(n.nspname) || '.' || quote_ident(c.cfgname)
+FROM pg_ts_config c JOIN pg_namespace n ON n.oid = c.cfgnamespace
 WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_ts_config'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'text_search_dictionary:' || quote_ident(n.nspname) || '.' || quote_ident(d.dictname)
+FROM pg_ts_dict d JOIN pg_namespace n ON n.oid = d.dictnamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend x WHERE x.classid = 'pg_ts_dict'::regclass AND x.objid = d.oid AND x.deptype = 'e')
+UNION ALL
+SELECT 'text_search_parser:' || quote_ident(n.nspname) || '.' || quote_ident(p.prsname)
+FROM pg_ts_parser p JOIN pg_namespace n ON n.oid = p.prsnamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_ts_parser'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'text_search_template:' || quote_ident(n.nspname) || '.' || quote_ident(t.tmplname)
+FROM pg_ts_template t JOIN pg_namespace n ON n.oid = t.tmplnamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_ts_template'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'event_trigger:' || quote_ident(e.evtname)
+FROM pg_event_trigger e
+WHERE NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_event_trigger'::regclass AND d.objid = e.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'publication:' || quote_ident(p.pubname) FROM pg_publication p
+UNION ALL
+SELECT 'extended_statistics:' || quote_ident(n.nspname) || '.' || quote_ident(s.stxname)
+FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_statistic_ext'::regclass AND d.objid = s.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'foreign_data_wrapper:' || quote_ident(f.fdwname)
+FROM pg_foreign_data_wrapper f
+WHERE NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_foreign_data_wrapper'::regclass AND d.objid = f.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'foreign_server:' || quote_ident(s.srvname) FROM pg_foreign_server s
+UNION ALL
+SELECT 'user_mapping:' || CASE WHEN u.umuser = 0 THEN 'PUBLIC' ELSE quote_ident(r.rolname) END || '@' || quote_ident(s.srvname)
+FROM pg_user_mapping u JOIN pg_foreign_server s ON s.oid = u.umserver LEFT JOIN pg_roles r ON r.oid = u.umuser
+UNION ALL
+SELECT 'table_inheritance:' || quote_ident(cn.nspname) || '.' || quote_ident(child.relname) || '->' ||
+       quote_ident(pn.nspname) || '.' || quote_ident(parent.relname)
+FROM pg_inherits i
+JOIN pg_class child ON child.oid = i.inhrelid
+JOIN pg_namespace cn ON cn.oid = child.relnamespace
+JOIN pg_class parent ON parent.oid = i.inhparent
+JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+WHERE child.relkind = 'r' AND NOT child.relispartition
+  AND cn.nspname NOT LIKE 'pg_%' AND cn.nspname <> 'information_schema'
+UNION ALL
+SELECT 'typed_table:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || format_type(c.reloftype, NULL)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND c.reloftype <> 0
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'table_access_method:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || quote_ident(am.amname)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_am am ON am.oid = c.relam
+WHERE c.relkind IN ('r', 'p', 'm') AND am.amname <> 'heap'
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'sequence_persistence:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || c.relpersistence::text
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'S' AND c.relpersistence <> 'p'
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'column_storage:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(a.attname) || '=' || a.attstorage::text
+FROM pg_attribute a
+JOIN pg_class c ON c.oid = a.attrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_type t ON t.oid = a.atttypid
+WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped AND a.attstorage <> t.typstorage
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'column_compression:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(a.attname) || '=' || a.attcompression::text
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped AND a.attcompression <> ''::"char"
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'column_statistics:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(a.attname) || '=' || a.attstattarget::text
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped AND a.attstattarget <> -1
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'column_options:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(a.attname)
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped AND a.attoptions IS NOT NULL
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'index_collation:' || quote_ident(n.nspname) || '.' || quote_ident(i.relname)
+FROM pg_index x
+JOIN pg_class i ON i.oid = x.indexrelid
+JOIN pg_class c ON c.oid = x.indrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE position(' COLLATE ' IN upper(pg_get_indexdef(x.indexrelid))) > 0
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = i.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'access_method:' || quote_ident(a.amname)
+FROM pg_am a
+WHERE a.oid >= 16384
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_am'::regclass AND d.objid = a.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'operator:' || quote_ident(n.nspname) || '.' || quote_ident(o.oprname) || '(' ||
+       format_type(o.oprleft, NULL) || ',' || format_type(o.oprright, NULL) || ')'
+FROM pg_operator o JOIN pg_namespace n ON n.oid = o.oprnamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_operator'::regclass AND d.objid = o.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'operator_class:' || quote_ident(n.nspname) || '.' || quote_ident(o.opcname) || '@' || quote_ident(a.amname)
+FROM pg_opclass o JOIN pg_namespace n ON n.oid = o.opcnamespace JOIN pg_am a ON a.oid = o.opcmethod
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_opclass'::regclass AND d.objid = o.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'operator_family:' || quote_ident(n.nspname) || '.' || quote_ident(o.opfname) || '@' || quote_ident(a.amname)
+FROM pg_opfamily o JOIN pg_namespace n ON n.oid = o.opfnamespace JOIN pg_am a ON a.oid = o.opfmethod
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_opfamily'::regclass AND d.objid = o.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'cast:' || format_type(c.castsource, NULL) || '->' || format_type(c.casttarget, NULL)
+FROM pg_cast c
+WHERE c.oid >= 16384
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_cast'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'conversion:' || quote_ident(n.nspname) || '.' || quote_ident(c.conname)
+FROM pg_conversion c JOIN pg_namespace n ON n.oid = c.connamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_conversion'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'procedural_language:' || quote_ident(l.lanname)
+FROM pg_language l
+WHERE l.oid >= 16384
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_language'::regclass AND d.objid = l.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'transform:' || format_type(t.trftype, NULL) || '@' || quote_ident(l.lanname)
+FROM pg_transform t JOIN pg_language l ON l.oid = t.trflang
+WHERE t.oid >= 16384
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_transform'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+UNION ALL
+SELECT 'subscription:' || quote_ident(s.subname) FROM pg_subscription s
+UNION ALL
+SELECT 'security_label:' || quote_ident(s.provider) || ':' || identified.identity
+FROM pg_seclabel s
+CROSS JOIN LATERAL pg_identify_object(s.classoid, s.objoid, s.objsubid) identified
+UNION ALL
+SELECT 'comment:extension:' || quote_ident(e.extname)
+FROM pg_extension e
+LEFT JOIN pg_available_extensions available ON available.name = e.extname
+WHERE obj_description(e.oid, 'pg_extension') IS NOT NULL
+  AND obj_description(e.oid, 'pg_extension') IS DISTINCT FROM available.comment
+UNION ALL
+SELECT 'comment:enum:' || quote_ident(n.nspname) || '.' || quote_ident(t.typname)
+FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE t.typtype = 'e' AND obj_description(t.oid, 'pg_type') IS NOT NULL
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'comment:trigger:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(t.tgname)
+FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE NOT t.tgisinternal AND obj_description(t.oid, 'pg_trigger') IS NOT NULL
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'comment:policy:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(p.polname)
+FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE obj_description(p.oid, 'pg_policy') IS NOT NULL
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+UNION ALL
+SELECT 'comment:view_column:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(a.attname)
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('v', 'm') AND a.attnum > 0 AND NOT a.attisdropped
+  AND col_description(a.attrelid, a.attnum) IS NOT NULL
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
 ORDER BY 1`
 
 func routineKindPredicate(version int) string {

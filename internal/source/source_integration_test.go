@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,205 @@ func TestLoadGraphForeignKeyIntegration(t *testing.T) {
 	accountID := pgschema.Column{Table: orders, Name: "account_id"}.ObjectID()
 	if len(dependencies) != 4 || dependencies[0] != accountID || dependencies[1] != primaryKey || dependencies[2] != accounts || dependencies[3] != orders {
 		t.Fatalf("foreign key dependencies = %#v", dependencies)
+	}
+}
+
+func TestLoadGraphBlocksPreviouslyBlindCatalogFamilies(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockIntegrationDatabase(t, ctx, conn)
+	suffix := time.Now().UTC().Format("20060102150405")
+	schemaName := "onwardpg_blockers_" + suffix
+	roleName := "onwardpg_owner_" + suffix
+	eventName := "onwardpg_event_" + suffix
+	publicationName := "onwardpg_pub_" + suffix
+	fdwName := "onwardpg_fdw_" + suffix
+	serverName := "onwardpg_server_" + suffix
+	accessMethodName := "onwardpg_am_" + suffix
+	languageName := "onwardpg_lang_" + suffix
+	subscriptionName := "onwardpg_sub_" + suffix
+	cleanup := func(sql string) { _, _ = conn.Exec(context.Background(), sql) }
+	defer cleanup("DROP ROLE IF EXISTS " + quote(roleName))
+	defer cleanup("DROP SCHEMA IF EXISTS " + quote(schemaName) + " CASCADE")
+	defer func() {
+		_, _ = conn.Exec(context.Background(), "ALTER SUBSCRIPTION "+quote(subscriptionName)+" SET (slot_name = NONE)")
+		_, _ = conn.Exec(context.Background(), "DROP SUBSCRIPTION IF EXISTS "+quote(subscriptionName))
+	}()
+	defer cleanup("DROP LANGUAGE IF EXISTS " + quote(languageName))
+	defer cleanup("DROP ACCESS METHOD IF EXISTS " + quote(accessMethodName))
+	defer cleanup("DROP FOREIGN DATA WRAPPER IF EXISTS " + quote(fdwName) + " CASCADE")
+	defer cleanup("DROP PUBLICATION IF EXISTS " + quote(publicationName))
+	defer cleanup("DROP EVENT TRIGGER IF EXISTS " + quote(eventName))
+
+	ddl := "CREATE ROLE " + quote(roleName) + ";" +
+		"CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE TABLE " + quote(schemaName) + ".objects (id bigint, other bigint, label text);" +
+		"CREATE TABLE " + quote(schemaName) + ".inherited (extra bigint) INHERITS (" + quote(schemaName) + ".objects);" +
+		"ALTER TABLE " + quote(schemaName) + ".objects ALTER COLUMN label SET STORAGE EXTERNAL;" +
+		"ALTER TABLE " + quote(schemaName) + ".objects ALTER COLUMN label SET STATISTICS 500;" +
+		"CREATE INDEX objects_label_c_idx ON " + quote(schemaName) + ".objects (label COLLATE \"C\");" +
+		"CREATE INDEX objects_cluster_idx ON " + quote(schemaName) + ".objects (id);" +
+		"CLUSTER " + quote(schemaName) + ".objects USING objects_cluster_idx;" +
+		"ALTER TABLE " + quote(schemaName) + ".objects REPLICA IDENTITY FULL;" +
+		"ALTER TABLE " + quote(schemaName) + ".objects SET (fillfactor = 70);" +
+		"GRANT SELECT ON " + quote(schemaName) + ".objects TO PUBLIC;" +
+		"ALTER DEFAULT PRIVILEGES IN SCHEMA " + quote(schemaName) + " GRANT SELECT ON TABLES TO PUBLIC;" +
+		"CREATE TABLE " + quote(schemaName) + ".owned (id bigint);" +
+		"ALTER TABLE " + quote(schemaName) + ".owned OWNER TO " + quote(roleName) + ";" +
+		"CREATE RULE no_delete AS ON DELETE TO " + quote(schemaName) + ".objects DO INSTEAD NOTHING;" +
+		"CREATE TEXT SEARCH DICTIONARY " + quote(schemaName) + ".simple_dict (TEMPLATE = pg_catalog.simple);" +
+		"CREATE TEXT SEARCH CONFIGURATION " + quote(schemaName) + ".simple_cfg (COPY = pg_catalog.simple);" +
+		"CREATE CONVERSION " + quote(schemaName) + ".latin1_to_utf8 FOR 'LATIN1' TO 'UTF8' FROM iso8859_1_to_utf8;" +
+		"CREATE OPERATOR FAMILY " + quote(schemaName) + ".int_family USING btree;" +
+		"CREATE TYPE " + quote(schemaName) + ".code AS ENUM ('x');" +
+		"COMMENT ON TYPE " + quote(schemaName) + ".code IS 'must not disappear';" +
+		"CREATE FUNCTION " + quote(schemaName) + ".code_text(" + quote(schemaName) + ".code) RETURNS text LANGUAGE SQL IMMUTABLE AS 'SELECT $1::text';" +
+		"CREATE CAST (" + quote(schemaName) + ".code AS text) WITH FUNCTION " + quote(schemaName) + ".code_text(" + quote(schemaName) + ".code);" +
+		"CREATE FUNCTION " + quote(schemaName) + ".equals(bigint, bigint) RETURNS boolean LANGUAGE SQL IMMUTABLE AS 'SELECT $1 = $2';" +
+		"CREATE OPERATOR " + quote(schemaName) + ".=== (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = " + quote(schemaName) + ".equals);" +
+		"CREATE FUNCTION " + quote(schemaName) + ".trigger_sink() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';" +
+		"CREATE TRIGGER objects_trigger BEFORE INSERT ON " + quote(schemaName) + ".objects FOR EACH ROW EXECUTE FUNCTION " + quote(schemaName) + ".trigger_sink();" +
+		"COMMENT ON TRIGGER objects_trigger ON " + quote(schemaName) + ".objects IS 'must not disappear';" +
+		"CREATE POLICY objects_policy ON " + quote(schemaName) + ".objects USING (true);" +
+		"COMMENT ON POLICY objects_policy ON " + quote(schemaName) + ".objects IS 'must not disappear';" +
+		"CREATE VIEW " + quote(schemaName) + ".objects_view AS SELECT id FROM " + quote(schemaName) + ".objects;" +
+		"COMMENT ON COLUMN " + quote(schemaName) + ".objects_view.id IS 'must not disappear';" +
+		"CREATE STATISTICS " + quote(schemaName) + ".objects_stats ON id, other FROM " + quote(schemaName) + ".objects;" +
+		"CREATE FUNCTION " + quote(schemaName) + ".event_sink() RETURNS event_trigger LANGUAGE plpgsql AS 'BEGIN END';" +
+		"CREATE EVENT TRIGGER " + quote(eventName) + " ON ddl_command_end EXECUTE FUNCTION " + quote(schemaName) + ".event_sink();" +
+		"CREATE PUBLICATION " + quote(publicationName) + " FOR TABLE " + quote(schemaName) + ".objects;" +
+		"CREATE FOREIGN DATA WRAPPER " + quote(fdwName) + ";" +
+		"CREATE SERVER " + quote(serverName) + " FOREIGN DATA WRAPPER " + quote(fdwName) + ";" +
+		"CREATE USER MAPPING FOR PUBLIC SERVER " + quote(serverName) + ";" +
+		"CREATE ACCESS METHOD " + quote(accessMethodName) + " TYPE TABLE HANDLER heap_tableam_handler;" +
+		"CREATE LANGUAGE " + quote(languageName) + " HANDLER plpgsql_call_handler INLINE plpgsql_inline_handler VALIDATOR plpgsql_validator;"
+	if _, err := conn.Exec(ctx, ddl); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, "CREATE SUBSCRIPTION "+quote(subscriptionName)+" CONNECTION 'host=invalid dbname=invalid' PUBLICATION fake WITH (connect=false, create_slot=false, enabled=false)"); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version >= 150000 {
+		if _, err := conn.Exec(ctx, "GRANT SET ON PARAMETER work_mem TO "+quote(roleName)); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			_, _ = conn.Exec(context.Background(), "REVOKE ALL ON PARAMETER work_mem FROM "+quote(roleName))
+			_, _ = conn.Exec(context.Background(), "REVOKE ALL ON PARAMETER work_mem FROM "+quote(conn.Config().User))
+		}()
+	}
+
+	snapshot, err := LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsupported := snapshot.Unsupported()
+	for _, prefix := range []string{
+		"ownership:relation:", "acl:default:", "rule:",
+		"replica_identity:", "clustered_index:", "table_options:",
+		"text_search_configuration:", "text_search_dictionary:", "event_trigger:",
+		"publication:", "extended_statistics:", "foreign_data_wrapper:",
+		"foreign_server:", "user_mapping:", "table_inheritance:",
+		"column_storage:", "column_statistics:", "index_collation:",
+		"access_method:", "operator:", "operator_family:", "cast:",
+		"conversion:", "procedural_language:", "subscription:",
+		"comment:enum:", "comment:trigger:", "comment:policy:", "comment:view_column:",
+	} {
+		found := false
+		for _, selector := range unsupported {
+			if strings.HasPrefix(selector, prefix) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s blocker in %#v", prefix, unsupported)
+		}
+	}
+	if version >= 150000 {
+		found := false
+		for _, selector := range unsupported {
+			if strings.HasPrefix(selector, "parameter_acl:") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing parameter_acl blocker in %#v", unsupported)
+		}
+	}
+	ignoredSnapshot, err := LoadGraph(ctx, Parse(url), "", unsupported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining := ignoredSnapshot.Unsupported(); len(remaining) != 0 {
+		t.Fatalf("exact blocker ignores left unsupported state: %#v", remaining)
+	}
+	ignored := ignoredSnapshot.Ignored()
+	if len(ignored) != len(unsupported) {
+		t.Fatalf("ignore receipt has %d selectors, want %d: %#v", len(ignored), len(unsupported), ignored)
+	}
+	for i := range unsupported {
+		if ignored[i] != unsupported[i] {
+			t.Fatalf("ignore receipt differs at %d: got %q want %q", i, ignored[i], unsupported[i])
+		}
+	}
+}
+
+func TestPostgres18NamedNotNullConstraintsBlock(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockIntegrationDatabase(t, ctx, conn)
+	var version int
+	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version < 180000 {
+		t.Skip("named NOT NULL constraints are a PostgreSQL 18 catalog family")
+	}
+	schemaName := "onwardpg_not_null_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA "+quote(schemaName)+" CASCADE") }()
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+quote(schemaName)+"; CREATE TABLE "+quote(schemaName)+".objects (id bigint CONSTRAINT id_required NOT NULL, doubled bigint GENERATED ALWAYS AS (id * 2) VIRTUAL)"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"not_null_constraint:" + schemaName + ".objects.id_required",
+		"virtual_generated_column:" + schemaName + ".objects.doubled",
+	} {
+		found := false
+		for _, selector := range snapshot.Unsupported() {
+			if selector == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing %q blocker in %#v", want, snapshot.Unsupported())
+		}
 	}
 }
 
@@ -255,15 +455,6 @@ func containsID(ids []pgschema.ID, target pgschema.ID) bool {
 	return false
 }
 
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
-
 func TestLoadGraphReportsNarrowlyIgnoredCatalogState(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -279,12 +470,42 @@ func TestLoadGraphReportsNarrowlyIgnoredCatalogState(t *testing.T) {
 	schemaName := "onwardpg_ignore_" + time.Now().UTC().Format("20060102150405")
 	ddl := "CREATE SCHEMA " + quote(schemaName) + ";" +
 		"CREATE TABLE " + quote(schemaName) + ".orders (tenant_id bigint);" +
+		"CREATE FUNCTION " + quote(schemaName) + ".tenant_allowed(value bigint) RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT value > 0 $$;" +
 		"ALTER TABLE " + quote(schemaName) + ".orders ENABLE ROW LEVEL SECURITY;" +
-		"CREATE POLICY tenant ON " + quote(schemaName) + ".orders USING (tenant_id > 0);"
+		"ALTER TABLE " + quote(schemaName) + ".orders FORCE ROW LEVEL SECURITY;" +
+		"CREATE POLICY tenant ON " + quote(schemaName) + ".orders USING (" + quote(schemaName) + ".tenant_allowed(tenant_id));" +
+		"GRANT SELECT ON " + quote(schemaName) + ".orders TO PUBLIC;"
 	if _, err := conn.Exec(ctx, ddl); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA "+quote(schemaName)+" CASCADE") }()
+	tableID := (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID()
+	policyID := (pgschema.Policy{Table: tableID, Name: "tenant"}).ObjectID()
+	rlsID := (pgschema.RowSecurity{Table: tableID}).ObjectID()
+	privilegeID := (pgschema.TablePrivilege{Table: tableID, Grantee: "PUBLIC", Privilege: "SELECT"}).ObjectID()
+	typed, err := LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyObject, exists := typed.Object(policyID)
+	policyValue, ok := policyObject.(pgschema.Policy)
+	if !exists || !ok || policyValue.Command != "ALL" || !policyValue.Permissive || len(policyValue.Roles) != 1 || policyValue.Roles[0] != "PUBLIC" || policyValue.Using == nil {
+		t.Fatalf("policy catalog state missing: %#v", policyObject)
+	}
+	if !containsID(typed.Dependencies(policyID), (pgschema.Column{Table: tableID, Name: "tenant_id"}).ObjectID()) {
+		t.Fatalf("policy column dependency missing: %#v", typed.Dependencies(policyID))
+	}
+	if !containsID(typed.Dependencies(policyID), (pgschema.Routine{Schema: schemaName, Name: "tenant_allowed", Signature: "value bigint"}).ObjectID()) {
+		t.Fatalf("policy routine dependency missing: %#v", typed.Dependencies(policyID))
+	}
+	rlsObject, exists := typed.Object(rlsID)
+	if value, ok := rlsObject.(pgschema.RowSecurity); !exists || !ok || !value.Enabled || !value.Forced || !containsID(typed.Dependencies(rlsID), policyID) {
+		t.Fatalf("row-security state/dependency missing: object=%#v deps=%#v", rlsObject, typed.Dependencies(rlsID))
+	}
+	privilegeObject, exists := typed.Object(privilegeID)
+	if value, ok := privilegeObject.(pgschema.TablePrivilege); !exists || !ok || value.Grantor != "@owner" || value.Grantable {
+		t.Fatalf("table privilege state missing: %#v", privilegeObject)
+	}
 	policy := "policy:" + schemaName + ".orders.tenant"
 	rls := "row_level_security:" + schemaName + ".orders"
 	snapshot, err := LoadGraph(ctx, Parse(url), "", []string{policy, rls})

@@ -61,16 +61,54 @@ claim and does not apply migrations automatically.
 - Strict read-only `ci check` composition for committed one-bundle ownership,
   freshness, hash-chain integrity, schema-square fidelity, and clone
   convergence.
+- One-time `history init` onboarding that plans empty PostgreSQL to the current
+  declarative schema, clone-verifies the `baseline` root bundle before writing
+  it, and refuses to modify an existing target chain or application database.
+- Evidence-linked ecosystem comparison covering Migra, pgmig, Stripe
+  pg-schema-diff, Alembic, Django migrations, and Drizzle Kit, with explicit
+  onwardpg gaps and a refreshed machine-readable pgmig roadmap map.
+- A pinned, MIT-attributed Stripe pg-schema-diff v1.0.7 executable reference,
+  deterministic 415-case acceptance inventory, and test-only differential
+  convergence harness that cannot enter the production planning path.
+- Continuous same-name standalone index replacement on ordinary tables,
+  materialized views, and independent local partitions, with deterministic
+  temporary identifiers, concurrent build/cleanup, phase boundaries, hazards,
+  statement/lock-timeout guidance, and Stripe differential evidence. Direct
+  leaf partition-parent hierarchies use an `ON ONLY` shell plus concurrent
+  leaf builds/attachments; nested trees recursively create `ON ONLY` shells
+  and attach concurrently built leaves bottom-up before retiring the old tree.
+  Existing structurally matching local indexes can be attached to incomplete
+  partitioned parents without rebuild or drop, with pinned Stripe differential
+  convergence evidence. New local primary/unique constraints can claim
+  same-named matching unique indexes before their constraint-owned attachment.
+- Ordinary primary-key and unique-constraint definition changes without
+  external dependents build replacement indexes concurrently and perform a
+  short transactional constraint swap; foreign-key dependents reject.
+- Typed standalone sequence `OWNED BY` edges and complete identity
+  add/options/confirmed-drop planning with real-PostgreSQL and differential
+  convergence evidence.
+- Typed RLS enable/force state, policies, policy dependency ordering, and
+  ordinary/partitioned-table privileges, including quoted roles, explicit
+  authorization decisions, timeout/hazard metadata, and Stripe differential
+  convergence evidence.
+- Explicit blockers and exact ignore receipts for ownership/ACL/default
+  privileges, rules, text search, event triggers, publications, extended
+  statistics, FDW/server/user-mapping state, replica identity,
+  clustered/invalid indexes, relation/column physical attributes, relation
+  tablespaces, traditional inheritance, subscriptions, custom access methods,
+  operators, casts, conversions and languages, security labels, unmodeled
+  comments, and PostgreSQL 18-only constraint/generated-column state. Every
+  PostgreSQL 14–18 catalog table is machine-classified, and the blocker suite
+  runs on all five majors; the attribute audit remains explicitly incomplete.
 
 ### Known limitations
 
 - No published binary artifacts, checksums, signing, package distribution, or
   release automation yet.
 - Several PostgreSQL object families are explicitly unsupported or require
-  manual work. See [README.md](README.md#known-preview-gaps) and
+  manual work. See [README.md](README.md#what-the-developer-preview-supports) and
   [docs/supported-features.md](docs/supported-features.md).
 - The real-PostgreSQL convergence corpus is growing and is not yet a complete
   production compatibility certification.
-- Execution/amendment receipts and the post-merge delayed-contract lifecycle
-  remain future work; the developer preview does not include a production
-  migration apply command.
+- Real migration execution remains deliberately outside onwardpg; the CLI has
+  no production, staging, or development apply command.

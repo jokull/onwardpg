@@ -17,11 +17,147 @@ import (
 	"github.com/jokull/onwardpg/internal/gitbase"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
+	"github.com/jokull/onwardpg/internal/historyinit"
 	"github.com/jokull/onwardpg/internal/prflow"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/verify"
 )
+
+func TestHistoryInitCreatesVerifiedGroundFloorWithoutApplyingToAdminDatabase(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	schemaName := "history_init_" + randomToken(t)
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+postgres_major = 16
+`)
+	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".users (id bigint PRIMARY KEY);`)
+
+	connection, err := pgx.Connect(context.Background(), adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close(context.Background())
+	var existedBefore bool
+	if err := connection.QueryRow(context.Background(), `SELECT to_regnamespace($1) IS NOT NULL`, schemaName).Scan(&existedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if existedBefore {
+		t.Fatalf("test schema %s already exists in admin database", schemaName)
+	}
+
+	output := captureStdout(t, func() int {
+		return runHistoryAt([]string{"init", "--target", "primary", "--bundle", "ground-floor"}, repository)
+	})
+	if output.code != 0 {
+		t.Fatalf("history init exit = %d, stdout = %s", output.code, output.stdout)
+	}
+	var report historyinit.Report
+	if err := json.Unmarshal([]byte(output.stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.ProtocolVersion != historyinit.Version || report.Outcome != "initialized" || report.BundleID != "ground-floor" || report.Verification == nil || report.Verification.Outcome != "verified" {
+		t.Fatalf("history init report = %#v", report)
+	}
+	chain, err := history.Load(repository, "onward-bundles", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.Entries) != 1 || chain.HeadDigest != report.HistoryHead {
+		t.Fatalf("history chain = %#v", chain)
+	}
+	manifest := chain.Entries[0].Artifact.Manifest
+	if manifest.BundleID != "ground-floor" || manifest.Purpose != "baseline" || manifest.Mode != "init" || manifest.History == nil || manifest.History.ParentDigest != bundle.HistoryRootDigest() {
+		t.Fatalf("baseline manifest = %#v", manifest)
+	}
+	if !strings.Contains(string(chain.Entries[0].Artifact.Files["phases/expand.sql"]), `CREATE TABLE "`+schemaName+`"."users"`) {
+		t.Fatalf("baseline expand SQL = %s", chain.Entries[0].Artifact.Files["phases/expand.sql"])
+	}
+	var existsAfter bool
+	if err := connection.QueryRow(context.Background(), `SELECT to_regnamespace($1) IS NOT NULL`, schemaName).Scan(&existsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if existsAfter {
+		t.Fatalf("history init applied declarative schema to caller database")
+	}
+
+	second := captureStdout(t, func() int {
+		return runHistoryAt([]string{"init", "--target", "primary", "--bundle", "another-root"}, repository)
+	})
+	if second.code != 4 {
+		t.Fatalf("second history init exit = %d, stdout = %s", second.code, second.stdout)
+	}
+	var blocked historyinit.Report
+	if err := json.Unmarshal([]byte(second.stdout), &blocked); err != nil {
+		t.Fatal(err)
+	}
+	if blocked.Outcome != "blocked" || len(blocked.Findings) != 1 || blocked.Findings[0].Code != "history_already_initialized" {
+		t.Fatalf("second history init report = %#v", blocked)
+	}
+
+	git(t, repository, "init", "-b", "main")
+	git(t, repository, "config", "user.name", "Onward Test")
+	git(t, repository, "config", "user.email", "onward@example.test")
+	git(t, repository, "add", "-A")
+	git(t, repository, "commit", "-m", "establish onwardpg baseline")
+	git(t, repository, "checkout", "-b", "feature")
+	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".users (id bigint PRIMARY KEY); CREATE TABLE "`+schemaName+`".projects (id bigint PRIMARY KEY);`)
+	git(t, repository, "add", "schema.sql")
+	git(t, repository, "commit", "-m", "add projects")
+	feature := captureStdout(t, func() int {
+		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "projects"}, repository)
+	})
+	if feature.code != 0 {
+		t.Fatalf("PR regenerate after history init exit = %d, stdout = %s", feature.code, feature.stdout)
+	}
+	featureArtifact, err := bundle.Read(filepath.Join(repository, "onward-bundles", "primary", "projects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if featureArtifact.Manifest.History == nil || featureArtifact.Manifest.History.ParentDigest != report.HistoryHead {
+		t.Fatalf("feature history receipt = %#v, baseline head = %s", featureArtifact.Manifest.History, report.HistoryHead)
+	}
+}
+
+func TestHistoryInitWritesNothingForUnsupportedBaseline(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+postgres_major = 16
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE DOMAIN public.email_address AS text CHECK (VALUE <> '');\n")
+
+	output := captureStdout(t, func() int {
+		return runHistoryAt([]string{"init", "--target", "primary"}, repository)
+	})
+	if output.code != 3 {
+		t.Fatalf("history init exit = %d, stdout = %s", output.code, output.stdout)
+	}
+	var report historyinit.Report
+	if err := json.Unmarshal([]byte(output.stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != string(protocol.Unsupported) || report.Plan == nil || report.Plan.Status != protocol.Unsupported {
+		t.Fatalf("history init report = %#v", report)
+	}
+	if _, err := os.Stat(filepath.Join(repository, "onward-bundles")); !os.IsNotExist(err) {
+		t.Fatalf("unsupported history init wrote bundle root: %v", err)
+	}
+}
 
 func TestPlanCLIWritesVersionedBundleOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
@@ -836,6 +972,15 @@ func disposableDatabaseCount(t *testing.T, url string) int {
 		t.Fatal(err)
 	}
 	return count
+}
+
+func randomToken(t *testing.T) string {
+	t.Helper()
+	random := make([]byte, 8)
+	if _, err := rand.Read(random); err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(random)
 }
 
 func createTestDatabase(t *testing.T, adminURL string) (string, func()) {

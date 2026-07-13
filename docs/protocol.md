@@ -185,3 +185,11 @@ execution failure. `ci check` emits `onwardpg.ci-check/v1`, composing repository
 classification, PR freshness/schema-square receipts, and full clone
 verification. Both exit `4` for an expected non-success outcome; neither has a
 production-apply surface.
+
+`history init` emits `onwardpg.history-init/v1`. A successful document has
+`outcome: "initialized"`, target and bundle identity, installed path, history
+head, desired fingerprint, the complete empty-to-desired plan, and an embedded
+`onwardpg.verify/v1` clone receipt. `needs_input` and `unsupported` preserve the
+ordinary planner exits `2` and `3` without writing a bundle. A pre-existing
+history returns `outcome: "blocked"`, a stable finding and remediation, and
+exit `4`.

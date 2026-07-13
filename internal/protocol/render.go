@@ -1,6 +1,9 @@
 package protocol
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // RenderSQL renders a reviewable, forward-only migration file. JSON remains
 // the stable CLI protocol; this format deliberately carries the phase and
@@ -30,12 +33,34 @@ func RenderSQL(result Result, indent string) string {
 		}
 		lines = append(lines, batchComment(batch))
 		for _, statement := range batch.Statements {
-			for _, line := range strings.Split(statement.SQL, "\n") {
-				lines = append(lines, line)
+			if statement.StatementTimeoutMS > 0 || statement.LockTimeoutMS > 0 {
+				lines = append(lines, timeoutComment(statement))
 			}
+			lines = append(lines, strings.Split(statement.SQL, "\n")...)
 		}
 	}
 	return indentLines(lines, indent)
+}
+
+func timeoutComment(statement Statement) string {
+	parts := make([]string, 0, 2)
+	if statement.StatementTimeoutMS > 0 {
+		parts = append(parts, "statement_timeout="+formatMilliseconds(statement.StatementTimeoutMS))
+	}
+	if statement.LockTimeoutMS > 0 {
+		parts = append(parts, "lock_timeout="+formatMilliseconds(statement.LockTimeoutMS))
+	}
+	return "-- Suggested session timeouts: " + strings.Join(parts, ", ") + "."
+}
+
+func formatMilliseconds(milliseconds int64) string {
+	if milliseconds%60000 == 0 {
+		return fmt.Sprintf("%dm", milliseconds/60000)
+	}
+	if milliseconds%1000 == 0 {
+		return fmt.Sprintf("%ds", milliseconds/1000)
+	}
+	return fmt.Sprintf("%dms", milliseconds)
 }
 
 func batchesForRender(statements []Statement) []Batch {

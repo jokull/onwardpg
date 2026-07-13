@@ -1,22 +1,55 @@
 # Supported features
 
-The developer-preview feature map is
-[`parity/pgmig-roadmap.json`](../parity/pgmig-roadmap.json). The separate
+The developer-preview comparison ledger is
+[`parity/pgmig-roadmap.json`](../parity/pgmig-roadmap.json). It tracks onwardpg
+against pgmig's public roadmap and is intentionally marked `in_progress`; it
+is not an exhaustive onwardpg catalog inventory. The separate
 [`parity/atlas-postgres.json`](../parity/atlas-postgres.json) is a pinned
 reference-behavior study used to find regressions and design cases; it is not a
-promise of one-for-one compatibility. The supported PostgreSQL server range is
-14–18.
+promise of one-for-one compatibility. The
+[`parity/stripe-pg-schema-diff-v1.0.7.json`](../parity/stripe-pg-schema-diff-v1.0.7.json)
+matrix indexes Stripe's complete pinned acceptance corpus and records observed
+or still-unverified differences. The supported PostgreSQL server range is 14–18.
 
 `implemented` means code and at least one project test exist. It does **not**
 mean a feature is ready for unattended production use. A preview feature earns
 stronger confidence only with current real-PostgreSQL convergence evidence.
 
-Outside the modeled preview boundary, onwardpg blocks rather than
-silently ignores objects. See the [reference behavior study](atlas-postgres-parity.md)
-and [the safety model](safety-model.md) for boundary and ignore-selector
-semantics.
+For explicitly inventoried unsupported families, onwardpg blocks rather than
+silently ignoring the object. Every PostgreSQL 14–18 catalog table is
+classified, while the finer modeled-attribute audit remains open; see [the
+safety model](safety-model.md) for that distinction and ignore-selector
+semantics, and the [reference behavior
+study](atlas-postgres-parity.md) for the separate Atlas research boundary.
 
 ## Dependency-aware work in progress
+
+Standalone same-name index definition changes on ordinary tables,
+materialized views, and independent local partition indexes support continuous
+replacement when concurrent indexes are enabled: the typed old index receives a
+deterministic temporary name, the desired stable name is built concurrently,
+and the temporary index is dropped concurrently in `contract`. Every statement
+has explicit lock/statement-timeout guidance, and each step is placed in a
+valid transactional or non-transactional batch. Temporary-name conflicts are
+checked across PostgreSQL's whole relation namespace. Partitioned-parent
+replacement is also continuous for standalone nested trees: onwardpg retains
+the valid old hierarchy, recursively creates `ON ONLY` shells, builds each
+leaf concurrently, attaches bottom-up, and removes the old hierarchy only
+after the new root becomes valid. Empty parents use the same shell swap.
+A prebuilt, structurally matching standalone child index can be attached to an
+incomplete standalone partitioned parent with explicit lock/timeout metadata;
+new local primary/unique constraints may also claim same-named matching unique
+indexes before attaching them to a constraint-owned parent. Detach, reparent,
+structural mutation, mismatched identities, and existing dependent local
+constraints remain unsupported rather than inferred.
+Ordinary-table primary-key and unique-constraint definition
+changes without external dependents build a replacement unique index
+concurrently, then swap the constraint to that index in one short contract
+transaction; foreign-key dependents reject explicitly instead of receiving an
+out-of-order drop. Isolated direct attached-child mutation, partitioned
+constraints, and other dependent constraint-backed
+variants remain explicit unsupported transitions until their complete
+vertical slices can preserve PostgreSQL's attachment and ownership semantics.
 
 Ordinary views are catalog-modeled, including PostgreSQL-deparsed definitions,
 reloptions, comments, and typed dependencies on referenced tables, columns,
@@ -86,8 +119,13 @@ remain conservative. A behaviorally identical trigger rename also requires a
 fingerprint-bound answer. PostgreSQL does not record arbitrary
 procedural-body references, so
 onwardpg does not rewrite a routine body for a column/table change or claim to
-have inferred those hidden dependencies. Routine ownership, grants, RLS state,
-and policies remain explicit blockers.
+have inferred those hidden dependencies. Routine ownership remains an explicit
+blocker. RLS state, policies, and ordinary/partitioned-table grants are typed
+verticals: policy column/routine dependencies are catalog edges; policy and
+authorization contractions require fingerprint-bound decisions; and role
+identifiers are quoted with `PUBLIC` retained as the PostgreSQL keyword.
+Default privileges, column grants, non-owner grant chains, and privileges on
+other relation kinds remain explicit blockers.
 
 A confirmed table rename treats its typed trigger children as PostgreSQL-retained
 catalog objects: onwardpg emits only the table rename when the trigger’s table
@@ -146,3 +184,13 @@ is implemented.
 
 Partitioned exclusion constraints are a PostgreSQL 17+ capability; PostgreSQL
 14–16 reject their creation before onwardpg can plan a transition.
+
+Standalone sequences preserve `OWNED BY NONE` or a typed owning-column edge.
+Create and mutation ordering ensures the owning column exists before ownership
+is attached, and ownership is detached before a reviewed owner drop can cascade
+the sequence. Sequence type/start/increment/min/max/cache/cycle and ownership
+can change together. Identity columns support create/add, generation mode,
+start/increment/min/max/cache/cycle, and removal. Removing identity is a
+fingerprint-bound destructive question because PostgreSQL drops the owned
+identity sequence; a replacement default is installed afterward in the same
+`contract` phase.

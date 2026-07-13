@@ -33,6 +33,8 @@ const (
 	KindRoutine      Kind = "routine"
 	KindTrigger      Kind = "trigger"
 	KindPolicy       Kind = "policy"
+	KindRowSecurity  Kind = "row_security"
+	KindPrivilege    Kind = "table_privilege"
 	KindForeignTable Kind = "foreign_table"
 )
 
@@ -130,6 +132,10 @@ type Sequence struct {
 	Cache     int64
 	Cycle     bool
 	Comment   *string
+	// OwnedBy captures ALTER SEQUENCE ... OWNED BY for standalone
+	// sequences. Identity and canonical serial sequences remain attributes of
+	// their owning Column and are not duplicated as standalone nodes.
+	OwnedBy *ID
 }
 
 func (o Sequence) ObjectID() ID { return ID{Kind: KindSequence, Schema: o.Schema, Name: o.Name} }
@@ -354,6 +360,57 @@ func (o Trigger) ObjectID() ID {
 }
 func (Trigger) object() {}
 
+// Policy is a row-level-security policy bound to one ordinary or partitioned
+// table. Roles are catalog role names (with the distinguished PUBLIC role
+// represented literally as "PUBLIC") and are canonicalized by the catalog
+// loader. Expressions are PostgreSQL's deparsed SQL, not caller-built tokens.
+type Policy struct {
+	Table      ID
+	Name       string
+	Permissive bool
+	Command    string // ALL, SELECT, INSERT, UPDATE, or DELETE.
+	Roles      []string
+	Using      *string
+	Check      *string
+}
+
+func (o Policy) ObjectID() ID {
+	return ID{Kind: KindPolicy, Schema: o.Table.Schema, Name: o.Table.Name, Part: o.Name}
+}
+func (Policy) object() {}
+
+// RowSecurity is deliberately a separate node from Table. Its dependency on
+// every policy for the table proves that policy creation precedes RLS enable,
+// while reverse dependency order proves that RLS disable precedes policy
+// removal. Forced may be true independently of Enabled in PostgreSQL catalogs.
+type RowSecurity struct {
+	Table   ID
+	Enabled bool
+	Forced  bool
+}
+
+func (o RowSecurity) ObjectID() ID {
+	return ID{Kind: KindRowSecurity, Schema: o.Table.Schema, Name: o.Table.Name}
+}
+func (RowSecurity) object() {}
+
+// TablePrivilege models one grantee/privilege pair. The owning role's
+// implicit rights are validated by the catalog loader rather than duplicated
+// as nodes. Grantor is retained so a non-owner grant chain can never vanish
+// from a snapshot; the planner currently accepts only the @owner sentinel.
+type TablePrivilege struct {
+	Table     ID
+	Grantee   string
+	Grantor   string
+	Privilege string
+	Grantable bool
+}
+
+func (o TablePrivilege) ObjectID() ID {
+	return ID{Kind: KindPrivilege, Schema: o.Table.Schema, Name: o.Table.Name, Part: o.Privilege + ":" + o.Grantee}
+}
+func (TablePrivilege) object() {}
+
 // Snapshot stores a complete catalog view. Objects and dependencies are kept
 // private so every write validates IDs and references at the boundary.
 type Snapshot struct {
@@ -374,6 +431,11 @@ func (s *Snapshot) Add(object Object) error {
 	if column, ok := object.(Column); ok {
 		column.Default = NormalizeDefault(column.Default)
 		object = column
+	}
+	if policy, ok := object.(Policy); ok {
+		policy.Roles = append([]string(nil), policy.Roles...)
+		sort.Strings(policy.Roles)
+		object = policy
 	}
 	id := object.ObjectID()
 	if !id.Valid() {

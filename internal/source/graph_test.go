@@ -38,6 +38,25 @@ func TestCatalogVersionPredicates(t *testing.T) {
 	if got, want := indexNullsNotDistinctSelector(150000), "idx.indnullsnotdistinct"; got != want {
 		t.Fatalf("PostgreSQL 15 NULLS NOT DISTINCT selector = %q, want %q", got, want)
 	}
+	if got := catalogVersionSafetyBlockersQuery(140000); got != "" {
+		t.Fatalf("PostgreSQL 14 version blocker query = %q, want empty", got)
+	}
+	if got := catalogVersionSafetyBlockersQuery(150000); !strings.Contains(got, "parameter_acl:") || strings.Contains(got, "not_null_constraint:") {
+		t.Fatalf("PostgreSQL 15 version blocker query = %q", got)
+	}
+	if got := catalogVersionSafetyBlockersQuery(180000); !strings.Contains(got, "parameter_acl:") || !strings.Contains(got, "not_null_constraint:") {
+		t.Fatalf("PostgreSQL 18 version blocker query = %q", got)
+	}
+}
+
+func TestCatalogSafetyQueryNamesSecurityLabelsWithoutValues(t *testing.T) {
+	if !strings.Contains(graphCatalogSafetyBlockersQuery, "pg_identify_object") ||
+		!strings.Contains(graphCatalogSafetyBlockersQuery, "security_label:") {
+		t.Fatal("security labels must have stable object-address blockers")
+	}
+	if strings.Contains(graphCatalogSafetyBlockersQuery, "s.label") {
+		t.Fatal("security-label values must not be exposed in diagnostics")
+	}
 }
 
 func TestNormalizePublicSchemaComment(t *testing.T) {

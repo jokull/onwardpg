@@ -26,9 +26,11 @@ invalid once either input schema changes.
 
 An agent should follow this loop for every feature:
 
-1. Write or obtain the desired DDL from the application schema tool. This can
-   come from Drizzle, Django, Prisma, SQLAlchemy, or handwritten PostgreSQL
-   `CREATE` statements.
+1. Write or obtain the desired DDL through a project-supplied deterministic
+   full-schema command. It may use Drizzle, Django, Prisma, SQLAlchemy, or
+   handwritten PostgreSQL `CREATE` statements; not every framework ships a
+   complete export, so replaying into scratch PostgreSQL and dumping the schema
+   may be part of the project command.
 2. Run `onwardpg plan` against a production-like clone or development database.
    Save the raw JSON result, including a `needs_input` result.
 3. Branch only on the documented exit status:

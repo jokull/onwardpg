@@ -107,9 +107,7 @@ func finalizeRebindReport(report *protocol.RebindReport, carried protocol.Answer
 	for _, question := range questions {
 		report.Unanswered = append(report.Unanswered, question.Kind+":"+question.Key)
 	}
-	for _, id := range sortedAnswerIDs(remaining) {
-		report.Deferred = append(report.Deferred, id)
-	}
+	report.Deferred = append(report.Deferred, sortedAnswerIDs(remaining)...)
 	sort.Strings(report.Unanswered)
 }
 

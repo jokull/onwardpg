@@ -68,6 +68,33 @@ See [migration bundles](bundles.md) for the current receipt workflow. The
 planner, bundle, freshness, and history cores do not require Git; `pr` commands
 are convenience wrappers that prepare directory snapshots and provenance.
 
+## Initialize onwardpg history
+
+```sh
+onwardpg history init --target primary-postgres
+onwardpg history init --target primary-postgres --bundle ground-floor
+```
+
+`history init` is the one-time, Git-independent onboarding command for a
+database target. It compiles the configured declarative DDL twice, plans from
+an empty PostgreSQL catalog, constructs a `purpose: baseline`, `mode: init`
+root bundle, and clone-verifies the complete result before installing it under
+`bundle_root`. The bundle ID defaults to `baseline`.
+
+The command accepts `--answers`, `--ignore`, and `--concurrent-indexes`. A
+`needs_input` or `unsupported` result is emitted without writing history. It
+also writes nothing when disposable convergence fails. If any target history
+already exists, it exits `4` with `history_already_initialized`; it never
+extends, replaces, or imports an existing chain.
+
+Initialization does not inspect or apply to an application database. For an
+existing project, its empty-to-schema SQL is replay genesis for clones and new
+environments—not work to run against the existing database. Commit and merge
+the baseline into the protected base before ordinary feature branches use
+`pr regenerate`. Separately run a normal read-only diff against the team's
+chosen ground-truth environment before adoption; initialization proves replay
+equals declarative code, not that a deployed database has no drift.
+
 ## PR status
 
 ```sh

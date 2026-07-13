@@ -16,6 +16,7 @@ import (
 	"github.com/jokull/onwardpg/internal/gitbase"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
+	"github.com/jokull/onwardpg/internal/historyinit"
 	"github.com/jokull/onwardpg/internal/prflow"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
@@ -29,13 +30,15 @@ func main() { os.Exit(run()) }
 
 func run() int {
 	if len(os.Args) < 2 {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg <plan|dev|bundle|config|pr|ci>"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg <plan|dev|history|bundle|config|pr|ci>"))
 	}
 	switch os.Args[1] {
 	case "plan":
 		return runPlan(os.Args[2:])
 	case "dev":
 		return runDev(os.Args[2:])
+	case "history":
+		return runHistory(os.Args[2:])
 	case "config":
 		return runConfig(os.Args[2:])
 	case "bundle":
@@ -46,6 +49,83 @@ func run() int {
 		return runPR(os.Args[2:])
 	default:
 		return writeError("invalid_invocation", fmt.Errorf("unknown command %q", os.Args[1]))
+	}
+}
+
+func runHistory(arguments []string) int { return runHistoryAt(arguments, ".") }
+
+func runHistoryAt(arguments []string, start string) int {
+	if len(arguments) == 0 || arguments[0] != "init" {
+		return writeError("invalid_invocation", errors.New("usage: onwardpg history init --target NAME [--bundle baseline]"))
+	}
+	flags := flag.NewFlagSet("history init", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	targetName := flags.String("target", "", "configured database target name")
+	bundleID := flags.String("bundle", "baseline", "root history bundle identifier")
+	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
+	answerFile := flags.String("answers", "", "fingerprint-bound planner answers")
+	concurrentIndexes := flags.Bool("concurrent-indexes", false, "create standalone indexes concurrently")
+	var ignores stringsFlag
+	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return writeError("invalid_invocation", err)
+	}
+	if *targetName == "" {
+		return writeError("invalid_invocation", errors.New("history init requires --target"))
+	}
+	configPath := *configName
+	if !filepath.IsAbs(configPath) {
+		configPath = filepath.Join(start, configPath)
+	}
+	configPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	config, err := workspace.Load(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	target, err := config.Target(*targetName)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	adminURL := os.Getenv(target.DevDatabaseEnv)
+	if adminURL == "" {
+		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv))
+	}
+	answers, err := readAnswers(*answerFile)
+	if err != nil {
+		return writeError("invalid_answers", err)
+	}
+	selectors := sortedUniqueStrings(ignores)
+	report, err := historyinit.Run(context.Background(), historyinit.Input{
+		Root:           filepath.Dir(configPath),
+		Config:         config,
+		TargetName:     *targetName,
+		Target:         target,
+		AdminURL:       adminURL,
+		BundleID:       *bundleID,
+		BuildVersion:   buildVersion,
+		Answers:        answers,
+		AnswersGiven:   *answerFile != "",
+		Ignores:        selectors,
+		PlannerOptions: graphplan.Options{ConcurrentIndexes: *concurrentIndexes},
+	})
+	if err != nil {
+		return writeError("history_init_error", err)
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(report)
+	switch report.Outcome {
+	case "initialized":
+		return 0
+	case string(protocol.NeedsInput):
+		return 2
+	case string(protocol.Unsupported):
+		return 3
+	case "blocked":
+		return 4
+	default:
+		return 1
 	}
 }
 
@@ -523,9 +603,9 @@ func assessPRBundle(ctx context.Context, repository gitbase.Repository, config w
 		if err := json.Unmarshal(data, &previous); err != nil {
 			return prStatusReport{}, fmt.Errorf("decode bundled answers: %w", err)
 		}
-		questions, err := bundle.DecisionQuestions(artifact)
-		if err != nil {
-			return prStatusReport{}, err
+		questions, questionErr := bundle.DecisionQuestions(artifact)
+		if questionErr != nil {
+			return prStatusReport{}, questionErr
 		}
 		analysis, err = prflow.AnalyzeWithReboundAnswers(ctx, input, previous, questions)
 	} else {
@@ -660,9 +740,9 @@ func runPRRegenerateAt(arguments []string, start string) int {
 				if err := json.Unmarshal(data, &previousAnswers); err != nil {
 					return writeError("invalid_bundle", fmt.Errorf("decode bundled answers: %w", err))
 				}
-				questions, err := bundle.DecisionQuestions(previous)
-				if err != nil {
-					return writeError("invalid_bundle", err)
+				questions, questionErr := bundle.DecisionQuestions(previous)
+				if questionErr != nil {
+					return writeError("invalid_bundle", questionErr)
 				}
 				analysis, err = prflow.AnalyzeWithReboundAnswers(context.Background(), input, previousAnswers, questions)
 			} else {

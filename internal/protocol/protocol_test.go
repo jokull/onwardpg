@@ -23,6 +23,11 @@ func TestStableStatementIDUsesCompleteNormalizedContract(t *testing.T) {
 	if StableStatementID(left) == StableStatementID(right) {
 		t.Fatal("transaction boundary did not affect stable statement identity")
 	}
+	right = left
+	right.StatementTimeoutMS, right.LockTimeoutMS = 1200000, 3000
+	if StableStatementID(left) == StableStatementID(right) {
+		t.Fatal("timeout guidance did not affect stable statement identity")
+	}
 }
 
 func TestErrorDiagnosticHasVersionedStableShape(t *testing.T) {
@@ -237,6 +242,20 @@ func TestRenderSQLDerivesAnAdHocBatchForLibraryCallers(t *testing.T) {
 	result := Result{Statements: []Statement{{SQL: "CREATE TABLE x ();", Phase: "expand"}}}
 	if got := RenderSQL(result, ""); !strings.Contains(got, "-- Batch ad-hoc: transactional.") || !strings.Contains(got, "CREATE TABLE x ();") {
 		t.Fatalf("RenderSQL = %q", got)
+	}
+}
+
+func TestRenderSQLIncludesTimeoutGuidanceWithoutApplyingIt(t *testing.T) {
+	result := Result{Statements: []Statement{{
+		SQL: "CREATE INDEX CONCURRENTLY idx ON items (id);", Phase: "expand", NonTransactional: true,
+		StatementTimeoutMS: 1200000, LockTimeoutMS: 3000,
+	}}}
+	rendered := RenderSQL(result, "")
+	if !strings.Contains(rendered, "-- Suggested session timeouts: statement_timeout=20m, lock_timeout=3s.") {
+		t.Fatalf("rendered plan lost timeout guidance: %q", rendered)
+	}
+	if strings.Contains(rendered, "SET statement_timeout") || strings.Contains(rendered, "SET lock_timeout") {
+		t.Fatalf("review guidance must not become an apply command: %q", rendered)
 	}
 }
 

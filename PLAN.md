@@ -30,6 +30,67 @@ onwardpg never applies a migration to production. It may apply reviewed plans
 only to disposable verification databases. Production execution remains an
 explicit operator/deployment-system action.
 
+## PostgreSQL reference checkpoint
+
+Stripe `pg-schema-diff` v1.0.7 is pinned at
+`6208f8f3ceccae8ca634055dc47907a6a864cb76` as a test-only executable
+reference. It must never become a production dependency or runtime planning
+authority. The authoritative receipts are:
+
+- `references/stripe-pg-schema-diff-v1.0.7.json` and
+  `THIRD_PARTY_NOTICES.md` for the immutable MIT-licensed pin;
+- `parity/stripe-pg-schema-diff-v1.0.7.json` for all 415 pinned acceptance
+  scenarios and their five comparison dimensions;
+- `parity/postgres-catalog-families.json` for the PostgreSQL 14–18
+  modeled/blocked/atomic catalog boundary; and
+- `docs/stripe-reference.md` for adopted, adapted, and rejected architecture.
+
+This feature-closing wave stops at the following proven boundary:
+
+- the guarded executable harness runs both planners only against disposable
+  PostgreSQL and compares ordering, hazards, timeouts, application,
+  idempotence, and residual diff;
+- continuous same-name standalone index replacement on ordinary tables,
+  materialized views, and independent local partitions, including
+  deterministic temporary names and phased concurrent cleanup, converges on
+  PostgreSQL 18 with Stripe differential evidence; standalone partitioned
+  parents now recursively use `ON ONLY` shells and bottom-up leaf attachment
+  across nested trees, and ordinary primary/unique
+  constraints without external dependents use a concurrent-build plus short
+  transactional swap;
+- sequence `OWNED BY` and complete identity option/add/confirmed-drop
+  transitions converge and have Stripe differential evidence;
+- typed RLS enable/force state, policies, policy dependency edges, and
+  ordinary/partitioned-table privileges converge with safe role rendering,
+  timeout/hazard metadata, fingerprint-bound authorization contractions, and
+  Stripe differential evidence; and
+- explicit ownership/ACL/default-privilege state, rules, text search, event
+  triggers, publications, extended statistics, and FDW/server/user mappings
+  now block with exact ignore receipts instead of disappearing; replica
+  identity, clustered/invalid indexes, table options, and relation tablespaces
+  also block rather than being silently discarded.
+
+The following work is deliberately deferred to later, demand-led PostgreSQL
+coverage waves rather than keeping this checkpoint open indefinitely:
+
+1. finish the modeled-attribute audit now that every PostgreSQL 14–18 catalog
+   table is classified; the blocker suite has run on all five majors, but the
+   matrix must retain its explicit `attribute_audit_in_progress` state until
+   every schema-bearing attribute is modeled, normalized, or blocked;
+2. retain the proven recursive partition-parent and matching prebuilt-child
+   attachment strategies; implement the remaining existing-local-constraint
+   variants or preserve explicit invariant-safe rejections;
+3. classify and differentially verify every Stripe acceptance scenario rather
+   than relying on family-level `weaker` classifications; and
+4. extend the real-PostgreSQL differential corpus across every supported major
+   before promoting individual `weaker` entries to verified support.
+
+This checkpoint does not claim Stripe parity: 40 of the 415 pinned scenarios
+are currently classified `supported`, 373 are conservatively `weaker`, and two
+are `out_of_scope`. The complete source corpus is inventoried, but only entries
+with direct onwardpg and differential evidence are promoted. That distinction
+is part of the release contract, not unfinished prose to be rounded up later.
+
 ## Product doctrine
 
 1. **Diffs describe outcomes, not development history.** Intermediate branch
@@ -412,6 +473,12 @@ journals, snapshots, or runtime ledgers. Framework-specific integration work
 is deferred until the core CLI workflow is mature—and should remain
 unnecessary wherever a reliable DDL export exists.
 
+`history init` establishes the chain ground floor. It plans empty PostgreSQL
+to the current declarative export, clone-verifies that `baseline` root entry
+before writing it, and refuses any target with existing history. For an
+existing application, the genesis is replay history for clones and new
+environments—not SQL to apply to the existing database.
+
 The ordinary invariants become:
 
 - `BC == BM`: base declarative export equals replay of the protected onwardpg
@@ -699,8 +766,10 @@ receipt.
 - Plans are forward-only and never auto-applied.
 - `onwardpg.plan/v1` provides fingerprints, typed questions/answers, hazards,
   phases, and transactional/non-transactional batches.
-- Unknown/unmodeled catalog state is explicit unsupported state unless matched
-  by a validated narrow ignore selector.
+- Known unmodeled catalog state covered by the current blocker inventory is
+  explicit unsupported state unless matched by a validated narrow ignore
+  selector. Completing that inventory remains required before a production
+  safety claim.
 - PostgreSQL 14–18 is the supported server policy.
 - Schemas, tables, columns, common constraints/indexes, enums, standalone
   sequences, extensions, ordinary/materialized views, modeled routines,
@@ -933,7 +1002,15 @@ backfill, and later contract without rewriting executed history.
 
 ### Wave 7 — production hardening
 
+- Complete and test the PostgreSQL catalog-family blocker inventory before
+  making a no-silent-omission or production-safety claim.
 - Complete feature-map gaps according to developer demand.
+- Re-evaluate the evidence-linked gaps in
+  `docs/ecosystem-comparison.md`: Stripe-quality continuous same-name index
+  replacement remains the highest-value online-DDL reference area; domains,
+  composite types, table ownership, and non-table/default/column ACLs remain
+  candidate breadth work, not reasons to interrupt the developer-preview
+  workflow milestone.
 - Benchmark large repos/schemas and publish performance bounds.
 - Publish binaries, checksums, provenance/signing, changelog, release
   automation, and support policy.
@@ -952,30 +1029,34 @@ that PostgreSQL DDL cannot satisfy.
 The developer-preview acceptance suite now uses only the public CLI boundary
 (`schema_file` / `schema_command`) and real PostgreSQL. It proves:
 
-1. `dev plan` asks a scoped rename question, never applies its SQL, and reaches
+1. `history init` creates and clone-verifies exactly one root entry without
+   inspecting or applying to an application database, then refuses re-init.
+2. `dev plan` asks a scoped rename question, never applies its SQL, and reaches
    an empty residual after deliberate local application.
-2. A feature schema evolves while retaining one replaceable logical bundle.
-3. Rename, staged `NOT NULL`, and application-owned backfill decisions survive
+3. A feature schema evolves while retaining one replaceable logical bundle.
+4. Rename, staged `NOT NULL`, and application-owned backfill decisions survive
    an unrelated feature edit and two new base-history migrations.
-4. The per-target parent/entry hash chain—not filenames—orders genesis, both
+5. The per-target parent/entry hash chain—not filenames—orders genesis, both
    base migrations, and the final feature bundle without a fork.
-5. The final receipt contains canonical questions, fingerprinted answers,
+6. The final receipt contains canonical questions, fingerprinted answers,
    plan JSON, hazards, and separate expand/manual/contract SQL.
-6. `bundle verify` proves the full chain converges and reports a residual when
+7. `bundle verify` proves the full chain converges and reports a residual when
    only a deliberately incomplete checkpoint is selected.
-7. `ci check` accepts the committed one-bundle PR and rejects an incorrectly
+8. `ci check` accepts the committed one-bundle PR and rejects an incorrectly
    stacked PR before database execution.
-8. Transactional clone work rolls back when a manual boolean postcondition
+9. Transactional clone work rolls back when a manual boolean postcondition
    fails, and disposable verification databases are removed.
-9. No command applies production SQL, modifies Git history, fetches/rebases,
-   or commits/pushes without an explicit surrounding developer workflow.
+10. No command applies SQL to a caller-supplied database, modifies Git history,
+    fetches/rebases, or commits/pushes without an explicit surrounding
+    developer workflow.
 
-Execution/amendment receipts and post-merge delayed-contract lifecycle are
-later milestones; they are not hidden inside the developer-preview claim.
+Real-environment execution evidence and deployment orchestration remain
+outside onwardpg. Delayed contracts are represented as explicit future
+forward plans, not as a reason to grow an apply or rollout-tracking surface.
 
 ## Explicit non-goals
 
-- No automatic production migration application.
+- No production, staging, or development migration application.
 - No generated down migrations.
 - No inference of application intent from name similarity alone.
 - No promise that repository main, migration history, and production are

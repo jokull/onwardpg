@@ -18,9 +18,12 @@ postgres_major = 16
 ```
 
 Drizzle, Django, Prisma, SQLAlchemy, handwritten SQL, or any future code-schema
-tool is usable when the project already has a reliable command that emits
-PostgreSQL DDL. onwardpg does not import the framework's model format and does
-not read, write, or translate its migration journal.
+source is usable only when the project has a reliable command that emits the
+complete PostgreSQL DDL. This is not uniformly built into those frameworks.
+For example, a Django project may need to replay its migrations in scratch
+PostgreSQL and dump the resulting schema. onwardpg does not import the
+framework's model format and does not read, write, or translate its migration
+journal.
 
 ## Why DDL is the boundary
 

@@ -25,6 +25,8 @@ jobs:
           go test ./internal/protocol -fuzz=FuzzResolverAnswerValidation -fuzztime=5s -parallel=1
       - name: Vet
         run: go vet ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
       - name: Check Go formatting
         run: bash scripts/check-gofmt.sh
       - name: Check whitespace errors
@@ -66,8 +68,22 @@ jobs:
           fetch-depth: 1
       - name: Build pinned Atlas
         run: (cd .atlas/cmd/atlas && go build -o "$GITHUB_WORKSPACE/.tools/atlas-pinned" .)
+      - name: Check out pinned Stripe pg-schema-diff reference
+        uses: actions/checkout@v4
+        with:
+          repository: stripe/pg-schema-diff
+          ref: 6208f8f3ceccae8ca634055dc47907a6a864cb76
+          path: .stripe-pg-schema-diff
+          fetch-depth: 1
+      - name: Build and verify pinned Stripe reference
+        run: |
+          scripts/build-pinned-stripe-reference.sh .stripe-pg-schema-diff .tools/pg-schema-diff-v1.0.7
+          go run ./scripts/stripeinventory -source .stripe-pg-schema-diff -output /tmp/stripe-matrix.json
+          diff -u parity/stripe-pg-schema-diff-v1.0.7.json /tmp/stripe-matrix.json
       - name: Integration and differential suite
         env:
           ONWARDPG_TEST_DATABASE_URL: postgres://pgmig:pgmig@localhost:5432/pgmig?sslmode=disable
           ATLAS_PINNED_BIN: ${{ github.workspace }}/.tools/atlas-pinned
+          STRIPE_PG_SCHEMA_DIFF_BIN: ${{ github.workspace }}/.tools/pg-schema-diff-v1.0.7
+          STRIPE_PG_SCHEMA_DIFF_REF: ${{ github.workspace }}/.stripe-pg-schema-diff
         run: go test ./... -count=1

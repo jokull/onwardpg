@@ -44,6 +44,10 @@ type Statement struct {
 	// application releases. "expand" is additive/compatible work; "contract"
 	// needs an explicit review after old application code is gone.
 	Phase string `json:"phase"`
+	// Timeouts are review guidance for the eventual executor. onwardpg never
+	// applies them or any migration SQL to a caller database.
+	StatementTimeoutMS int64 `json:"statement_timeout_ms,omitempty"`
+	LockTimeoutMS      int64 `json:"lock_timeout_ms,omitempty"`
 	// NonTransactional is planner metadata used when forming executable
 	// batches. It is intentionally not part of the public statement JSON: the
 	// batch is the execution boundary exposed by the protocol.
@@ -62,15 +66,18 @@ func StableStatementID(statement Statement) string {
 	hazards := append([]string(nil), statement.Hazards...)
 	sort.Strings(hazards)
 	canonical := struct {
-		SQL              string      `json:"sql"`
-		Safety           string      `json:"safety"`
-		Hazards          []string    `json:"hazards,omitempty"`
-		Phase            string      `json:"phase"`
-		NonTransactional bool        `json:"non_transactional"`
-		Manual           *ManualWork `json:"manual,omitempty"`
+		SQL                string      `json:"sql"`
+		Safety             string      `json:"safety"`
+		Hazards            []string    `json:"hazards,omitempty"`
+		Phase              string      `json:"phase"`
+		NonTransactional   bool        `json:"non_transactional"`
+		StatementTimeoutMS int64       `json:"statement_timeout_ms,omitempty"`
+		LockTimeoutMS      int64       `json:"lock_timeout_ms,omitempty"`
+		Manual             *ManualWork `json:"manual,omitempty"`
 	}{
 		SQL: statement.SQL, Safety: statement.Safety, Hazards: hazards,
 		Phase: statement.Phase, NonTransactional: statement.NonTransactional,
+		StatementTimeoutMS: statement.StatementTimeoutMS, LockTimeoutMS: statement.LockTimeoutMS,
 		Manual: statement.Manual,
 	}
 	data, err := json.Marshal(canonical)
