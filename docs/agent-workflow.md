@@ -148,7 +148,7 @@ is reviewable rather than hidden in an agent transcript:
 -- ============================================================================
 -- CONTRACT — run only after old application code no longer uses the prior shape.
 -- ============================================================================
--- Batch contract-transactional: transactional.
+-- Batch batch-001: transactional.
 ALTER TABLE "app"."users" RENAME COLUMN "name" TO "full_name";
 ```
 

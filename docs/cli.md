@@ -1,6 +1,6 @@
 # CLI reference
 
-The only command today is:
+The smallest, repository-independent command is:
 
 ```sh
 onwardpg plan --from SOURCE --to SOURCE [options]
@@ -49,13 +49,20 @@ Repository configuration can be checked with:
 onwardpg config check --config .onwardpg.toml
 ```
 
-See [migration bundles](bundles.md) for the current receipt workflow and its
-explicit Git-provenance boundary.
+See [migration bundles](bundles.md) for the current receipt workflow. The
+planner, bundle, freshness, and history cores do not require Git; `pr` commands
+are convenience wrappers that prepare directory snapshots and provenance.
 
 ## PR status
 
 ```sh
 onwardpg pr status --base origin/main --target primary-postgres
+
+# Also compare an existing bundle with freshly compiled base/head trees.
+onwardpg pr status \
+  --base origin/main \
+  --target primary-postgres \
+  --bundle customer-profile
 ```
 
 This read-only command resolves the base, head, and merge base to exact object
@@ -68,8 +75,15 @@ the protected migration lineage. This distinction prevents an unrelated
 migration newly landed on main from appearing as a branch deletion. Existing
 base-history edits and concurrent path collisions produce `outcome: "blocked"`
 and exit `4`. An advanced base produces `relationship: "base_advanced"` and
-`synthetic_head_needed: true`. `pr status` remains read-only and does not
-compile that tree.
+`synthetic_head_needed: true`.
+
+Without `--bundle`, status reports repository/migration-history classification
+only. With `--bundle`, it remains read-only but also compiles the prepared base
+and desired trees, replays base history, reruns the recorded planner contract,
+and emits `onwardpg.freshness/v1`.
+Findings distinguish `provenance_stale`, `schema_stale`, `decision_stale`, and
+`artifact_stale`, and each carries remediation text. Freshness checks never
+replace a draft.
 
 ## PR regeneration
 
@@ -96,11 +110,26 @@ square:
 
 The configured `dev_database_env` must contain a disposable PostgreSQL admin
 URL. A second decision pass uses `--answers` and `--replace-draft`; prior
-question receipts are retained. The bundle root is excluded from dirty source
-fingerprints, and configuration rejects any overlap between `bundle_root` and
-the migration runner's `migration_path`.
+question receipts are retained without advancing the generation when the
+source/planner contract is unchanged. The bundle root is excluded from dirty source
+fingerprints, and configuration rejects overlap between `bundle_root` and the
+legacy plain-SQL `migration_path`.
 
-This command does not yet write a Drizzle/ORM migration journal entry. Its
-schema-square receipt therefore reports `head_artifact_fidelity:
-"not_generated"`. The adapter handoff and `HC == HM` clone proof remain an
-explicit missing layer, not a successful claim.
+Regeneration records `head_history_fidelity: "not_replayed"` today. The next
+history wave replaces the legacy migration path with a per-target,
+content-addressed onwardpg bundle chain and proves `HC == HM` by replaying that
+chain plus the proposed phase artifacts on disposable PostgreSQL.
+
+There is intentionally no migration-runner handoff command. Drizzle and other
+frameworks may compile declarative schemas to DDL, but onwardpg does not read
+or write their journals. Developers and agents run reviewed phase artifacts at
+the appropriate rollout points; the live catalog and residual diff show what
+work remains.
+
+## Integration boundary
+
+Git is not part of the migration engine. PR analysis accepts prepared base and
+desired directories plus opaque revision receipts. The built-in `pr` commands use
+Git to produce those inputs because that is convenient in a checkout. CI or
+another tool can produce equivalent snapshots without embedding Git behavior
+in onwardpg's semantic core.

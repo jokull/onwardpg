@@ -111,12 +111,22 @@ func TestWritePreservesDecisionHistoryAcrossDraftReplacement(t *testing.T) {
 	if manifest.State != "planned" || len(manifest.Decisions) != 1 || manifest.Decisions[0].Path != "decisions/attempt-001.json" {
 		t.Fatalf("decision history was not preserved: %#v", manifest)
 	}
-	generation, attempt, err := NextCoordinates(destination)
+	generation, attempt, err := NextCoordinates(destination, metadata(), plannedResult())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if generation != 2 || attempt != 2 {
-		t.Fatalf("next coordinates = (%d, %d), want (2, 2)", generation, attempt)
+	if generation != 1 || attempt != 2 {
+		t.Fatalf("next coordinates = (%d, %d), want (1, 2)", generation, attempt)
+	}
+	generation, attempt, err = NextCoordinates(destination, metadata(), decisionResult)
+	if err != nil || generation != 1 || attempt != 1 {
+		t.Fatalf("repeated decision coordinates = (%d, %d, %v), want (1, 1, nil)", generation, attempt, err)
+	}
+	changed := metadata()
+	changed.HeadRevision = strings.Repeat("c", 40)
+	generation, attempt, err = NextCoordinates(destination, changed, plannedResult())
+	if err != nil || generation != 2 || attempt != 1 {
+		t.Fatalf("changed-source coordinates = (%d, %d, %v), want (2, 1, nil)", generation, attempt, err)
 	}
 }
 
@@ -136,11 +146,32 @@ func TestBuildRejectsMismatchedReceiptAndIncompletePlan(t *testing.T) {
 	}
 }
 
+func TestManifestRejectsPathTokensAndSecretDescriptions(t *testing.T) {
+	for _, name := range []string{".", "..", "..."} {
+		meta := metadata()
+		meta.BundleID = name
+		if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err == nil {
+			t.Fatalf("accepted unsafe bundle id %q", name)
+		}
+	}
+	for _, description := range []string{
+		"postgres://user:secret@example.test/db",
+		"host=db.example.test user=app password=secret dbname=app",
+		"host=db.example.test passfile=/tmp/pgpass",
+	} {
+		meta := metadata()
+		meta.BaselineSource.Description = description
+		if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err == nil {
+			t.Fatalf("accepted secret-bearing description %q", description)
+		}
+	}
+}
+
 func TestBuildValidatesSchemaSquareReceipt(t *testing.T) {
 	meta := metadata()
 	meta.SchemaSquare = &SchemaSquareReceipt{
 		BaseCodeFingerprint: currentFingerprint, BaseHistoryFingerprint: currentFingerprint,
-		HeadCodeFingerprint: desiredFingerprint, BaseIntegrity: "matched", HeadArtifactFidelity: "not_generated",
+		HeadCodeFingerprint: desiredFingerprint, BaseIntegrity: "matched", HeadHistoryFidelity: "not_replayed",
 	}
 	if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err != nil {
 		t.Fatal(err)
@@ -232,7 +263,7 @@ func TestWriteRefusesToReplaceTamperedOrAugmentedBundle(t *testing.T) {
 			if err := Write(destination, artifact, WriteOptions{ReplaceDraft: true}); err == nil || !strings.Contains(err.Error(), "invalid bundle") {
 				t.Fatalf("expected invalid existing bundle rejection, got %v", err)
 			}
-			if _, _, err := NextCoordinates(destination); err == nil {
+			if _, _, err := NextCoordinates(destination, metadata(), plannedResult()); err == nil {
 				t.Fatal("coordinate calculation accepted an invalid existing bundle")
 			}
 		})

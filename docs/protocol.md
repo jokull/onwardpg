@@ -29,6 +29,9 @@ Every normal planner result has this shape:
 }
 ```
 
+Empty arrays use `omitempty` and may be absent. Consumers must treat an omitted
+array as empty.
+
 `current_fingerprint` and `desired_fingerprint` identify the complete typed
 catalog graphs used for the decision. A fingerprint change means a new planning
 input, even if an object name appears unchanged.
@@ -70,8 +73,8 @@ Answers are a separate, fingerprint-bound input:
   "answers": [
     {
       "kind": "rename_table",
-      "key": "table:public.old_name",
-      "value": "table:public.new_name"
+      "key": "table:public:old_name",
+      "value": "table:public:new_name"
     }
   ]
 }
@@ -147,8 +150,14 @@ human-readable context and may become more specific without a protocol change.
 Current codes distinguish invocation, answers, source, ignore, planning,
 configuration, bundle, and Git-status failures.
 
-`pr regenerate` emits `onwardpg.pr-analysis/v1`. It nests the exact
-`onwardpg.git-status/v1`, partial schema-square fingerprints, the ordinary
+`pr regenerate` emits `onwardpg.pr-analysis/v1`. It contains prepared-tree
+revision receipts, partial schema-square fingerprints, the ordinary
 `onwardpg.plan/v1` result, and the written bundle generation/path. A blocked
-Git or base-integrity result omits `plan` and exits `4`; needs-input and
-unsupported planner results retain exits `2` and `3`.
+base-integrity result omits `plan` and exits `4`; needs-input and unsupported
+planner results retain exits `2` and `3`. The optional Git CLI wrapper reports
+its separate `onwardpg.git-status/v1` result when repository classification is
+blocked.
+
+`pr status --bundle` emits `onwardpg.pr-status/v1` with repository,
+PR-analysis, and `onwardpg.freshness/v1` receipts. It is read-only. Stale
+findings carry stable codes and remediation text and exit `4`.

@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	"github.com/jokull/onwardpg/internal/bundle"
+	"github.com/jokull/onwardpg/internal/freshness"
 	"github.com/jokull/onwardpg/internal/gitbase"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/prflow"
@@ -63,6 +64,7 @@ func runPRStatusAt(arguments []string, start string) int {
 	base := flags.String("base", "", "exact PR base ref")
 	head := flags.String("head", "HEAD", "feature head ref")
 	targetName := flags.String("target", "", "configured database target name")
+	bundleID := flags.String("bundle", "", "read-only freshness check for this logical bundle")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
 	workingTree := flags.Bool("working-tree", true, "include staged, unstaged, and untracked checkout state when head is HEAD")
 	if err := flags.Parse(arguments); err != nil {
@@ -92,16 +94,118 @@ func runPRStatusAt(arguments []string, start string) int {
 	}
 	status, err := repository.Inspect(context.Background(), gitbase.Options{
 		BaseRef: *base, HeadRef: *head, MigrationPath: target.MigrationPath,
-		IncludeWorkingTree: *workingTree, ExcludePaths: []string{config.BundleRoot},
+		IncludeWorkingTree: *workingTree, ExcludePaths: []string{config.BundleRoot, target.MigrationPath},
 	})
 	if err != nil {
 		return writeError("git_status_error", err)
+	}
+	if *bundleID != "" && status.Outcome == "ready" {
+		return runPRBundleStatus(repository, config, *targetName, *bundleID, target, status)
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(status)
 	if status.Outcome == "blocked" {
 		return 4
 	}
 	return 0
+}
+
+const prStatusVersion = "onwardpg.pr-status/v1"
+
+type prStatusReport struct {
+	ProtocolVersion string            `json:"protocol_version"`
+	Outcome         string            `json:"outcome"`
+	Repository      gitbase.Status    `json:"repository"`
+	Analysis        *prflow.Analysis  `json:"analysis,omitempty"`
+	Freshness       *freshness.Report `json:"freshness,omitempty"`
+}
+
+func runPRBundleStatus(repository gitbase.Repository, config workspace.Config, targetName, bundleID string, target workspace.Target, status gitbase.Status) int {
+	destination, err := config.BundlePath(repository.Root, targetName, bundleID)
+	if err != nil {
+		return writeError("invalid_bundle", err)
+	}
+	artifact, err := bundle.Read(destination)
+	if err != nil {
+		fresh := freshness.ArtifactStale(err)
+		report := prStatusReport{ProtocolVersion: prStatusVersion, Outcome: fresh.Outcome, Repository: status, Freshness: &fresh}
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return 4
+	}
+	if artifact.Manifest.Target != targetName || artifact.Manifest.BundleID != bundleID || artifact.Manifest.Mode != "pr" {
+		return writeError("invalid_bundle", errors.New("bundle identity or mode does not match the requested PR target"))
+	}
+	devURL := os.Getenv(target.DevDatabaseEnv)
+	if devURL == "" {
+		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv))
+	}
+	baseTree, err := repository.PrepareCommitTree(context.Background(), status.BaseCommit)
+	if err != nil {
+		return writeError("git_status_error", err)
+	}
+	defer baseTree.Close()
+	headTree, err := repository.PreparePRTree(context.Background(), status)
+	if err != nil {
+		return writeError("git_status_error", err)
+	}
+	defer headTree.Close()
+	options := graphplan.Options{
+		ConcurrentIndexes: artifact.Manifest.Planner.Options.ConcurrentIndexes,
+		IfNotExists:       artifact.Manifest.Planner.Options.IfNotExists,
+		IfExists:          artifact.Manifest.Planner.Options.IfExists,
+		CascadeDrops:      artifact.Manifest.Planner.Options.CascadeDrops,
+		SchemaQualifier:   artifact.Manifest.Planner.Options.SchemaQualifier,
+	}
+	input := prflow.Input{
+		BaseRoot: baseTree.Root, HeadRoot: headTree.Root,
+		BaseRevision: status.BaseCommit, HeadRevision: status.HeadRevision,
+		TargetName: targetName, Target: target, DevDatabaseURL: devURL,
+		PlannerOptions: options, Ignores: artifact.Manifest.Planner.IgnoreSelectors,
+	}
+	analysis, err := prflow.Analyze(context.Background(), input)
+	if err != nil {
+		return writeError("pr_analysis_error", err)
+	}
+	if analysis.Outcome == "blocked" || analysis.Plan == nil {
+		report := prStatusReport{ProtocolVersion: prStatusVersion, Outcome: "blocked", Repository: status, Analysis: &analysis}
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return 4
+	}
+	if data, exists := artifact.Files["answers.json"]; exists &&
+		analysis.Plan.CurrentFingerprint == artifact.Manifest.BaselineSource.Fingerprint &&
+		analysis.Plan.DesiredFingerprint == artifact.Manifest.DesiredSource.Fingerprint {
+		var answers protocol.Answers
+		if err := json.Unmarshal(data, &answers); err != nil {
+			return writeError("invalid_bundle", fmt.Errorf("decode bundled answers: %w", err))
+		}
+		input.Answers = answers
+		analysis, err = prflow.Analyze(context.Background(), input)
+		if err != nil {
+			return writeError("pr_analysis_error", err)
+		}
+	}
+	resultDigest, err := bundle.ResultDigest(*analysis.Plan)
+	if err != nil {
+		return writeError("invalid_bundle", err)
+	}
+	currentPlanner := bundle.PlannerReceipt{
+		Version: buildVersion, Options: artifact.Manifest.Planner.Options,
+		IgnoreSelectors: append([]string(nil), artifact.Manifest.Planner.IgnoreSelectors...),
+	}
+	fresh, err := freshness.Assess(artifact, freshness.Observation{
+		BaselineRef: status.BaseRef, BaselineRevision: status.BaseCommit, DesiredRevision: status.HeadRevision,
+		BaselineFingerprint: analysis.SchemaSquare.BaseCodeFingerprint,
+		DesiredFingerprint:  analysis.SchemaSquare.HeadCodeFingerprint,
+		Planner:             currentPlanner, ResultDigest: resultDigest,
+	})
+	if err != nil {
+		return writeError("freshness_error", err)
+	}
+	report := prStatusReport{ProtocolVersion: prStatusVersion, Outcome: fresh.Outcome, Repository: status, Analysis: &analysis, Freshness: &fresh}
+	_ = json.NewEncoder(os.Stdout).Encode(report)
+	if fresh.Outcome == "fresh" {
+		return 0
+	}
+	return 4
 }
 
 func runPRRegenerateAt(arguments []string, start string) int {
@@ -160,10 +264,31 @@ func runPRRegenerateAt(arguments []string, start string) int {
 		ConcurrentIndexes: *concurrentIndexes, IfNotExists: *ifNotExists,
 		IfExists: *ifExists, CascadeDrops: *cascadeDrops,
 	}
+	status, err := repository.Inspect(context.Background(), gitbase.Options{
+		BaseRef: *base, HeadRef: *head, MigrationPath: target.MigrationPath,
+		IncludeWorkingTree: *workingTree, ExcludePaths: []string{config.BundleRoot, target.MigrationPath},
+	})
+	if err != nil {
+		return writeError("git_status_error", err)
+	}
+	if status.Outcome != "ready" {
+		_ = json.NewEncoder(os.Stdout).Encode(status)
+		return 4
+	}
+	baseTree, err := repository.PrepareCommitTree(context.Background(), status.BaseCommit)
+	if err != nil {
+		return writeError("git_status_error", err)
+	}
+	defer baseTree.Close()
+	headTree, err := repository.PreparePRTree(context.Background(), status)
+	if err != nil {
+		return writeError("git_status_error", err)
+	}
+	defer headTree.Close()
 	analysis, err := prflow.Analyze(context.Background(), prflow.Input{
-		Repository: repository, TargetName: *targetName, Target: target,
-		BaseRef: *base, HeadRef: *head, IncludeWorkingTree: *workingTree,
-		ExcludePaths: []string{config.BundleRoot}, DevDatabaseURL: devURL,
+		BaseRoot: baseTree.Root, HeadRoot: headTree.Root,
+		BaseRevision: status.BaseCommit, HeadRevision: status.HeadRevision,
+		TargetName: *targetName, Target: target, DevDatabaseURL: devURL,
 		Ignores: ignores, Answers: answers, PlannerOptions: options,
 	})
 	if err != nil {
@@ -180,10 +305,6 @@ func runPRRegenerateAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_bundle", err)
 	}
-	generation, attempt, err := bundle.NextCoordinates(destination)
-	if err != nil {
-		return writeError("invalid_bundle", err)
-	}
 	intent, err := readOptionalFile(*intentFile)
 	if err != nil {
 		return writeError("invalid_bundle", err)
@@ -192,31 +313,39 @@ func runPRRegenerateAt(arguments []string, start string) int {
 	if *answerFile != "" {
 		answerReceipt = &answers
 	}
-	artifact, err := bundle.Build(bundle.Input{
-		Metadata: bundle.Metadata{
-			BundleID: *bundleID, Generation: generation, Target: *targetName, Purpose: *purpose, Mode: "pr",
-			BaseRef: *base, BaseCommit: analysis.Git.BaseCommit, HeadRevision: analysis.Git.HeadRevision,
-			BaselineSource: bundle.SourceReceipt{
-				Kind: "adapter", Description: "base declarative " + analysis.BaseProvenance,
-				Fingerprint: analysis.SchemaSquare.BaseCodeFingerprint, GitCommit: analysis.Git.BaseCommit, PostgresMajor: target.PostgresMajor,
-			},
-			DesiredSource: bundle.SourceReceipt{
-				Kind: "adapter", Description: "synthetic head declarative " + analysis.HeadProvenance,
-				Fingerprint: analysis.SchemaSquare.HeadCodeFingerprint, GitCommit: analysis.Git.HeadCommit, PostgresMajor: target.PostgresMajor,
-			},
-			Planner: bundle.PlannerReceipt{Version: buildVersion, Options: bundle.PlannerOptions{
-				ConcurrentIndexes: options.ConcurrentIndexes, IfNotExists: options.IfNotExists,
-				IfExists: options.IfExists, CascadeDrops: options.CascadeDrops,
-			}},
-			SchemaSquare: &bundle.SchemaSquareReceipt{
-				BaseCodeFingerprint:    analysis.SchemaSquare.BaseCodeFingerprint,
-				BaseHistoryFingerprint: analysis.SchemaSquare.BaseHistoryFingerprint,
-				HeadCodeFingerprint:    analysis.SchemaSquare.HeadCodeFingerprint,
-				BaseIntegrity:          analysis.SchemaSquare.BaseIntegrity,
-				HeadArtifactFidelity:   analysis.SchemaSquare.HeadArtifactFidelity,
-			},
+	metadata := bundle.Metadata{
+		BundleID: *bundleID, Target: *targetName, Purpose: *purpose, Mode: "pr",
+		BaseRef: *base, BaseCommit: status.BaseCommit, HeadRevision: status.HeadRevision,
+		BaselineSource: bundle.SourceReceipt{
+			Kind: "adapter", Description: "base declarative " + analysis.BaseProvenance,
+			Fingerprint: analysis.SchemaSquare.BaseCodeFingerprint, GitCommit: status.BaseCommit, PostgresMajor: target.PostgresMajor,
 		},
-		Result: *analysis.Plan, Answers: answerReceipt, Intent: intent, Attempt: attempt,
+		DesiredSource: bundle.SourceReceipt{
+			Kind: "adapter", Description: "synthetic head declarative " + analysis.HeadProvenance,
+			Fingerprint: analysis.SchemaSquare.HeadCodeFingerprint, GitCommit: status.HeadCommit, PostgresMajor: target.PostgresMajor,
+		},
+		Planner: bundle.PlannerReceipt{Version: buildVersion, IgnoreSelectors: sortedUniqueStrings(ignores), Options: bundle.PlannerOptions{
+			ConcurrentIndexes: options.ConcurrentIndexes, IfNotExists: options.IfNotExists,
+			IfExists: options.IfExists, CascadeDrops: options.CascadeDrops,
+		}},
+		SchemaSquare: &bundle.SchemaSquareReceipt{
+			BaseCodeFingerprint:    analysis.SchemaSquare.BaseCodeFingerprint,
+			BaseHistoryFingerprint: analysis.SchemaSquare.BaseHistoryFingerprint,
+			HeadCodeFingerprint:    analysis.SchemaSquare.HeadCodeFingerprint,
+			HeadHistoryFingerprint: analysis.SchemaSquare.HeadHistoryFingerprint,
+			BaseHistoryDigest:      analysis.HistoryDigest,
+			BaseIntegrity:          analysis.SchemaSquare.BaseIntegrity,
+			HeadHistoryFidelity:    analysis.SchemaSquare.HeadHistoryFidelity,
+		},
+	}
+	generation, attempt, err := bundle.NextCoordinates(destination, metadata, *analysis.Plan)
+	if err != nil {
+		return writeError("invalid_bundle", err)
+	}
+	metadata.Generation = generation
+	artifact, err := bundle.Build(bundle.Input{
+		Metadata: metadata,
+		Result:   *analysis.Plan, Answers: answerReceipt, Intent: intent, Attempt: attempt,
 	})
 	if err != nil {
 		return writeError("invalid_bundle", err)
@@ -275,6 +404,9 @@ func runPlan(arguments []string) int {
 	if *from == "" || *to == "" {
 		return writeError("invalid_invocation", errors.New("plan requires --from and --to"))
 	}
+	if *bundleDir == "" && (*bundleID != "" || *target != "" || *bundlePurpose != "feature" || *bundleMode != "pr" || *baseRef != "" || *baseCommit != "" || *headRevision != "" || *intentFile != "" || *replaceDraft) {
+		return writeError("invalid_invocation", errors.New("bundle receipt flags require --bundle"))
+	}
 	if *unsortedDump {
 		return writeError("invalid_invocation", errors.New("--unsorted-dump requires an adapter-supplied object order and is unavailable for CLI URL/DDL sources"))
 	}
@@ -307,10 +439,6 @@ func runPlan(arguments []string) int {
 		if *bundleID == "" || *target == "" {
 			return writeError("invalid_bundle", errors.New("--bundle requires --bundle-id and --target"))
 		}
-		generation, attempt, err := bundle.NextCoordinates(*bundleDir)
-		if err != nil {
-			return writeError("invalid_bundle", err)
-		}
 		intent, err := readOptionalFile(*intentFile)
 		if err != nil {
 			return writeError("invalid_bundle", err)
@@ -319,20 +447,26 @@ func runPlan(arguments []string) int {
 		if *answerFile != "" {
 			answerReceipt = &answers
 		}
+		metadata := bundle.Metadata{
+			BundleID: *bundleID, Target: *target,
+			Purpose: *bundlePurpose, Mode: *bundleMode, BaseRef: *baseRef,
+			BaseCommit: *baseCommit, HeadRevision: *headRevision,
+			BaselineSource: sourceReceipt(fromSpec, result.CurrentFingerprint, "current"),
+			DesiredSource:  sourceReceipt(toSpec, result.DesiredFingerprint, "desired"),
+			Planner: bundle.PlannerReceipt{Version: buildVersion, IgnoreSelectors: sortedUniqueStrings(ignores), Options: bundle.PlannerOptions{
+				ConcurrentIndexes: options.ConcurrentIndexes, IfNotExists: options.IfNotExists,
+				IfExists: options.IfExists, CascadeDrops: options.CascadeDrops,
+				SchemaQualifier: options.SchemaQualifier,
+			}},
+		}
+		generation, attempt, err := bundle.NextCoordinates(*bundleDir, metadata, result)
+		if err != nil {
+			return writeError("invalid_bundle", err)
+		}
+		metadata.Generation = generation
 		artifact, err := bundle.Build(bundle.Input{
-			Metadata: bundle.Metadata{
-				BundleID: *bundleID, Generation: generation, Target: *target,
-				Purpose: *bundlePurpose, Mode: *bundleMode, BaseRef: *baseRef,
-				BaseCommit: *baseCommit, HeadRevision: *headRevision,
-				BaselineSource: sourceReceipt(fromSpec, result.CurrentFingerprint, "current"),
-				DesiredSource:  sourceReceipt(toSpec, result.DesiredFingerprint, "desired"),
-				Planner: bundle.PlannerReceipt{Version: buildVersion, Options: bundle.PlannerOptions{
-					ConcurrentIndexes: options.ConcurrentIndexes, IfNotExists: options.IfNotExists,
-					IfExists: options.IfExists, CascadeDrops: options.CascadeDrops,
-					SchemaQualifier: options.SchemaQualifier,
-				}},
-			},
-			Result: result, Answers: answerReceipt, Intent: intent, Attempt: attempt,
+			Metadata: metadata,
+			Result:   result, Answers: answerReceipt, Intent: intent, Attempt: attempt,
 		})
 		if err != nil {
 			return writeError("invalid_bundle", err)
@@ -378,10 +512,11 @@ func runConfig(arguments []string) int {
 	}
 	sort.Strings(targets)
 	_ = json.NewEncoder(os.Stdout).Encode(struct {
-		Status        string   `json:"status"`
-		ConfigVersion int      `json:"config_version"`
-		Targets       []string `json:"targets"`
-	}{Status: "valid", ConfigVersion: config.Version, Targets: targets})
+		ProtocolVersion string   `json:"protocol_version"`
+		Status          string   `json:"status"`
+		ConfigVersion   int      `json:"config_version"`
+		Targets         []string `json:"targets"`
+	}{ProtocolVersion: "onwardpg.config-check/v1", Status: "valid", ConfigVersion: config.Version, Targets: targets})
 	return 0
 }
 
@@ -423,6 +558,23 @@ func sourceReceipt(spec source.Spec, fingerprint, role string) bundle.SourceRece
 func writeError(code string, err error) int {
 	_ = json.NewEncoder(os.Stdout).Encode(protocol.ErrorDiagnostic(code, err))
 	return 1
+}
+
+func sortedUniqueStrings(values []string) []string {
+	result := append([]string(nil), values...)
+	sort.Strings(result)
+	if len(result) == 0 {
+		return nil
+	}
+	write := 1
+	for _, value := range result[1:] {
+		if value == result[write-1] {
+			continue
+		}
+		result[write] = value
+		write++
+	}
+	return result[:write]
 }
 
 type stringsFlag []string

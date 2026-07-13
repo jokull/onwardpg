@@ -22,7 +22,6 @@ type Config struct {
 	Version    int               `toml:"version" json:"version"`
 	BundleRoot string            `toml:"bundle_root" json:"bundle_root"`
 	Targets    map[string]Target `toml:"targets" json:"targets"`
-	Policy     Policy            `toml:"policy" json:"policy"`
 }
 
 type Target struct {
@@ -32,12 +31,6 @@ type Target struct {
 	MigrationPath  string   `toml:"migration_path" json:"migration_path"`
 	DevDatabaseEnv string   `toml:"dev_database_env" json:"dev_database_env"`
 	PostgresMajor  int      `toml:"postgres_major" json:"postgres_major"`
-}
-
-type Policy struct {
-	RequireOneBundlePerPR bool     `toml:"require_one_bundle_per_pr" json:"require_one_bundle_per_pr"`
-	AllowDeferredContract bool     `toml:"allow_deferred_contract" json:"allow_deferred_contract"`
-	ApprovalHazards       []string `toml:"approval_hazards" json:"approval_hazards,omitempty"`
 }
 
 func Load(name string) (Config, error) {
@@ -70,6 +63,7 @@ func (c Config) Validate() error {
 	if len(c.Targets) == 0 {
 		return fmt.Errorf("at least one target is required")
 	}
+	migrationOwners := make(map[string]string, len(c.Targets))
 	for name, target := range c.Targets {
 		if !safeName(name) {
 			return fmt.Errorf("target name %q is invalid", name)
@@ -80,18 +74,20 @@ func (c Config) Validate() error {
 		if pathsOverlap(c.BundleRoot, target.MigrationPath) {
 			return fmt.Errorf("target %s: bundle_root and migration_path must not overlap", name)
 		}
-	}
-	seenHazards := make(map[string]bool, len(c.Policy.ApprovalHazards))
-	for _, hazard := range c.Policy.ApprovalHazards {
-		if !safeName(hazard) || seenHazards[hazard] {
-			return fmt.Errorf("approval_hazards contains invalid or duplicate value %q", hazard)
+		if target.SchemaFile != "" && pathsOverlap(target.SchemaFile, target.MigrationPath) {
+			return fmt.Errorf("target %s: schema_file must not be inside migration_path", name)
 		}
-		seenHazards[hazard] = true
+		migrationKey := strings.ToLower(target.MigrationPath)
+		if owner, exists := migrationOwners[migrationKey]; exists {
+			return fmt.Errorf("targets %s and %s share migration_path %q", owner, name, target.MigrationPath)
+		}
+		migrationOwners[migrationKey] = name
 	}
 	return nil
 }
 
 func pathsOverlap(first, second string) bool {
+	first, second = strings.ToLower(first), strings.ToLower(second)
 	return first == second || strings.HasPrefix(first, second+"/") || strings.HasPrefix(second, first+"/")
 }
 
@@ -153,14 +149,14 @@ func validateRepositoryPath(value string) error {
 		return fmt.Errorf("path must be a slash-separated repository-relative path")
 	}
 	clean := filepath.ToSlash(filepath.Clean(value))
-	if clean != value || clean == "." || strings.HasPrefix(clean, "../") {
+	if clean != value || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("path must be normalized and remain within the repository")
 	}
 	return nil
 }
 
 func safeName(value string) bool {
-	if value == "" {
+	if value == "" || strings.Trim(value, ".") == "" {
 		return false
 	}
 	for _, r := range value {

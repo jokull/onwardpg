@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/jokull/onwardpg/internal/protocol"
 )
 
 type WriteOptions struct {
@@ -14,8 +17,10 @@ type WriteOptions struct {
 }
 
 // NextCoordinates returns deterministic generation and decision-attempt
-// numbers for a bundle path. A missing path starts at generation/attempt 1.
-func NextCoordinates(destination string) (generation, attempt int, err error) {
+// numbers for a bundle path. Replanning the same source contract stays in the
+// same generation, and an identical decision result reuses its attempt path.
+// A changed source/planner contract advances the generation.
+func NextCoordinates(destination string, metadata Metadata, result protocol.Result) (generation, attempt int, err error) {
 	artifact, readErr := Read(destination)
 	if os.IsNotExist(readErr) {
 		return 1, 1, nil
@@ -31,7 +36,39 @@ func NextCoordinates(destination string) (generation, attempt int, err error) {
 			maxAttempt = value
 		}
 	}
-	return manifest.Generation + 1, maxAttempt + 1, nil
+	if !samePlanningContract(manifest, metadata) {
+		return manifest.Generation + 1, 1, nil
+	}
+	if result.Status == protocol.NeedsInput || result.Status == protocol.Unsupported {
+		data, encodeErr := jsonDocument(result)
+		if encodeErr != nil {
+			return 0, 0, encodeErr
+		}
+		digest := Digest(data)
+		for _, decision := range manifest.Decisions {
+			if decision.Digest != digest {
+				continue
+			}
+			var value int
+			if _, scanErr := fmt.Sscanf(filepath.Base(decision.Path), "attempt-%03d.json", &value); scanErr == nil {
+				return manifest.Generation, value, nil
+			}
+		}
+	}
+	return manifest.Generation, maxAttempt + 1, nil
+}
+
+func samePlanningContract(manifest Manifest, metadata Metadata) bool {
+	return manifest.BundleID == metadata.BundleID &&
+		manifest.Target == metadata.Target &&
+		manifest.Purpose == metadata.Purpose &&
+		manifest.Mode == metadata.Mode &&
+		manifest.BaseRef == metadata.BaseRef &&
+		manifest.BaseCommit == metadata.BaseCommit &&
+		manifest.HeadRevision == metadata.HeadRevision &&
+		reflect.DeepEqual(manifest.BaselineSource, metadata.BaselineSource) &&
+		reflect.DeepEqual(manifest.DesiredSource, metadata.DesiredSource) &&
+		reflect.DeepEqual(manifest.Planner, metadata.Planner)
 }
 
 // Read loads and verifies every file in an existing bundle. It is deliberately
@@ -96,16 +133,49 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("create bundle parent: %w", err)
 	}
+	backup := destination + ".onwardpg-replaced"
+	if _, err := os.Stat(backup); err == nil {
+		return fmt.Errorf("bundle replacement backup exists at %s; recover or remove it before continuing", backup)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	lock := destination + ".onwardpg-lock"
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("bundle lifecycle operation is already in progress: %s", lock)
+		}
+		return fmt.Errorf("acquire bundle lifecycle lock: %w", err)
+	}
+	defer os.Remove(lock)
+	var previous Artifact
+	var replacing bool
 	if _, err := os.Stat(destination); err == nil {
+		replacing = true
 		if !options.ReplaceDraft {
-			return fmt.Errorf("bundle destination %s already exists; use explicit draft replacement", destination)
+			return fmt.Errorf("bundle destination %s already exists; rerun with --replace-draft after reviewing the replacement", destination)
 		}
 		if err := validateReplaceableBundle(destination); err != nil {
 			return err
 		}
-		artifact, err = preserveDecisionHistory(destination, artifact)
+		previous, err = Read(destination)
 		if err != nil {
 			return err
+		}
+		if previous.Manifest.BundleID != artifact.Manifest.BundleID || previous.Manifest.Target != artifact.Manifest.Target {
+			return fmt.Errorf("replacement bundle identity does not match the existing bundle")
+		}
+		switch artifact.Manifest.Generation {
+		case previous.Manifest.Generation:
+			if !sameManifestPlanningContract(previous.Manifest, artifact.Manifest) {
+				return fmt.Errorf("same-generation replacement changed its source or planner contract")
+			}
+			artifact, err = preserveDecisionHistory(destination, artifact)
+			if err != nil {
+				return err
+			}
+		case previous.Manifest.Generation + 1:
+		default:
+			return fmt.Errorf("replacement generation must stay at %d or advance to %d", previous.Manifest.Generation, previous.Manifest.Generation+1)
 		}
 	} else if !os.IsNotExist(err) {
 		return err
@@ -130,12 +200,16 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 			return fmt.Errorf("write artifact %s: %w", name, err)
 		}
 	}
-	if _, err := os.Stat(destination); err == nil {
-		backup := destination + ".onwardpg-replaced"
-		if _, err := os.Stat(backup); err == nil {
-			return fmt.Errorf("bundle replacement backup already exists: %s", backup)
-		} else if !os.IsNotExist(err) {
-			return err
+	if replacing {
+		current, err := Read(destination)
+		if err != nil {
+			return fmt.Errorf("bundle changed before replacement: %w", err)
+		}
+		if Digest(current.Files["manifest.json"]) != Digest(previous.Files["manifest.json"]) {
+			return fmt.Errorf("bundle changed after replacement was prepared")
+		}
+		if err := validateReplaceableBundle(destination); err != nil {
+			return fmt.Errorf("bundle became immutable before replacement: %w", err)
 		}
 		if err := os.Rename(destination, backup); err != nil {
 			return fmt.Errorf("preserve existing bundle for replacement: %w", err)
@@ -153,6 +227,16 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 		return fmt.Errorf("install bundle: %w", err)
 	}
 	return nil
+}
+
+func sameManifestPlanningContract(previous, next Manifest) bool {
+	return previous.BundleID == next.BundleID && previous.Target == next.Target &&
+		previous.Purpose == next.Purpose && previous.Mode == next.Mode &&
+		previous.BaseRef == next.BaseRef && previous.BaseCommit == next.BaseCommit &&
+		previous.HeadRevision == next.HeadRevision &&
+		reflect.DeepEqual(previous.BaselineSource, next.BaselineSource) &&
+		reflect.DeepEqual(previous.DesiredSource, next.DesiredSource) &&
+		reflect.DeepEqual(previous.Planner, next.Planner)
 }
 
 func preserveDecisionHistory(destination string, next Artifact) (Artifact, error) {

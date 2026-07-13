@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -131,7 +130,8 @@ func digestTree(root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		_, _ = io.WriteString(hash, name+"\x00"+info.Mode().String()+"\x00")
+		writeDigestFrame(hash, []byte(name))
+		writeDigestFrame(hash, []byte(info.Mode().String()))
 		if info.IsDir() {
 			continue
 		}
@@ -140,24 +140,17 @@ func digestTree(root string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			_, _ = io.WriteString(hash, target)
+			writeDigestFrame(hash, []byte(target))
 			continue
 		}
 		if !info.Mode().IsRegular() {
 			return "", fmt.Errorf("compiler tree contains unsupported path %s", name)
 		}
-		file, err := os.Open(full)
+		data, err := os.ReadFile(full)
 		if err != nil {
 			return "", err
 		}
-		_, copyErr := io.Copy(hash, file)
-		closeErr := file.Close()
-		if copyErr != nil {
-			return "", copyErr
-		}
-		if closeErr != nil {
-			return "", closeErr
-		}
+		writeDigestFrame(hash, data)
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ const Version = "onwardpg.bundle/v1"
 var (
 	fingerprintPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	commitPattern      = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+	secretDSNPattern   = regexp.MustCompile(`(?i)(?:^|[\s;])(?:password|passfile|sslkey)\s*=`)
 )
 
 type SourceReceipt struct {
@@ -40,17 +42,19 @@ type PlannerOptions struct {
 }
 
 type PlannerReceipt struct {
-	Version string         `json:"version"`
-	Options PlannerOptions `json:"options"`
+	Version         string         `json:"version"`
+	Options         PlannerOptions `json:"options"`
+	IgnoreSelectors []string       `json:"ignore_selectors,omitempty"`
 }
 
 type SchemaSquareReceipt struct {
-	BaseCodeFingerprint     string `json:"base_code_fingerprint"`
-	BaseHistoryFingerprint  string `json:"base_history_fingerprint"`
-	HeadCodeFingerprint     string `json:"head_code_fingerprint"`
-	HeadArtifactFingerprint string `json:"head_artifact_fingerprint,omitempty"`
-	BaseIntegrity           string `json:"base_integrity"`
-	HeadArtifactFidelity    string `json:"head_artifact_fidelity"`
+	BaseCodeFingerprint    string `json:"base_code_fingerprint"`
+	BaseHistoryFingerprint string `json:"base_history_fingerprint"`
+	HeadCodeFingerprint    string `json:"head_code_fingerprint"`
+	HeadHistoryFingerprint string `json:"head_history_fingerprint,omitempty"`
+	BaseHistoryDigest      string `json:"base_history_digest,omitempty"`
+	BaseIntegrity          string `json:"base_integrity"`
+	HeadHistoryFidelity    string `json:"head_history_fidelity"`
 }
 
 type Lineage struct {
@@ -144,6 +148,25 @@ func (a Artifact) Validate() error {
 		if a.Manifest.ResultDigest != a.Manifest.PlanDigest {
 			return fmt.Errorf("planned result_digest must equal plan_digest")
 		}
+		var result protocol.Result
+		if err := json.Unmarshal(a.Files["plan.json"], &result); err != nil {
+			return fmt.Errorf("decode plan.json: %w", err)
+		}
+		if err := validatePlanStatements(result); err != nil {
+			return fmt.Errorf("validate plan.json: %w", err)
+		}
+		phases, phaseFiles, err := renderPhases(result)
+		if err != nil {
+			return fmt.Errorf("render plan phases: %w", err)
+		}
+		if !samePhaseReceipts(phases, a.Manifest.Phases) {
+			return fmt.Errorf("phase receipts do not match plan.json")
+		}
+		for name, expected := range phaseFiles {
+			if string(a.Files[name]) != string(expected) {
+				return fmt.Errorf("phase artifact %s does not match manifest digest or plan.json", name)
+			}
+		}
 	case string(protocol.NeedsInput):
 		if !decisionDigestExists(a.Manifest.Decisions, a.Manifest.ResultDigest) {
 			return fmt.Errorf("needs_input result_digest must match a decision receipt")
@@ -178,6 +201,18 @@ func (a Artifact) Validate() error {
 		}
 	}
 	return nil
+}
+
+func samePhaseReceipts(first, second map[string]PhaseArtifact) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for phase, artifact := range first {
+		if other, ok := second[phase]; !ok || !reflect.DeepEqual(artifact, other) {
+			return false
+		}
+	}
+	return true
 }
 
 func Build(input Input) (Artifact, error) {
@@ -269,6 +304,16 @@ func Build(input Input) (Artifact, error) {
 func Digest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// ResultDigest returns the canonical digest used by bundle manifests and
+// freshness observations for a planner result.
+func ResultDigest(result protocol.Result) (string, error) {
+	data, err := jsonDocument(result)
+	if err != nil {
+		return "", err
+	}
+	return Digest(data), nil
 }
 
 func jsonDocument(value any) ([]byte, error) {
@@ -388,6 +433,13 @@ func (m Manifest) Validate() error {
 	if strings.TrimSpace(m.Planner.Version) == "" {
 		return fmt.Errorf("planner version is required")
 	}
+	previousIgnore := ""
+	for _, selector := range m.Planner.IgnoreSelectors {
+		if strings.TrimSpace(selector) == "" || strings.ContainsRune(selector, '\x00') || (previousIgnore != "" && selector <= previousIgnore) {
+			return fmt.Errorf("planner ignore selectors must be non-empty, sorted, and unique")
+		}
+		previousIgnore = selector
+	}
 	if m.SchemaSquare != nil {
 		if err := m.SchemaSquare.Validate(m.BaselineSource.Fingerprint, m.DesiredSource.Fingerprint); err != nil {
 			return fmt.Errorf("schema_square: %w", err)
@@ -448,8 +500,11 @@ func (s SchemaSquareReceipt) Validate(baselineFingerprint, desiredFingerprint st
 			return fmt.Errorf("%s fingerprint %q is invalid", name, fingerprint)
 		}
 	}
-	if s.HeadArtifactFingerprint != "" && !fingerprintPattern.MatchString(s.HeadArtifactFingerprint) {
-		return fmt.Errorf("head_artifact fingerprint %q is invalid", s.HeadArtifactFingerprint)
+	if s.HeadHistoryFingerprint != "" && !fingerprintPattern.MatchString(s.HeadHistoryFingerprint) {
+		return fmt.Errorf("head history fingerprint %q is invalid", s.HeadHistoryFingerprint)
+	}
+	if s.BaseHistoryDigest != "" && !fingerprintPattern.MatchString(s.BaseHistoryDigest) {
+		return fmt.Errorf("base history digest %q is invalid", s.BaseHistoryDigest)
 	}
 	if s.BaseCodeFingerprint != baselineFingerprint || s.HeadCodeFingerprint != desiredFingerprint {
 		return fmt.Errorf("schema square does not match planner source receipts")
@@ -457,28 +512,28 @@ func (s SchemaSquareReceipt) Validate(baselineFingerprint, desiredFingerprint st
 	if s.BaseIntegrity != "matched" || s.BaseCodeFingerprint != s.BaseHistoryFingerprint {
 		return fmt.Errorf("bundle requires matched base code and migration history")
 	}
-	switch s.HeadArtifactFidelity {
-	case "not_generated":
-		if s.HeadArtifactFingerprint != "" {
-			return fmt.Errorf("not_generated head artifact must not have a fingerprint")
+	switch s.HeadHistoryFidelity {
+	case "not_replayed":
+		if s.HeadHistoryFingerprint != "" {
+			return fmt.Errorf("not_replayed head history must not have a fingerprint")
 		}
 	case "matched":
-		if s.HeadArtifactFingerprint == "" || s.HeadArtifactFingerprint != s.HeadCodeFingerprint {
-			return fmt.Errorf("matched head artifact must equal head code")
+		if s.HeadHistoryFingerprint == "" || s.HeadHistoryFingerprint != s.HeadCodeFingerprint {
+			return fmt.Errorf("matched head history must equal head code")
 		}
 	case "mismatched", "deferred":
 	default:
-		return fmt.Errorf("head artifact fidelity %q is invalid", s.HeadArtifactFidelity)
+		return fmt.Errorf("head history fidelity %q is invalid", s.HeadHistoryFidelity)
 	}
 	return nil
 }
 
 func (s SourceReceipt) Validate() error {
-	if s.Kind != "database" && s.Kind != "ddl" && s.Kind != "adapter" && s.Kind != "git_migrations" && s.Kind != "typed_snapshot" {
+	if s.Kind != "database" && s.Kind != "ddl" && s.Kind != "adapter" && s.Kind != "git_migrations" && s.Kind != "onwardpg_history" && s.Kind != "typed_snapshot" {
 		return fmt.Errorf("kind %q is invalid", s.Kind)
 	}
-	if strings.TrimSpace(s.Description) == "" || strings.Contains(s.Description, "://") {
-		return fmt.Errorf("description is required and must not contain a connection URL")
+	if strings.TrimSpace(s.Description) == "" || strings.ContainsRune(s.Description, '\x00') || strings.Contains(s.Description, "://") || secretDSNPattern.MatchString(s.Description) {
+		return fmt.Errorf("description is required and must not contain a connection URL or libpq secret")
 	}
 	if !fingerprintPattern.MatchString(s.Fingerprint) {
 		return fmt.Errorf("fingerprint %q is invalid", s.Fingerprint)
@@ -493,7 +548,7 @@ func (s SourceReceipt) Validate() error {
 }
 
 func safeName(value string) bool {
-	if value == "" {
+	if value == "" || strings.Trim(value, ".") == "" {
 		return false
 	}
 	for _, r := range value {

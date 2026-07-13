@@ -24,7 +24,7 @@ artifacts exist and are tested from a clean checkout.
 The intended release contract is a versioned binary archive with SHA-256
 checksums, a changelog, supported-version policy, reproducible build
 instructions, and automated release verification. These are tracked as open
-production-handoff work in `PLAN.md`.
+production-readiness work in `PLAN.md`.
 
 The current preview history is recorded in the
 [changelog](../CHANGELOG.md).

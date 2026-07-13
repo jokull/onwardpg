@@ -434,7 +434,7 @@ func validateRepositoryPath(value string) error {
 		return fmt.Errorf("must be a repository-relative slash-separated path")
 	}
 	clean := filepath.ToSlash(filepath.Clean(value))
-	if clean != value || clean == "." || strings.HasPrefix(clean, "../") {
+	if clean != value || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("must be normalized and remain within the repository")
 	}
 	return nil

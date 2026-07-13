@@ -13,11 +13,6 @@ func TestLoadStrictConfigAndResolveBundlePath(t *testing.T) {
 	data := `version = 1
 bundle_root = "onward-bundles"
 
-[policy]
-require_one_bundle_per_pr = true
-allow_deferred_contract = true
-approval_hazards = ["data_loss", "access_exclusive_lock"]
-
 [targets.primary-postgres]
 adapter = "drizzle"
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
@@ -32,7 +27,7 @@ postgres_major = 16
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !config.Policy.RequireOneBundlePerPR || config.Targets["primary-postgres"].Adapter != "drizzle" {
+	if config.Targets["primary-postgres"].Adapter != "drizzle" {
 		t.Fatalf("config = %#v", config)
 	}
 	path, err := config.BundlePath("/repo", "primary-postgres", "customer-profile")
@@ -107,17 +102,6 @@ postgres_major = 16
 	}
 }
 
-func TestConfigRejectsDuplicateApprovalHazards(t *testing.T) {
-	config := Config{
-		Version: ConfigVersion, BundleRoot: "onward-bundles",
-		Targets: map[string]Target{"db": {Adapter: "ddl", SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16}},
-		Policy:  Policy{ApprovalHazards: []string{"data_loss", "data_loss"}},
-	}
-	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("expected duplicate hazard rejection, got %v", err)
-	}
-}
-
 func TestConfigRejectsOverlappingBundleAndMigrationPaths(t *testing.T) {
 	config := Config{
 		Version: ConfigVersion, BundleRoot: "migrations/onward",
@@ -125,5 +109,24 @@ func TestConfigRejectsOverlappingBundleAndMigrationPaths(t *testing.T) {
 	}
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "must not overlap") {
 		t.Fatalf("expected path overlap rejection, got %v", err)
+	}
+}
+
+func TestConfigRejectsAmbiguousTargetPaths(t *testing.T) {
+	base := Target{Adapter: "ddl", SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16}
+	config := Config{Version: ConfigVersion, BundleRoot: "onward-bundles", Targets: map[string]Target{"first": base, "second": base}}
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "share migration_path") {
+		t.Fatalf("expected shared migration path rejection, got %v", err)
+	}
+	base.SchemaFile = "MIGRATIONS/schema.sql"
+	config.Targets = map[string]Target{"db": base}
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "schema_file") {
+		t.Fatalf("expected schema-in-history rejection, got %v", err)
+	}
+	base.SchemaFile = "schema.sql"
+	config.Targets = map[string]Target{"db": base}
+	config.BundleRoot = ".."
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "remain within") {
+		t.Fatalf("expected parent bundle root rejection, got %v", err)
 	}
 }

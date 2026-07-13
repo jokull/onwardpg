@@ -220,18 +220,19 @@ func TestInspectExcludesGeneratedReceiptRootFromDirtyRevision(t *testing.T) {
 	write(t, repository, "migrations/0001.sql", "base\n")
 	commit(t, repository, "base")
 	write(t, repository, "onward-bundles/primary/feature/manifest.json", "generated\n")
+	write(t, repository, "migrations/0002_feature.sql", "generated migration\n")
 	gitRepository, err := Open(context.Background(), repository)
 	if err != nil {
 		t.Fatal(err)
 	}
 	status, err := gitRepository.Inspect(context.Background(), Options{
 		BaseRef: "main", MigrationPath: "migrations", IncludeWorkingTree: true,
-		ExcludePaths: []string{"onward-bundles"},
+		ExcludePaths: []string{"onward-bundles", "migrations"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Dirty || status.HeadRevision != status.HeadCommit || len(status.ExcludedPaths) != 1 {
+	if status.Dirty || status.HeadRevision != status.HeadCommit || len(status.ExcludedPaths) != 2 {
 		t.Fatalf("generated receipt changed source revision: %#v", status)
 	}
 	prepared, err := gitRepository.PreparePRTree(context.Background(), status)
@@ -241,6 +242,9 @@ func TestInspectExcludesGeneratedReceiptRootFromDirtyRevision(t *testing.T) {
 	defer prepared.Close()
 	if _, err := os.Stat(filepath.Join(prepared.Root, "onward-bundles")); !os.IsNotExist(err) {
 		t.Fatalf("excluded untracked bundle reached synthetic tree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(prepared.Root, "migrations", "0002_feature.sql")); !os.IsNotExist(err) {
+		t.Fatalf("excluded untracked migration reached synthetic tree: %v", err)
 	}
 }
 

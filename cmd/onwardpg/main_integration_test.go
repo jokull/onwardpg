@@ -106,7 +106,7 @@ postgres_major = 16
 	if err != nil {
 		t.Fatal(err)
 	}
-	if artifact.Manifest.SchemaSquare == nil || artifact.Manifest.SchemaSquare.BaseCodeFingerprint != artifact.Manifest.SchemaSquare.BaseHistoryFingerprint {
+	if artifact.Manifest.SchemaSquare == nil || artifact.Manifest.SchemaSquare.BaseCodeFingerprint != artifact.Manifest.SchemaSquare.BaseHistoryFingerprint || artifact.Manifest.SchemaSquare.HeadHistoryFidelity != "not_replayed" {
 		t.Fatalf("bundle schema square = %#v", artifact.Manifest.SchemaSquare)
 	}
 	if !strings.Contains(string(artifact.Files["phases/expand.sql"]), `CREATE TABLE "app"."projects"`) {
@@ -125,9 +125,24 @@ postgres_major = 16
 	if err := json.Unmarshal([]byte(second.stdout), &regenerated); err != nil {
 		t.Fatal(err)
 	}
-	if regenerated.Git.HeadRevision != analysis.Git.HeadRevision || regenerated.Bundle == nil || regenerated.Bundle.Generation != 2 {
+	if regenerated.Inputs.DesiredRevision != analysis.Inputs.DesiredRevision || regenerated.Bundle == nil || regenerated.Bundle.Generation != 1 {
 		t.Fatalf("regenerated analysis = %#v", regenerated)
 	}
+
+	statusOutput := captureStdout(t, func() int {
+		return runPRAt([]string{"status", "--base", "main", "--target", "primary", "--bundle", "projects"}, repository)
+	})
+	if statusOutput.code != 0 {
+		t.Fatalf("freshness status exit = %d, stdout = %s", statusOutput.code, statusOutput.stdout)
+	}
+	var status prStatusReport
+	if err := json.Unmarshal([]byte(statusOutput.stdout), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.ProtocolVersion != prStatusVersion || status.Outcome != "fresh" || status.Freshness == nil || status.Freshness.Outcome != "fresh" {
+		t.Fatalf("freshness status = %#v", status)
+	}
+
 }
 
 type captured struct {

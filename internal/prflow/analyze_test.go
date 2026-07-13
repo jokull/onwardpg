@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jokull/onwardpg/adapter"
-	"github.com/jokull/onwardpg/internal/gitbase"
 	"github.com/jokull/onwardpg/internal/workspace"
 )
 
@@ -30,29 +28,18 @@ func TestAnalyzeProvesBaseIntegrityAndPlansSyntheticHeadOnPostgreSQL(t *testing.
 	if devURL == "" {
 		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
 	}
-	repositoryRoot := t.TempDir()
-	git(t, repositoryRoot, "init", "-b", "main")
-	git(t, repositoryRoot, "config", "user.name", "Onward Test")
-	git(t, repositoryRoot, "config", "user.email", "onward@example.test")
+	baseRoot, headRoot := t.TempDir(), t.TempDir()
 	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.users (id bigint PRIMARY KEY);\n"
-	write(t, repositoryRoot, "schema.sql", baseDDL)
-	write(t, repositoryRoot, "migrations/0001.sql", baseDDL)
-	commit(t, repositoryRoot, "base")
-	git(t, repositoryRoot, "checkout", "-b", "feature")
-	write(t, repositoryRoot, "schema.sql", baseDDL+"CREATE TABLE app.projects (id bigint PRIMARY KEY);\n")
-	commit(t, repositoryRoot, "feature schema")
-
-	repository, err := gitbase.Open(context.Background(), repositoryRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	write(t, baseRoot, "schema.sql", baseDDL)
+	write(t, baseRoot, "migrations/0001.sql", baseDDL)
+	write(t, headRoot, "schema.sql", baseDDL+"CREATE TABLE app.projects (id bigint PRIMARY KEY);\n")
 	target := workspace.Target{
 		Adapter: "ddl", SchemaFile: "schema.sql", MigrationPath: "migrations",
 		DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16,
 	}
 	analysis, err := Analyze(context.Background(), Input{
-		Repository: repository, TargetName: "primary", Target: target,
-		BaseRef: "main", HeadRef: "HEAD", IncludeWorkingTree: true, DevDatabaseURL: devURL,
+		BaseRoot: baseRoot, HeadRoot: headRoot, BaseRevision: "base-tree", HeadRevision: "head-tree",
+		TargetName: "primary", Target: target, DevDatabaseURL: devURL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,22 +57,14 @@ func TestAnalyzeBlocksUnhealthyBaseOnPostgreSQL(t *testing.T) {
 	if devURL == "" {
 		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
 	}
-	repositoryRoot := t.TempDir()
-	git(t, repositoryRoot, "init", "-b", "main")
-	git(t, repositoryRoot, "config", "user.name", "Onward Test")
-	git(t, repositoryRoot, "config", "user.email", "onward@example.test")
-	write(t, repositoryRoot, "schema.sql", "CREATE TABLE users (id bigint);\n")
-	write(t, repositoryRoot, "migrations/0001.sql", "CREATE TABLE accounts (id bigint);\n")
-	commit(t, repositoryRoot, "inconsistent base")
-
-	repository, err := gitbase.Open(context.Background(), repositoryRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	baseRoot, headRoot := t.TempDir(), t.TempDir()
+	write(t, baseRoot, "schema.sql", "CREATE TABLE users (id bigint);\n")
+	write(t, baseRoot, "migrations/0001.sql", "CREATE TABLE accounts (id bigint);\n")
+	write(t, headRoot, "schema.sql", "CREATE TABLE users (id bigint);\n")
 	target := workspace.Target{Adapter: "ddl", SchemaFile: "schema.sql", MigrationPath: "migrations", DevDatabaseEnv: "ONWARDPG_TEST_DATABASE_URL", PostgresMajor: 16}
 	analysis, err := Analyze(context.Background(), Input{
-		Repository: repository, TargetName: "primary", Target: target,
-		BaseRef: "main", HeadRef: "HEAD", IncludeWorkingTree: true, DevDatabaseURL: devURL,
+		BaseRoot: baseRoot, HeadRoot: headRoot, BaseRevision: "base-tree", HeadRevision: "head-tree",
+		TargetName: "primary", Target: target, DevDatabaseURL: devURL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -111,19 +90,5 @@ func write(t *testing.T, root, name, contents string) {
 	}
 	if err := os.WriteFile(full, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func commit(t *testing.T, root, message string) {
-	t.Helper()
-	git(t, root, "add", "-A")
-	git(t, root, "commit", "-m", message)
-}
-
-func git(t *testing.T, root string, arguments ...string) {
-	t.Helper()
-	command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
 	}
 }

@@ -38,6 +38,13 @@ The tool should make the safe path the convenient path, while keeping a human
 or agent accountable for the decisions that require knowledge of data,
 application behavior, traffic, and rollout timing.
 
+Simplicity is a product constraint. The semantic workflow is always “current
+schema + desired schema + explicit intent → forward plan.” Git, GitHub, ORM
+journals, bundles, and CI are optional adapters around that operation. The
+one-command PR workflow may prepare snapshots from Git for convenience, but
+planning, freshness, bundle history, and verification do not depend on Git
+internally.
+
 ```text
 declarative schema ──► disposable PostgreSQL ──► desired catalog graph
                                                         │
@@ -160,16 +167,20 @@ JSON and exit codes. See [migration bundles](docs/bundles.md).
 Git-aware guardrail. It resolves exact commits, distinguishes the PR-owned
 merge-base patch from an eroded current base, fingerprints dirty checkout
 state, and blocks edits to base-reachable migration history or migration-path
-collisions. Synthetic merged-schema compilation and regeneration remain in
-the `pr regenerate` workflow below; `pr status` itself stays read-only.
+collisions. Adding `--bundle FEATURE` makes the same read-only command compile
+the prepared base/head trees and classify the bundle as fresh or stale, with
+typed findings and remediation. It never regenerates as a side effect.
 
 `onwardpg pr regenerate --base origin/main --target NAME --bundle FEATURE`
 now compiles the exact base and the would-be merged head in isolated trees,
 replays base migrations in PostgreSQL, requires base code and history to match,
 and writes the fingerprinted PR bundle. It runs configured schema compilers
-twice and rejects nondeterminism or undeclared filesystem output. The current
-slice does not yet write Drizzle/ORM journal entries or prove the bottom/right
-edges of the schema square; runner handoff and clone verification remain next.
+twice and rejects nondeterminism or undeclared filesystem output. Drizzle and
+other frameworks are DDL/typed-snapshot compilers only; onwardpg does not
+integrate with their migration journals or runners. The bundle's phase files
+are the reviewed migration history, and the developer or coding agent
+orchestrates their timing. Per-target hash-chain replay, durable execution
+receipts, CI fidelity checks, and clone execution receipts remain upcoming.
 
 ## Developer preview: what works now
 

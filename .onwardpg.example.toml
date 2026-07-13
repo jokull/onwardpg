@@ -1,14 +1,10 @@
 version = 1
 bundle_root = "migrations/onward"
 
-[policy]
-require_one_bundle_per_pr = true
-allow_deferred_contract = true
-approval_hazards = ["data_loss", "table_rewrite", "access_exclusive_lock"]
-
 [targets.primary-postgres]
-adapter = "drizzle"
+adapter = "ddl"
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
+# Transitional until onwardpg-owned bundle-chain replay replaces plain SQL.
 migration_path = "packages/db/migrations"
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 postgres_major = 16

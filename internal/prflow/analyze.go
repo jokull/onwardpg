@@ -1,14 +1,15 @@
-// Package prflow composes Git provenance, declarative compilation, migration
-// replay, and graph planning for the PR comparison boundary.
+// Package prflow composes prepared source trees, declarative compilation,
+// migration replay, and graph planning for the PR comparison boundary. It is
+// deliberately unaware of how callers obtained those trees.
 package prflow
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/jokull/onwardpg/adapter"
-	"github.com/jokull/onwardpg/internal/gitbase"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
@@ -19,25 +20,30 @@ import (
 const Version = "onwardpg.pr-analysis/v1"
 
 type Input struct {
-	Repository         gitbase.Repository
-	TargetName         string
-	Target             workspace.Target
-	BaseRef            string
-	HeadRef            string
-	IncludeWorkingTree bool
-	ExcludePaths       []string
-	DevDatabaseURL     string
-	Ignores            []string
-	Answers            protocol.Answers
-	PlannerOptions     graphplan.Options
+	BaseRoot       string
+	HeadRoot       string
+	BaseRevision   string
+	HeadRevision   string
+	TargetName     string
+	Target         workspace.Target
+	DevDatabaseURL string
+	Ignores        []string
+	Answers        protocol.Answers
+	PlannerOptions graphplan.Options
+}
+
+type InputReceipt struct {
+	BaselineRevision string `json:"baseline_revision"`
+	DesiredRevision  string `json:"desired_revision"`
 }
 
 type SchemaSquare struct {
 	BaseCodeFingerprint    string `json:"base_code_fingerprint,omitempty"`
 	BaseHistoryFingerprint string `json:"base_history_fingerprint,omitempty"`
 	HeadCodeFingerprint    string `json:"head_code_fingerprint,omitempty"`
+	HeadHistoryFingerprint string `json:"head_history_fingerprint,omitempty"`
 	BaseIntegrity          string `json:"base_integrity"`
-	HeadArtifactFidelity   string `json:"head_artifact_fidelity"`
+	HeadHistoryFidelity    string `json:"head_history_fidelity"`
 }
 
 type Problem struct {
@@ -55,7 +61,7 @@ type BundleOutput struct {
 type Analysis struct {
 	ProtocolVersion string           `json:"protocol_version"`
 	Outcome         string           `json:"outcome"`
-	Git             gitbase.Status   `json:"git"`
+	Inputs          InputReceipt     `json:"inputs"`
 	SchemaSquare    SchemaSquare     `json:"schema_square"`
 	Problems        []Problem        `json:"problems,omitempty"`
 	Plan            *protocol.Result `json:"plan,omitempty"`
@@ -67,44 +73,27 @@ type Analysis struct {
 }
 
 func Analyze(ctx context.Context, input Input) (Analysis, error) {
-	if input.Repository.Root == "" || input.TargetName == "" {
-		return Analysis{}, fmt.Errorf("repository and target name are required")
+	if input.TargetName == "" {
+		return Analysis{}, fmt.Errorf("target name is required")
 	}
-	status, err := input.Repository.Inspect(ctx, gitbase.Options{
-		BaseRef: input.BaseRef, HeadRef: input.HeadRef, MigrationPath: input.Target.MigrationPath,
-		IncludeWorkingTree: input.IncludeWorkingTree, ExcludePaths: input.ExcludePaths,
-	})
-	if err != nil {
-		return Analysis{}, err
+	if input.BaseRoot == "" || !filepath.IsAbs(input.BaseRoot) || input.HeadRoot == "" || !filepath.IsAbs(input.HeadRoot) {
+		return Analysis{}, fmt.Errorf("prepared base and head roots must be absolute paths")
+	}
+	if input.BaseRevision == "" || input.HeadRevision == "" {
+		return Analysis{}, fmt.Errorf("base and head revision receipts are required")
 	}
 	analysis := Analysis{
-		ProtocolVersion: Version, Outcome: "blocked", Git: status,
-		SchemaSquare: SchemaSquare{BaseIntegrity: "unchecked", HeadArtifactFidelity: "unchecked"},
+		ProtocolVersion: Version, Outcome: "blocked",
+		Inputs:       InputReceipt{BaselineRevision: input.BaseRevision, DesiredRevision: input.HeadRevision},
+		SchemaSquare: SchemaSquare{BaseIntegrity: "unchecked", HeadHistoryFidelity: "unchecked"},
 	}
-	if status.Outcome == "blocked" {
-		for _, problem := range status.Problems {
-			analysis.Problems = append(analysis.Problems, Problem{Code: problem.Code, Message: problem.Message + ": " + problem.Path})
-		}
-		return analysis, nil
-	}
-
-	baseTree, err := input.Repository.PrepareCommitTree(ctx, status.BaseCommit)
-	if err != nil {
-		return Analysis{}, fmt.Errorf("prepare base tree: %w", err)
-	}
-	defer baseTree.Close()
-	headTree, err := input.Repository.PreparePRTree(ctx, status)
-	if err != nil {
-		return Analysis{}, fmt.Errorf("prepare synthetic head tree: %w", err)
-	}
-	defer headTree.Close()
 
 	compiler := workspace.TargetCompiler{TargetName: input.TargetName, Target: input.Target}
-	baseArtifact, err := compileDeterministic(ctx, compiler, adapter.CompileRequest{Root: baseTree.Root, Target: input.TargetName, Revision: status.BaseCommit})
+	baseArtifact, err := compileDeterministic(ctx, compiler, adapter.CompileRequest{Root: input.BaseRoot, Target: input.TargetName, Revision: input.BaseRevision})
 	if err != nil {
 		return Analysis{}, fmt.Errorf("compile base declarative schema: %w", err)
 	}
-	headArtifact, err := compileDeterministic(ctx, compiler, adapter.CompileRequest{Root: headTree.Root, Target: input.TargetName, Revision: status.HeadRevision})
+	headArtifact, err := compileDeterministic(ctx, compiler, adapter.CompileRequest{Root: input.HeadRoot, Target: input.TargetName, Revision: input.HeadRevision})
 	if err != nil {
 		return Analysis{}, fmt.Errorf("compile head declarative schema: %w", err)
 	}
@@ -116,7 +105,7 @@ func Analyze(ctx context.Context, input Input) (Analysis, error) {
 	if err != nil {
 		return Analysis{}, fmt.Errorf("materialize head declarative schema: %w", err)
 	}
-	history, err := workspace.LoadMigrationHistory(baseTree.Root, input.Target)
+	history, err := workspace.LoadMigrationHistory(input.BaseRoot, input.Target)
 	if err != nil {
 		return Analysis{}, fmt.Errorf("load base migration history: %w", err)
 	}
@@ -141,7 +130,7 @@ func Analyze(ctx context.Context, input Input) (Analysis, error) {
 	}
 	analysis.SchemaSquare = SchemaSquare{
 		BaseCodeFingerprint: baseCodeFingerprint, BaseHistoryFingerprint: baseHistoryFingerprint,
-		HeadCodeFingerprint: headCodeFingerprint, BaseIntegrity: "matched", HeadArtifactFidelity: "not_generated",
+		HeadCodeFingerprint: headCodeFingerprint, BaseIntegrity: "matched", HeadHistoryFidelity: "not_replayed",
 	}
 	analysis.BaseProvenance, analysis.HeadProvenance = baseArtifact.Provenance, headArtifact.Provenance
 	analysis.HistoryDigest, analysis.HistoryFiles = history.Digest, history.Files
@@ -186,23 +175,36 @@ func compileDeterministic(ctx context.Context, compiler adapter.Compiler, reques
 	if err := second.Validate(); err != nil {
 		return adapter.Artifact{}, err
 	}
-	if first.Provenance != second.Provenance || !bytes.Equal(first.DDL, second.DDL) || !equivalentSnapshots(first.Snapshot, second.Snapshot) {
+	snapshotsEqual, err := equivalentSnapshots(first.Snapshot, second.Snapshot)
+	if err != nil {
+		return adapter.Artifact{}, fmt.Errorf("fingerprint compiler snapshot for revision %s: %w", request.Revision, err)
+	}
+	if first.Provenance != second.Provenance || !bytes.Equal(first.DDL, second.DDL) || !snapshotsEqual {
 		return adapter.Artifact{}, fmt.Errorf("schema compiler is nondeterministic for revision %s", request.Revision)
 	}
 	return first, nil
 }
 
-func equivalentSnapshots(first, second *pgschema.Snapshot) bool {
+func equivalentSnapshots(first, second *pgschema.Snapshot) (bool, error) {
 	if first == nil || second == nil {
-		return first == second
+		return first == second, nil
 	}
 	firstFingerprint, firstErr := first.Fingerprint()
+	if firstErr != nil {
+		return false, firstErr
+	}
 	secondFingerprint, secondErr := second.Fingerprint()
-	return firstErr == nil && secondErr == nil && firstFingerprint == secondFingerprint
+	if secondErr != nil {
+		return false, secondErr
+	}
+	return firstFingerprint == secondFingerprint, nil
 }
 
 func artifactGraph(ctx context.Context, artifact adapter.Artifact, devURL string, ignores []string) (*pgschema.Snapshot, error) {
 	if artifact.Snapshot != nil {
+		if len(ignores) > 0 {
+			return nil, fmt.Errorf("ignore selectors are unavailable for typed snapshot compiler output")
+		}
 		return artifact.Snapshot, nil
 	}
 	return source.LoadDDLGraphForComparison(ctx, artifact.DDL, artifact.Provenance, devURL, ignores)

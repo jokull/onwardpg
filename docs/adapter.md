@@ -63,6 +63,6 @@ stable `Compiler` boundary through `.onwardpg.toml`: `schema_file` reads genesis
 DDL from an isolated tree, while `schema_command` executes an argument vector
 in that tree and accepts DDL on stdout. Commands run twice; changing the tree,
 emitting empty output, or producing different output is rejected. Commands
-that require unmaterialized dependencies such as `node_modules` need the
-upcoming Drizzle-specific compiler rather than relying on the generic command
-runner.
+must be self-contained in the prepared tree/environment or callers must supply
+a pre-exported `schema_file`. Framework-specific migration/journal adapters are
+intentionally out of scope.
