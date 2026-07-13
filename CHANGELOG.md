@@ -98,8 +98,6 @@ development, staging, or production database.
 ### Known limitations
 
 - No preview tag has been published yet.
-- No project license has been selected; the release workflow refuses to
-  publish until `LICENSE` exists.
 - PostgreSQL families marked unsupported in
   [docs/supported-features.md](docs/supported-features.md) remain explicit
   blockers unless narrowly ignored.

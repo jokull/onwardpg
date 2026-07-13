@@ -73,8 +73,6 @@ checks, builds deterministic archives, verifies checksums and embedded version
 metadata, then creates the GitHub release. Release application or database
 deployment is not part of this workflow.
 
-No preview tag has been published yet, and the release workflow deliberately
-refuses to publish until the repository has an explicit `LICENSE`. Until a
-license is selected and a tag exists, installation from a clean checkout is
-the only preview evaluation path; the public source is not an implied grant of
-reuse rights.
+No preview tag has been published yet. The source is available under the
+[MIT License](../LICENSE); until a tag exists, installation from a clean
+checkout is the preview evaluation path.

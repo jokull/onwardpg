@@ -530,8 +530,8 @@ Current notable gaps include:
   explicit operator-authored contract;
 - broad multi-schema moves and complex cross-schema dependency transitions;
   and
-- release engineering: no preview tag, selected project license, signatures,
-  or signed provenance yet; and
+- release engineering: no preview tag, signatures, or signed provenance yet;
+  and
 - the broader compatibility corpus remains preview hardening work.
 
 Known unmodeled state covered by the blocker inventory is a stop, not a
@@ -636,9 +636,9 @@ the [Atlas reference study](parity/atlas-postgres.json), and the pinned
 - [Developer-preview security review](docs/security-review.md)
 - [Changelog](CHANGELOG.md)
 
-The immediate path to the first preview tag is selecting a project license,
-final documentation review, and release-candidate testing from the generated archives. The
-planner remains a planner.
+onwardpg is available under the [MIT License](LICENSE). The immediate path to
+the first preview tag is final documentation review and release-candidate
+testing from the generated archives. The planner remains a planner.
 
 CI runs this walkthrough as a black-box CLI fixture from a new directory on
 every supported PostgreSQL major; see

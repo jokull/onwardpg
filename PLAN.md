@@ -84,16 +84,15 @@ non-transactional failure, false assertions, cancellation, scratch cleanup,
 and the lifecycle have been exercised on PostgreSQL 14–18. Deterministic
 release archives, checksums, embedded versions, performance bounds, and an
 internal security review now exist. The vulnerability scan is clean with Go
-1.26.5 and pgx 5.9.2. Publishing remains deliberately blocked until the
-project has an explicit license.
+1.26.5 and pgx 5.9.2. The project is licensed under the MIT License.
 
 The final workflow audit adds exact golden bytes for the minimal decision
 protocol; real-PostgreSQL additive draft, convergence, and byte-stability
 acceptance; multiple-candidate semantic rename selection; an executable
 no-apply assertion; and removal of the abandoned execution-receipt lifecycle.
 The complete suite, pinned Atlas/Stripe corpus, and black-box README workflow
-pass on PostgreSQL 14–18 from clean disposable servers. The remaining release
-decision is the project license; onwardpg must not choose it implicitly.
+pass on PostgreSQL 14–18 from clean disposable servers. The human-owned license
+decision is resolved as MIT and release archives include it.
 
 ## North star walkthrough
 
@@ -812,13 +811,11 @@ receipts, CI verification, and empty final residual.
 
 Do not expand PostgreSQL feature coverage in this slice. The implementation is
 at the release-candidate boundary. Cold-read documentation review, exact
-README execution, PostgreSQL 14–18 differential verification, and reproducible
-archive builds are complete. What remains is deliberately human-owned:
+README execution, PostgreSQL 14–18 differential verification, reproducible
+archive builds, and MIT licensing are complete. What remains is deliberately
+human-owned:
 
-1. choose and add the project license;
-2. include that license in the release archives and perform the clean-checkout
-   release build; and
-3. publish the first preview tag only if the generated artifacts and observed
+1. publish the first preview tag only if the generated artifacts and observed
    CLI output still match the documentation.
 
 This is the junction for every future proposal: if it does not make
