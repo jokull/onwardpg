@@ -12,12 +12,14 @@ The planner's core safety rules are:
   subset of SQL;
 - block catalog state in the preview's explicit unsupported-family inventory
   unless a validated narrow ignore selector accounts for it;
-- bind ambiguity answers to both source and desired graph fingerprints;
-- reject stale, invalid, contradictory, duplicate, and unused answers;
-- require an explicit, fingerprint-bound manual-work contract—including its
-  transactional/non-transactional execution mode—whenever schema state cannot
-  prove the required data work;
-- emit no plan when status is `needs_input` or `unsupported`;
+- accept semantic hints for only the intent graph state cannot prove, then bind
+  the generated internal receipt to both source and desired graph fingerprints;
+- reject stale, impossible, contradictory, duplicate, and unused hints or
+  internal answers;
+- hand product-specific casts, backfills, refreshes, and niche operations to an
+  explicit phase-local SQL TODO rather than accepting SQL inside decision JSON;
+- never report an incomplete plan as converged: `needs_decisions`,
+  `needs_sql_edits`, and `unsupported` are blocking states;
 - preserve execution constraints through explicit transactional batches; and
 - surface destructive, lock, rewrite, validation, and availability concerns as
   statement safety/hazard metadata for review.
@@ -49,17 +51,21 @@ RLS enable/force state, policies, and table privileges are modeled rather than
 ignored. Graph edges place policies before RLS enable and RLS disable before
 policy removal. Policy replacement, policy alteration, RLS relaxation,
 privilege revocation, and removal of grant options remain reviewable and, when
-destructive or authorization-relaxing, fingerprint-bound. Every emitted
+destructive or authorization-relaxing, require an explicit semantic decision.
+The generated internal receipt remains fingerprint-bound. Every emitted
 authorization statement carries lock/statement timeout guidance; onwardpg
 does not set those values on a caller session.
 
-Manual-work SQL is operator-owned and is never invented from catalog state.
-Only a question that explicitly requests manual work may carry that payload;
-ordinary answer types reject it. Summaries are one-line metadata. Verification
-queries are one-line postconditions that must each return one boolean `true`
-row during clone verification. The reviewed statement list is placed in its
-own `MANUAL` batch with the declared execution boundary; a failed transactional
-postcondition rolls that batch back.
+Product-specific SQL is developer/agent-owned and is never invented from
+catalog state. Choosing `manual_sql` writes an explicit `ONWARDPG TODO` into the
+relevant phase; the semantic hint itself cannot carry SQL. Every TODO must be
+replaced before verification. Optional `verify.sql` postconditions must each
+return one boolean `true` row during clone verification. Edited SQL and its
+batch directives are receipted only after execution and convergence succeed.
+The read-only `verify --check` gate additionally recompiles current configured
+DDL, requires the selected bundle to be the chain head, and compares its desired
+fingerprint before clone execution. Self-consistency with a stale recorded
+target is not sufficient.
 
 Transactional batches are intended to be atomic execution boundaries. The real
 PostgreSQL integration suite includes a failure case that proves an earlier

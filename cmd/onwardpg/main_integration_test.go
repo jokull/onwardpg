@@ -5,24 +5,544 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jokull/onwardpg/internal/bundle"
-	"github.com/jokull/onwardpg/internal/gitbase"
+	"github.com/jokull/onwardpg/internal/draftflow"
+	"github.com/jokull/onwardpg/internal/driftcheck"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/historyinit"
-	"github.com/jokull/onwardpg/internal/prflow"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/verify"
 )
+
+func TestDriftCheckComparesReplayedHeadReadOnlyOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	liveURL, cleanup := createTestDatabase(t, adminURL)
+	defer cleanup()
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_UNUSED_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	ddl := "CREATE SCHEMA app; CREATE TABLE app.users (id bigint, email text);\n"
+	writeTestFile(t, repository, "schema.sql", ddl)
+	initialized := captureStdout(t, func() int {
+		return runInitAt([]string{"--target", "primary", "--bundle", "baseline"}, repository)
+	})
+	if initialized.code != 0 {
+		t.Fatalf("init exit = %d, stdout = %s", initialized.code, initialized.stdout)
+	}
+	connection, err := pgx.Connect(context.Background(), liveURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close(context.Background())
+	if _, err := connection.Exec(context.Background(), ddl+"CREATE INDEX users_email_manual_idx ON app.users (email);"); err != nil {
+		t.Fatal(err)
+	}
+
+	driftedOutput := captureStdout(t, func() int {
+		return runDriftAt([]string{"check", "--target", "primary", "--database", liveURL}, repository)
+	})
+	if driftedOutput.code != 4 {
+		t.Fatalf("drifted exit = %d, stdout = %s", driftedOutput.code, driftedOutput.stdout)
+	}
+	var drifted driftcheck.Report
+	if err := json.Unmarshal([]byte(driftedOutput.stdout), &drifted); err != nil {
+		t.Fatal(err)
+	}
+	if drifted.Outcome != "drifted" || len(drifted.Differences) == 0 {
+		t.Fatalf("drift report = %#v", drifted)
+	}
+	foundIndex := false
+	for _, difference := range drifted.Differences {
+		if difference.Kind == "unexpected_in_actual" && strings.Contains(difference.ObjectID, "users_email_manual_idx") {
+			foundIndex = true
+		}
+	}
+	if !foundIndex {
+		t.Fatalf("drift did not report the unexpected index: %#v", drifted.Differences)
+	}
+	var stillExists bool
+	if err := connection.QueryRow(context.Background(), `SELECT to_regclass('app.users_email_manual_idx') IS NOT NULL`).Scan(&stillExists); err != nil {
+		t.Fatal(err)
+	}
+	if !stillExists {
+		t.Fatal("drift check modified the live database")
+	}
+	if _, err := connection.Exec(context.Background(), "DROP INDEX app.users_email_manual_idx;"); err != nil {
+		t.Fatal(err)
+	}
+	cleanOutput := captureStdout(t, func() int {
+		return runDriftAt([]string{"check", "--target", "primary", "--database", liveURL}, repository)
+	})
+	if cleanOutput.code != 0 {
+		t.Fatalf("clean drift exit = %d, stdout = %s", cleanOutput.code, cleanOutput.stdout)
+	}
+	var clean driftcheck.Report
+	if err := json.Unmarshal([]byte(cleanOutput.stdout), &clean); err != nil {
+		t.Fatal(err)
+	}
+	if clean.Outcome != "drift_free" || len(clean.Differences) != 0 {
+		t.Fatalf("clean drift report = %#v", clean)
+	}
+}
+
+func TestGitFreeInitDraftHintVerifyAndRestackOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	devURL, cleanupDev := createTestDatabase(t, adminURL)
+	defer cleanupDev()
+	t.Setenv("ONWARDPG_ITERATION_DEV_DATABASE_URL", devURL)
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_ITERATION_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n"
+	writeTestFile(t, repository, "schema.sql", baseDDL)
+
+	initialized := captureStdout(t, func() int {
+		return runInitAt([]string{"--target", "primary", "--bundle", "baseline"}, repository)
+	})
+	if initialized.code != 0 {
+		t.Fatalf("init exit = %d, stdout = %s", initialized.code, initialized.stdout)
+	}
+	if _, err := os.Stat(filepath.Join(repository, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("workflow unexpectedly created or required Git metadata: %v", err)
+	}
+
+	featureDDL := "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint);\n"
+	writeTestFile(t, repository, "schema.sql", featureDDL)
+	pendingOutput := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if pendingOutput.code != 2 {
+		t.Fatalf("pending draft exit = %d, stdout = %s", pendingOutput.code, pendingOutput.stdout)
+	}
+	var pending struct {
+		Protocol  string              `json:"protocol"`
+		Status    string              `json:"status"`
+		Decisions []protocol.Decision `json:"decisions"`
+	}
+	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Protocol != draftflow.Version || pending.Status != "needs_decisions" || len(pending.Decisions) == 0 {
+		t.Fatalf("pending draft = %#v", pending)
+	}
+	var renameHint *protocol.Hint
+	for _, decision := range pending.Decisions {
+		for _, choice := range decision.Choices {
+			if choice.Hint.Kind == "rename" && choice.Hint.Object == "table" {
+				hint := choice.Hint
+				renameHint = &hint
+			}
+		}
+	}
+	if renameHint == nil {
+		t.Fatalf("draft did not offer a semantic table rename: %#v", pending.Decisions)
+	}
+	hintData, err := json.Marshal(renameHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plannedOutput := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--hint", string(hintData)}, repository)
+	})
+	if plannedOutput.code != 0 {
+		t.Fatalf("planned draft exit = %d, stdout = %s", plannedOutput.code, plannedOutput.stdout)
+	}
+	var planned draftflow.Report
+	if err := json.Unmarshal([]byte(plannedOutput.stdout), &planned); err != nil {
+		t.Fatal(err)
+	}
+	if planned.Outcome != string(protocol.Planned) || planned.Verification == nil || planned.Verification.Outcome != "verified" {
+		t.Fatalf("planned draft = %#v", planned)
+	}
+	artifact, err := bundle.Read(filepath.Join(repository, "onward-bundles", "primary", "customer-rename"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.History == nil || artifact.Manifest.History.ParentDigest != planned.HistoryHead {
+		t.Fatalf("draft manifest = %#v", artifact.Manifest)
+	}
+	if artifact.Manifest.AnswersDigest == "" || artifact.Manifest.QuestionsDigest == "" || artifact.Manifest.SemanticDigest == "" {
+		t.Fatalf("draft did not retain semantic and fingerprint-bound decision receipts: %#v", artifact.Manifest)
+	}
+	receiptedHints, err := bundle.SemanticHints(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receiptedHints) != 1 || receiptedHints[0].Kind != "rename" {
+		t.Fatalf("semantic decisions = %#v", receiptedHints)
+	}
+	verified := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if verified.code != 0 {
+		t.Fatalf("verify exit = %d, stdout = %s", verified.code, verified.stdout)
+	}
+
+	// Simulate an agent rebasing files: an upstream bundle now follows the old
+	// baseline while the explicitly selected feature still names that baseline
+	// as its parent. No Git API is involved in detecting or repairing the fork.
+	featurePath := filepath.Join(repository, "onward-bundles", "primary", "customer-rename")
+	parkedPath := filepath.Join(repository, "customer-rename.parked")
+	if err := os.Rename(featurePath, parkedPath); err != nil {
+		t.Fatal(err)
+	}
+	upstreamDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint); CREATE TABLE app.audit_log (id bigint);\n"
+	writeHistoryTransitionFixture(t, repository, adminURL, "upstream-audit", upstreamDDL)
+	if err := os.Rename(parkedPath, featurePath); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.audit_log (id bigint);\n")
+
+	restackedOutput := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if restackedOutput.code != 0 {
+		t.Fatalf("restacked draft exit = %d, stdout = %s", restackedOutput.code, restackedOutput.stdout)
+	}
+	var restacked draftflow.Report
+	if err := json.Unmarshal([]byte(restackedOutput.stdout), &restacked); err != nil {
+		t.Fatal(err)
+	}
+	if !restacked.ParentChanged || restacked.PreviousParent == restacked.HistoryHead || restacked.AnswerRebind == nil || len(restacked.AnswerRebind.Carried) == 0 {
+		t.Fatalf("restacked draft = %#v", restacked)
+	}
+	chain, err := history.Load(repository, "onward-bundles", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.Entries) != 3 || chain.Entries[1].Directory != "upstream-audit" || chain.Entries[2].Directory != "customer-rename" {
+		t.Fatalf("restacked chain = %#v", chain)
+	}
+
+	// A second independent base migration lands during the same feature. The
+	// coding agent brings those files into the checkout; onwardpg again needs
+	// only the selected bundle ID to distinguish the movable tip.
+	if err := os.Rename(featurePath, parkedPath); err != nil {
+		t.Fatal(err)
+	}
+	secondUpstreamDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n"
+	writeHistoryTransitionFixture(t, repository, adminURL, "upstream-settings", secondUpstreamDDL)
+	if err := os.Rename(parkedPath, featurePath); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
+	secondRestackOutput := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if secondRestackOutput.code != 0 {
+		t.Fatalf("second base restack exit = %d, stdout = %s", secondRestackOutput.code, secondRestackOutput.stdout)
+	}
+	var secondRestack draftflow.Report
+	if err := json.Unmarshal([]byte(secondRestackOutput.stdout), &secondRestack); err != nil {
+		t.Fatal(err)
+	}
+	if !secondRestack.ParentChanged || secondRestack.AnswerRebind == nil || len(secondRestack.AnswerRebind.Carried) == 0 {
+		t.Fatalf("second base restack = %#v", secondRestack)
+	}
+	chain, err = history.Load(repository, "onward-bundles", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.Entries) != 4 || chain.Entries[1].Directory != "upstream-audit" || chain.Entries[2].Directory != "upstream-settings" || chain.Entries[3].Directory != "customer-rename" {
+		t.Fatalf("twice-restacked chain = %#v", chain)
+	}
+
+	// Ownership now moves to the coding agent. It adds product-specific SQL and
+	// a boolean assertion directly to the migration folder. Read-only check mode
+	// rejects the unreceipted edits; normal verification executes them only in
+	// disposable PostgreSQL and receipts their exact bytes after convergence.
+	migrateSQL := `-- Product-aware work owned by the feature agent.
+CREATE TEMP TABLE onwardpg_agent_receipt (value text NOT NULL);
+INSERT INTO onwardpg_agent_receipt (value) VALUES ('customer-rename');
+`
+	writeTestFile(t, featurePath, "phases/migrate.sql", migrateSQL)
+	writeTestFile(t, featurePath, "verify.sql", `-- onwardpg:assert agent_sql_ran
+SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
+`)
+	unreceiptedCheck := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename", "--check"}, repository)
+	})
+	if unreceiptedCheck.code != 4 {
+		t.Fatalf("read-only check exit = %d, want 4: %s", unreceiptedCheck.code, unreceiptedCheck.stdout)
+	}
+	if !strings.Contains(unreceiptedCheck.stdout, `"code":"unreceipted_sql_edits"`) {
+		t.Fatalf("read-only check did not explain the receipt step: %s", unreceiptedCheck.stdout)
+	}
+	receiptedOutput := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if receiptedOutput.code != 0 {
+		t.Fatalf("edited verification exit = %d, stdout = %s", receiptedOutput.code, receiptedOutput.stdout)
+	}
+	var receiptedReport verify.Report
+	if err := json.Unmarshal([]byte(receiptedOutput.stdout), &receiptedReport); err != nil {
+		t.Fatal(err)
+	}
+	if !receiptedReport.ReceiptsUpdated || receiptedReport.Outcome != "verified" {
+		t.Fatalf("edited verification = %#v", receiptedReport)
+	}
+	receiptedArtifact, err := bundle.Read(featurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receiptedArtifact.Manifest.PhaseSource != "edited" || receiptedArtifact.Manifest.VerificationDigest == "" || string(receiptedArtifact.Files["phases/migrate.sql"]) != migrateSQL {
+		t.Fatalf("receipted edited artifact = %#v", receiptedArtifact.Manifest)
+	}
+	checked := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename", "--check"}, repository)
+	})
+	if checked.code != 0 {
+		t.Fatalf("receipted read-only check exit = %d, stdout = %s", checked.code, checked.stdout)
+	}
+
+	// A receipted bundle is not fresh merely because it still converges to its
+	// own recorded plan. CI must compare it with the schema the working code now
+	// exports and direct the agent back through the same draft loop.
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, unplanned text); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
+	staleCheck := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename", "--check"}, repository)
+	})
+	if staleCheck.code != 4 {
+		t.Fatalf("stale read-only check exit = %d, stdout = %s", staleCheck.code, staleCheck.stdout)
+	}
+	var staleReport verify.Report
+	if err := json.Unmarshal([]byte(staleCheck.stdout), &staleReport); err != nil {
+		t.Fatal(err)
+	}
+	if staleReport.Outcome != "stale" || len(staleReport.Findings) != 1 || staleReport.Findings[0].Code != "working_schema_changed" || staleReport.WorkingFingerprint == staleReport.DesiredFingerprint {
+		t.Fatalf("stale read-only report = %#v", staleReport)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
+
+	// Applying the current migration to the developer database is not a history
+	// transition. The feature may keep evolving, and the same explicit bundle
+	// must remain the cumulative H → W draft.
+	chain, err = history.Load(repository, "onward-bundles", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	devConnection, err := pgx.Connect(context.Background(), devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devConnection.Close(context.Background())
+	for _, entry := range chain.Entries {
+		for _, phase := range []string{"expand", "migrate", "contract"} {
+			receipt, exists := entry.Artifact.Manifest.Phases[phase]
+			if !exists {
+				continue
+			}
+			if _, err := devConnection.Exec(context.Background(), string(entry.Artifact.Files[receipt.Path])); err != nil {
+				t.Fatalf("apply %s/%s to disposable developer fixture: %v", entry.Directory, phase, err)
+			}
+		}
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.audit_log (id bigint, note text); CREATE TABLE app.settings (id bigint);\n")
+
+	localOutput := captureStdout(t, func() int {
+		return runDevAt([]string{"plan", "--target", "primary"}, repository)
+	})
+	if localOutput.code != 0 {
+		t.Fatalf("local residual plan exit = %d, stdout = %s", localOutput.code, localOutput.stdout)
+	}
+	var localPlan protocol.Result
+	if err := json.Unmarshal([]byte(localOutput.stdout), &localPlan); err != nil {
+		t.Fatal(err)
+	}
+	if len(localPlan.Statements) != 1 || !strings.Contains(localPlan.Statements[0].SQL, "note") {
+		t.Fatalf("D → W should contain only the newly added column: %#v", localPlan.Statements)
+	}
+
+	redraftedOutput := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if redraftedOutput.code != 0 {
+		t.Fatalf("same-bundle redraft exit = %d, stdout = %s", redraftedOutput.code, redraftedOutput.stdout)
+	}
+	var redrafted draftflow.Report
+	if err := json.Unmarshal([]byte(redraftedOutput.stdout), &redrafted); err != nil {
+		t.Fatal(err)
+	}
+	if redrafted.EditReconciliation == nil || redrafted.EditReconciliation.Outcome != "reconciled" || len(redrafted.EditReconciliation.Conflicts) != 0 {
+		t.Fatalf("same-bundle reconciliation = %#v", redrafted)
+	}
+	refreshedArtifact, err := bundle.Read(featurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(refreshedArtifact.Files["phases/migrate.sql"]) != migrateSQL || string(refreshedArtifact.Files["verify.sql"]) != string(receiptedArtifact.Files["verify.sql"]) {
+		t.Fatalf("same-bundle redraft lost agent-owned SQL: %#v", refreshedArtifact.Manifest)
+	}
+	foundNote := false
+	for _, receipt := range refreshedArtifact.Manifest.Phases {
+		if strings.Contains(string(refreshedArtifact.Files[receipt.Path]), "note") {
+			foundNote = true
+		}
+	}
+	if !foundNote {
+		t.Fatal("same-bundle redraft did not include the new column")
+	}
+	refreshedCheck := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename", "--check"}, repository)
+	})
+	if refreshedCheck.code != 0 {
+		t.Fatalf("redrafted read-only check exit = %d, stdout = %s", refreshedCheck.code, refreshedCheck.stdout)
+	}
+
+	// When both the agent and generator change expand, draft moves the bundle's
+	// receipts to the new plan but preserves the current SQL as an unreceipted
+	// three-way handoff. This makes the conflict resolvable through ordinary SQL
+	// editing followed by verify, without a merge DSL or Git knowledge.
+	expandReceipt, exists := refreshedArtifact.Manifest.Phases["expand"]
+	if !exists {
+		t.Fatal("fixture needs an expand phase for the conflict handoff")
+	}
+	agentExpand := string(refreshedArtifact.Files[expandReceipt.Path]) + "\n-- Agent-owned rollout note retained across regeneration.\n"
+	writeTestFile(t, featurePath, expandReceipt.Path, agentExpand)
+	receiptAgentExpand := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if receiptAgentExpand.code != 0 {
+		t.Fatalf("receipt agent expand edit = %d, %s", receiptAgentExpand.code, receiptAgentExpand.stdout)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, timezone text); CREATE TABLE app.audit_log (id bigint, note text); CREATE TABLE app.settings (id bigint);\n")
+	conflictedOutput := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if conflictedOutput.code != 4 {
+		t.Fatalf("same-phase conflict exit = %d, stdout = %s", conflictedOutput.code, conflictedOutput.stdout)
+	}
+	var conflicted draftflow.Report
+	if err := json.Unmarshal([]byte(conflictedOutput.stdout), &conflicted); err != nil {
+		t.Fatal(err)
+	}
+	if conflicted.Outcome != "blocked" || conflicted.EditReconciliation == nil || len(conflicted.EditReconciliation.Conflicts) != 1 {
+		t.Fatalf("same-phase conflict report = %#v", conflicted)
+	}
+	conflict := conflicted.EditReconciliation.Conflicts[0]
+	if conflict.Path != expandReceipt.Path || conflict.OldGeneratedSQL == nil || conflict.CurrentSQL == nil || conflict.NewGeneratedSQL == nil || !strings.Contains(*conflict.CurrentSQL, "Agent-owned rollout note") || !strings.Contains(*conflict.NewGeneratedSQL, "timezone") {
+		t.Fatalf("same-phase conflict evidence = %#v", conflict)
+	}
+	preservedExpand, err := os.ReadFile(filepath.Join(featurePath, filepath.FromSlash(conflict.Path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(preservedExpand), "Agent-owned rollout note") || strings.Contains(string(preservedExpand), "timezone") {
+		t.Fatalf("conflict handoff overwrote current SQL: %s", preservedExpand)
+	}
+	mergedExpand := *conflict.NewGeneratedSQL + "\n-- Agent-owned rollout note retained across regeneration.\n"
+	writeTestFile(t, featurePath, conflict.Path, mergedExpand)
+	resolvedOutput := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+	})
+	if resolvedOutput.code != 0 {
+		t.Fatalf("resolved same-phase conflict = %d, %s", resolvedOutput.code, resolvedOutput.stdout)
+	}
+	resolvedCheck := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename", "--check"}, repository)
+	})
+	if resolvedCheck.code != 0 {
+		t.Fatalf("resolved conflict read-only check = %d, %s", resolvedCheck.code, resolvedCheck.stdout)
+	}
+}
+
+func TestSemanticManualSQLHandoffRequiresEditedCloneVerificationOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_UNUSED_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.events (id bigint, occurred_on text);\n")
+	initialized := captureStdout(t, func() int {
+		return runInitAt([]string{"--target", "primary", "--bundle", "baseline"}, repository)
+	})
+	if initialized.code != 0 {
+		t.Fatalf("init exit = %d, stdout = %s", initialized.code, initialized.stdout)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.events (id bigint, occurred_on date);\n")
+	hint := `{"kind":"type_change","name":["app","events","occurred_on"],"strategy":"manual_sql"}`
+	drafted := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "event-date", "--hint", hint}, repository)
+	})
+	if drafted.code != 2 {
+		t.Fatalf("manual draft exit = %d, stdout = %s", drafted.code, drafted.stdout)
+	}
+	var handoff struct {
+		Protocol string   `json:"protocol"`
+		Status   string   `json:"status"`
+		Path     string   `json:"path"`
+		Edit     []string `json:"edit"`
+	}
+	if err := json.Unmarshal([]byte(drafted.stdout), &handoff); err != nil {
+		t.Fatal(err)
+	}
+	if handoff.Protocol != draftflow.Version || handoff.Status != string(protocol.NeedsSQLEdits) || len(handoff.Edit) != 1 || handoff.Edit[0] != "phases/migrate.sql" {
+		t.Fatalf("handoff = %#v", handoff)
+	}
+	bundlePath := filepath.Join(repository, filepath.FromSlash(handoff.Path))
+	artifact, err := bundle.Read(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.State != string(protocol.NeedsSQLEdits) || !strings.Contains(string(artifact.Files["phases/migrate.sql"]), "ONWARDPG TODO") {
+		t.Fatalf("incomplete bundle = %#v", artifact.Manifest)
+	}
+	todoCheck := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "event-date", "--check"}, repository)
+	})
+	if todoCheck.code != 4 || !strings.Contains(todoCheck.stdout, `"code":"unresolved_sql_todo"`) || !strings.Contains(todoCheck.stdout, "phases/migrate.sql") {
+		t.Fatalf("TODO check = %d, %s", todoCheck.code, todoCheck.stdout)
+	}
+	writeTestFile(t, bundlePath, "phases/migrate.sql", "ALTER TABLE app.events ALTER COLUMN occurred_on TYPE date USING occurred_on::date;\n")
+	verified := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "event-date"}, repository)
+	})
+	if verified.code != 0 {
+		t.Fatalf("edited verification exit = %d, stdout = %s", verified.code, verified.stdout)
+	}
+	receipted, err := bundle.Read(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipted.Manifest.State != string(protocol.Planned) || receipted.Manifest.PhaseSource != "edited" {
+		t.Fatalf("receipted bundle = %#v", receipted.Manifest)
+	}
+}
 
 func TestHistoryInitCreatesVerifiedGroundFloorWithoutApplyingToAdminDatabase(t *testing.T) {
 	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
@@ -36,7 +556,6 @@ bundle_root = "onward-bundles"
 [targets.primary]
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
-postgres_major = 16
 `)
 	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".users (id bigint PRIMARY KEY);`)
 
@@ -74,7 +593,7 @@ postgres_major = 16
 		t.Fatalf("history chain = %#v", chain)
 	}
 	manifest := chain.Entries[0].Artifact.Manifest
-	if manifest.BundleID != "ground-floor" || manifest.Purpose != "baseline" || manifest.Mode != "init" || manifest.History == nil || manifest.History.ParentDigest != bundle.HistoryRootDigest() {
+	if manifest.BundleID != "ground-floor" || manifest.Purpose != "baseline" || manifest.History == nil || manifest.History.ParentDigest != bundle.HistoryRootDigest() {
 		t.Fatalf("baseline manifest = %#v", manifest)
 	}
 	if !strings.Contains(string(chain.Entries[0].Artifact.Files["phases/expand.sql"]), `CREATE TABLE "`+schemaName+`"."users"`) {
@@ -102,20 +621,12 @@ postgres_major = 16
 		t.Fatalf("second history init report = %#v", blocked)
 	}
 
-	git(t, repository, "init", "-b", "main")
-	git(t, repository, "config", "user.name", "Onward Test")
-	git(t, repository, "config", "user.email", "onward@example.test")
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "establish onwardpg baseline")
-	git(t, repository, "checkout", "-b", "feature")
 	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".users (id bigint PRIMARY KEY); CREATE TABLE "`+schemaName+`".projects (id bigint PRIMARY KEY);`)
-	git(t, repository, "add", "schema.sql")
-	git(t, repository, "commit", "-m", "add projects")
 	feature := captureStdout(t, func() int {
-		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "projects"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "projects"}, repository)
 	})
 	if feature.code != 0 {
-		t.Fatalf("PR regenerate after history init exit = %d, stdout = %s", feature.code, feature.stdout)
+		t.Fatalf("draft after history init exit = %d, stdout = %s", feature.code, feature.stdout)
 	}
 	featureArtifact, err := bundle.Read(filepath.Join(repository, "onward-bundles", "primary", "projects"))
 	if err != nil {
@@ -137,7 +648,6 @@ bundle_root = "onward-bundles"
 [targets.primary]
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
-postgres_major = 16
 `)
 	writeTestFile(t, repository, "schema.sql", "CREATE DOMAIN public.email_address AS text CHECK (VALUE <> '');\n")
 
@@ -159,51 +669,46 @@ postgres_major = 16
 	}
 }
 
-func TestPlanCLIWritesVersionedBundleOnPostgreSQL(t *testing.T) {
+func TestConfigCheckMaterializesEveryTarget(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
 	}
-	directory := t.TempDir()
-	current := filepath.Join(directory, "current.sql")
-	desired := filepath.Join(directory, "desired.sql")
-	if err := os.WriteFile(current, []byte("CREATE SCHEMA app;"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(desired, []byte("CREATE SCHEMA app; CREATE TABLE app.users (id bigint PRIMARY KEY);"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	bundlePath := filepath.Join(directory, "bundle")
+	repository := t.TempDir()
+	t.Setenv("ONWARDPG_CONFIG_CHECK_URL", url)
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_CONFIG_CHECK_URL"
+scratch_database_env = "ONWARDPG_CONFIG_CHECK_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.config_check (id bigint PRIMARY KEY);\n")
 	output := captureStdout(t, func() int {
-		return runPlan([]string{
-			"--from", "file://" + current, "--to", "file://" + desired, "--dev-url", url,
-			"--bundle", bundlePath, "--bundle-id", "users", "--target", "primary-postgres",
-			"--base-ref", "origin/main", "--base-commit", strings.Repeat("a", 40), "--head-revision", strings.Repeat("b", 40),
-		})
+		return runConfig([]string{"check", "--config", filepath.Join(repository, ".onwardpg.toml")})
 	})
 	if output.code != 0 {
-		t.Fatalf("runPlan exit = %d, stdout = %s", output.code, output.stdout)
+		t.Fatalf("config check exit = %d, stdout = %s", output.code, output.stdout)
 	}
-	data, err := os.ReadFile(filepath.Join(bundlePath, "manifest.json"))
-	if err != nil {
+	var report struct {
+		ProtocolVersion string `json:"protocol_version"`
+		Status          string `json:"status"`
+		Targets         []struct {
+			Name          string `json:"name"`
+			Provenance    string `json:"provenance"`
+			Fingerprint   string `json:"fingerprint"`
+			PostgresMajor int    `json:"postgres_major"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal([]byte(output.stdout), &report); err != nil {
 		t.Fatal(err)
 	}
-	var manifest bundle.Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatal(err)
+	if report.ProtocolVersion != "onwardpg.config-check/v2" || report.Status != "valid" || len(report.Targets) != 1 {
+		t.Fatalf("config check report = %#v", report)
 	}
-	if err := manifest.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if manifest.ProtocolVersion != bundle.Version || manifest.State != "planned" || manifest.Phases["expand"].Path != "phases/expand.sql" {
-		t.Fatalf("manifest = %#v", manifest)
-	}
-	phase, err := os.ReadFile(filepath.Join(bundlePath, "phases", "expand.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(phase), `CREATE TABLE "app"."users"`) {
-		t.Fatalf("expand phase = %s", phase)
+	target := report.Targets[0]
+	if target.Name != "primary" || target.Provenance != "schema_file:schema.sql" || !strings.HasPrefix(target.Fingerprint, "sha256:") || target.PostgresMajor < 14 || target.PostgresMajor > 18 {
+		t.Fatalf("config check target = %#v", target)
 	}
 }
 
@@ -221,7 +726,6 @@ bundle_root = "onward-bundles"
 [targets.primary]
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_DEV_TEST_URL"
-postgres_major = 16
 `)
 	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint);\n")
 	connection, err := pgx.Connect(context.Background(), devURL)
@@ -239,32 +743,33 @@ postgres_major = 16
 	if pendingOutput.code != 2 {
 		t.Fatalf("pending exit = %d, stdout = %s", pendingOutput.code, pendingOutput.stdout)
 	}
-	var pending protocol.Result
+	var pending struct {
+		Protocol  string              `json:"protocol"`
+		Status    string              `json:"status"`
+		Decisions []protocol.Decision `json:"decisions"`
+	}
 	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
+	if pending.Protocol != "onwardpg/dev-plan/2" || pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
 		t.Fatalf("pending = %#v", pending)
 	}
-	question := pending.Questions[0]
-	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint,
-		DesiredFingerprint: pending.DesiredFingerprint,
-		Answers: []protocol.Answer{{
-			Kind: question.Kind, Key: question.Key, Value: question.Choices[0],
-			QuestionFingerprint: question.ScopeFingerprint,
-		}},
+	var renameHint *protocol.Hint
+	for _, choice := range pending.Decisions[0].Choices {
+		if choice.Hint.Kind == "rename" {
+			hint := choice.Hint
+			renameHint = &hint
+		}
 	}
-	answerData, err := json.MarshalIndent(answers, "", "  ")
+	if renameHint == nil {
+		t.Fatalf("pending decision has no rename hint: %#v", pending)
+	}
+	hintData, err := json.Marshal(renameHint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	answerPath := filepath.Join(repository, "answers.json")
-	if err := os.WriteFile(answerPath, append(answerData, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	plannedOutput := captureStdout(t, func() int {
-		return runDevAt([]string{"plan", "--target", "primary", "--answers", answerPath}, repository)
+		return runDevAt([]string{"plan", "--target", "primary", "--hint", string(hintData)}, repository)
 	})
 	if plannedOutput.code != 0 {
 		t.Fatalf("planned exit = %d, stdout = %s", plannedOutput.code, plannedOutput.stdout)
@@ -303,480 +808,6 @@ postgres_major = 16
 	}
 }
 
-func TestPRRegenerateWritesVerifiedBaseToSyntheticHeadBundle(t *testing.T) {
-	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
-	}
-	repository := t.TempDir()
-	git(t, repository, "init", "-b", "main")
-	git(t, repository, "config", "user.name", "Onward Test")
-	git(t, repository, "config", "user.email", "onward@example.test")
-	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
-bundle_root = "onward-bundles"
-[targets.primary]
-schema_file = "schema.sql"
-dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
-postgres_major = 16
-`)
-	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.users (id bigint PRIMARY KEY);\n"
-	writeTestFile(t, repository, "schema.sql", baseDDL)
-	writeHistoryFixture(t, repository, url, "genesis", baseDDL)
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "base")
-	git(t, repository, "checkout", "-b", "feature")
-	writeTestFile(t, repository, "schema.sql", baseDDL+"CREATE TABLE app.projects (id bigint PRIMARY KEY);\n")
-	git(t, repository, "add", "schema.sql")
-	git(t, repository, "commit", "-m", "feature schema")
-
-	output := captureStdout(t, func() int {
-		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "projects"}, repository)
-	})
-	if output.code != 0 {
-		t.Fatalf("exit = %d, stdout = %s", output.code, output.stdout)
-	}
-	var analysis prflow.Analysis
-	if err := json.Unmarshal([]byte(output.stdout), &analysis); err != nil {
-		t.Fatal(err)
-	}
-	if analysis.Outcome != "ready" || analysis.Bundle == nil || analysis.Bundle.Generation != 1 || analysis.SchemaSquare.BaseIntegrity != "matched" {
-		t.Fatalf("analysis = %#v", analysis)
-	}
-	bundlePath := filepath.Join(repository, filepath.FromSlash(analysis.Bundle.Path))
-	artifact, err := bundle.Read(bundlePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if artifact.Manifest.SchemaSquare == nil || artifact.Manifest.SchemaSquare.BaseCodeFingerprint != artifact.Manifest.SchemaSquare.BaseHistoryFingerprint || artifact.Manifest.SchemaSquare.HeadHistoryFidelity != "matched" || artifact.Manifest.SchemaSquare.HeadCodeFingerprint != artifact.Manifest.SchemaSquare.HeadHistoryFingerprint {
-		t.Fatalf("bundle schema square = %#v", artifact.Manifest.SchemaSquare)
-	}
-	if artifact.Manifest.History == nil || artifact.Manifest.History.ParentDigest == bundle.HistoryRootDigest() {
-		t.Fatalf("bundle history receipt = %#v", artifact.Manifest.History)
-	}
-	if !strings.Contains(string(artifact.Files["phases/expand.sql"]), `CREATE TABLE "app"."projects"`) {
-		t.Fatalf("expand phase = %s", artifact.Files["phases/expand.sql"])
-	}
-
-	// The existing receipt root is excluded from source revision provenance, so
-	// an explicit draft regeneration remains on the same clean head revision.
-	second := captureStdout(t, func() int {
-		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "projects", "--replace-draft"}, repository)
-	})
-	if second.code != 0 {
-		t.Fatalf("second exit = %d, stdout = %s", second.code, second.stdout)
-	}
-	var regenerated prflow.Analysis
-	if err := json.Unmarshal([]byte(second.stdout), &regenerated); err != nil {
-		t.Fatal(err)
-	}
-	if regenerated.Inputs.DesiredRevision != analysis.Inputs.DesiredRevision || regenerated.Bundle == nil || regenerated.Bundle.Generation != 1 {
-		t.Fatalf("regenerated analysis = %#v", regenerated)
-	}
-
-	statusOutput := captureStdout(t, func() int {
-		return runPRAt([]string{"status", "--base", "main", "--target", "primary", "--bundle", "projects"}, repository)
-	})
-	if statusOutput.code != 0 {
-		t.Fatalf("freshness status exit = %d, stdout = %s", statusOutput.code, statusOutput.stdout)
-	}
-	var status prStatusReport
-	if err := json.Unmarshal([]byte(statusOutput.stdout), &status); err != nil {
-		t.Fatal(err)
-	}
-	if status.ProtocolVersion != prStatusVersion || status.Outcome != "fresh" || status.Freshness == nil || status.Freshness.Outcome != "fresh" {
-		t.Fatalf("freshness status = %#v", status)
-	}
-
-	git(t, repository, "add", "onward-bundles/primary/projects")
-	git(t, repository, "commit", "-m", "add projects migration bundle")
-	ciOutput := captureStdout(t, func() int {
-		return runCIAt([]string{"check", "--base", "main", "--target", "primary", "--bundle", "projects"}, repository)
-	})
-	if ciOutput.code != 0 {
-		t.Fatalf("CI exit = %d, stdout = %s", ciOutput.code, ciOutput.stdout)
-	}
-	var ci ciReport
-	if err := json.Unmarshal([]byte(ciOutput.stdout), &ci); err != nil {
-		t.Fatal(err)
-	}
-	if ci.ProtocolVersion != ciVersion || ci.Outcome != "passed" || ci.PRStatus == nil || ci.PRStatus.Freshness == nil || ci.PRStatus.Freshness.Outcome != "fresh" || ci.Verification == nil || ci.Verification.Outcome != "verified" {
-		t.Fatalf("CI report = %#v", ci)
-	}
-	if len(ci.PRStatus.Freshness.Notices) != 1 || ci.PRStatus.Freshness.Notices[0].Code != "provenance_changed" {
-		t.Fatalf("CI no-op receipt commit notice = %#v", ci.PRStatus.Freshness)
-	}
-
-}
-
-func TestCICheckRejectsStackedBundleDirectoriesBeforeDatabaseUse(t *testing.T) {
-	repository := t.TempDir()
-	git(t, repository, "init", "-b", "main")
-	git(t, repository, "config", "user.name", "Onward Test")
-	git(t, repository, "config", "user.email", "onward@example.test")
-	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
-bundle_root = "onward-bundles"
-[targets.primary]
-schema_file = "schema.sql"
-dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
-postgres_major = 16
-`)
-	writeTestFile(t, repository, "schema.sql", "CREATE TABLE example (id bigint);\n")
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "base")
-	git(t, repository, "checkout", "-b", "feature")
-	writeTestFile(t, repository, "onward-bundles/primary/feature-a/receipt", "a\n")
-	writeTestFile(t, repository, "onward-bundles/primary/feature-b/receipt", "b\n")
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "stacked migrations")
-
-	output := captureStdout(t, func() int {
-		return runCIAt([]string{"check", "--base", "main", "--target", "primary", "--bundle", "feature-a"}, repository)
-	})
-	if output.code != 4 {
-		t.Fatalf("CI exit = %d, stdout = %s", output.code, output.stdout)
-	}
-	var report ciReport
-	if err := json.Unmarshal([]byte(output.stdout), &report); err != nil {
-		t.Fatal(err)
-	}
-	if len(report.Findings) != 1 || report.Findings[0].Code != "incorrect_bundle_stack" {
-		t.Fatalf("CI report = %#v", report)
-	}
-}
-
-func TestPRStatusClassifiesWouldBeMergeConflict(t *testing.T) {
-	repository := t.TempDir()
-	git(t, repository, "init", "-b", "main")
-	git(t, repository, "config", "user.name", "Onward Test")
-	git(t, repository, "config", "user.email", "onward@example.test")
-	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
-bundle_root = "onward-bundles"
-[targets.primary]
-schema_file = "schema.sql"
-dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
-postgres_major = 16
-`)
-	writeTestFile(t, repository, "schema.sql", "CREATE TABLE example (value text);\n")
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "base")
-	git(t, repository, "checkout", "-b", "feature")
-	writeTestFile(t, repository, "schema.sql", "CREATE TABLE example (value bigint);\n")
-	git(t, repository, "add", "schema.sql")
-	git(t, repository, "commit", "-m", "feature type")
-	git(t, repository, "checkout", "main")
-	writeTestFile(t, repository, "schema.sql", "CREATE TABLE example (value integer);\n")
-	git(t, repository, "add", "schema.sql")
-	git(t, repository, "commit", "-m", "main type")
-	git(t, repository, "checkout", "feature")
-
-	output := captureStdout(t, func() int {
-		return runPRAt([]string{"status", "--base", "main", "--target", "primary"}, repository)
-	})
-	if output.code != 4 {
-		t.Fatalf("status exit = %d, stdout = %s", output.code, output.stdout)
-	}
-	var status gitbase.Status
-	if err := json.Unmarshal([]byte(output.stdout), &status); err != nil {
-		t.Fatal(err)
-	}
-	if status.Outcome != "conflicting" || len(status.Problems) != 1 || status.Problems[0].Code != "merge_conflict" {
-		t.Fatalf("status = %#v", status)
-	}
-}
-
-func TestPRRegenerateCarriesRenameAnswerAcrossUnrelatedBaseErosion(t *testing.T) {
-	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
-	}
-	repository := t.TempDir()
-	git(t, repository, "init", "-b", "main")
-	git(t, repository, "config", "user.name", "Onward Test")
-	git(t, repository, "config", "user.email", "onward@example.test")
-	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
-bundle_root = "onward-bundles"
-[targets.primary]
-schema_command = ["sh", "-c", "cat schema/*.sql"]
-dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
-postgres_major = 16
-`)
-	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.old_users (id bigint);\n"
-	writeTestFile(t, repository, "schema/00_base.sql", baseDDL)
-	writeHistoryFixture(t, repository, url, "genesis", baseDDL)
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "base")
-
-	git(t, repository, "checkout", "-b", "feature")
-	featureDDL := "CREATE SCHEMA app; CREATE TABLE app.users (id bigint);\n"
-	writeTestFile(t, repository, "schema/00_base.sql", featureDDL)
-	git(t, repository, "add", "schema/00_base.sql")
-	git(t, repository, "commit", "-m", "rename users")
-	first := captureStdout(t, func() int {
-		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "rename-users"}, repository)
-	})
-	if first.code != 2 {
-		t.Fatalf("first exit = %d, stdout = %s", first.code, first.stdout)
-	}
-	var pending prflow.Analysis
-	if err := json.Unmarshal([]byte(first.stdout), &pending); err != nil {
-		t.Fatal(err)
-	}
-	if pending.Plan == nil || len(pending.Plan.Questions) != 1 || pending.Plan.Questions[0].ScopeFingerprint == "" {
-		t.Fatalf("pending = %#v", pending)
-	}
-	question := pending.Plan.Questions[0]
-	pendingArtifact, err := bundle.Read(filepath.Join(repository, "onward-bundles/primary/rename-users"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	answerPath := filepath.Join(repository, "rename.answers.json")
-	answer := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.Plan.CurrentFingerprint, DesiredFingerprint: pending.Plan.DesiredFingerprint,
-		Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: question.Choices[0], QuestionFingerprint: question.ScopeFingerprint}},
-	}
-	answerData, err := json.MarshalIndent(answer, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(answerPath, append(answerData, '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	opened, err := gitbase.Open(context.Background(), repository)
-	if err != nil {
-		t.Fatal(err)
-	}
-	preflight, err := opened.Inspect(context.Background(), gitbase.Options{
-		BaseRef: "main", HeadRef: "HEAD", HistoryPath: "onward-bundles/primary", IncludeWorkingTree: true,
-		ExcludePaths: append([]string{"onward-bundles"}, repositoryReceiptPaths(repository, answerPath)...),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if preflight.Dirty {
-		t.Fatalf("answer and draft exclusions still produced dirty revision: %#v", preflight)
-	}
-	if pendingArtifact.Manifest.HeadRevision != preflight.HeadRevision {
-		t.Fatalf("pending head revision %s differs from excluded preflight %s", pendingArtifact.Manifest.HeadRevision, preflight.HeadRevision)
-	}
-	ready := captureStdout(t, func() int {
-		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "rename-users", "--answers", answerPath, "--replace-draft"}, repository)
-	})
-	if ready.code != 0 {
-		t.Fatalf("ready exit = %d, stdout = %s", ready.code, ready.stdout)
-	}
-	prior, err := bundle.Read(filepath.Join(repository, "onward-bundles/primary/rename-users"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	priorQuestions, err := bundle.DecisionQuestions(prior)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(priorQuestions) != 1 || priorQuestions[0].Kind != "rename_table" {
-		t.Fatalf("preserved questions = %#v, manifest = %#v", priorQuestions, prior.Manifest)
-	}
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "review rename migration")
-
-	git(t, repository, "checkout", "main")
-	auditDDL := "CREATE TABLE app.audit_log (id bigint);\n"
-	writeTestFile(t, repository, "schema/10_audit.sql", auditDDL)
-	writeHistoryTransitionFixture(t, repository, url, "add-audit", baseDDL+auditDDL)
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "add audit log")
-	git(t, repository, "checkout", "feature")
-	git(t, repository, "merge", "main", "--no-edit")
-
-	restacked := captureStdout(t, func() int {
-		return runPRAt([]string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "rename-users", "--replace-draft"}, repository)
-	})
-	if restacked.code != 0 {
-		t.Fatalf("restacked exit = %d, stdout = %s", restacked.code, restacked.stdout)
-	}
-	var analysis prflow.Analysis
-	if err := json.Unmarshal([]byte(restacked.stdout), &analysis); err != nil {
-		t.Fatal(err)
-	}
-	if analysis.Rebind == nil || len(analysis.Rebind.Carried) != 1 || len(analysis.Rebind.Invalidated) != 0 || analysis.Outcome != "ready" {
-		t.Fatalf("restacked analysis = %#v", analysis)
-	}
-	artifact, err := bundle.Read(filepath.Join(repository, "onward-bundles/primary/rename-users"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	chain, err := history.Load(repository, "onward-bundles", "primary")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if artifact.Manifest.History == nil || artifact.Manifest.History.ParentDigest == bundle.HistoryRootDigest() || artifact.Manifest.Generation < 2 || chain.HeadDigest != artifact.Manifest.History.EntryDigest {
-		t.Fatalf("restacked manifest = %#v", artifact.Manifest)
-	}
-	var reboundAnswers protocol.Answers
-	if err := json.Unmarshal(artifact.Files["answers.json"], &reboundAnswers); err != nil {
-		t.Fatal(err)
-	}
-	if reboundAnswers.CurrentFingerprint != analysis.Plan.CurrentFingerprint || reboundAnswers.DesiredFingerprint != analysis.Plan.DesiredFingerprint || reboundAnswers.Answers[0].QuestionFingerprint != question.ScopeFingerprint {
-		t.Fatalf("rebound answers = %#v", reboundAnswers)
-	}
-}
-
-func TestDeveloperPreviewLifecycleRestacksOneBundleAcrossTwoBaseMigrations(t *testing.T) {
-	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
-	}
-	repository := t.TempDir()
-	git(t, repository, "init", "-b", "main")
-	git(t, repository, "config", "user.name", "Onward Test")
-	git(t, repository, "config", "user.email", "onward@example.test")
-	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
-bundle_root = "onward-bundles"
-[targets.primary]
-schema_command = ["sh", "-c", "cat schema/*.sql"]
-dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
-postgres_major = 16
-`)
-	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint); CREATE TABLE app.events (id bigint, occurred_on date);\n"
-	writeTestFile(t, repository, "schema/00_base.sql", baseDDL)
-	writeHistoryFixture(t, repository, url, "genesis", baseDDL)
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "base schema")
-
-	git(t, repository, "checkout", "-b", "feature")
-	featureDDL := "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TABLE app.events (id bigint, occurred_on date NOT NULL);\n"
-	writeTestFile(t, repository, "schema/00_base.sql", featureDDL)
-	git(t, repository, "add", "schema/00_base.sql")
-	git(t, repository, "commit", "-m", "feature schema")
-	bundleArguments := []string{"regenerate", "--base", "main", "--target", "primary", "--bundle", "customer-dates"}
-	regenerate := func(extra ...string) (captured, prflow.Analysis) {
-		arguments := append(append([]string(nil), bundleArguments...), extra...)
-		output := captureStdout(t, func() int { return runPRAt(arguments, repository) })
-		var analysis prflow.Analysis
-		if err := json.Unmarshal([]byte(output.stdout), &analysis); err != nil {
-			t.Fatalf("decode regenerate output %s: %v", output.stdout, err)
-		}
-		return output, analysis
-	}
-	answerPath := filepath.Join(t.TempDir(), "answers.json")
-	var answers protocol.Answers
-	writeAnswers := func() {
-		data, err := json.MarshalIndent(answers, "", "  ")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(answerPath, append(data, '\n'), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	first, pendingRename := regenerate()
-	if first.code != 2 || pendingRename.Plan == nil || len(pendingRename.Plan.Questions) != 1 || pendingRename.Plan.Questions[0].Kind != "rename_table" {
-		t.Fatalf("rename decision = code %d, %#v", first.code, pendingRename)
-	}
-	answers = protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pendingRename.Plan.CurrentFingerprint, DesiredFingerprint: pendingRename.Plan.DesiredFingerprint}
-	rename := pendingRename.Plan.Questions[0]
-	answers.Answers = append(answers.Answers, protocol.Answer{Kind: rename.Kind, Key: rename.Key, Value: rename.Choices[0], QuestionFingerprint: rename.ScopeFingerprint})
-	writeAnswers()
-	second, pendingStrategy := regenerate("--answers", answerPath, "--replace-draft")
-	if second.code != 2 || pendingStrategy.Plan == nil || len(pendingStrategy.Plan.Questions) != 1 || pendingStrategy.Plan.Questions[0].Kind != "set_not_null" {
-		t.Fatalf("strategy decision = code %d, %#v", second.code, pendingStrategy)
-	}
-	strategy := pendingStrategy.Plan.Questions[0]
-	answers.Answers = append(answers.Answers, protocol.Answer{Kind: strategy.Kind, Key: strategy.Key, Value: "staged_with_backfill", QuestionFingerprint: strategy.ScopeFingerprint})
-	writeAnswers()
-	third, pendingBackfill := regenerate("--answers", answerPath, "--replace-draft")
-	if third.code != 2 || pendingBackfill.Plan == nil || len(pendingBackfill.Plan.Questions) != 1 || pendingBackfill.Plan.Questions[0].Kind != "backfill_not_null" {
-		t.Fatalf("backfill decision = code %d, %#v", third.code, pendingBackfill)
-	}
-	backfill := pendingBackfill.Plan.Questions[0]
-	answers.Answers = append(answers.Answers, protocol.Answer{
-		Kind: backfill.Kind, Key: backfill.Key, Value: "provided", QuestionFingerprint: backfill.ScopeFingerprint,
-		Manual: &protocol.ManualWork{
-			Summary: "fill missing event dates from reviewed application policy", ExecutionMode: "transactional",
-			Statements:      []string{`UPDATE "app"."events" SET "occurred_on" = CURRENT_DATE WHERE "occurred_on" IS NULL;`},
-			VerificationSQL: []string{`SELECT count(*) = 0 FROM "app"."events" WHERE "occurred_on" IS NULL;`},
-		},
-	})
-	writeAnswers()
-	readyOutput, ready := regenerate("--answers", answerPath, "--replace-draft")
-	if readyOutput.code != 0 || ready.Outcome != "ready" || ready.Plan == nil {
-		t.Fatalf("ready = code %d, %#v", readyOutput.code, ready)
-	}
-
-	// The feature keeps evolving, but regeneration replaces the same logical
-	// bundle and carries only still-valid scoped decisions.
-	writeTestFile(t, repository, "schema/20_feature.sql", "CREATE TABLE app.customer_notes (id bigint, body text);\n")
-	regeneratedOutput, regenerated := regenerate("--replace-draft")
-	if regeneratedOutput.code != 0 || regenerated.Rebind == nil || len(regenerated.Rebind.Carried) != 3 {
-		t.Fatalf("feature regeneration = code %d, %#v", regeneratedOutput.code, regenerated)
-	}
-	git(t, repository, "add", "-A")
-	git(t, repository, "commit", "-m", "feature schema and logical migration")
-
-	// Two unrelated migrations land on main while the feature remains open.
-	for index, erosion := range []struct {
-		id   string
-		file string
-		ddl  string
-	}{{"add-audit", "schema/10_audit.sql", "CREATE TABLE app.audit_log (id bigint);\n"}, {"add-teams", "schema/11_teams.sql", "CREATE TABLE app.teams (id bigint);\n"}} {
-		git(t, repository, "checkout", "main")
-		writeTestFile(t, repository, erosion.file, erosion.ddl)
-		mainDDL := baseDDL + "CREATE TABLE app.audit_log (id bigint);\n"
-		if index == 1 {
-			mainDDL += "CREATE TABLE app.teams (id bigint);\n"
-		}
-		writeHistoryTransitionFixture(t, repository, url, erosion.id, mainDDL)
-		git(t, repository, "add", "-A")
-		git(t, repository, "commit", "-m", erosion.id)
-		git(t, repository, "checkout", "feature")
-		git(t, repository, "merge", "main", "--no-edit")
-		restackedOutput, restacked := regenerate("--replace-draft")
-		if restackedOutput.code != 0 || restacked.Outcome != "ready" || restacked.Rebind == nil || len(restacked.Rebind.Carried) != 3 || len(restacked.Rebind.Invalidated) != 0 {
-			t.Fatalf("restack %d = code %d, output %s", index+1, restackedOutput.code, restackedOutput.stdout)
-		}
-		git(t, repository, "add", "-A")
-		git(t, repository, "commit", "-m", "restack logical migration")
-	}
-
-	chain, err := history.Load(repository, "onward-bundles", "primary")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(chain.Entries) != 4 || chain.Entries[len(chain.Entries)-1].Directory != "customer-dates" {
-		t.Fatalf("history = %#v", chain)
-	}
-	artifact := chain.Entries[len(chain.Entries)-1].Artifact
-	if artifact.Manifest.Generation < 4 || artifact.Manifest.History == nil || artifact.Manifest.History.ParentDigest != chain.Entries[len(chain.Entries)-2].Artifact.Manifest.History.EntryDigest {
-		t.Fatalf("final bundle manifest = %#v", artifact.Manifest)
-	}
-	if _, exists := artifact.Manifest.Phases["manual"]; !exists {
-		t.Fatalf("final bundle has no manual backfill phase: %#v", artifact.Manifest.Phases)
-	}
-	if _, exists := artifact.Manifest.Phases["contract"]; !exists {
-		t.Fatalf("final bundle has no contract phase: %#v", artifact.Manifest.Phases)
-	}
-
-	verificationOutput := captureStdout(t, func() int {
-		return runBundleAt([]string{"verify", "--target", "primary", "--bundle", "customer-dates"}, repository)
-	})
-	if verificationOutput.code != 0 {
-		t.Fatalf("clone verification = %d, %s", verificationOutput.code, verificationOutput.stdout)
-	}
-	ciOutput := captureStdout(t, func() int {
-		return runCIAt([]string{"check", "--base", "main", "--target", "primary", "--bundle", "customer-dates"}, repository)
-	})
-	if ciOutput.code != 0 {
-		t.Fatalf("CI = %d, %s", ciOutput.code, ciOutput.stdout)
-	}
-	writeTestFile(t, repository, "schema/99_uncommitted.sql", "CREATE TABLE app.uncommitted_work (id bigint);\n")
-	dirtyCI := captureStdout(t, func() int {
-		return runCIAt([]string{"check", "--base", "main", "--target", "primary", "--bundle", "customer-dates"}, repository)
-	})
-	if dirtyCI.code != 4 || !strings.Contains(dirtyCI.stdout, `"code":"dirty_working_tree"`) {
-		t.Fatalf("dirty CI = %d, %s", dirtyCI.code, dirtyCI.stdout)
-	}
-}
-
 func TestBundleVerifyReportsPartialResidualAndFullConvergenceOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -788,7 +819,6 @@ bundle_root = "onward-bundles"
 [targets.primary]
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
-postgres_major = 16
 `)
 	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.obsolete (id bigint PRIMARY KEY);\n"
 	writeTestFile(t, repository, "schema.sql", "")
@@ -828,9 +858,131 @@ postgres_major = 16
 	}
 }
 
+func TestVerifyFailureModesAlwaysCleanDisposableDatabases(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	tests := []struct {
+		name       string
+		phaseSQL   string
+		verifySQL  string
+		wantCode   string
+		cancelSoon bool
+	}{
+		{
+			name: "transactional failure",
+			phaseSQL: "-- onwardpg:batch transactional\n" +
+				"CREATE SCHEMA should_rollback;\nSELECT definitely_not_a_function();\n",
+			wantCode: "transactional_batch_failed",
+		},
+		{
+			name: "non-transactional failure",
+			phaseSQL: "-- onwardpg:batch nontransactional\n" +
+				"CREATE SCHEMA partial_disposable_effect;\nSELECT definitely_not_a_function();\n",
+			wantCode: "non_transactional_batch_failed",
+		},
+		{
+			name:      "false assertion",
+			verifySQL: "-- onwardpg:assert expected_product_effect\nSELECT false;\n",
+			wantCode:  "assertion_false",
+		},
+		{
+			name:       "cancellation",
+			phaseSQL:   "-- onwardpg:batch transactional\nSELECT pg_sleep(30);\n",
+			wantCode:   "transactional_batch_failed",
+			cancelSoon: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+			ddl := "CREATE SCHEMA app; CREATE TABLE app.items (id bigint PRIMARY KEY);\n"
+			writeTestFile(t, repository, "schema.sql", ddl)
+			writeHistoryFixture(t, repository, url, "genesis", ddl)
+			bundlePath := filepath.Join(repository, "onward-bundles", "primary", "genesis")
+			if test.phaseSQL != "" {
+				writeTestFile(t, bundlePath, "phases/expand.sql", test.phaseSQL)
+			}
+			if test.verifySQL != "" {
+				writeTestFile(t, bundlePath, "verify.sql", test.verifySQL)
+			}
+			edited, err := bundle.PrepareEdited(bundlePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := bundle.InstallReceipts(bundlePath, edited); err != nil {
+				t.Fatal(err)
+			}
+			chain, err := history.Load(repository, "onward-bundles", "primary")
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := disposableDatabaseCount(t, url)
+			ctx := context.Background()
+			if test.cancelSoon {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, time.Second)
+				defer cancel()
+			}
+			report, err := verify.Run(ctx, verify.Input{AdminURL: url, Chain: chain, BundleID: "genesis"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Outcome != "failed" || report.Failure == nil || report.Failure.Code != test.wantCode || len(report.Findings) != 1 || report.Findings[0].Code != test.wantCode || report.Failure.Remediation == "" {
+				t.Fatalf("failure report = %#v", report)
+			}
+			if after := disposableDatabaseCount(t, url); after != before {
+				t.Fatalf("disposable database count after failure = %d, want %d", after, before)
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsHistoryReceiptedForAnotherPostgresMajor(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	ddl := "CREATE TABLE items (id bigint PRIMARY KEY);\n"
+	writeHistoryFixture(t, repository, url, "genesis", ddl)
+	chain, err := history.Load(repository, "onward-bundles", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := source.PostgresMajor(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	different := 14
+	if actual == different {
+		different = 15
+	}
+	chain.Entries[0].Artifact.Manifest.DesiredSource.PostgresMajor = different
+	before := disposableDatabaseCount(t, url)
+	_, err = verify.Run(context.Background(), verify.Input{AdminURL: url, Chain: chain, BundleID: "genesis"})
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("targets PostgreSQL %d but the scratch server is PostgreSQL %d", different, actual)) {
+		t.Fatalf("major mismatch error = %v", err)
+	}
+	if after := disposableDatabaseCount(t, url); after != before {
+		t.Fatalf("major mismatch created a disposable database: before=%d after=%d", before, after)
+	}
+}
+
 func writeHistoryFixture(t *testing.T, root, devURL, id, desiredDDL string) {
 	t.Helper()
 	ctx := context.Background()
+	postgresMajor, err := source.PostgresMajor(ctx, devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	current, err := source.LoadDDLGraphForComparison(ctx, nil, "empty-history", devURL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -844,10 +996,9 @@ func writeHistoryFixture(t *testing.T, root, devURL, id, desiredDDL string) {
 		t.Fatal(err)
 	}
 	metadata := bundle.Metadata{
-		BundleID: id, Generation: 1, Target: "primary", Purpose: "feature", Mode: "pr",
-		BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
-		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "empty history", Fingerprint: result.CurrentFingerprint, PostgresMajor: 16},
-		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "fixture schema", Fingerprint: result.DesiredFingerprint, PostgresMajor: 16},
+		BundleID: id, Generation: 1, Target: "primary", Purpose: "feature",
+		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "empty history", Fingerprint: result.CurrentFingerprint, PostgresMajor: postgresMajor},
+		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "fixture schema", Fingerprint: result.DesiredFingerprint, PostgresMajor: postgresMajor},
 		Planner:        bundle.PlannerReceipt{Version: "test"}, HistoryParentDigest: bundle.HistoryRootDigest(),
 	}
 	artifact, err := bundle.Build(bundle.Input{Metadata: metadata, Result: result})
@@ -862,6 +1013,10 @@ func writeHistoryFixture(t *testing.T, root, devURL, id, desiredDDL string) {
 func writeHistoryTransitionFixture(t *testing.T, root, devURL, id, desiredDDL string) {
 	t.Helper()
 	ctx := context.Background()
+	postgresMajor, err := source.PostgresMajor(ctx, devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	chain, err := history.Load(root, "onward-bundles", "primary")
 	if err != nil {
 		t.Fatal(err)
@@ -883,10 +1038,9 @@ func writeHistoryTransitionFixture(t *testing.T, root, devURL, id, desiredDDL st
 		t.Fatal(err)
 	}
 	metadata := bundle.Metadata{
-		BundleID: id, Generation: 1, Target: "primary", Purpose: "feature", Mode: "pr",
-		BaseRef: "origin/main", BaseCommit: strings.Repeat("c", 40), HeadRevision: strings.Repeat("d", 40),
-		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "fixture history", Fingerprint: result.CurrentFingerprint, PostgresMajor: 16},
-		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "fixture transition", Fingerprint: result.DesiredFingerprint, PostgresMajor: 16},
+		BundleID: id, Generation: 1, Target: "primary", Purpose: "feature",
+		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "fixture history", Fingerprint: result.CurrentFingerprint, PostgresMajor: postgresMajor},
+		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "fixture transition", Fingerprint: result.DesiredFingerprint, PostgresMajor: postgresMajor},
 		Planner:        bundle.PlannerReceipt{Version: "test"}, HistoryParentDigest: chain.HeadDigest,
 	}
 	artifact, err := bundle.Build(bundle.Input{Metadata: metadata, Result: result})
@@ -901,6 +1055,10 @@ func writeHistoryTransitionFixture(t *testing.T, root, devURL, id, desiredDDL st
 func writeHistoryContractDropFixture(t *testing.T, root, devURL, id string) {
 	t.Helper()
 	ctx := context.Background()
+	postgresMajor, err := source.PostgresMajor(ctx, devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	chain, err := history.Load(root, "onward-bundles", "primary")
 	if err != nil {
 		t.Fatal(err)
@@ -945,10 +1103,9 @@ func writeHistoryContractDropFixture(t *testing.T, root, devURL, id string) {
 		t.Fatalf("drop result = %#v", result)
 	}
 	metadata := bundle.Metadata{
-		BundleID: id, Generation: 1, Target: "primary", Purpose: "contract", Mode: "pr",
-		BaseRef: "origin/main", BaseCommit: strings.Repeat("e", 40), HeadRevision: strings.Repeat("f", 40),
-		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "fixture history", Fingerprint: result.CurrentFingerprint, PostgresMajor: 16},
-		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "empty fixture schema", Fingerprint: result.DesiredFingerprint, PostgresMajor: 16},
+		BundleID: id, Generation: 1, Target: "primary", Purpose: "contract",
+		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "fixture history", Fingerprint: result.CurrentFingerprint, PostgresMajor: postgresMajor},
+		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "empty fixture schema", Fingerprint: result.DesiredFingerprint, PostgresMajor: postgresMajor},
 		Planner:        bundle.PlannerReceipt{Version: "test"}, HistoryParentDigest: chain.HeadDigest,
 	}
 	artifact, err := bundle.Build(bundle.Input{Metadata: metadata, Result: result, Answers: &answers})

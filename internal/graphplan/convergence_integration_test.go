@@ -241,7 +241,7 @@ func TestChangedViewRequiresManualDependentMaterializedViewRefresh(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Batches) != 2 || plan.Batches[1].Phase != "manual" || !strings.Contains(joinSQL(plan), "REFRESH MATERIALIZED VIEW") {
+	if plan.Status != protocol.Planned || len(plan.Batches) != 2 || plan.Batches[1].Phase != "migrate" || !strings.Contains(joinSQL(plan), "REFRESH MATERIALIZED VIEW") {
 		t.Fatalf("expected view replacement followed by a manual refresh batch, got %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -432,7 +432,7 @@ func TestManualPartitionReconfigurationContractConvergesOnPostgreSQL(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Batches) != 1 || plan.Batches[0].Phase != "manual" {
+	if plan.Status != protocol.Planned || len(plan.Batches) != 1 || plan.Batches[0].Phase != "migrate" {
 		t.Fatalf("expected manual plan, got %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -493,7 +493,7 @@ func TestManualDefaultPartitionReconfigurationContractConvergesOnPostgreSQL(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Batches) != 1 || plan.Batches[0].Phase != "manual" {
+	if plan.Status != protocol.Planned || len(plan.Batches) != 1 || plan.Batches[0].Phase != "migrate" {
 		t.Fatalf("expected manual default-partition plan, got %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -1891,7 +1891,7 @@ func TestRoutineReplacementRequiresMaterializedViewRefreshContract(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), "CREATE OR REPLACE FUNCTION") || !strings.Contains(joinSQL(plan), "REFRESH MATERIALIZED VIEW") || len(plan.Batches) != 2 || plan.Batches[1].Phase != "manual" {
+	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), "CREATE OR REPLACE FUNCTION") || !strings.Contains(joinSQL(plan), "REFRESH MATERIALIZED VIEW") || len(plan.Batches) != 2 || plan.Batches[1].Phase != "migrate" {
 		t.Fatalf("expected routine replacement followed by manual refresh, got %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)

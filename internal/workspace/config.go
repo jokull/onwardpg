@@ -25,10 +25,10 @@ type Config struct {
 }
 
 type Target struct {
-	SchemaFile     string   `toml:"schema_file" json:"schema_file,omitempty"`
-	SchemaCommand  []string `toml:"schema_command" json:"schema_command,omitempty"`
-	DevDatabaseEnv string   `toml:"dev_database_env" json:"dev_database_env"`
-	PostgresMajor  int      `toml:"postgres_major" json:"postgres_major"`
+	SchemaFile         string   `toml:"schema_file" json:"schema_file,omitempty"`
+	SchemaCommand      []string `toml:"schema_command" json:"schema_command,omitempty"`
+	DevDatabaseEnv     string   `toml:"dev_database_env" json:"dev_database_env"`
+	ScratchDatabaseEnv string   `toml:"scratch_database_env" json:"scratch_database_env,omitempty"`
 }
 
 func Load(name string) (Config, error) {
@@ -101,10 +101,21 @@ func (t Target) Validate() error {
 	if !envNamePattern.MatchString(t.DevDatabaseEnv) {
 		return fmt.Errorf("dev_database_env must name an environment variable, not contain a URL")
 	}
-	if t.PostgresMajor < 14 || t.PostgresMajor > 18 {
-		return fmt.Errorf("postgres_major must be between 14 and 18")
+	if t.ScratchDatabaseEnv != "" && !envNamePattern.MatchString(t.ScratchDatabaseEnv) {
+		return fmt.Errorf("scratch_database_env must name an environment variable, not contain a URL")
 	}
 	return nil
+}
+
+// ScratchEnv returns the environment variable containing the disposable
+// PostgreSQL administrative URL. Falling back to dev_database_env preserves
+// existing preview configuration while new repositories can keep the read-only
+// development catalog separate from CREATE DATABASE authority.
+func (t Target) ScratchEnv() string {
+	if t.ScratchDatabaseEnv != "" {
+		return t.ScratchDatabaseEnv
+	}
+	return t.DevDatabaseEnv
 }
 
 func (c Config) Target(name string) (Target, error) {

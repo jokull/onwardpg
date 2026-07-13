@@ -47,8 +47,6 @@ type Input struct {
 	AdminURL       string
 	BundleID       string
 	BuildVersion   string
-	Answers        protocol.Answers
-	AnswersGiven   bool
 	Ignores        []string
 	PlannerOptions graphplan.Options
 }
@@ -75,6 +73,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if input.BuildVersion == "" {
 		return report, fmt.Errorf("planner build version is required")
 	}
+	postgresMajor, err := source.PostgresMajor(ctx, input.AdminURL)
+	if err != nil {
+		return report, err
+	}
 
 	chain, err := history.Load(input.Root, input.Config.BundleRoot, input.TargetName)
 	if err != nil {
@@ -86,7 +88,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Findings = []Finding{{
 			Code:        "history_already_initialized",
 			Message:     fmt.Sprintf("target %s already has %d history entries", input.TargetName, len(chain.Entries)),
-			Remediation: "use pr status or pr regenerate; history init is only for an empty target history",
+			Remediation: "use onwardpg draft; init is only for an empty target history",
 		}}
 		return report, nil
 	}
@@ -106,7 +108,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err := source.ValidateIgnoreSelectors(input.Ignores, empty, desired); err != nil {
 		return report, err
 	}
-	plan, err := graphplan.Build(empty, desired, input.Answers, input.PlannerOptions)
+	plan, err := graphplan.Build(empty, desired, protocol.Answers{}, input.PlannerOptions)
 	if err != nil {
 		return report, fmt.Errorf("plan baseline: %w", err)
 	}
@@ -117,24 +119,18 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return report, nil
 	}
 
-	var answerReceipt *protocol.Answers
-	if input.AnswersGiven {
-		answers := input.Answers
-		answerReceipt = &answers
-	}
 	metadata := bundle.Metadata{
 		BundleID:   input.BundleID,
 		Generation: 1,
 		Target:     input.TargetName,
 		Purpose:    "baseline",
-		Mode:       "init",
 		BaselineSource: bundle.SourceReceipt{
 			Kind: "ddl", Description: "empty PostgreSQL catalog",
-			Fingerprint: plan.CurrentFingerprint, PostgresMajor: input.Target.PostgresMajor,
+			Fingerprint: plan.CurrentFingerprint, PostgresMajor: postgresMajor,
 		},
 		DesiredSource: bundle.SourceReceipt{
 			Kind: "ddl_export", Description: "baseline declarative " + compiled.Provenance,
-			Fingerprint: plan.DesiredFingerprint, PostgresMajor: input.Target.PostgresMajor,
+			Fingerprint: plan.DesiredFingerprint, PostgresMajor: postgresMajor,
 		},
 		Planner: bundle.PlannerReceipt{
 			Version: input.BuildVersion,
@@ -152,9 +148,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	artifact, err := bundle.Build(bundle.Input{
 		Metadata:  metadata,
 		Result:    plan,
-		Answers:   answerReceipt,
 		Questions: plan.Questions,
-		Intent:    "# onwardpg history baseline\n\nThis bundle reconstructs the existing declarative schema from an empty PostgreSQL database. It establishes replay history and is not an instruction to apply the genesis SQL to an already-existing database.\n",
 		Attempt:   1,
 	})
 	if err != nil {

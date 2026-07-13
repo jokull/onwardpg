@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/jokull/onwardpg/adapter"
 )
 
 func TestTargetCompilerReadsSchemaFile(t *testing.T) {
@@ -15,11 +13,11 @@ func TestTargetCompilerReadsSchemaFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "schema.sql"), []byte("CREATE TABLE users (id bigint);\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	compiler := TargetCompiler{TargetName: "primary", Target: Target{
+	target := Target{
 		SchemaFile:     "schema.sql",
-		DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16,
-	}}
-	artifact, err := compiler.Compile(context.Background(), adapter.CompileRequest{Root: root, Target: "primary", Revision: "test"})
+		DevDatabaseEnv: "DEV_DATABASE_URL",
+	}
+	artifact, err := CompileDDL(context.Background(), root, "primary", target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,11 +28,11 @@ func TestTargetCompilerReadsSchemaFile(t *testing.T) {
 
 func TestTargetCompilerCapturesCommandStdout(t *testing.T) {
 	root := t.TempDir()
-	compiler := TargetCompiler{TargetName: "primary", Target: Target{
+	target := Target{
 		SchemaCommand:  []string{"printf", "CREATE TABLE users (id bigint);\\n"},
-		DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16,
-	}}
-	artifact, err := compiler.Compile(context.Background(), adapter.CompileRequest{Root: root, Target: "primary"})
+		DevDatabaseEnv: "DEV_DATABASE_URL",
+	}
+	artifact, err := CompileDDL(context.Background(), root, "primary", target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,14 +41,36 @@ func TestTargetCompilerCapturesCommandStdout(t *testing.T) {
 	}
 }
 
+func TestTargetCompilerAcceptsAnEmptyDesiredSchema(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "schema.sql"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileArtifact, err := CompileDDL(context.Background(), root, "file", Target{
+		SchemaFile: "schema.sql", DevDatabaseEnv: "DEV_DATABASE_URL",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandArtifact, err := CompileDDL(context.Background(), root, "command", Target{
+		SchemaCommand: []string{"sh", "-c", "true"}, DevDatabaseEnv: "DEV_DATABASE_URL",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fileArtifact.DDL) != 0 || len(commandArtifact.DDL) != 0 {
+		t.Fatalf("file=%q command=%q", fileArtifact.DDL, commandArtifact.DDL)
+	}
+}
+
 func TestTargetCompilerRejectsUndeclaredCommandOutputs(t *testing.T) {
 	root := t.TempDir()
-	compiler := TargetCompiler{TargetName: "primary", Target: Target{
+	target := Target{
 		SchemaCommand:  []string{"sh", "-c", "mkdir cache && printf 'CREATE TABLE users (id bigint);'"},
-		DevDatabaseEnv: "DEV_DATABASE_URL", PostgresMajor: 16,
-	}}
-	_, err := compiler.Compile(context.Background(), adapter.CompileRequest{Root: root, Target: "primary"})
-	if err == nil || !strings.Contains(err.Error(), "modified its isolated input tree") {
+		DevDatabaseEnv: "DEV_DATABASE_URL",
+	}
+	_, err := CompileDDL(context.Background(), root, "primary", target)
+	if err == nil || !strings.Contains(err.Error(), "modified repository inputs") {
 		t.Fatalf("expected undeclared output rejection, got %v", err)
 	}
 }

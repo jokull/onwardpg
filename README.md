@@ -1,423 +1,468 @@
 # onwardpg
 
-`onwardpg` is an agent-friendly PostgreSQL schema-diff planner. It helps a
-developer or coding agent do two things well:
+onwardpg is an agent-native, forward-only PostgreSQL schema-diff planner.
 
-1. keep a development database aligned while a feature evolves; and
-2. turn the final feature into one reviewable, forward-only migration bundle
-   before its pull request lands.
+It gives a developer or coding agent a clean answer to:
 
-Give onwardpg a schema that exists and PostgreSQL `CREATE`-statement DDL for
-the schema you want. It inspects both with PostgreSQL, reports their semantic
-difference, asks when the schemas cannot prove your intent, and emits readable
-`EXPAND`, `MIGRATE`, `CONTRACT`, and `MANUAL` work.
+> Given the migration chain beneath this feature and the PostgreSQL schema the
+> code now declares, what migration gets us from here to there?
 
-**onwardpg never applies a plan to a caller-supplied database.** The developer
-or agent owns real execution because it has the application, CI, deployment,
-traffic, and timing context. onwardpg may execute reviewed SQL only in random
-disposable databases that it creates and destroys for verification.
+onwardpg replays the accepted migration chain in disposable PostgreSQL,
+materializes the desired CREATE-statement DDL, asks for intent the schemas
+cannot prove, and produces reviewable expand/migrate/contract SQL.
+
+**It never applies migrations to development, staging, or production.** The
+developer or agent owns real execution because it has the application, CI,
+deployment, traffic, and timing context.
 
 The approach comes from [Use a diff tool for SQL
-migrations](https://www.solberg.is/sql-diff-migrations): derive migrations
-from the real difference between declarative code and a real database, keep
-manual control, detect drift, and prove difficult work on a clone.
+migrations](https://www.solberg.is/sql-diff-migrations): derive migrations from
+real schema state, keep manual control, expose drift, and prove difficult work
+on a clone.
 
-## The idea in one minute
+## The model
 
-Feature-branch schema work has two comparison boundaries:
+There are four schemas to keep separate:
 
-| Loop | Current schema | Desired schema | Durable result |
-| --- | --- | --- | --- |
-| **Develop** | Your development database | DDL exported from the working tree | Usually none; plan, apply deliberately, and diff again |
-| **PR** | Declarative schema and onwardpg history at the latest PR base | The schema the feature would produce after merge | One restackable migration bundle per target |
+| Name | Meaning |
+| --- | --- |
+| **H — history head** | The schema produced by replaying the onwardpg migration chain |
+| **D — developer database** | The developer's mutable local database |
+| **W — working schema** | Complete CREATE-statement DDL exported from the current code |
+| **P — production** | The live production catalog, inspected only by an explicit drift audit |
 
-During development, run the cheap loop as often as useful. Before review,
-collapse the feature's exploratory history into one logical PR migration. If
-`origin/main` advances, regenerate that same unexecuted bundle from the new
-base instead of stacking another migration on top.
+They form two everyday loops and one occasional audit:
 
-```text
-code-exported DDL ───► disposable PostgreSQL ──► desired catalog graph
-                                                        │
-live / replayed DB ─────────────────────────────► current catalog graph
-                                                        │
-                                                        ▼
-                                             typed dependency diff
-                                                        │
-                                  questions ◄──► fingerprinted answers
-                                                        │
-                                                        ▼
-                          reviewed plan + phased SQL + hazards + receipts
-```
+~~~text
+local development:      D ──diff──> W     ephemeral; the agent may apply it
+next migration:         H ──diff──> W     durable; committed as one bundle
+periodic drift audit:   H ──diff──> P     read-only diagnostic
+~~~
 
-This is “one migration per PR” at the level that matters: one logical feature
-outcome. It may span several SQL files, transactions, and deployment moments.
+The durable migration is never based on the developer database. Local state can
+be useful, behind, ahead, or messy; it is not the historical source of truth.
 
 ## Install the developer preview
 
 There are no published binaries yet. Build from a checkout with Go 1.26 or
 newer:
 
-```sh
+~~~sh
 git clone https://github.com/jokull/onwardpg.git
 cd onwardpg
 go install ./cmd/onwardpg
-command -v onwardpg
-```
+onwardpg version
+~~~
 
-If the last command fails, add your configured `GOBIN` or
-`$(go env GOPATH)/bin` to `PATH` and retry.
+The preview targets PostgreSQL 14–18.
 
-The basic diff engine needs PostgreSQL 14–18. The Git-aware PR commands also
-need Git and the dependencies used by your `schema_command`. CI currently
-tests Linux against every supported PostgreSQL major; source development also
-works on macOS.
+## Configure one target
 
-## Quick start
+Your application or ORM only needs to export complete PostgreSQL DDL:
 
-Configure one database target. Your application or ORM only needs to export
-complete PostgreSQL DDL to a file or stdout:
-
-```toml
+~~~toml
 # .onwardpg.toml
 version = 1
 bundle_root = "migrations/onward"
 
-[targets.primary-postgres]
+[targets.primary]
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
-postgres_major = 16
-```
+scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
+~~~
 
-`schema_file = "schema.sql"` can be used instead of `schema_command`. The
-environment variable must name a PostgreSQL server on which onwardpg can
-create disposable databases. Database credentials are not stored in bundles.
+Use schema_file = "schema.sql" instead of schema_command when the DDL already
+exists in the repository. Drizzle, Django, Prisma, SQLAlchemy, or handwritten
+SQL may produce it; onwardpg does not contain framework adapters.
 
-Check the setup, then plan the development database diff:
+dev_database_env names the read-only development catalog.
+scratch_database_env names a PostgreSQL administrative URL that may create and
+drop disposable databases. For compatibility, omitting scratch_database_env
+falls back to dev_database_env; new repositories should keep them separate.
+Credentials are never written to bundles. The PostgreSQL major is discovered
+from the scratch server, recorded in receipts, and never duplicated in config.
 
-```sh
+~~~sh
 onwardpg config check
-onwardpg dev plan --target primary-postgres
-```
+~~~
 
-The configured role needs `LOGIN`, `CREATEDB`, `CONNECT` on the named
-development database, and enough catalog visibility to inspect every in-scope
-object. It does not need permission to read or write application rows. For
-`dev plan`, the database named by `ONWARDPG_DEV_DATABASE_URL` is the current
-schema and is inspected read-only; onwardpg also uses the same server
-connection to create randomly named scratch databases for DDL materialization.
-PR planning and verification use only scratch databases. Use local or isolated
-infrastructure—not production credentials—as this administrative connection.
+DDL is materialized in random onwardpg_ddl_* databases and verification uses
+onwardpg_verify_* databases. They are dropped after use.
 
-| Command | Caller-owned database | Disposable PostgreSQL | Checkout |
-| --- | --- | --- | --- |
-| `plan` / `dev plan` | Catalog read only | Creates and drops databases when DDL must be materialized | No writes |
-| `history init` | Not inspected or modified | Builds and verifies empty→declarative genesis | Writes only the first target bundle |
-| `pr status --bundle` | Not used as a migration destination | Compiles and replays schemas | Read only |
-| `pr regenerate` | Not used as a migration destination | Compiles, replays, and proves convergence | Writes only the requested bundle |
-| `bundle verify` | Not accepted | Executes the validated bundle in random databases | No writes |
-| `ci check` | Not accepted | Replays and verifies the bundle | Read only |
+## 1. Establish the replayable ground floor
 
-Scratch databases use `onwardpg_ddl_*` or `onwardpg_verify_*` names and are
-dropped after use. A killed process or failed cleanup can leave one behind for
-the database owner to remove.
+Run this once for a target:
 
-Planner exits are designed for agents:
+~~~sh
+onwardpg init --target primary
+~~~
 
-| Exit | Meaning | Next action |
-| --- | --- | --- |
-| `0` | Plan ready, including an empty residual | Review JSON or rerun with `--sql` |
-| `2` | Explicit intent required | Write fingerprint-bound answers and rerun |
-| `3` | Schema state is outside the modeled safety boundary | Narrowly ignore it or handle it outside onwardpg |
-| `4` | Bundle/CI policy blocked, stale, residual, or verification failed | Follow the typed remediation |
-| `1` | Invocation, configuration, connection, or internal error | Fix the reported error |
+The command plans empty PostgreSQL to the current desired DDL, creates a
+content-addressed baseline bundle, clone-verifies it, and only then installs it
+under the configured bundle root.
 
-## The agent decision loop
+For an existing system, the baseline is a replayable declaration of the ground
+beneath future work. It is not SQL to apply to the already-existing production
+database.
 
-onwardpg does not guess that a column was renamed, a drop is intentional, a
-cast is correct, or a backfill is safe. The loop is deliberately mechanical:
+~~~text
+migrations/onward/primary/
+└── baseline/
+    ├── manifest.json
+    ├── plan.json
+    └── phases/
+        └── expand.sql
+~~~
 
-1. Run the planner and read its versioned JSON.
-2. If it returns `needs_input`, combine the typed question with the developer's
-   stated feature intent.
-3. Record the chosen value and exact question fingerprint in an answer file.
-4. Rerun. Later question stages appear only after earlier ambiguities resolve.
-5. Continue until the result is either a complete plan or an explicit
-   unsupported result—never a partial successful plan.
-6. Render SQL, review its phases and hazards, and let the developer or agent
-   decide when and where to run it.
-7. Diff again. The live PostgreSQL catalog is the journal of what remains.
+History ordering comes from parent and entry digests, not filenames. Forks,
+missing parents, altered artifacts, and ambiguous order are rejected.
 
-Capture the exact result rather than copying fingerprints from terminal text:
 
-```sh
-set +e
-onwardpg dev plan --target primary-postgres > dev-plan.json
-status=$?
-set -e
+## 2. Iterate on the development database
 
-# status=2 means the questions and fingerprints are in dev-plan.json.
-jq '{current_fingerprint, desired_fingerprint, questions}' dev-plan.json
-```
+While the feature evolves:
 
-`jq` is optional here; it only makes the JSON easier to inspect.
+~~~sh
+onwardpg dev plan --target primary
+~~~
 
-There is not yet a separate answer-template command. A developer or agent
-creates the small answer document from that exact result: copy the two root
-fingerprints, then copy each chosen question's `kind`, `key`, selected value,
-and `scope_fingerprint` as `question_fingerprint`. The example below shows the
-complete shape.
+This compares D → W. It prints a versioned plan and never runs it. A coding
+agent may deliberately apply the SQL through the project's own tools, observe
+the application, change the declarative schema, and run the command again.
 
-Answers are bound to the complete current and desired states and to the
-participating objects' dependency scope. Stale, contradictory, invalid, and
-unused answers are rejected. During PR restacking, onwardpg carries a decision
-only when that scoped state is unchanged and explicitly reports every carried,
-invalidated, unanswered, or deferred answer.
+After a pull or rebase, D may be missing both upstream and feature work.
+dev plan simply reports the complete local reconciliation. It does not affect
+the durable migration baseline.
 
-### Small example: make a rename explicit
+Applying a local plan does not advance onwardpg history. If the developer
+applies today's feature SQL to D and adds another column tomorrow, `dev plan`
+shows only that new `D → W` residual. The durable feature migration is still
+the complete `H → W` transition.
 
-Current:
+## 3. Keep one logical feature migration current
 
-```sql
-CREATE TABLE public.users (
-    id bigint PRIMARY KEY,
-    name text NOT NULL
-);
-```
+Create or refresh the feature's selected bundle at any point:
 
-Desired:
+~~~sh
+onwardpg draft \
+  --target primary \
+  --bundle payment-settlement
+~~~
 
-```sql
-CREATE TABLE public.users (
-    id bigint PRIMARY KEY,
-    full_name text NOT NULL
-);
-```
+The bundle ID is the only lifecycle context onwardpg needs. Keep using the same
+ID while the feature evolves. The command does
+not inspect the Git branch, origin/main, commits, merge bases, or pull requests.
 
-The first run exits `2` with a `rename_column` question. It does not decide
-that dropping `name` and creating `full_name` is safe merely because their
-types look alike. The agent records the developer's rename intent:
+draft:
 
-```json
+1. excludes only payment-settlement from the candidate base;
+2. validates every other bundle as one hash chain;
+3. replays that history on disposable PostgreSQL;
+4. exports and materializes the working DDL;
+5. plans H → W through the typed PostgreSQL graph;
+6. stops for intent it cannot infer;
+7. writes or refreshes that same selected bundle; and
+8. clone-verifies generated complete plans before writing them.
+
+The selected bundle remains a mutable cumulative `H → W` draft even after its
+SQL has been deliberately applied to the developer database. There is no
+`lock`, `finalize`, or `promote` command. Local execution changes D, not H.
+
+If accounts became customers, onwardpg asks rather than guessing:
+
+~~~json
 {
-  "protocol_version": "onwardpg.plan/v1",
-  "current_fingerprint": "sha256:...",
-  "desired_fingerprint": "sha256:...",
-  "answers": [
+  "protocol": "onwardpg/draft/2",
+  "status": "needs_decisions",
+  "decisions": [
     {
-      "kind": "rename_column",
-      "key": "column:public:users:name",
-      "value": "column:public:users:full_name",
-      "question_fingerprint": "sha256:..."
+      "choices": [
+        {
+          "hint": {
+            "kind": "rename",
+            "object": "table",
+            "from": ["app", "accounts"],
+            "to": ["app", "customers"]
+          }
+        },
+        {
+          "hint": {
+            "kind": "drop",
+            "object": "table",
+            "name": ["app", "accounts"]
+          },
+          "hazards": ["data_loss"]
+        }
+      ]
     }
   ]
 }
-```
+~~~
 
-Then it asks onwardpg for the complete reviewed SQL (abridged here):
+The coding agent knows the product intent, so it runs the same draft again with
+the offered semantic hint:
 
-```sh
-onwardpg dev plan \
-  --target primary-postgres \
-  --answers migration.answers.json \
-  --sql > dev-plan.sql
-```
+~~~sh
+onwardpg draft \
+  --target primary \
+  --bundle customer-rename \
+  --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}'
+~~~
 
-```sql
--- CONTRACT — a direct rename requires coordinated application rollout.
--- Batch: transactional
-ALTER TABLE "public"."users" RENAME COLUMN "name" TO "full_name";
-```
+The agent can supply the same hint on the first invocation when it already
+knows the rename from the feature context. It may prepare a complete hints file
+for every decision it anticipates; onwardpg walks staged questions until all
+matching intent is consumed. A hint says only what schema state cannot: the
+relationship between the old and new identities. onwardpg validates it against
+the real graph diff, rejects malformed, contradictory, impossible, and unused
+intent, then adds narrow fingerprints to its own receipt. Accepted intent
+persists automatically; the agent does not maintain an answer file. Resending
+the same complete hints file is safe.
 
-After the developer or agent deliberately runs the SQL against the development
-database, another `dev plan` reports an empty residual. onwardpg itself never
-performed the application.
+`--hint` is repeatable. `--hints-file` accepts an array of the same objects.
+Object names are identifier arrays, so quoted names containing dots or colons
+remain unambiguous. `--output text` prints copyable hints; JSON is the default.
 
-The SQL renderer includes all non-empty phases and batch comments. A
-transactional batch may be wrapped atomically by the caller; a
-non-transactional batch—such as `CREATE INDEX CONCURRENTLY`—must run outside
-`BEGIN`/`COMMIT`. `MANUAL` statements are developer-supplied, fingerprinted
-work: clone verification executes them and checks their boolean postconditions,
-while the developer or agent decides how the real deployment system should run
-and observe them.
+An agent can author common intent before the first call because the hint
+vocabulary is semantic and finite:
 
-### Feature showcase: expand, backfill, validate, contract
+| Kind | Only information not present in schema state |
+| --- | --- |
+| `rename` | Old and new identifiers are the same object |
+| `drop` | Removal is deliberate, not an unrecognized rename |
+| `type_change` | Use direct DDL or hand the conversion to editable SQL |
+| `rollout` | Use direct or staged `NOT NULL` sequencing |
+| `confirm` | Approve the exact niche lifecycle action named by the planner |
+| `manual_sql` | Put the named niche operation into an editable phase TODO |
 
-Suppose an earlier compatible release added nullable `events.occurred_on date`
-beside `events.occurred_at timestamptz`, and the current feature is ready to
-finish the transition and add an index. A direct rename-and-cast would have
-rewritten or locked a large table and immediately broken old application code.
-Schema state also cannot tell onwardpg how the business wants timestamps
-mapped to dates.
+The first four are usually predictable from feature context. `confirm` and
+`manual_sql` are deliberately easiest to copy from planner output when the
+agent did not already know onwardpg would require them.
 
-With explicit answers, the reviewed plan can instead express a rollout like
-this (abridged, with the generated guard name shortened for readability):
+If onwardpg cannot derive product-specific SQL, the choice is semantic rather
+than a JSON orchestration contract:
 
-```sql
--- EXPAND — compatible with the old application.
-ALTER TABLE "public"."events"
-  ADD CONSTRAINT "events_occurred_on_nn"
-  CHECK ("occurred_on" IS NOT NULL) NOT VALID;
+~~~sh
+onwardpg draft \
+  --target primary \
+  --bundle event-date \
+  --hint '{"kind":"type_change","name":["app","events","occurred_on"],"strategy":"manual_sql"}'
+~~~
 
--- EXPAND — non-transactional batch.
-CREATE INDEX CONCURRENTLY "events_occurred_on_idx"
-  ON "public"."events" ("occurred_on");
+The command returns `needs_sql_edits`, writes an `ONWARDPG TODO` in the relevant
+phase, and does not claim convergence. The agent replaces that TODO with
+reviewed SQL, adds assertions when useful, and runs `onwardpg verify`. Only
+TODO-free SQL that converges on a disposable clone receives planned receipts.
 
--- MANUAL — application-owned data work supplied as a fingerprinted contract.
-UPDATE "public"."events"
-SET "occurred_on" = "occurred_at"::date
-WHERE "occurred_on" IS NULL;
--- Verify: SELECT count(*) = 0 FROM "public"."events"
---         WHERE "occurred_on" IS NULL;
+Planner exits are stable for agents:
 
--- CONTRACT — only after compatible code is deployed and data work is observed.
-ALTER TABLE "public"."events"
-  VALIDATE CONSTRAINT "events_occurred_on_nn";
-ALTER TABLE "public"."events"
-  ALTER COLUMN "occurred_on" SET NOT NULL;
-ALTER TABLE "public"."events"
-  DROP CONSTRAINT "events_occurred_on_nn";
-ALTER TABLE "public"."events" DROP COLUMN "occurred_at";
-```
+| Exit | Meaning |
+| --- | --- |
+| 0 | Complete plan, including an empty plan |
+| 2 | A semantic decision or SQL edit is required |
+| 3 | Unsupported schema state |
+| 4 | History, convergence, or policy blocker |
+| 1 | Invocation, configuration, connection, or internal error |
 
-The plan records transactional boundaries, concurrent-index requirements,
-lock/rewrite/data-loss hazards, the supplied backfill, and its verification
-query. The developer or agent still decides how this maps onto deploys:
+## 4. Review the generated bundle
 
-1. run compatible `EXPAND` work;
-2. deploy code that can tolerate both shapes;
-3. run and observe the application-owned backfill;
-4. switch application reads to the new column; and
-5. run `CONTRACT` only after the compatibility window closes.
+A planned bundle currently looks like:
 
-This is why phase files are guidance rather than an apply API. Only the caller
-has enough operational context to sequence the real rollout.
-
-## From a feature branch to one PR bundle
-
-The durable loop starts from the latest base, not from whichever development
-migrations happened to exist yesterday:
-
-```sh
-git fetch origin
-
-# Read-only: is the existing bundle fresh, stale, conflicting, or blocked?
-onwardpg pr status \
-  --base origin/main \
-  --target primary-postgres \
-  --bundle account-profile
-
-# Replace the same unexecuted logical bundle after feature edits or base erosion.
-onwardpg pr regenerate \
-  --base origin/main \
-  --target primary-postgres \
-  --bundle account-profile \
-  --replace-draft
-```
-
-Omit `--replace-draft` when creating the bundle for the first time. Replacement
-is always explicit; onwardpg does not overwrite an existing directory merely
-because its name matches.
-
-If regeneration exits `2`, create the fingerprint-bound answer file from the
-bundle's `questions.json`/decision result and rerun with `--answers ...
---replace-draft`. The command:
-
-- exports the schema at the exact PR base and from the would-be merged feature;
-- replays base migration history and proves it matches base declarative code;
-- plans base to feature and proves the proposed history reaches the feature
-  schema;
-- preserves still-valid decisions while invalidating only affected ones; and
-- replaces `account-profile`, rather than adding a second migration for the
-  same feature.
-
-The resulting bundle is reviewable without rerunning the planner:
-
-```text
-migrations/onward/primary-postgres/account-profile/
+~~~text
+migrations/onward/primary/customer-rename/
 ├── manifest.json
-├── intent.md                 # when supplied
+├── decisions.json
 ├── questions.json
+├── answers.json
 ├── decisions/
 │   └── attempt-001.json
-├── answers.json
 ├── plan.json
 └── phases/
     ├── expand.sql
     ├── migrate.sql
-    ├── manual.sql
     └── contract.sql
-```
+~~~
 
-Only non-empty phase files are written. The manifest fingerprints inputs,
-planner options, answers, history parent, plan, and SQL artifacts. Per-target
-history is a parent/digest chain, not filename order. Forks, stale parents,
-missing entries, altered history, ambiguous ordering, and unreceipted edits
-are rejected.
+Only non-empty phases are written. SQL includes phase, batch, transaction, and
+hazard comments. CREATE INDEX CONCURRENTLY and similar operations are separated
+from transactional batches.
 
-### Initialize the history ground floor
+`decisions.json`, `questions.json`, and `answers.json` are generated receipts.
+Only the compact semantic hint is authored by the agent; fingerprints and
+planner keys remain internal evidence.
 
-Before the first restackable feature PR, establish what “the schema on main”
-means:
+### Take ownership of the SQL
 
-```sh
-onwardpg history init --target primary-postgres
-onwardpg bundle verify --target primary-postgres --bundle baseline
-```
+The generated plan remains a receipt, but the agent may now add or rewrite SQL
+directly under phases/. It may create a missing migrate.sql or contract.sql and
+add verify.sql with boolean assertions.
 
-`history init` compiles the current declarative schema, plans an empty
-PostgreSQL database to that schema, builds a `baseline` root bundle, and proves
-the complete bundle converges in disposable PostgreSQL **before** writing it.
-It refuses to run if the target already has any history. It never inspects or
-modifies an existing application database.
+~~~sql
+-- phases/migrate.sql
+-- Product-aware rule supplied by the coding agent.
+UPDATE public.payments
+SET settled_on = (captured_at AT TIME ZONE 'Atlantic/Reykjavik')::date
+WHERE status = 'captured' AND settled_on IS NULL;
+~~~
 
-Initialization proves **empty replay equals declarative code**; it does not
-claim that a particular deployed database already equals that code. Before
-adopting an existing project, run a normal read-only diff against the
-environment your team treats as ground truth and resolve or explicitly record
-any drift.
+~~~sql
+-- verify.sql
+-- onwardpg:assert captured_payments_are_settled
+SELECT count(*) = 0
+FROM public.payments
+WHERE status = 'captured' AND settled_on IS NULL;
+~~~
 
-For an existing project, the generated genesis SQL is a reproducible ground
-floor for replay and new environments. It is not a migration to run against
-the already-existing database. Review the bundle in a small onboarding PR and
-merge it to the protected base before creating ordinary feature bundles. That
-separate merge is what lets later `pr regenerate` prove that base declarative
-code and replayed base history are equal.
+An edited phase with no directive is one transactional batch. Split execution
+boundaries with exact comment directives when needed:
 
-This intentionally does not import or interpret a framework's legacy journal.
-If the exported schema cannot be reconstructed from empty PostgreSQL within
-onwardpg's modeled boundary, initialization returns `unsupported` and writes
-nothing.
+~~~sql
+-- onwardpg:batch transactional
+UPDATE public.payments SET settled_on = captured_at::date
+WHERE settled_on IS NULL;
 
-## Verification and CI
+-- onwardpg:batch nontransactional
+CREATE INDEX CONCURRENTLY payments_settled_on_idx
+ON public.payments (settled_on);
+~~~
 
-Before review, prove the committed bundle converges:
+Each nontransactional batch should contain one operation that PostgreSQL permits
+outside a transaction. Multiple assertions use distinct
+-- onwardpg:assert NAME markers. An unresolved ONWARDPG TODO blocks
+verification.
 
-```sh
-onwardpg bundle verify \
-  --target primary-postgres \
-  --bundle account-profile
+## 5. Verify the generated migration
 
-onwardpg ci check \
-  --base origin/main \
-  --target primary-postgres \
-  --bundle account-profile
-```
+~~~sh
+onwardpg verify \
+  --target primary \
+  --bundle customer-rename
+~~~
 
-`bundle verify` has no database destination flag. It creates random disposable
-databases, executes the validated history and selected phases, catalog-inspects
-the result, reports the residual diff, and destroys the databases. A partial
-checkpoint such as `--through expand` may intentionally have a residual; the
-complete bundle must converge.
+verify creates disposable databases, replays history through the selected
+bundle, executes its exact phase files in order, evaluates verify.sql,
+introspects the result, and requires an empty residual diff for full
+verification. On success it refreshes the edited phase and assertion receipts
+in manifest.json. That records which exact bytes converged; it does not freeze
+the selected feature draft. It has no destination flag.
 
-`ci check` is read-only with respect to the checkout and all caller-supplied
-databases. It rejects stale or forked history, edited artifacts, unanswered or
-invalidated decisions, incorrectly stacked bundles, schema/history mismatch,
-dirty source input, and failed clone convergence.
+~~~sh
+onwardpg verify --target primary --bundle customer-rename --check
+~~~
 
-Neither command deploys anything. After handoff, rerunning a normal diff
-against a real environment shows exactly which reviewed work that environment
-still needs.
+--check is read-only: it rejects unreceipted edits and clone-verifies a
+receipted bundle without changing the checkout. It also recompiles the current
+configured DDL and rejects a bundle whose recorded desired fingerprint is
+stale, directing the agent back to `draft`.
+
+A partial checkpoint is diagnostic:
+
+~~~sh
+onwardpg verify \
+  --target primary \
+  --bundle customer-rename \
+  --through expand
+~~~
+
+
+Verification proves structural replay and declared manual postconditions. It
+does not prove production timing, realistic data volume, application
+compatibility, or business correctness.
+
+## 6. Absorb a moving base without Git integration
+
+Suppose another migration lands while the feature is open. The developer or
+coding agent pulls and rebases normally, then reruns:
+
+~~~sh
+onwardpg draft \
+  --target primary \
+  --bundle customer-rename
+~~~
+
+The checkout now contains the new upstream entry and customer-rename still
+names its old parent. Selecting customer-rename lets onwardpg exclude that one
+entry, validate the new base chain, and detect the stale parent from content
+digests alone.
+
+onwardpg replans `new-head → W` and replaces the same logical bundle. It carries
+only answers whose dependency scope is unchanged. For developer-edited SQL it
+compares the previous generated phase, the edited phase, and the newly
+generated phase:
+
+- when only the generator changed a phase, the phase is refreshed;
+- when only the agent changed a phase, the exact agent SQL is preserved;
+- `verify.sql` is agent-owned and carried forward; and
+- when both changed the same phase, onwardpg anchors the folder to the new plan
+  while preserving the current SQL bytes unreceipted. The JSON report includes
+  the old generated, current edited, and new generated SQL. The coding agent
+  merges the intended work in that phase and runs `onwardpg verify`; only clone
+  convergence receipts the resolution.
+
+This is intentionally phase-grained, not a semantic SQL merge. Remaining forks
+or ambiguous entries are blockers.
+
+This is the responsibility split:
+
+- Git tells the coding agent which files belong in the checkout.
+- The explicit bundle ID tells onwardpg which migration is mutable.
+- Parent digests reveal whether the ground moved.
+- Disposable replay proves whether the resulting chain converges.
+
+The same mechanism handles ordinary feature iteration. Apply the current SQL
+locally, change the DDL again, and rerun `draft --bundle` with the same ID. The
+bundle remains the complete migration that will be reviewed for merge; it does
+not stack a second feature migration merely because D moved.
+
+## 7. Hand off; onwardpg does not deploy
+
+The developer commits the reviewed migration folder and uses the application's
+existing CI and deployment tooling to decide when expand, migrate, and contract
+run. Once a bundle has actually been published or run in a shared environment,
+rewriting it is no longer safe. onwardpg cannot infer that operational fact and
+does not model it with a lock command: the agent stops selecting that bundle as
+the feature draft and creates a successor for later work.
+
+There is no production apply command, migration-runner integration, down
+migration, embedded coding agent, framework adapter, or hidden Git mutation.
+
+verify --check is the Git-free read-only gate over the same bundle contract.
+Git-aware `pr` and `ci` commands are not exposed. The caller brings any branch
+or merge-base knowledge and selects the stable bundle ID.
+
+## 8. Audit production drift separately
+
+The normal feature workflow trusts that production has applied the accepted
+chain. It does not query production for every PR.
+
+Run the audit explicitly:
+
+~~~sh
+onwardpg drift check \
+  --target primary \
+  --database "$PRODUCTION_DATABASE_URL"
+~~~
+
+It compares replayed H with live P, read-only, and reports typed
+missing_in_actual, unexpected_in_actual, and changed_in_actual objects with
+both fingerprints. This catches a missing migration, unexpected index, or
+manual catalog edit. It will not
+generate an emergency repair, mutate history, or become a prerequisite for
+ordinary draft generation.
+
+## What onwardpg currently proves
+
+A valid generated chain proves:
+
+- every entry has one known parent and unmodified receipted content;
+- entries replay in content-addressed order;
+- the selected draft was planned from the actual replayed head;
+- generated complete phases converge to the desired catalog in disposable
+  PostgreSQL; and
+- questions, answers, planner options, hazards, and fingerprints are retained.
+
+It does not prove that production has applied the chain. That operational fact
+belongs to deployment observability and the separate drift-audit boundary.
 
 ## What the developer preview supports
 
@@ -477,8 +522,9 @@ Current notable gaps include:
   explicit operator-authored contract;
 - broad multi-schema moves and complex cross-schema dependency transitions;
   and
-- release engineering: published binaries, checksums/signing, benchmarked
-  performance bounds, and a complete real-PostgreSQL compatibility corpus.
+- release engineering: no preview tag, selected project license, signatures,
+  or signed provenance yet; and
+- the broader compatibility corpus remains preview hardening work.
 
 Known unmodeled state covered by the blocker inventory is a stop, not a
 footnote. Narrow ignore selectors must match and are reported exactly. Every
@@ -500,9 +546,10 @@ possible catalog attribute is already understood.
 - No claim of one-for-one Atlas or Migra compatibility.
 - No incomplete plan reported as success.
 
-Git-aware PR commands are checkout conveniences around prepared base and
-desired trees. Git is not part of the typed schema-diff engine, and the basic
-`onwardpg plan --from SOURCE --to SOURCE` command is repository-independent.
+Git is not part of the authoring model. A coding agent or developer changes the
+working tree; onwardpg sees only the validated migration chain, the explicitly
+selected draft, and the desired DDL. The low-level
+`onwardpg plan --from SOURCE --to SOURCE` command remains repository-independent.
 
 ## Philosophy
 
@@ -515,16 +562,17 @@ position:
   sides are read back from catalogs; onwardpg does not maintain a partial SQL
   interpretation beside the server.
 - **A schema proves destination, not intent.** Renames, drops, casts,
-  backfills, and rollout timing become explicit questions or manual contracts,
+  backfills, and rollout timing become explicit decisions or editable SQL handoffs,
   never guesses hidden inside plausible SQL.
 - **The result is a handoff, not a deployment.** SQL is forward-only,
   reviewable, phased, and never applied to a caller-owned database by
   onwardpg.
-- **Feature work has a different lifecycle from deployed history.** While a PR
-  is unmerged, regenerate one logical bundle from the newest base instead of
-  stacking every exploratory edit or base-erosion repair.
+- **Feature work has a different lifecycle from accepted history.** While a
+  feature is unmerged, regenerate one explicitly selected logical bundle from
+  the newest replayed head instead of stacking exploratory edits or base-erosion
+  repairs.
 - **Agents need receipts.** Stable JSON, fingerprints, carried and invalidated
-  answers, hazards, history hashes, clone convergence, and residual diffs make
+  decisions, hazards, history hashes, clone convergence, and residual diffs make
   the loop deterministic and resumable.
 - **Known unmodeled state is a result.** Inventoried unsupported families block
   unless a narrow validated ignore says exactly what may be excluded. Closing
@@ -566,7 +614,7 @@ the [Atlas reference study](parity/atlas-postgres.json), and the pinned
 - [CLI reference](docs/cli.md)
 - [Agent-assisted walkthrough](docs/agent-workflow.md)
 - [Migration bundles and repository configuration](docs/bundles.md)
-- [JSON protocol and answer files](docs/protocol.md)
+- [Semantic decision and receipt protocol](docs/protocol.md)
 - [Schema DDL inputs](docs/schema-inputs.md)
 - [Forward-only migration workflow](docs/migration-workflow.md)
 - [Safety model](docs/safety-model.md)
@@ -576,9 +624,10 @@ the [Atlas reference study](parity/atlas-postgres.json), and the pinned
 - [Ecosystem comparison](docs/ecosystem-comparison.md)
 - [Migra compatibility](docs/compatibility.md)
 - [Installation and release status](docs/installation.md)
+- [Performance envelope](docs/performance.md)
+- [Developer-preview security review](docs/security-review.md)
 - [Changelog](CHANGELOG.md)
 
-The immediate path from developer preview is hardening, not a broader
-application surface: improve Git-wrapper diagnostics, expand real-PostgreSQL
-convergence coverage, benchmark large schemas, and publish reproducible release
-artifacts. The planner remains a planner.
+The immediate path to the first preview tag is selecting a project license,
+final documentation review, and release-candidate testing from the generated archives. The
+planner remains a planner.

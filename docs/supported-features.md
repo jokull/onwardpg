@@ -54,7 +54,7 @@ vertical slices can preserve PostgreSQL's attachment and ownership semantics.
 Ordinary views are catalog-modeled, including PostgreSQL-deparsed definitions,
 reloptions, comments, and typed dependencies on referenced tables, columns,
 views, enums, and modeled user routines. The planner supports create, `CREATE OR REPLACE` definition/options
-changes, fingerprint-bound direct renames, and approved drops. For ordinary
+changes, validated semantic renames, and approved drops. For ordinary
 dependent views, onwardpg performs the confirmed base rename first, then
 reapplies each dependent desired definition in the `contract` phase; it does
 not emit a statement referring to the new base name before that rename exists.
@@ -65,12 +65,12 @@ PG14–18 variation in target-list qualification without rewriting literals,
 comments, dollar strings, function calls, or arbitrary SQL. Any other
 materialized-dependent definition change remains conservative because its
 rebuild is destructive and needs a separately reviewed transition.
-Materialized views support a fingerprint-bound direct rename. When every index
+Materialized views support a validated semantic direct rename. When every index
 has an exact old→new relation identity match, onwardpg preserves those indexes
 through the rename instead of dropping or rebuilding them, and applies any
 index comment change afterward in `contract`; index definition changes remain
 conservative. Materialized views remain catalog-modeled and support
-create/drop. A definition/options change emits a fingerprint-bound destructive
+create/drop. A definition/options change emits an explicit destructive
 rebuild question, then a reviewed drop/create `migrate` batch if approved.
 Indexes on materialized views are graph-modeled and recreated after an approved
 materialized-view rebuild. With the concurrent-index option, their rebuild is
@@ -78,13 +78,13 @@ emitted in a separate non-transactional batch after the transactional view
 rebuild.
 
 When an ordinary view definition or option change has a typed direct or
-transitive materialized-view dependent, onwardpg requires a fingerprint-bound
-`refresh_materialized_view` manual-work contract. Replacing the ordinary view
+transitive materialized-view dependent, onwardpg requires an explicit
+`refresh_materialized_view` SQL handoff. Replacing the ordinary view
 alone can leave stored materialized rows stale even though schema comparison
-converges. The contract supplies the reviewed refresh statement (ordinary or
-concurrent), execution mode, and optional data verification query; onwardpg
-places it after the view replacement in a distinct `MANUAL` batch and never
-guesses locking, refresh mode, or validation criteria. A materialized view that
+converges. Choosing `manual_sql` places an `ONWARDPG TODO` after the view
+replacement. The developer or agent supplies the reviewed refresh statement
+(ordinary or concurrent), batch boundary, and optional `verify.sql` assertion;
+onwardpg never guesses locking, refresh mode, or validation criteria. A materialized view that
 is itself rebuilt does not receive a redundant refresh contract.
 The same contract is required when a typed routine-body replacement can change
 a materialized view's result: replacing a function changes behavior but not
@@ -106,7 +106,7 @@ and approved drops; a trigger depends on both its table and its invoked
 routine. Ordinary and materialized views also have typed catalog edges to
 invoked user routines, so routine creation precedes dependent views and
 approved drops remove views before their routine. A same-signature routine
-rename requires a fingerprint-bound answer.
+rename requires a validated semantic hint.
 When that rename is the only change to a dependent materialized view's
 protected, schema-qualified routine call, onwardpg retains the materialized
 view through PostgreSQL's native OID-preserving rewrite rather than requesting
@@ -116,13 +116,13 @@ When its typed trigger dependents all remain in place and point at the desired
 routine, onwardpg renames/redefines the routine first and reapplies each
 trigger with `CREATE OR REPLACE TRIGGER`; other trigger lifecycle transitions
 remain conservative. A behaviorally identical trigger rename also requires a
-fingerprint-bound answer. PostgreSQL does not record arbitrary
+validated semantic hint. PostgreSQL does not record arbitrary
 procedural-body references, so
 onwardpg does not rewrite a routine body for a column/table change or claim to
 have inferred those hidden dependencies. Routine ownership remains an explicit
 blocker. RLS state, policies, and ordinary/partitioned-table grants are typed
 verticals: policy column/routine dependencies are catalog edges; policy and
-authorization contractions require fingerprint-bound decisions; and role
+authorization contractions require explicit semantic decisions; and role
 identifiers are quoted with `PUBLIC` retained as the PostgreSQL keyword.
 Default privileges, column grants, non-owner grant chains, and privileges on
 other relation kinds remain explicit blockers.
@@ -148,23 +148,19 @@ change remains an independent reviewed transition.
 Partition children are graph-modeled. The planner supports an explicit attach
 or detach of an existing range/list/hash/default child and marks the
 lock/possible-scan hazards in the `migrate` phase. Moving a child to a
-different parent, changing a bound, or changing a default partition requires a fingerprint-bound
-`partition_reconfiguration` answer containing an operator-authored manual
-work contract: a summary, explicit transactional/non-transactional execution
-mode, reviewed SQL statements, and optional verification SQL. onwardpg emits
-that contract in its own `MANUAL` batch and never invents
-a detach/attach sequence, cast, or data movement. An acknowledgement without
-the actual contract is rejected. Summaries and verification queries are
-single-line receipt fields; verification queries execute only during
-self-created clone verification and must each return one boolean `true` row.
-Only explicitly supplied work statements change schema or data.
+different parent, changing a bound, or changing a default partition requires
+an explicit `manual_sql` choice. onwardpg places an `ONWARDPG TODO` in the
+ordered phase and never invents a detach/attach sequence, cast, or data
+movement. The developer or agent edits the ordinary SQL file, declares any
+non-transactional boundary with a batch directive, and may add boolean
+postconditions to `verify.sql`. Only TODO-free, explicitly supplied SQL is
+executed during self-created clone verification.
 
 A nullable-to-`NOT NULL` transition offers `direct`, `staged`, and
-`staged_with_backfill`. The last option asks a second fingerprint-bound
-`backfill_not_null` question. Its application-owned SQL runs in the manual
-phase after the `NOT VALID` guard is installed and before contract validation,
-`SET NOT NULL`, and helper-constraint removal. onwardpg never derives the
-backfill expression from the schema.
+`staged_with_backfill`. The last option hands the application-owned backfill to
+an explicit phase-local SQL TODO after the `NOT VALID` guard and before
+contract validation, `SET NOT NULL`, and helper-constraint removal. onwardpg
+never derives the backfill expression from the schema.
 
 PostgreSQL's propagated parent/child indexes and constraints are graph-modeled
 with typed child→parent edges. This includes primary/unique constraints and
@@ -190,7 +186,7 @@ Create and mutation ordering ensures the owning column exists before ownership
 is attached, and ownership is detached before a reviewed owner drop can cascade
 the sequence. Sequence type/start/increment/min/max/cache/cycle and ownership
 can change together. Identity columns support create/add, generation mode,
-start/increment/min/max/cache/cycle, and removal. Removing identity is a
-fingerprint-bound destructive question because PostgreSQL drops the owned
-identity sequence; a replacement default is installed afterward in the same
-`contract` phase.
+start/increment/min/max/cache/cycle, and removal. Removing identity is an
+explicit destructive decision because PostgreSQL drops the owned identity
+sequence; a replacement default is installed afterward in the same `contract`
+phase.

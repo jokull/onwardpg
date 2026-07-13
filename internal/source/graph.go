@@ -13,6 +13,25 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
+// PostgresMajor discovers the actual server major used for disposable
+// materialization. Callers record this evidence instead of asking developers
+// to duplicate an inferable value in configuration.
+func PostgresMajor(ctx context.Context, databaseURL string) (int, error) {
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		return 0, fmt.Errorf("connect PostgreSQL version probe: %w", err)
+	}
+	defer conn.Close(context.Background())
+	var version int
+	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
+		return 0, fmt.Errorf("read PostgreSQL version: %w", err)
+	}
+	if err := validatePostgresVersion(version); err != nil {
+		return 0, err
+	}
+	return version / 10000, nil
+}
+
 func materializeDDLGraph(ctx context.Context, path, devURL string, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
 	ddl, err := os.ReadFile(path)
 	if err != nil {

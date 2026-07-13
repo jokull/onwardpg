@@ -31,8 +31,11 @@ func RenderSQL(result Result, indent string) string {
 			lines = append(lines, phaseComment(batch.Phase)...)
 			lastPhase = batch.Phase
 		}
-		lines = append(lines, batchComment(batch))
+		lines = append(lines, batchDirective(batch), batchComment(batch))
 		for _, statement := range batch.Statements {
+			if review := reviewComment(statement); review != "" {
+				lines = append(lines, review)
+			}
 			if statement.StatementTimeoutMS > 0 || statement.LockTimeoutMS > 0 {
 				lines = append(lines, timeoutComment(statement))
 			}
@@ -40,6 +43,28 @@ func RenderSQL(result Result, indent string) string {
 		}
 	}
 	return indentLines(lines, indent)
+}
+
+func reviewComment(statement Statement) string {
+	var parts []string
+	if statement.Safety != "" {
+		parts = append(parts, "safety="+statement.Safety)
+	}
+	if len(statement.Hazards) > 0 {
+		parts = append(parts, "hazards="+strings.Join(statement.Hazards, ","))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "-- Review: " + strings.Join(parts, "; ") + "."
+}
+
+func batchDirective(batch Batch) string {
+	mode := "transactional"
+	if !batch.Transactional {
+		mode = "nontransactional"
+	}
+	return "-- onwardpg:batch " + mode
 }
 
 func timeoutComment(statement Statement) string {
@@ -113,12 +138,6 @@ func phaseComment(phase string) []string {
 			"-- ============================================================================",
 			"-- CONTRACT — run only after old application code no longer uses the prior shape.",
 			"-- This section can remove compatibility paths or enforce the final contract.",
-			"-- ============================================================================",
-		}
-	case "manual":
-		return []string{
-			"-- ============================================================================",
-			"-- MANUAL — review and execute only with an explicit operator decision.",
 			"-- ============================================================================",
 		}
 	default:

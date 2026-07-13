@@ -15,9 +15,10 @@ const Version = "onwardpg.plan/v1"
 type Status string
 
 const (
-	Planned     Status = "planned"
-	NeedsInput  Status = "needs_input"
-	Unsupported Status = "unsupported"
+	Planned       Status = "planned"
+	NeedsInput    Status = "needs_input"
+	NeedsSQLEdits Status = "needs_sql_edits"
+	Unsupported   Status = "unsupported"
 )
 
 type Result struct {

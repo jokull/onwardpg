@@ -430,6 +430,12 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 	}
 	result.Status = protocol.Planned
+	for _, item := range result.Statements {
+		if strings.Contains(item.SQL, "ONWARDPG TODO") {
+			result.Status = protocol.NeedsSQLEdits
+			break
+		}
+	}
 	return result, nil
 }
 
@@ -456,6 +462,7 @@ func scopeQuestions(questions []protocol.Question, current, desired *pgschema.Sn
 }
 
 func questionScopeFingerprint(question protocol.Question, current, desired *pgschema.Snapshot) string {
+	currentExcluded, desiredExcluded := renameTableScopeExclusions(question, current, desired)
 	document := struct {
 		Kind           string                 `json:"kind"`
 		Key            string                 `json:"key"`
@@ -466,8 +473,8 @@ func questionScopeFingerprint(question protocol.Question, current, desired *pgsc
 	}{
 		Kind: question.Kind, Key: question.Key, Choices: append([]string(nil), question.Choices...),
 		AllowsFreeform: question.AllowsFreeform,
-		Current:        questionScopeObjects(current, question),
-		Desired:        questionScopeObjects(desired, question),
+		Current:        questionScopeObjects(current, question, currentExcluded),
+		Desired:        questionScopeObjects(desired, question, desiredExcluded),
 	}
 	if len(document.Current) == 0 && len(document.Desired) == 0 {
 		return ""
@@ -480,7 +487,7 @@ func questionScopeFingerprint(question protocol.Question, current, desired *pgsc
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Question) []scopedQuestionObject {
+func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Question, excluded map[pgschema.ID]bool) []scopedQuestionObject {
 	selectedNames := map[string]bool{question.Key: true}
 	for _, choice := range question.Choices {
 		selectedNames[choice] = true
@@ -488,7 +495,7 @@ func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Questio
 	selected := make(map[pgschema.ID]bool)
 	ids := snapshot.IDs()
 	for _, id := range ids {
-		if selectedNames[id.String()] {
+		if selectedNames[id.String()] && !excluded[id] {
 			selected[id] = true
 		}
 	}
@@ -505,7 +512,7 @@ func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Questio
 		dependency := queue[0]
 		queue = queue[1:]
 		for _, candidate := range ids {
-			if selected[candidate] || !containsID(snapshot.Dependencies(candidate), dependency) {
+			if selected[candidate] || excluded[candidate] || !containsID(snapshot.Dependencies(candidate), dependency) {
 				continue
 			}
 			selected[candidate] = true
@@ -520,7 +527,7 @@ func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Questio
 		id := queue[0]
 		queue = queue[1:]
 		for _, dependency := range snapshot.Dependencies(id) {
-			if selected[dependency] {
+			if selected[dependency] || excluded[dependency] {
 				continue
 			}
 			selected[dependency] = true
@@ -548,6 +555,46 @@ func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Questio
 		objects = append(objects, scopedQuestionObject{ID: id.String(), Definition: definition, Dependencies: dependencyNames})
 	}
 	return objects
+}
+
+// A new child on the desired side is an independent structural edit, not
+// evidence that an otherwise credible table identity changed. Excluding only
+// unpaired direct children keeps a rename receipt stable while a feature adds
+// a column; modifications to children present on both sides still invalidate
+// the receipt.
+func renameTableScopeExclusions(question protocol.Question, current, desired *pgschema.Snapshot) (map[pgschema.ID]bool, map[pgschema.ID]bool) {
+	currentExcluded, desiredExcluded := make(map[pgschema.ID]bool), make(map[pgschema.ID]bool)
+	if question.Kind != "rename_table" || len(question.Choices) == 0 {
+		return currentExcluded, desiredExcluded
+	}
+	fromObject, fromExists := objectByString(current, question.Key)
+	toObject, toExists := objectByString(desired, question.Choices[0])
+	from, fromOK := fromObject.(pgschema.Table)
+	to, toOK := toObject.(pgschema.Table)
+	if !fromExists || !toExists || !fromOK || !toOK {
+		return currentExcluded, desiredExcluded
+	}
+	fromChildren, toChildren := tableChildren(current, from.ObjectID()), tableChildren(desired, to.ObjectID())
+	for key, child := range fromChildren {
+		if _, exists := toChildren[key]; !exists {
+			currentExcluded[child.ObjectID()] = true
+		}
+	}
+	for key, child := range toChildren {
+		if _, exists := fromChildren[key]; !exists {
+			desiredExcluded[child.ObjectID()] = true
+		}
+	}
+	return currentExcluded, desiredExcluded
+}
+
+func objectByString(snapshot *pgschema.Snapshot, value string) (pgschema.Object, bool) {
+	for _, id := range snapshot.IDs() {
+		if id.String() == value {
+			return snapshot.Object(id)
+		}
+	}
+	return nil, false
 }
 
 func containsID(ids []pgschema.ID, wanted pgschema.ID) bool {
@@ -1413,14 +1460,22 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 		}
 		if answer == candidate.ID.String() {
 			consumed[drop.ID], consumed[candidate.ID] = true, true
-			for _, object := range current.Objects() {
-				if childTable(object) == from.ObjectID() {
-					consumed[object.ObjectID()] = true
-				}
+			fromChildren, toChildren := tableChildren(current, from.ObjectID()), tableChildren(desired, to.ObjectID())
+			for key, before := range fromChildren {
+				after := toChildren[key]
+				consumed[before.ObjectID()] = true
+				consumed[after.ObjectID()] = true
 			}
-			for _, object := range desired.Objects() {
-				if childTable(object) == to.ObjectID() {
-					consumed[object.ObjectID()] = true
+			for key, after := range toChildren {
+				if _, exists := fromChildren[key]; exists {
+					continue
+				}
+				column := after.(pgschema.Column)
+				column.Table = from.ObjectID()
+				for index := range changes {
+					if changes[index].Kind == change.Create && changes[index].ID == after.ObjectID() {
+						changes[index].After = column
+					}
 				}
 			}
 			retainedViews := retainedTableRenameViews(current, desired, from, to)
@@ -2256,12 +2311,17 @@ func equivalentTableForRename(current, desired *pgschema.Snapshot, from, to pgsc
 	}
 	fromChildren := tableChildren(current, from.ObjectID())
 	toChildren := tableChildren(desired, to.ObjectID())
-	if len(fromChildren) != len(toChildren) {
-		return false
-	}
 	for key, before := range fromChildren {
 		after, exists := toChildren[key]
 		if !exists || !equivalentChildForTableRename(before, after, from, to) {
+			return false
+		}
+	}
+	for key, after := range toChildren {
+		if _, exists := fromChildren[key]; exists {
+			continue
+		}
+		if _, ok := after.(pgschema.Column); !ok {
 			return false
 		}
 	}
@@ -2728,7 +2788,7 @@ func constraintPropagatedByPartitionParent(object pgschema.Constraint, desired *
 }
 
 // renderIndex deliberately uses the typed index payload rather than the
-// pg_get_indexdef compatibility field. This keeps adapter snapshots portable
+// pg_get_indexdef compatibility field. This keeps constructed snapshots portable
 // and makes an unrepresented attribute an explicit unsupported result instead
 // of silently emitting a different index.
 func renderIndex(index pgschema.Index) (string, string) {
@@ -4205,7 +4265,7 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 			question := protocol.Question{
 				ID: "type_change:" + item.ID.String(), Kind: "type_change", Key: item.ID.String(),
 				Message: "Column " + item.ID.String() + " changes from " + before.Type + " to " + after.Type + ". Supply a PostgreSQL USING expression or choose direct.",
-				Choices: []string{"direct"}, AllowsFreeform: true,
+				Choices: []string{"direct", "manual_sql"}, AllowsFreeform: true,
 				CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 			}
 			answer, found, err := resolver.Resolve(question)
@@ -4414,11 +4474,20 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 		if !exists {
 			return nil, nil, nil, fmt.Errorf("missing type-change decision for %s", after.ObjectID())
 		}
-		sql := "ALTER TABLE " + table + " ALTER COLUMN " + column + " TYPE " + after.Type
-		if using != "direct" {
-			sql += " USING " + using
+		if using == "manual_sql" {
+			statements = append(statements, statement(
+				"-- ONWARDPG TODO: replace this comment with reviewed SQL that changes "+after.ObjectID().String()+" from "+before.Type+" to "+after.Type+".\n"+
+					"-- Expected effect: the column has PostgreSQL type "+after.Type+" and preserves the product meaning intended by the feature.\n"+
+					"-- Add boolean assertions to verify.sql for data-dependent conversion assumptions.",
+				"migrate", "manual", true, "manual_sql", "table_rewrite_possible", "access_exclusive_lock",
+			))
+		} else {
+			sql := "ALTER TABLE " + table + " ALTER COLUMN " + column + " TYPE " + after.Type
+			if using != "direct" {
+				sql += " USING " + using
+			}
+			statements = append(statements, statement(sql+";", "migrate", "review", true, "table_rewrite_possible", "access_exclusive_lock"))
 		}
-		statements = append(statements, statement(sql+";", "migrate", "review", true, "table_rewrite_possible", "access_exclusive_lock"))
 	}
 	if !identityHandledDefault && reflect.DeepEqual(before.Serial, after.Serial) && !reflect.DeepEqual(before.Default, after.Default) {
 		phase := "expand"
@@ -4940,13 +5009,13 @@ func withTimeoutGuidance(statement protocol.Statement, statementTimeoutMS, lockT
 }
 
 func manualWorkStatement(work protocol.ManualWork, hazards ...string) protocol.Statement {
-	lines := []string{"-- MANUAL CONTRACT: " + work.Summary}
+	lines := []string{"-- PRODUCT-SPECIFIC SQL: " + work.Summary}
 	for _, verification := range work.VerificationSQL {
 		lines = append(lines, "-- Verify: "+verification)
 	}
 	lines = append(lines, work.Statements...)
 	return protocol.Statement{
-		SQL: strings.Join(lines, "\n"), Phase: "manual", Safety: "manual",
+		SQL: strings.Join(lines, "\n"), Phase: "migrate", Safety: "manual",
 		Hazards: hazards, Manual: &work, NonTransactional: work.ExecutionMode == "non_transactional",
 	}
 }
@@ -4956,10 +5025,10 @@ func appendStatement(result *protocol.Result, item protocol.Statement) {
 }
 
 func rebuildBatches(result *protocol.Result) error {
-	orderedPhases := []string{"expand", "migrate", "manual", "contract"}
+	orderedPhases := []string{"expand", "migrate", "contract"}
 	byPhase := make(map[string][]protocol.Statement, len(orderedPhases))
 	for _, item := range result.Statements {
-		if item.Phase != "expand" && item.Phase != "migrate" && item.Phase != "contract" && item.Phase != "manual" {
+		if item.Phase != "expand" && item.Phase != "migrate" && item.Phase != "contract" {
 			return fmt.Errorf("unknown statement phase %q", item.Phase)
 		}
 		byPhase[item.Phase] = append(byPhase[item.Phase], item)
@@ -4971,7 +5040,8 @@ func rebuildBatches(result *protocol.Result) error {
 			transactional := !item.NonTransactional
 			if len(result.Batches) > 0 {
 				last := &result.Batches[len(result.Batches)-1]
-				if last.Phase == phase && last.Transactional == transactional {
+				lastIsManual := len(last.Statements) > 0 && last.Statements[len(last.Statements)-1].Manual != nil
+				if last.Phase == phase && last.Transactional == transactional && !lastIsManual && item.Manual == nil {
 					last.Statements = append(last.Statements, item)
 					continue
 				}

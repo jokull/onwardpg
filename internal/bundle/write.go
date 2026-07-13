@@ -13,7 +13,8 @@ import (
 )
 
 type WriteOptions struct {
-	ReplaceDraft bool
+	ReplaceDraft   bool
+	PreserveEdited []string
 }
 
 // NextCoordinates returns deterministic generation and decision-attempt
@@ -62,8 +63,6 @@ func samePlanningContract(manifest Manifest, metadata Metadata) bool {
 	return manifest.BundleID == metadata.BundleID &&
 		manifest.Target == metadata.Target &&
 		manifest.Purpose == metadata.Purpose &&
-		manifest.Mode == metadata.Mode &&
-		manifest.BaseRef == metadata.BaseRef &&
 		sameSourcePlanningContract(manifest.BaselineSource, metadata.BaselineSource) &&
 		sameSourcePlanningContract(manifest.DesiredSource, metadata.DesiredSource) &&
 		reflect.DeepEqual(manifest.Planner, metadata.Planner) &&
@@ -128,6 +127,9 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 	if destination == "" {
 		return fmt.Errorf("bundle destination is required")
 	}
+	if len(options.PreserveEdited) > 0 && !options.ReplaceDraft {
+		return fmt.Errorf("preserving edited files requires draft replacement")
+	}
 	parent := filepath.Dir(destination)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("create bundle parent: %w", err)
@@ -182,12 +184,35 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 	if err := artifact.Validate(); err != nil {
 		return err
 	}
+	filesToWrite := artifact.Files
+	if len(options.PreserveEdited) > 0 {
+		filesToWrite = make(map[string][]byte, len(artifact.Files))
+		for name, body := range artifact.Files {
+			filesToWrite[name] = append([]byte(nil), body...)
+		}
+		seen := make(map[string]bool, len(options.PreserveEdited))
+		for _, name := range options.PreserveEdited {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			if name != "verify.sql" && !isEditablePhasePath(name) {
+				return fmt.Errorf("conflict handoff path %q is not editable", name)
+			}
+			body, exists := previous.Files[name]
+			if !exists {
+				delete(filesToWrite, name)
+				continue
+			}
+			filesToWrite[name] = append([]byte(nil), body...)
+		}
+	}
 	temporary, err := os.MkdirTemp(parent, ".onwardpg-bundle-")
 	if err != nil {
 		return fmt.Errorf("create temporary bundle directory: %w", err)
 	}
 	defer os.RemoveAll(temporary)
-	for _, name := range SortedFiles(artifact.Files) {
+	for _, name := range SortedFiles(filesToWrite) {
 		if err := validateArtifactPath(name); err != nil {
 			return err
 		}
@@ -195,9 +220,12 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return fmt.Errorf("create artifact directory for %s: %w", name, err)
 		}
-		if err := os.WriteFile(full, artifact.Files[name], 0o644); err != nil {
+		if err := writeFileDurable(full, filesToWrite[name], 0o644); err != nil {
 			return fmt.Errorf("write artifact %s: %w", name, err)
 		}
+	}
+	if err := syncDirectoryTree(temporary); err != nil {
+		return fmt.Errorf("sync temporary bundle: %w", err)
 	}
 	if replacing {
 		current, err := Read(destination)
@@ -217,6 +245,9 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 			_ = os.Rename(backup, destination)
 			return fmt.Errorf("install replacement bundle: %w", err)
 		}
+		if err := syncDirectory(parent); err != nil {
+			return fmt.Errorf("sync installed replacement: %w", err)
+		}
 		if err := os.RemoveAll(backup); err != nil {
 			return fmt.Errorf("remove replaced bundle backup: %w", err)
 		}
@@ -225,13 +256,53 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 	if err := os.Rename(temporary, destination); err != nil {
 		return fmt.Errorf("install bundle: %w", err)
 	}
+	if err := syncDirectory(parent); err != nil {
+		return fmt.Errorf("sync installed bundle: %w", err)
+	}
+	return nil
+}
+
+func writeFileDurable(name string, body []byte, mode os.FileMode) error {
+	file, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(body); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func syncDirectoryTree(root string) error {
+	var directories []string
+	if err := filepath.WalkDir(root, func(name string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			directories = append(directories, name)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	sort.Slice(directories, func(i, j int) bool { return len(directories[i]) > len(directories[j]) })
+	for _, directory := range directories {
+		if err := syncDirectory(directory); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func sameManifestPlanningContract(previous, next Manifest) bool {
 	return previous.BundleID == next.BundleID && previous.Target == next.Target &&
-		previous.Purpose == next.Purpose && previous.Mode == next.Mode &&
-		previous.BaseRef == next.BaseRef &&
+		previous.Purpose == next.Purpose &&
 		sameSourcePlanningContract(previous.BaselineSource, next.BaselineSource) &&
 		sameSourcePlanningContract(previous.DesiredSource, next.DesiredSource) &&
 		reflect.DeepEqual(previous.Planner, next.Planner) &&
@@ -239,7 +310,6 @@ func sameManifestPlanningContract(previous, next Manifest) bool {
 }
 
 func sameSourcePlanningContract(previous, next SourceReceipt) bool {
-	previous.GitCommit, next.GitCommit = "", ""
 	return reflect.DeepEqual(previous, next)
 }
 
@@ -323,7 +393,7 @@ func validateReplaceableBundle(destination string) error {
 		return fmt.Errorf("refuse to replace invalid bundle: %w", err)
 	}
 	manifest := artifact.Manifest
-	if manifest.State != "planned" && manifest.State != "needs_input" && manifest.State != "unsupported" {
+	if manifest.State != "planned" && manifest.State != "needs_sql_edits" && manifest.State != "needs_input" && manifest.State != "unsupported" {
 		return fmt.Errorf("bundle state %q is immutable", manifest.State)
 	}
 	return nil

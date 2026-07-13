@@ -1,40 +1,96 @@
 # Forward-only migration workflow
 
-1. Produce the desired schema from your ORM or declarative source.
-2. Plan from the real current catalog to that desired schema:
+The normal durable workflow is one command repeated with the same bundle ID:
 
-   ```sh
-   onwardpg plan --from "$DATABASE_URL" --to file://"$PWD/schema.sql" \
-     --dev-url "$DEV_POSTGRES_URL" > plan.json
-   ```
+```sh
+onwardpg draft --target primary --bundle payment-settlement
+```
 
-3. If the command exits `2`, review the typed questions. Commit a
-   fingerprint-bound answer document, then rerun with `--answers`.
-4. If it exits `3`, remove or narrowly ignore the unsupported catalog state,
-   or write a manually reviewed migration. Do not treat `unsupported` as an
-   empty diff.
-5. For a manual-work question, supply reviewed statements, verification SQL,
-   and an explicit transactional/non-transactional execution mode in the
-   answer file. The resulting `MANUAL` batch is executable only as reviewed;
-   onwardpg never creates its contents.
-6. Review SQL, hazards, and batch boundaries. `--sql` groups the emitted file
-   with `EXPAND`, `MIGRATE`, and `CONTRACT` comments: run expand before the
-   compatible deployment, put/run observed application-specific backfills in
-   migrate, and defer contract until old code is gone. Store reviewed SQL as a
-   forward migration in the application repository. onwardpg never applies it.
-7. Test the reviewed plan against a clone with representative data. Confirm a
-   new onwardpg plan from the migrated clone to the desired state is empty.
-8. Apply compatible `expand` work, deploy application code that tolerates both
-   old and new shapes, perform any required data migration/backfill outside the
-   generated DDL, then plan/review/apply the later `contract` work.
+onwardpg replays accepted history, materializes the configured CREATE-statement
+DDL, and plans from that history head to the schema declared by the working
+code. It never applies SQL to the development, staging, or production database.
 
-Do not generate or rely on down migrations. Recovery is a new, reviewed
-forward migration. In particular, a rename, type conversion, dropped object,
-or `NOT NULL` transition may require application rollout, data validation, and
-an explicit backfill decision that schema state alone cannot provide.
+## Decisions are semantic and optional up front
 
-For concurrent indexes, execute the non-transactional batch exactly as
-reported; PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside a transaction.
-Every other batch marked transactional should be executed as one transaction:
-the integration suite verifies that a failing statement rolls back earlier
-statements in that batch. Do not combine or split reported batches casually.
+If schema state cannot prove intent, `draft` exits `2` with only the valid
+semantic choices. For example:
+
+```json
+{
+  "protocol": "onwardpg/draft/2",
+  "status": "needs_decisions",
+  "decisions": [
+    {
+      "choices": [
+        {
+          "hint": {
+            "kind": "rename",
+            "object": "column",
+            "from": ["app", "users", "name"],
+            "to": ["app", "users", "display_name"]
+          }
+        },
+        {
+          "hint": {
+            "kind": "drop",
+            "object": "column",
+            "name": ["app", "users", "name"]
+          },
+          "hazards": ["data_loss"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The agent reruns the same command with the choice justified by its feature
+context:
+
+```sh
+onwardpg draft --target primary --bundle payment-settlement \
+  --hint '{"kind":"rename","object":"column","from":["app","users","name"],"to":["app","users","display_name"]}'
+```
+
+When the intent is already known, supply the same hint on the first call.
+Hints are repeatable; `--hints-file` accepts an array. onwardpg validates every
+hint against the exact graph diff and rejects impossible, contradictory, or
+unused intent. The agent never copies fingerprints or opaque planner keys.
+
+## Product-specific SQL belongs in SQL
+
+When a safe transition depends on a product-aware cast, backfill, refresh, or
+other operation that onwardpg cannot derive, choose `manual_sql`. The hint
+contains no SQL:
+
+```sh
+onwardpg draft --target primary --bundle payment-settlement \
+  --hint '{"kind":"type_change","name":["app","payments","settled_on"],"strategy":"manual_sql"}'
+```
+
+The command exits `2` with `needs_sql_edits` and names the phase file containing
+an `ONWARDPG TODO`. Replace the TODO with reviewed SQL, optionally add boolean
+assertions to `verify.sql`, then run:
+
+```sh
+onwardpg verify --target primary --bundle payment-settlement
+```
+
+Verification executes only in onwardpg-created disposable databases and
+requires an empty residual diff. The developer or coding agent decides how and
+when the receipted phase files run in a real environment.
+
+## Review and rollout
+
+Generated SQL is split into `expand`, `migrate`, `manual`, and `contract`
+phases with transaction and hazard comments. Run expand before compatible
+application code, complete data work while both shapes are supported, and
+delay contract until old code is gone. Concurrent index operations remain in
+their required non-transactional batches.
+
+Keep rerunning `draft` with the same bundle ID while the feature changes or
+after new base migrations arrive. The selected bundle remains the one
+cumulative history-head-to-working-schema transition. There is no lock or
+finalize command, no down migration, and no automatic application command.
+
+Recovery from a deployed mistake is another reviewed forward migration.

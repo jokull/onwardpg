@@ -1,11 +1,105 @@
 # JSON protocol
 
-`onwardpg plan` writes JSON to standard output by default. The current stable
-success/decision protocol is `onwardpg.plan/v1`. Consumers must branch on
-`protocol_version` before interpreting a result. A future incompatible change
-will use a new identifier rather than silently changing v1 fields.
+`draft` is the agent-facing authoring protocol. `plan` retains a more detailed
+low-level protocol used by internal receipts and explicit source-to-source
+callers. Consumers must branch on the version field before interpreting either
+document; incompatible changes receive a new identifier.
 
-`--sql` is deliberately not JSON: it is a review-only rendering available only
+## Minimal draft decisions
+
+`onwardpg/draft/2` deliberately makes output and input asymmetric. onwardpg
+emits the context needed to choose safely; the agent returns only semantic
+intent that cannot be inferred from schema state.
+
+~~~json
+{
+  "protocol": "onwardpg/draft/2",
+  "status": "needs_decisions",
+  "decisions": [
+    {
+      "choices": [
+        {
+          "hint": {
+            "kind": "rename",
+            "object": "column",
+            "from": ["public", "users", "name"],
+            "to": ["public", "users", "display_name"]
+          }
+        },
+        {
+          "hint": {
+            "kind": "drop",
+            "object": "column",
+            "name": ["public", "users", "name"]
+          },
+          "hazards": ["data_loss"]
+        }
+      ]
+    }
+  ]
+}
+~~~
+
+The response omits the target, bundle, whole-schema fingerprints, internal
+question key, prose labels, correlation IDs, and rerun command. The caller
+already knows the invocation, and onwardpg already knows the fingerprints.
+Every remaining field is needed to parse the response or choose between
+different effects.
+
+Each `hint` object is the exact accepted input shape. Pass one with repeatable
+`--hint '<json-object>'`, or pass an array with `--hints-file`. Hints use strict
+decoding: unknown fields, wrong identifier arity, empty identifiers, invalid
+strategies, duplicates, contradictions, impossible mappings, and unused intent
+fail. Identifier arrays preserve quoted names without inventing a delimiter.
+
+Current semantic kinds are:
+
+- `rename`: object kind plus exact `from` and `to` identifiers;
+- `drop`: object kind plus exact current identifier;
+- `type_change`: column identifier and `direct` or `manual_sql` strategy;
+- `rollout`: column identifier and offered strategy (`not_null` is implied);
+- `confirm`: exact object and authorization/rebuild/destructive action; and
+- `manual_sql`: exact object and action handed to editable phase SQL.
+
+Hints may be supplied before a question is emitted. An agent that already
+understands the feature may construct the complete hints file in advance. The
+planner iterates through its dependency-ordered question stages and consumes
+any matching intent. One drop hint can therefore reject a rename and later
+confirm removal. A hint that never consumes a real decision is rejected rather
+than ignored.
+
+Consumed hints are stored automatically in generated `decisions.json` beside
+their internal scoped answer evidence. The agent never copies fingerprints and
+does not need to resubmit accepted hints. Resending the same complete hints
+file is idempotent; a newly irrelevant entry still fails as unused intent.
+Unrelated schema erosion preserves a scoped decision; changed meaning
+invalidates it.
+
+`manual_sql` contains no SQL. It returns this nonterminal envelope after writing
+a phase-local TODO:
+
+~~~json
+{
+  "protocol": "onwardpg/draft/2",
+  "status": "needs_sql_edits",
+  "path": "migrations/onward/primary/event-date",
+  "edit": ["phases/migrate.sql"]
+}
+~~~
+
+The agent edits those files directly. `ONWARDPG TODO` prevents receipt refresh,
+and the bundle cannot participate as immutable base history. Only successful
+full clone verification transitions the exact edited files to `planned`.
+
+`--output text` renders the same choices as copyable `--hint` arguments. It
+does not change planning semantics or prompt on a TTY.
+
+## Low-level plan protocol
+
+`onwardpg plan` writes JSON to standard output by default. Its current protocol
+is `onwardpg.plan/v1`.
+
+`--output text` is deliberately not JSON: it is a review-only rendering available only
 when a plan is ready. It emits SQL comments for phase boundaries and
 transactional batches so a committed migration remains legible to both humans
 and coding agents. Automation should use JSON and render reviewed SQL from the
@@ -20,7 +114,7 @@ Every normal planner result has this shape:
   "protocol_version": "onwardpg.plan/v1",
   "current_fingerprint": "sha256:...",
   "desired_fingerprint": "sha256:...",
-  "status": "planned | needs_input | unsupported",
+  "status": "planned | needs_input | needs_sql_edits | unsupported",
   "statements": [],
   "batches": [],
   "questions": [],
@@ -51,11 +145,12 @@ of:
 transactional and carries its statements. A non-transactional batch must not
 be wrapped in an explicit transaction by an executor.
 
-`needs_input` contains typed questions and no executable plan. `unsupported`
-contains catalog/planner conditions that onwardpg cannot faithfully plan and
-also contains no executable plan. `ignored` records catalog objects excluded by
-validated `--ignore` selectors; it is not an assertion that their definitions
-are safe to change.
+`needs_input` contains typed questions and no executable plan.
+`needs_sql_edits` contains phased SQL with at least one explicit TODO and is not
+a successful plan. `unsupported` contains catalog/planner conditions that
+onwardpg cannot faithfully plan and also contains no executable plan. `ignored`
+records catalog objects excluded by validated `--ignore` selectors; it is not
+an assertion that their definitions are safe to change.
 
 Question fields are stable v1 keys: `id`, `kind`, `message`, `key`, `choices`,
 `allows_freeform`, `current_fingerprint`, `desired_fingerprint`, and
@@ -64,9 +159,11 @@ Question fields are stable v1 keys: `id`, `kind`, `message`, `key`, `choices`,
 objects and relevant dependency closure, excluding unrelated objects that
 merely share a schema.
 
-## Answer document
+## Generated internal answer receipt
 
-Answers are a separate, fingerprint-bound input:
+Answers are the verbose fingerprint-bound implementation protocol beneath
+semantic hints. No CLI accepts this as author input; onwardpg generates and
+receipts it after validating semantic intent against the observed diff:
 
 ```json
 {
@@ -84,69 +181,25 @@ Answers are a separate, fingerprint-bound input:
 }
 ```
 
-Generate this from the exact `needs_input` result, save it in the pull request,
-and pass it with `--answers answers.json`. The planner rejects a different
-protocol version, stale fingerprints, missing required fields, duplicate or
-contradictory entries, values outside a question's choices, and entries that
-are unused by the current plan. Copy `scope_fingerprint` from the exact
-question into the answer's `question_fingerprint`.
+The planner rejects a different protocol version, stale fingerprints, missing
+required fields, duplicate or contradictory entries, values outside a
+question's choices, and entries unused by the current plan. `draft` carries
+only receipts whose narrow question scope remains equivalent when history or
+desired DDL moves. Its report lists carried and invalidated evidence. These
+documents are implementation receipts: editing or supplying one is not a
+supported way to express intent.
 
-Do not manually edit whole-schema fingerprints to carry an answer between
-revisions. `pr status` and `pr regenerate` use
-`onwardpg.answer-rebind/v1` to carry only answers whose question scope is
-byte-for-byte equivalent. Its report lists `carried`, `invalidated`,
-`unanswered`, and staged decisions that are `deferred` until their planner
-stage becomes reachable. The rebound answer document receives the new global
-fingerprints.
-
-### Manual work contract
-
-Some questions, such as `partition_reconfiguration`, require a reviewed
-operator-owned contract instead of an acknowledgement. Its answer uses
-`value: "provided"` and contains the SQL onwardpg must not invent:
-
-```json
-{
-  "kind": "partition_reconfiguration",
-  "key": "table:app:events_2026",
-  "value": "provided",
-  "manual": {
-    "summary": "move the empty partition to its reviewed range",
-    "execution_mode": "transactional",
-    "statements": [
-      "ALTER TABLE \"app\".\"events\" DETACH PARTITION \"app\".\"events_2026\";",
-      "ALTER TABLE \"app\".\"events\" ATTACH PARTITION \"app\".\"events_2026\" FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');"
-    ],
-    "verification_sql": [
-      "SELECT count(*) = 0 FROM \"app\".\"events_2026\";"
-    ]
-  }
-}
-```
-
-`execution_mode` is required and is either `transactional` or
-`non_transactional`; onwardpg uses it to form the manual batch. `summary` and
-each verification query must be one line because they are rendered as SQL
-comments. During clone verification each query must return exactly one boolean
-row, and every value must be true. `statements` are the only executable,
-operator-supplied text and may contain multi-line SQL. The contract is still
-fingerprint-bound, checked for usage, and shown in the resulting statement's
-`manual` metadata.
-
-Current manual-work questions include `partition_reconfiguration`,
-`refresh_materialized_view`, and `backfill_not_null`. The last is a second
-stage after choosing `staged_with_backfill` for `set_not_null`: onwardpg emits
-the `NOT VALID` structural guard, executes only the supplied application-owned
-backfill in the manual phase, requires its boolean postcondition, and leaves
-validation plus `SET NOT NULL` for contract. A plain `staged` choice remains
-available when the developer has separately proved the data is already clean.
+Niche operator work uses a semantic `manual_sql` hint. The hint contains no
+SQL; onwardpg writes a blocking TODO into the relevant phase. The agent edits
+that SQL file and optional boolean assertions directly, then `verify` receipts
+the exact files after disposable clone convergence.
 
 ## Exit codes and diagnostics
 
 | Exit code | Meaning | Standard output |
 | --- | --- | --- |
-| `0` | `planned` | v1 result JSON, or SQL with `--sql` |
-| `2` | `needs_input` | v1 result JSON |
+| `0` | `planned` | v1 result JSON, or SQL with `--output text` |
+| `2` | `needs_input` or `needs_sql_edits` | versioned decision/handoff JSON |
 | `3` | `unsupported` | v1 result JSON |
 | `4` | policy blocked, stale, residual, or clone execution failed | command-specific versioned status JSON |
 | `1` | invocation, input, connection, configuration, bundle, or internal planning error | `onwardpg.diagnostic/v1` JSON |
@@ -164,32 +217,40 @@ Errors outside a normal plan result use a stable diagnostic envelope:
 
 Consumers should branch on `protocol_version` and `code`; `message` is
 human-readable context and may become more specific without a protocol change.
-Current codes distinguish invocation, answers, source, ignore, planning,
-configuration, bundle, and Git-status failures.
+Current codes distinguish invocation, hints, answers, source, ignore, planning,
+configuration, bundle, and history-integrity failures.
 
-`pr regenerate` emits `onwardpg.pr-analysis/v1`. It contains prepared-tree
-revision receipts, complete schema-square fingerprints, the ordinary
-`onwardpg.plan/v1` result, and the written bundle generation/path. A blocked
-base-integrity result omits `plan` and exits `4`; needs-input and unsupported
-planner results retain exits `2` and `3`. The optional Git CLI wrapper reports
-its separate `onwardpg.git-status/v1` result when repository classification is
-blocked.
+`draft` uses `onwardpg/draft/2` for minimal decision and SQL-edit handoffs.
+Complete and blocked reports currently retain detailed replay, reconciliation,
+and verification receipts. Reconciliation reports exact preserved, refreshed,
+and conflicting phase paths; a conflict leaves the existing bundle untouched.
+Decision and SQL-edit handoffs exit `2`; unsupported state exits `3`; history
+or convergence blockers exit `4`.
 
-`pr status --bundle` emits `onwardpg.pr-status/v1` with repository,
-PR-analysis, and `onwardpg.freshness/v1` receipts. It is read-only. Stale
-findings carry stable codes and remediation text and exit `4`.
-
-`bundle verify` emits `onwardpg.verify/v1` with the selected phase checkpoint,
-executed batch count, observed/full fingerprints, and residual plan or typed
-execution failure. `ci check` emits `onwardpg.ci-check/v1`, composing repository
-classification, PR freshness/schema-square receipts, and full clone
-verification. Both exit `4` for an expected non-success outcome; neither has a
-production-apply surface.
-
-`history init` emits `onwardpg.history-init/v1`. A successful document has
+`init` emits `onwardpg.history-init/v1`. A successful document has
 `outcome: "initialized"`, target and bundle identity, installed path, history
 head, desired fingerprint, the complete empty-to-desired plan, and an embedded
 `onwardpg.verify/v1` clone receipt. `needs_input` and `unsupported` preserve the
 ordinary planner exits `2` and `3` without writing a bundle. A pre-existing
 history returns `outcome: "blocked"`, a stable finding and remediation, and
 exit `4`.
+
+`verify` emits `onwardpg.verify/v1` with the selected phase checkpoint,
+executed batch count, observed/full fingerprints, and residual plan or typed
+execution failure. It exits `4` for a residual or expected verification
+failure and has no caller-database application surface. A successful normal
+verification may set `receipts_updated: true` after atomically recording exact
+edited phase and assertion digests. This is evidence, not a finalized or locked
+bundle state; `--check` never writes it.
+
+Execution failures include a stable `failure.code`, the bundle, phase and batch
+or assertion identity, the execution mode when relevant, and an exact
+remediation. Current codes are `transactional_batch_failed`,
+`non_transactional_batch_failed`, `assertion_query_failed`, and
+`assertion_false`. Every such execution occurs only in an onwardpg-created
+database, which is force-dropped on success, failure, or cancellation.
+
+`drift check` emits `onwardpg.drift-check/v1` with target, history head,
+expected and actual fingerprints, exact ignored objects, and deterministic
+differences classified as `missing_in_actual`, `unexpected_in_actual`, or
+`changed_in_actual`. Drift exits `4`; a matching live catalog exits `0`.

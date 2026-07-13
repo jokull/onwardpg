@@ -43,7 +43,7 @@ matter more than a single “supports migrations” checkbox.
 
 | Tool | Authority for desired state | Main artifact | Applies to a caller database? | Rename policy | History / PR restacking |
 | --- | --- | --- | --- | --- | --- |
-| **onwardpg preview** | Live PostgreSQL or exported DDL materialized by PostgreSQL | Fingerprinted JSON, questions, phased SQL, hazards, bundle receipts | **Never** | Credible candidate becomes an explicit fingerprint-bound question | Hash-chained bundles; one logical bundle can be regenerated from a newer base |
+| **onwardpg preview** | Live PostgreSQL or exported DDL materialized by PostgreSQL | Semantic hints, phased SQL, hazards, and fingerprinted bundle receipts | **Never** | Credible candidate becomes an explicit semantic choice; evidence is bound internally | Hash-chained bundles; one logical bundle can be regenerated from a newer base |
 | **Migra** | Two PostgreSQL schemas, or `EMPTY` | Ordered SQL | CLI no; Python API can | Name-keyed diff, generally drop/add or rebuild | None |
 | **pgmig** | Two live PostgreSQL databases | Ordered SQL | No | No table/column rename; some structurally equal objects are paired automatically | None |
 | **Stripe pg-schema-diff** | PostgreSQL database or directory of DDL | Flat ordered statements with timeouts and hazards | CLI can; library leaves it to caller | Names are identity, so rename is drop/add | None |
@@ -212,7 +212,8 @@ hard:
 - partitioned and local-index cases are broader;
 - sequence `OWNED BY`, detailed identity changes, RLS policies, and table
   privileges are modeled (onwardpg now covers these too, with stricter
-  fingerprint-bound authorization contractions); and
+  explicit semantic authorization contractions, bound internally to the exact
+  graph state); and
 - its released acceptance corpus is substantially larger.
 
 Its workflow makes different choices:

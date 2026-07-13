@@ -4,17 +4,12 @@
 an input and an output, not the internal schema model.
 
 ```text
-live URL ───────────────┐
-                       ├─ catalog snapshot ─ typed graph ─ semantic changes
-exported DDL ───── temp PostgreSQL ┘                         │
-                                                             ▼
-                                            questions + hazard policy
-                                                             │
-                                                             ▼
-                                              dependency-ordered batches
-                                                             │
-                                                             ▼
-                                                   reviewable forward SQL
+accepted chain ── disposable replay ── H ─┐
+                                          ├─ typed graph diff ─ questions ─ phased SQL
+working DDL ─── disposable PostgreSQL ─ W ┘
+
+developer DB ───────────────────────── D ── diff to W only for local reconciliation
+production ─────────────────────────── P ── compared to H only by explicit drift audit
 ```
 
 ## Invariants
@@ -29,6 +24,8 @@ exported DDL ───── temp PostgreSQL ┘                         │
 - Rename, cast, backfill and destructive intent come from fingerprinted answers,
   never heuristics presented as facts.
 - Plans are forward-only artifacts. Applying them is outside the planner.
+- Git state is supplied by the coding agent through the files in the checkout;
+  the core sees only history, one explicitly selected draft, and desired DDL.
 
 ## Product boundaries
 

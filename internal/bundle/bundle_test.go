@@ -20,7 +20,7 @@ func TestBuildPlannedBundleWritesDeterministicPhaseReceipts(t *testing.T) {
 	index := statement("CREATE INDEX CONCURRENTLY users_id_idx ON app.users (id);", "expand", false)
 	contract := statement("DROP TABLE app.old_users;", "contract", true)
 	result := plannedResult(expand, index, contract)
-	input := Input{Metadata: metadata(), Result: result, Intent: "# Intent\n\nAdd users safely.", Answers: &protocol.Answers{
+	input := Input{Metadata: metadata(), Result: result, Answers: &protocol.Answers{
 		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint, Answers: []protocol.Answer{},
 	}}
 	artifact, err := Build(input)
@@ -60,6 +60,34 @@ func TestBuildPlannedBundleWritesDeterministicPhaseReceipts(t *testing.T) {
 	}
 }
 
+func TestBuildReceiptsSemanticHintsWithoutMakingThemAuthoringState(t *testing.T) {
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "drop", Key: "column:public:users:legacy", Value: "drop", QuestionFingerprint: "sha256:scope"}},
+	}
+	hint := protocol.Hint{Kind: "drop", Object: "column", Name: []string{"public", "users", "legacy"}}
+	artifact, err := Build(Input{
+		Metadata: metadata(), Result: plannedResult(statement("ALTER TABLE public.users DROP COLUMN legacy;", "contract", true)),
+		Answers: &answers, Hints: []protocol.Hint{hint},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.SemanticDigest == "" || artifact.Files["decisions.json"] == nil {
+		t.Fatalf("semantic decision receipt missing: %#v", artifact.Manifest)
+	}
+	hints, err := SemanticHints(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hints) != 1 || hints[0].Kind != "drop" || hints[0].Name[2] != "legacy" {
+		t.Fatalf("hints = %#v", hints)
+	}
+	if err := artifact.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBuildHistoryReceiptCommitsToParentAndManifest(t *testing.T) {
 	meta := metadata()
 	meta.HistoryParentDigest = HistoryRootDigest()
@@ -77,7 +105,7 @@ func TestBuildHistoryReceiptCommitsToParentAndManifest(t *testing.T) {
 	if again.Manifest.History.EntryDigest != artifact.Manifest.History.EntryDigest {
 		t.Fatal("identical bundle inputs produced different history entry digests")
 	}
-	artifact.Manifest.HeadRevision = strings.Repeat("c", 40)
+	artifact.Manifest.Purpose = "repair"
 	if err := artifact.Manifest.Validate(); err == nil || !strings.Contains(err.Error(), "history entry digest") {
 		t.Fatalf("expected changed manifest to invalidate history receipt, got %v", err)
 	}
@@ -100,6 +128,33 @@ func TestBuildNeedsInputStoresDecisionWithoutExecutablePlan(t *testing.T) {
 	}
 	if _, ok := artifact.Files["plan.json"]; ok {
 		t.Fatal("needs_input bundle exposed an executable plan")
+	}
+}
+
+func TestNeedsSQLEditsBundleBecomesPlannedOnlyAfterTODOIsReplaced(t *testing.T) {
+	result := plannedResult(statement("-- ONWARDPG TODO: provide reviewed conversion SQL", "migrate", true))
+	result.Status = protocol.NeedsSQLEdits
+	artifact, err := Build(Input{Metadata: metadata(), Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.State != string(protocol.NeedsSQLEdits) || artifact.Manifest.PhaseSource != "generated" {
+		t.Fatalf("manifest = %#v", artifact.Manifest)
+	}
+	destination := filepath.Join(t.TempDir(), "manual-conversion")
+	if err := Write(destination, artifact, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	phase := filepath.Join(destination, "phases", "migrate.sql")
+	if err := os.WriteFile(phase, []byte("ALTER TABLE public.events ALTER COLUMN occurred_on TYPE date USING occurred_on::date;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edited, err := PrepareEdited(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Manifest.State != string(protocol.Planned) || edited.Manifest.PhaseSource != "edited" {
+		t.Fatalf("edited manifest = %#v", edited.Manifest)
 	}
 }
 
@@ -146,11 +201,6 @@ func TestWritePreservesDecisionHistoryAcrossDraftReplacement(t *testing.T) {
 		t.Fatalf("repeated decision coordinates = (%d, %d, %v), want (1, 1, nil)", generation, attempt, err)
 	}
 	changed := metadata()
-	changed.HeadRevision = strings.Repeat("c", 40)
-	generation, attempt, err = NextCoordinates(destination, changed, plannedResult())
-	if err != nil || generation != 1 || attempt != 2 {
-		t.Fatalf("provenance-refresh coordinates = (%d, %d, %v), want (1, 2, nil)", generation, attempt, err)
-	}
 	changed.HistoryParentDigest = desiredFingerprint
 	generation, attempt, err = NextCoordinates(destination, changed, plannedResult())
 	if err != nil || generation != 2 || attempt != 1 {
@@ -192,21 +242,6 @@ func TestManifestRejectsPathTokensAndSecretDescriptions(t *testing.T) {
 		if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err == nil {
 			t.Fatalf("accepted secret-bearing description %q", description)
 		}
-	}
-}
-
-func TestBuildValidatesSchemaSquareReceipt(t *testing.T) {
-	meta := metadata()
-	meta.SchemaSquare = &SchemaSquareReceipt{
-		BaseCodeFingerprint: currentFingerprint, BaseHistoryFingerprint: currentFingerprint,
-		HeadCodeFingerprint: desiredFingerprint, BaseIntegrity: "matched", HeadHistoryFidelity: "not_replayed",
-	}
-	if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err != nil {
-		t.Fatal(err)
-	}
-	meta.SchemaSquare.BaseHistoryFingerprint = desiredFingerprint
-	if _, err := Build(Input{Metadata: meta, Result: plannedResult()}); err == nil || !strings.Contains(err.Error(), "matched base") {
-		t.Fatalf("expected base integrity receipt rejection, got %v", err)
 	}
 }
 
@@ -300,9 +335,8 @@ func TestWriteRefusesToReplaceTamperedOrAugmentedBundle(t *testing.T) {
 
 func metadata() Metadata {
 	return Metadata{
-		BundleID: "customer-profile", Generation: 1, Target: "primary-postgres", Purpose: "feature", Mode: "pr",
-		BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
-		BaselineSource: SourceReceipt{Kind: "git_migrations", Description: "origin/main migrations", Fingerprint: currentFingerprint, GitCommit: strings.Repeat("a", 40), PostgresMajor: 16},
+		BundleID: "customer-profile", Generation: 1, Target: "primary-postgres", Purpose: "feature",
+		BaselineSource: SourceReceipt{Kind: "onwardpg_history", Description: "replayed onwardpg history", Fingerprint: currentFingerprint, PostgresMajor: 16},
 		DesiredSource:  SourceReceipt{Kind: "ddl_export", Description: "project primary schema", Fingerprint: desiredFingerprint, PostgresMajor: 16},
 		Planner:        PlannerReceipt{Version: "dev", Options: PlannerOptions{ConcurrentIndexes: true}},
 	}

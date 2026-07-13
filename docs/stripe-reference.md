@@ -55,7 +55,8 @@ evidence.
 - Stripe's RLS/policy/privilege ordering and role escaping are represented as
   typed onwardpg nodes and dependency edges. Authorization relaxations,
   policy replacement, and grant-option removal additionally require
-  fingerprint-bound answers; emitted statements carry timeout guidance but
+  explicit semantic decisions with fingerprint-bound internal receipts;
+  emitted statements carry timeout guidance but
   are never executed against the caller database.
 
 ## Rejected
@@ -63,7 +64,8 @@ evidence.
 - **Runtime delegation.** Stripe is an oracle in tests, never a production
   dependency or source of planning truth.
 - **Names equal identity.** A credible onwardpg rename remains a
-  fingerprint-bound question; it is not silently converted into Stripe's
+  semantic decision bound internally to both schemas; it is not silently
+  converted into Stripe's
   create/drop interpretation.
 - **Hazards as authorization.** A warning does not approve a drop, cast,
   backfill, refresh, or other absent intent.
@@ -96,7 +98,7 @@ relaxation, table-privilege revocation, grant-option removal, partition-parent
 replacement, and primary-constraint swaps converge in both planners. Both
 planners converge for Stripe's exact primary-key/type-change acceptance DDL;
 Stripe selects a direct cast while onwardpg requires the cast as a
-fingerprint-bound answer. onwardpg's extra intent questions are an intentional
+validated semantic decision. onwardpg's extra intent questions are an intentional
 workflow difference, not normalized away by the harness. The catalog-family
 inventory and the new partition-attachment convergence cases have been
 observed on PostgreSQL 14–18. CI remains the authoritative cross-version proof

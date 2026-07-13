@@ -7,6 +7,13 @@ of two ways:
 - `schema_file` points to a repository-relative SQL file; or
 - `schema_command` is an argument vector whose stdout is the SQL document.
 
+`schema_command` is trusted project code. onwardpg invokes the argument vector
+directly, without a shell, from the repository root. It runs the command twice,
+limits captured output, requires byte-identical DDL, and rejects direct changes
+to the checkout that it can observe. It is not an operating-system sandbox and
+cannot prevent writes outside the checkout or through external symlink targets;
+use a read-only export command.
+
 ```toml
 version = 1
 bundle_root = "migrations/onward"
@@ -14,8 +21,10 @@ bundle_root = "migrations/onward"
 [targets.primary-postgres]
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
-postgres_major = 16
 ```
+
+The PostgreSQL major is inferred from the configured scratch server and bound
+to generated history. It is not a user-maintained configuration value.
 
 Drizzle, Django, Prisma, SQLAlchemy, handwritten SQL, or any future code-schema
 source is usable only when the project has a reliable command that emits the
@@ -33,7 +42,7 @@ names, expressions, dependencies, and version-specific semantics. Equivalent
 DDL sources converge on equivalent catalog graphs.
 
 The export command runs in an isolated prepared tree. PR regeneration runs it
-twice and rejects nondeterministic output, empty output, command failure, or
+twice and rejects nondeterministic output, command failure, or
 undeclared changes to that tree. Commands should write the schema only to
 stdout. Put credentials in the configured environment variable; URL-bearing
 command arguments are rejected, and receipts never record environment values.

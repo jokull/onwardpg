@@ -430,7 +430,7 @@ func TestBuildRequiresFingerprintBoundManualContractForPartitionReconfiguration(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].Phase != "manual" || planned.Statements[0].Manual == nil || len(planned.Batches) != 1 || planned.Batches[0].Transactional {
+	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].Phase != "migrate" || planned.Statements[0].Manual == nil || len(planned.Batches) != 1 || planned.Batches[0].Transactional {
 		t.Fatalf("expected a manual planned statement, got %#v", planned)
 	}
 }
@@ -942,7 +942,7 @@ func TestBuildStagesApplicationBackfillBeforeNotNullContract(t *testing.T) {
 	if planned.Status != protocol.Planned || len(planned.Batches) != 3 {
 		t.Fatalf("planned = %#v", planned)
 	}
-	if planned.Batches[0].Phase != "expand" || planned.Batches[1].Phase != "manual" || planned.Batches[2].Phase != "contract" {
+	if planned.Batches[0].Phase != "expand" || planned.Batches[1].Phase != "migrate" || planned.Batches[2].Phase != "contract" {
 		t.Fatalf("phase order = %#v", planned.Batches)
 	}
 	if planned.Batches[1].Statements[0].Manual == nil || !strings.Contains(planned.Batches[2].Statements[0].SQL, "VALIDATE CONSTRAINT") {
@@ -1272,6 +1272,76 @@ func TestBuildRequiresFingerprintBoundTableRenameAnswer(t *testing.T) {
 	}
 	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER TABLE "public"."orders_old" RENAME TO "orders_new";` {
 		t.Fatalf("unexpected rename plan %#v", planned)
+	}
+}
+
+func TestBuildKeepsTableRenameIntentStableWhileAddingColumn(t *testing.T) {
+	current, desiredBefore, desiredAfter := pgschema.New(), pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "public"}
+	oldTable := pgschema.Table{Schema: "public", Name: "accounts"}
+	newTable := pgschema.Table{Schema: "public", Name: "customers"}
+	oldID := pgschema.Column{Table: oldTable.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	newID := pgschema.Column{Table: newTable.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	timezone := pgschema.Column{Table: newTable.ObjectID(), Name: "timezone", Position: 2, Type: "text"}
+	for _, object := range []pgschema.Object{schema, oldTable, oldID} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, snapshot := range []*pgschema.Snapshot{desiredBefore, desiredAfter} {
+		for _, object := range []pgschema.Object{schema, newTable, newID} {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := desiredAfter.Add(timezone); err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range [][2]pgschema.ID{{oldTable.ObjectID(), schema.ObjectID()}, {oldID.ObjectID(), oldTable.ObjectID()}} {
+		if err := current.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, snapshot := range []*pgschema.Snapshot{desiredBefore, desiredAfter} {
+		for _, edge := range [][2]pgschema.ID{{newTable.ObjectID(), schema.ObjectID()}, {newID.ObjectID(), newTable.ObjectID()}} {
+			if err := snapshot.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := desiredAfter.AddDependency(timezone.ObjectID(), newTable.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingBefore, err := Build(current, desiredBefore, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingAfter, err := Build(current, desiredAfter, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pendingBefore.Status != protocol.NeedsInput || pendingAfter.Status != protocol.NeedsInput || len(pendingBefore.Questions) != 1 || len(pendingAfter.Questions) != 1 {
+		t.Fatalf("rename questions before=%#v after=%#v", pendingBefore, pendingAfter)
+	}
+	if pendingBefore.Questions[0].ScopeFingerprint != pendingAfter.Questions[0].ScopeFingerprint {
+		t.Fatalf("additive column invalidated rename intent: before=%s after=%s", pendingBefore.Questions[0].ScopeFingerprint, pendingAfter.Questions[0].ScopeFingerprint)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pendingAfter.CurrentFingerprint, DesiredFingerprint: pendingAfter.DesiredFingerprint,
+		Answers: []protocol.Answer{{
+			Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String(),
+			QuestionFingerprint: pendingAfter.Questions[0].ScopeFingerprint,
+		}},
+	}
+	planned, err := Build(current, desiredAfter, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := joinSQL(planned)
+	if planned.Status != protocol.Planned || !strings.Contains(sql, `ALTER TABLE "public"."accounts" ADD COLUMN "timezone" text`) || !strings.Contains(sql, `ALTER TABLE "public"."accounts" RENAME TO "customers"`) {
+		t.Fatalf("rename plus additive column plan = %#v\n%s", planned, sql)
 	}
 }
 

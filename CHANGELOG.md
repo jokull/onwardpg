@@ -1,114 +1,99 @@
 # Changelog
 
-All notable changes to onwardpg are documented here. This project follows
-[Semantic Versioning](https://semver.org/) once published releases begin.
+All notable changes to onwardpg are documented here. Published versions follow
+Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ## Unreleased — developer preview
 
-This is the first developer-preview cut of onwardpg. It is intended for local,
-reviewed use by developers and coding agents; it is not a production-release
-claim and does not apply migrations automatically.
+This is the first developer-preview line. onwardpg generates forward-only,
+reviewable PostgreSQL migration bundles. It never applies SQL to a caller-owned
+development, staging, or production database.
 
 ### Added
 
-- PostgreSQL 14–18 catalog-backed schema comparison for live databases and
-  declarative `CREATE`-statement SQL materialized in disposable PostgreSQL.
-- Typed dependency-aware planning for core relations, constraints, indexes,
-  enums, sequences, views, materialized views, routines, triggers, and
-  partition children.
-- Forward-only annotated SQL and a versioned JSON planning protocol with
-  fingerprint-bound answers for ambiguous or destructive intent.
-- Expand, migrate, contract, and manual-work phases; typed hazards; and valid
-  transactional/non-transactional execution batches.
-- Conservative rename handling and explicit unsupported results instead of
-  guessed casts, backfills, destructive operations, or unknown catalog state.
-- Deterministic statement IDs, `onwardpg.bundle/v1` receipt directories,
-  phase-specific SQL artifacts, preserved decision history, strict repository
-  configuration, and versioned diagnostic errors.
-- Read-only `pr status` Git provenance with base-erosion, protected migration
-  history, concurrent path-collision, and dirty-revision classification.
-- Isolated synthetic PR trees, deterministic DDL export commands,
-  hash-chained base-history replay, `BC == BM` enforcement, and Git-aware
-  `pr regenerate` bundle generation.
-- Git-free PR-analysis core fed by prepared directories and
-  explicit receipts, with Git retained as optional CLI orchestration.
-- Read-only bundle freshness classification with typed remediation.
-- Idempotent draft generations/decision attempts and stronger bundle
-  replacement, phase-integrity, digest-framing, path, and secret guards.
-- Narrow DDL-export boundary: `schema_file` or deterministic `schema_command`
-  feeds the CLI; framework adapters, ORM journal integration, and runner
-  handoffs are intentionally out of scope. Phase bundles are the forward
-  migration history.
-- Per-target content-addressed bundle history with canonical parent/entry
-  digests, fork and missing-parent rejection, filename-independent replay, and
-  complete `BC == BM` / `HC == HM` schema-square verification during PR
-  regeneration.
-- Question-scoped answer fingerprints and staged answer rebinding across base
-  erosion, with explicit carried, invalidated, unanswered, and deferred
-  reports. Equivalent Git provenance refreshes no longer create a new bundle
-  generation when the schema/planner/history contract is unchanged.
-- Config-driven `dev plan` for the deliberate local database loop, including
-  deterministic `schema_file` / `schema_command` export and the same typed
-  questions, answer files, phase SQL, and residual diff as the low-level CLI.
-- Canonical staged-question receipts in ready bundles, allowing rename and
-  manual-work answers to survive repeated feature edits and multiple base
-  history changes instead of disappearing at generation boundaries.
-- A `staged_with_backfill` NOT NULL strategy that records application-owned
-  manual SQL and boolean verification without inventing data logic.
-- `bundle verify`, which executes selected phases only in self-created
-  disposable databases, checks manual postconditions, and reports residual or
-  full convergence; failed transactional postconditions roll back.
-- Strict read-only `ci check` composition for committed one-bundle ownership,
-  freshness, hash-chain integrity, schema-square fidelity, and clone
-  convergence.
-- One-time `history init` onboarding that plans empty PostgreSQL to the current
-  declarative schema, clone-verifies the `baseline` root bundle before writing
-  it, and refuses to modify an existing target chain or application database.
-- Evidence-linked ecosystem comparison covering Migra, pgmig, Stripe
-  pg-schema-diff, Alembic, Django migrations, and Drizzle Kit, with explicit
-  onwardpg gaps and a refreshed machine-readable pgmig roadmap map.
-- A pinned, MIT-attributed Stripe pg-schema-diff v1.0.7 executable reference,
-  deterministic 415-case acceptance inventory, and test-only differential
-  convergence harness that cannot enter the production planning path.
-- Continuous same-name standalone index replacement on ordinary tables,
-  materialized views, and independent local partitions, with deterministic
-  temporary identifiers, concurrent build/cleanup, phase boundaries, hazards,
-  statement/lock-timeout guidance, and Stripe differential evidence. Direct
-  leaf partition-parent hierarchies use an `ON ONLY` shell plus concurrent
-  leaf builds/attachments; nested trees recursively create `ON ONLY` shells
-  and attach concurrently built leaves bottom-up before retiring the old tree.
-  Existing structurally matching local indexes can be attached to incomplete
-  partitioned parents without rebuild or drop, with pinned Stripe differential
-  convergence evidence. New local primary/unique constraints can claim
-  same-named matching unique indexes before their constraint-owned attachment.
-- Ordinary primary-key and unique-constraint definition changes without
-  external dependents build replacement indexes concurrently and perform a
-  short transactional constraint swap; foreign-key dependents reject.
-- Typed standalone sequence `OWNED BY` edges and complete identity
-  add/options/confirmed-drop planning with real-PostgreSQL and differential
-  convergence evidence.
-- Typed RLS enable/force state, policies, policy dependency ordering, and
-  ordinary/partitioned-table privileges, including quoted roles, explicit
-  authorization decisions, timeout/hazard metadata, and Stripe differential
-  convergence evidence.
-- Explicit blockers and exact ignore receipts for ownership/ACL/default
-  privileges, rules, text search, event triggers, publications, extended
-  statistics, FDW/server/user-mapping state, replica identity,
-  clustered/invalid indexes, relation/column physical attributes, relation
-  tablespaces, traditional inheritance, subscriptions, custom access methods,
-  operators, casts, conversions and languages, security labels, unmodeled
-  comments, and PostgreSQL 18-only constraint/generated-column state. Every
-  PostgreSQL 14–18 catalog table is machine-classified, and the blocker suite
-  runs on all five majors; the attribute audit remains explicitly incomplete.
+- A typed PostgreSQL dependency graph populated from consistent read-only
+  catalog snapshots on PostgreSQL 14–18.
+- Live PostgreSQL and deterministic `schema_file` / `schema_command` inputs;
+  CREATE-statement DDL is materialized in disposable PostgreSQL rather than
+  partially parsed.
+- Git-free `init`, `dev plan`, `draft`, `verify`, and `drift check`
+  workflows plus a low-level explicit-source `plan` command.
+- Content-addressed, per-target history with parent digests, fork detection,
+  deterministic replay, and one explicitly selected mutable feature bundle.
+- Agent-facing semantic hints for renames, destructive changes, type changes,
+  NOT NULL rollout choices, confirmations, and product-specific SQL handoff.
+  Hints can be supplied ahead of time and are bound to narrow graph scopes in
+  generated receipts.
+- Readable `expand.sql`, `migrate.sql`, and `contract.sql` files with phase
+  timing, batch boundaries, hazards, lock/rewrite guidance, and optional
+  `verify.sql` boolean assertions.
+- Conservative three-way preservation of agent-edited phase SQL across feature
+  regeneration and incoming history, including explicit same-phase conflicts.
+- Disposable clone verification of generated and edited SQL, expected partial
+  residuals, exact edit receipts, typed failure diagnostics, cancellation
+  cleanup, and the read-only `verify --check` CI gate.
+- Explicit read-only drift auditing against replayed history.
+- Broad PostgreSQL planning for tables, columns, constraints, indexes,
+  sequences and identity, enums, extensions, routines, triggers, views,
+  materialized views, row-level security, privileges, and common partition
+  relationships. Unmodeled catalog state blocks or requires a validated narrow
+  ignore selector.
+- Continuous concurrent index replacement, staged NOT NULL enforcement,
+  foreign-key cycle handling, and explicit transactional/non-transactional
+  batches.
+- Pinned, test-only Atlas and Stripe pg-schema-diff references with
+  machine-readable capability matrices and MIT attribution where applicable.
+- Tag-driven deterministic archives for Darwin, Linux, and Windows on amd64 and
+  arm64, embedded version metadata, SHA-256 checksums, and GitHub release
+  automation.
+- A large-schema planner benchmark and documented preview performance envelope;
+  typed-ID ordering avoids allocation-heavy string formatting in graph sorts.
+
+### Changed
+
+- Product-specific backfills and orchestration are edited directly in phase SQL
+  rather than authored through a JSON operation language.
+- The normal lifecycle has exactly three phases: expand, migrate, and contract.
+- `dev plan`, `draft`, and low-level `plan` share `--output text|json`; JSON is the stable
+  non-interactive default.
+- Empty DDL is accepted as a valid empty desired schema, while destructive
+  changes still require explicit intent.
+- The PostgreSQL major is discovered from the scratch server, recorded in
+  bundle receipts, and enforced during replay rather than duplicated in config.
+- Frameworks participate only by exporting PostgreSQL DDL; onwardpg has no
+  framework adapter API.
+
+### Removed
+
+- Git, branch, pull-request, merge-base, and dirty-working-tree awareness.
+- `pr`, `ci`, `history init`, and `bundle verify` command aliases.
+- The public adapter package and legacy Git-derived analysis packages.
+- Fingerprint-bound `--answers` authoring. Internal answer evidence
+  remains generated and state-bound.
+- Free-form `intent.md` authoring and low-level bundle-writing flags; bounded
+  hints carry decisions, phase SQL carries richer intent, and only `draft`
+  writes durable history.
+- Caller-database apply, deployment orchestration, down migrations, ORM journal
+  integration, embedded agents, and plugin APIs.
+
+### Verification
+
+- Full unit, race, vet, staticcheck, formatting, and parity-matrix gates pass.
+- The Git-free lifecycle, edited SQL handoff, partial/full convergence,
+  transactional rollback, non-transactional failure, false assertions,
+  cancellation, cleanup, and major-version receipts have been exercised on
+  real PostgreSQL 14, 15, 16, 17, and 18.
+- CI builds release archives twice and compares their checksums before a
+  preview tag is published.
 
 ### Known limitations
 
-- No published binary artifacts, checksums, signing, package distribution, or
-  release automation yet.
-- Several PostgreSQL object families are explicitly unsupported or require
-  manual work. See [README.md](README.md#what-the-developer-preview-supports) and
-  [docs/supported-features.md](docs/supported-features.md).
-- The real-PostgreSQL convergence corpus is growing and is not yet a complete
-  production compatibility certification.
-- Real migration execution remains deliberately outside onwardpg; the CLI has
-  no production, staging, or development apply command.
+- No preview tag has been published yet.
+- No project license has been selected; the release workflow refuses to
+  publish until `LICENSE` exists.
+- PostgreSQL families marked unsupported in
+  [docs/supported-features.md](docs/supported-features.md) remain explicit
+  blockers unless narrowly ignored.
+- Clone convergence proves schema effects and declared assertions, not
+  production traffic safety, application compatibility, or rollout timing.
+- Migration application remains deliberately outside onwardpg.

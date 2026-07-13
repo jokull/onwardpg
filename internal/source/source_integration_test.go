@@ -12,6 +12,20 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
+func TestPostgresMajorDiscoversTheConnectedServer(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	major, err := PostgresMajor(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if major < 14 || major > 18 {
+		t.Fatalf("PostgresMajor = %d", major)
+	}
+}
+
 // This is intentionally opt-in: it verifies catalog extraction against a real
 // PostgreSQL server without making the regular unit suite require Docker.
 func TestLoadGraphForeignKeyIntegration(t *testing.T) {

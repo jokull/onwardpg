@@ -215,6 +215,7 @@ func TestRenderSQLIncludesPhaseAndBatchGuidance(t *testing.T) {
   -- EXPAND — run before deploying application code that relies on the new shape.
   -- Keep this compatible with the application version currently in production.
   -- ============================================================================
+  -- onwardpg:batch transactional
   -- Batch batch-001: transactional.
   CREATE TABLE x ();
 
@@ -223,6 +224,7 @@ func TestRenderSQLIncludesPhaseAndBatchGuidance(t *testing.T) {
   -- Add any application-specific backfill here or run it separately and observe it.
   -- onwardpg never invents a cast or data transform that schema state cannot prove.
   -- ============================================================================
+  -- onwardpg:batch nontransactional
   -- Batch batch-002: non-transactional; execute outside BEGIN/COMMIT.
   ALTER TABLE x
   ADD COLUMN id bigint;
@@ -231,6 +233,7 @@ func TestRenderSQLIncludesPhaseAndBatchGuidance(t *testing.T) {
   -- CONTRACT — run only after old application code no longer uses the prior shape.
   -- This section can remove compatibility paths or enforce the final contract.
   -- ============================================================================
+  -- onwardpg:batch transactional
   -- Batch batch-003: transactional.
   ALTER TABLE x DROP COLUMN legacy;`
 	if got := RenderSQL(result, "  "); got != want {
@@ -248,9 +251,13 @@ func TestRenderSQLDerivesAnAdHocBatchForLibraryCallers(t *testing.T) {
 func TestRenderSQLIncludesTimeoutGuidanceWithoutApplyingIt(t *testing.T) {
 	result := Result{Statements: []Statement{{
 		SQL: "CREATE INDEX CONCURRENTLY idx ON items (id);", Phase: "expand", NonTransactional: true,
+		Safety: "review", Hazards: []string{"index_build", "availability_risk"},
 		StatementTimeoutMS: 1200000, LockTimeoutMS: 3000,
 	}}}
 	rendered := RenderSQL(result, "")
+	if !strings.Contains(rendered, "-- Review: safety=review; hazards=index_build,availability_risk.") {
+		t.Fatalf("rendered plan lost review metadata: %q", rendered)
+	}
 	if !strings.Contains(rendered, "-- Suggested session timeouts: statement_timeout=20m, lock_timeout=3s.") {
 		t.Fatalf("rendered plan lost timeout guidance: %q", rendered)
 	}
@@ -259,13 +266,13 @@ func TestRenderSQLIncludesTimeoutGuidanceWithoutApplyingIt(t *testing.T) {
 	}
 }
 
-func TestRenderSQLIncludesManualNonTransactionalBoundary(t *testing.T) {
+func TestRenderSQLIncludesProductSpecificNonTransactionalBoundary(t *testing.T) {
 	result := Result{Batches: []Batch{{
-		ID: "batch-004", Phase: "manual", Transactional: false,
-		Statements: []Statement{{SQL: "-- MANUAL CONTRACT: build concurrently\nCREATE INDEX CONCURRENTLY idx ON items (id);", Phase: "manual", Safety: "manual"}},
+		ID: "batch-004", Phase: "migrate", Transactional: false,
+		Statements: []Statement{{SQL: "-- PRODUCT-SPECIFIC SQL: build concurrently\nCREATE INDEX CONCURRENTLY idx ON items (id);", Phase: "migrate", Safety: "manual"}},
 	}}}
 	rendered := RenderSQL(result, "")
-	if !strings.Contains(rendered, "-- MANUAL — review and execute only with an explicit operator decision.") || !strings.Contains(rendered, "-- Batch batch-004: non-transactional; execute outside BEGIN/COMMIT.") || !strings.Contains(rendered, "CREATE INDEX CONCURRENTLY") {
+	if !strings.Contains(rendered, "-- MIGRATE — run after compatible code is deployed") || !strings.Contains(rendered, "-- Batch batch-004: non-transactional; execute outside BEGIN/COMMIT.") || !strings.Contains(rendered, "CREATE INDEX CONCURRENTLY") {
 		t.Fatalf("manual SQL rendering lost execution guidance: %q", rendered)
 	}
 }

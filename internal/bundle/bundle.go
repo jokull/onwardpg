@@ -26,7 +26,6 @@ func HistoryRootDigest() string { return rootHistoryDigest }
 
 var (
 	fingerprintPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	commitPattern      = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 	secretDSNPattern   = regexp.MustCompile(`(?i)(?:^|[\s;])(?:password|passfile|sslkey)\s*=`)
 )
 
@@ -34,7 +33,6 @@ type SourceReceipt struct {
 	Kind          string `json:"kind"`
 	Description   string `json:"description"`
 	Fingerprint   string `json:"fingerprint"`
-	GitCommit     string `json:"git_commit,omitempty"`
 	PostgresMajor int    `json:"postgres_major,omitempty"`
 }
 
@@ -52,16 +50,6 @@ type PlannerReceipt struct {
 	IgnoreSelectors []string       `json:"ignore_selectors,omitempty"`
 }
 
-type SchemaSquareReceipt struct {
-	BaseCodeFingerprint    string `json:"base_code_fingerprint"`
-	BaseHistoryFingerprint string `json:"base_history_fingerprint"`
-	HeadCodeFingerprint    string `json:"head_code_fingerprint"`
-	HeadHistoryFingerprint string `json:"head_history_fingerprint,omitempty"`
-	BaseHistoryDigest      string `json:"base_history_digest,omitempty"`
-	BaseIntegrity          string `json:"base_integrity"`
-	HeadHistoryFidelity    string `json:"head_history_fidelity"`
-}
-
 // HistoryReceipt links a bundle to the exact protected history head it was
 // planned from. EntryDigest commits to the complete manifest receipt (with the
 // entry digest itself cleared), so directory names and filesystem ordering are
@@ -69,12 +57,6 @@ type SchemaSquareReceipt struct {
 type HistoryReceipt struct {
 	ParentDigest string `json:"parent_digest"`
 	EntryDigest  string `json:"entry_digest"`
-}
-
-type Lineage struct {
-	Relationship string `json:"relationship"`
-	BundleID     string `json:"bundle_id"`
-	Generation   int    `json:"generation"`
 }
 
 type PhaseArtifact struct {
@@ -94,27 +76,22 @@ type Manifest struct {
 	Generation      int    `json:"generation"`
 	Target          string `json:"target"`
 	Purpose         string `json:"purpose"`
-	Mode            string `json:"mode"`
 	State           string `json:"state"`
 
-	BaseRef      string `json:"base_ref,omitempty"`
-	BaseCommit   string `json:"base_commit,omitempty"`
-	HeadRevision string `json:"head_revision,omitempty"`
+	BaselineSource SourceReceipt   `json:"baseline_source"`
+	DesiredSource  SourceReceipt   `json:"desired_source"`
+	Planner        PlannerReceipt  `json:"planner"`
+	History        *HistoryReceipt `json:"history,omitempty"`
 
-	BaselineSource SourceReceipt        `json:"baseline_source"`
-	DesiredSource  SourceReceipt        `json:"desired_source"`
-	Planner        PlannerReceipt       `json:"planner"`
-	SchemaSquare   *SchemaSquareReceipt `json:"schema_square,omitempty"`
-	History        *HistoryReceipt      `json:"history,omitempty"`
-
-	ResultDigest    string                   `json:"result_digest"`
-	PlanDigest      string                   `json:"plan_digest,omitempty"`
-	Decisions       []FileReceipt            `json:"decisions,omitempty"`
-	AnswersDigest   string                   `json:"answers_digest,omitempty"`
-	QuestionsDigest string                   `json:"questions_digest,omitempty"`
-	IntentDigest    string                   `json:"intent_digest,omitempty"`
-	Phases          map[string]PhaseArtifact `json:"phases,omitempty"`
-	Lineage         *Lineage                 `json:"lineage,omitempty"`
+	ResultDigest       string                   `json:"result_digest"`
+	PlanDigest         string                   `json:"plan_digest,omitempty"`
+	Decisions          []FileReceipt            `json:"decisions,omitempty"`
+	AnswersDigest      string                   `json:"answers_digest,omitempty"`
+	QuestionsDigest    string                   `json:"questions_digest,omitempty"`
+	SemanticDigest     string                   `json:"semantic_decisions_digest,omitempty"`
+	PhaseSource        string                   `json:"phase_source,omitempty"`
+	VerificationDigest string                   `json:"verification_digest,omitempty"`
+	Phases             map[string]PhaseArtifact `json:"phases,omitempty"`
 }
 
 type Metadata struct {
@@ -122,24 +99,18 @@ type Metadata struct {
 	Generation          int
 	Target              string
 	Purpose             string
-	Mode                string
-	BaseRef             string
-	BaseCommit          string
-	HeadRevision        string
 	BaselineSource      SourceReceipt
 	DesiredSource       SourceReceipt
 	Planner             PlannerReceipt
-	SchemaSquare        *SchemaSquareReceipt
 	HistoryParentDigest string
-	Lineage             *Lineage
 }
 
 type Input struct {
 	Metadata  Metadata
 	Result    protocol.Result
 	Answers   *protocol.Answers
+	Hints     []protocol.Hint
 	Questions []protocol.Question
-	Intent    string
 	Attempt   int
 }
 
@@ -161,7 +132,7 @@ func (a Artifact) Validate() error {
 	}
 	required := map[string]string{"manifest.json": Digest(manifestBytes)}
 	switch a.Manifest.State {
-	case string(protocol.Planned):
+	case string(protocol.Planned), string(protocol.NeedsSQLEdits):
 		required["plan.json"] = a.Manifest.PlanDigest
 		if a.Manifest.ResultDigest != a.Manifest.PlanDigest {
 			return fmt.Errorf("planned result_digest must equal plan_digest")
@@ -173,17 +144,26 @@ func (a Artifact) Validate() error {
 		if err := validatePlanStatements(result); err != nil {
 			return fmt.Errorf("validate plan.json: %w", err)
 		}
-		phases, phaseFiles, err := renderPhases(result)
-		if err != nil {
-			return fmt.Errorf("render plan phases: %w", err)
-		}
-		if !samePhaseReceipts(phases, a.Manifest.Phases) {
-			return fmt.Errorf("phase receipts do not match plan.json")
-		}
-		for name, expected := range phaseFiles {
-			if string(a.Files[name]) != string(expected) {
-				return fmt.Errorf("phase artifact %s does not match manifest digest or plan.json", name)
+		switch a.Manifest.PhaseSource {
+		case "", "generated":
+			phases, phaseFiles, err := renderPhases(result)
+			if err != nil {
+				return fmt.Errorf("render plan phases: %w", err)
 			}
+			if !samePhaseReceipts(phases, a.Manifest.Phases) {
+				return fmt.Errorf("phase receipts do not match plan.json")
+			}
+			for name, expected := range phaseFiles {
+				if string(a.Files[name]) != string(expected) {
+					return fmt.Errorf("phase artifact %s does not match manifest digest or plan.json", name)
+				}
+			}
+		case "edited":
+			if err := validateEditedPhaseReceipts(a.Manifest.Phases); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("phase_source %q is invalid", a.Manifest.PhaseSource)
 		}
 	case string(protocol.NeedsInput):
 		if !decisionDigestExists(a.Manifest.Decisions, a.Manifest.ResultDigest) {
@@ -224,8 +204,28 @@ func (a Artifact) Validate() error {
 			}
 		}
 	}
-	if a.Manifest.IntentDigest != "" {
-		required["intent.md"] = a.Manifest.IntentDigest
+	if a.Manifest.SemanticDigest != "" {
+		required["decisions.json"] = a.Manifest.SemanticDigest
+		var receipt protocol.DecisionReceipt
+		if err := json.Unmarshal(a.Files["decisions.json"], &receipt); err != nil {
+			return fmt.Errorf("decode decisions.json: %w", err)
+		}
+		if receipt.Protocol != protocol.DecisionsVersion {
+			return fmt.Errorf("decisions.json protocol is %q, want %q", receipt.Protocol, protocol.DecisionsVersion)
+		}
+		canonical, err := protocol.CanonicalHints(receipt.Hints)
+		if err != nil {
+			return fmt.Errorf("validate decisions.json hints: %w", err)
+		}
+		if !reflect.DeepEqual(canonical, receipt.Hints) {
+			return fmt.Errorf("decisions.json hints are not in canonical order")
+		}
+		if answers == nil || !reflect.DeepEqual(*answers, receipt.Answers) {
+			return fmt.Errorf("decisions.json answers do not match answers.json")
+		}
+	}
+	if a.Manifest.VerificationDigest != "" {
+		required["verify.sql"] = a.Manifest.VerificationDigest
 	}
 	for _, phase := range a.Manifest.Phases {
 		required[phase.Path] = phase.Digest
@@ -257,6 +257,21 @@ func samePhaseReceipts(first, second map[string]PhaseArtifact) bool {
 	return true
 }
 
+func validateEditedPhaseReceipts(phases map[string]PhaseArtifact) error {
+	for phase, artifact := range phases {
+		if phase != "expand" && phase != "migrate" && phase != "contract" {
+			return fmt.Errorf("edited phase %q is invalid", phase)
+		}
+		if artifact.Path != path.Join("phases", phase+".sql") {
+			return fmt.Errorf("edited phase %q has invalid path %q", phase, artifact.Path)
+		}
+		if !fingerprintPattern.MatchString(artifact.Digest) {
+			return fmt.Errorf("edited phase %q has invalid digest", phase)
+		}
+	}
+	return nil
+}
+
 func Build(input Input) (Artifact, error) {
 	if input.Attempt == 0 {
 		input.Attempt = 1
@@ -267,7 +282,7 @@ func Build(input Input) (Artifact, error) {
 	if input.Result.ProtocolVersion != protocol.Version {
 		return Artifact{}, fmt.Errorf("result protocol_version is %q, want %q", input.Result.ProtocolVersion, protocol.Version)
 	}
-	if input.Result.Status != protocol.Planned && input.Result.Status != protocol.NeedsInput && input.Result.Status != protocol.Unsupported {
+	if input.Result.Status != protocol.Planned && input.Result.Status != protocol.NeedsSQLEdits && input.Result.Status != protocol.NeedsInput && input.Result.Status != protocol.Unsupported {
 		return Artifact{}, fmt.Errorf("cannot bundle planner status %q", input.Result.Status)
 	}
 	if input.Metadata.BaselineSource.Fingerprint != input.Result.CurrentFingerprint {
@@ -284,12 +299,10 @@ func Build(input Input) (Artifact, error) {
 	manifest := Manifest{
 		ProtocolVersion: Version,
 		BundleID:        input.Metadata.BundleID, Generation: input.Metadata.Generation,
-		Target: input.Metadata.Target, Purpose: input.Metadata.Purpose, Mode: input.Metadata.Mode,
-		State: string(input.Result.Status), BaseRef: input.Metadata.BaseRef,
-		BaseCommit: input.Metadata.BaseCommit, HeadRevision: input.Metadata.HeadRevision,
+		Target: input.Metadata.Target, Purpose: input.Metadata.Purpose,
+		State:          string(input.Result.Status),
 		BaselineSource: input.Metadata.BaselineSource, DesiredSource: input.Metadata.DesiredSource,
-		Planner: input.Metadata.Planner, SchemaSquare: input.Metadata.SchemaSquare,
-		ResultDigest: Digest(resultBytes), Lineage: input.Metadata.Lineage,
+		Planner: input.Metadata.Planner, ResultDigest: Digest(resultBytes),
 	}
 	files := make(map[string][]byte)
 	switch input.Result.Status {
@@ -297,7 +310,7 @@ func Build(input Input) (Artifact, error) {
 		name := fmt.Sprintf("decisions/attempt-%03d.json", input.Attempt)
 		files[name] = resultBytes
 		manifest.Decisions = []FileReceipt{{Path: name, Digest: Digest(resultBytes)}}
-	case protocol.Planned:
+	case protocol.Planned, protocol.NeedsSQLEdits:
 		if err := validatePlanStatements(input.Result); err != nil {
 			return Artifact{}, err
 		}
@@ -308,6 +321,7 @@ func Build(input Input) (Artifact, error) {
 			return Artifact{}, err
 		}
 		manifest.Phases = phases
+		manifest.PhaseSource = "generated"
 		for name, data := range phaseFiles {
 			files[name] = data
 		}
@@ -323,6 +337,23 @@ func Build(input Input) (Artifact, error) {
 		files["answers.json"] = answerBytes
 		manifest.AnswersDigest = Digest(answerBytes)
 	}
+	if len(input.Hints) > 0 {
+		if input.Answers == nil {
+			return Artifact{}, fmt.Errorf("semantic decisions require an internal answer receipt")
+		}
+		hints, err := protocol.CanonicalHints(input.Hints)
+		if err != nil {
+			return Artifact{}, fmt.Errorf("validate semantic decisions: %w", err)
+		}
+		receiptBytes, err := jsonDocument(protocol.DecisionReceipt{
+			Protocol: protocol.DecisionsVersion, Hints: hints, Answers: *input.Answers,
+		})
+		if err != nil {
+			return Artifact{}, fmt.Errorf("encode semantic decisions: %w", err)
+		}
+		files["decisions.json"] = receiptBytes
+		manifest.SemanticDigest = Digest(receiptBytes)
+	}
 	if len(input.Questions) > 0 {
 		if err := validateQuestions(input.Questions, input.Result.CurrentFingerprint, input.Result.DesiredFingerprint); err != nil {
 			return Artifact{}, err
@@ -333,11 +364,6 @@ func Build(input Input) (Artifact, error) {
 		}
 		files["questions.json"] = questionBytes
 		manifest.QuestionsDigest = Digest(questionBytes)
-	}
-	if strings.TrimSpace(input.Intent) != "" {
-		intent := []byte(strings.TrimRight(input.Intent, "\n") + "\n")
-		files["intent.md"] = intent
-		manifest.IntentDigest = Digest(intent)
 	}
 	if input.Metadata.HistoryParentDigest != "" {
 		manifest.History = &HistoryReceipt{ParentDigest: input.Metadata.HistoryParentDigest}
@@ -532,7 +558,7 @@ func sameStatement(left, right protocol.Statement) bool {
 func renderPhases(result protocol.Result) (map[string]PhaseArtifact, map[string][]byte, error) {
 	phases := make(map[string]PhaseArtifact)
 	files := make(map[string][]byte)
-	for _, phase := range []string{"expand", "migrate", "manual", "contract"} {
+	for _, phase := range []string{"expand", "migrate", "contract"} {
 		var batches []protocol.Batch
 		var statements []protocol.Statement
 		transactional := true
@@ -567,15 +593,15 @@ func renderPhases(result protocol.Result) (map[string]PhaseArtifact, map[string]
 }
 
 // RenderReplaySQL renders phase artifacts exactly as bundle history will replay
-// them, in lifecycle order. It is used to prove the proposed side of the
-// schema square before a ready bundle is written.
+// them, in lifecycle order. It is used to prove a draft before its bundle is
+// written.
 func RenderReplaySQL(result protocol.Result) ([]byte, error) {
 	_, files, err := renderPhases(result)
 	if err != nil {
 		return nil, err
 	}
 	var sql strings.Builder
-	for _, phase := range []string{"expand", "migrate", "manual", "contract"} {
+	for _, phase := range []string{"expand", "migrate", "contract"} {
 		name := path.Join("phases", phase+".sql")
 		body, exists := files[name]
 		if !exists {
@@ -603,16 +629,17 @@ func (m Manifest) Validate() error {
 	if m.Purpose != "feature" && m.Purpose != "repair" && m.Purpose != "contract" && m.Purpose != "baseline" {
 		return fmt.Errorf("bundle purpose %q is invalid", m.Purpose)
 	}
-	if m.Mode != "pr" && m.Mode != "release" && m.Mode != "verify" && m.Mode != "develop" && m.Mode != "init" {
-		return fmt.Errorf("bundle mode %q is invalid", m.Mode)
-	}
-	if m.State != string(protocol.Planned) && m.State != string(protocol.NeedsInput) && m.State != string(protocol.Unsupported) {
+	if m.State != string(protocol.Planned) && m.State != string(protocol.NeedsSQLEdits) && m.State != string(protocol.NeedsInput) && m.State != string(protocol.Unsupported) {
 		return fmt.Errorf("bundle state %q is invalid", m.State)
 	}
-	if m.Mode == "pr" {
-		if m.BaseRef == "" || !commitPattern.MatchString(m.BaseCommit) || m.HeadRevision == "" {
-			return fmt.Errorf("pr bundle requires base_ref, full base_commit, and head_revision")
-		}
+	if m.PhaseSource != "" && m.PhaseSource != "generated" && m.PhaseSource != "edited" {
+		return fmt.Errorf("phase_source %q is invalid", m.PhaseSource)
+	}
+	if m.State != string(protocol.Planned) && m.State != string(protocol.NeedsSQLEdits) && (m.PhaseSource != "" || m.VerificationDigest != "") {
+		return fmt.Errorf("only planned or needs_sql_edits bundles may contain phase receipts")
+	}
+	if m.State == string(protocol.NeedsSQLEdits) && m.VerificationDigest != "" {
+		return fmt.Errorf("needs_sql_edits bundle cannot contain a verification receipt")
 	}
 	if err := m.BaselineSource.Validate(); err != nil {
 		return fmt.Errorf("baseline source: %w", err)
@@ -629,11 +656,6 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("planner ignore selectors must be non-empty, sorted, and unique")
 		}
 		previousIgnore = selector
-	}
-	if m.SchemaSquare != nil {
-		if err := m.SchemaSquare.Validate(m.BaselineSource.Fingerprint, m.DesiredSource.Fingerprint); err != nil {
-			return fmt.Errorf("schema_square: %w", err)
-		}
 	}
 	if m.History != nil {
 		if !fingerprintPattern.MatchString(m.History.ParentDigest) || !fingerprintPattern.MatchString(m.History.EntryDigest) {
@@ -655,14 +677,15 @@ func (m Manifest) Validate() error {
 	}
 	for name, digest := range map[string]string{
 		"result": m.ResultDigest, "plan": m.PlanDigest,
-		"answers": m.AnswersDigest, "questions": m.QuestionsDigest, "intent": m.IntentDigest,
+		"answers": m.AnswersDigest, "questions": m.QuestionsDigest, "semantic_decisions": m.SemanticDigest,
+		"verification": m.VerificationDigest,
 	} {
 		if digest != "" && !fingerprintPattern.MatchString(digest) {
 			return fmt.Errorf("%s digest %q is invalid", name, digest)
 		}
 	}
-	if m.State == string(protocol.Planned) && m.PlanDigest == "" {
-		return fmt.Errorf("planned bundle requires plan_digest")
+	if (m.State == string(protocol.Planned) || m.State == string(protocol.NeedsSQLEdits)) && m.PlanDigest == "" {
+		return fmt.Errorf("planned or needs_sql_edits bundle requires plan_digest")
 	}
 	seenDecisions := make(map[string]bool, len(m.Decisions))
 	for _, decision := range m.Decisions {
@@ -675,66 +698,34 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("%s bundle requires a decision receipt matching result_digest", m.State)
 	}
 	for phase, artifact := range m.Phases {
-		if phase != "expand" && phase != "migrate" && phase != "manual" && phase != "contract" {
+		if phase != "expand" && phase != "migrate" && phase != "contract" {
 			return fmt.Errorf("unknown phase artifact %q", phase)
 		}
 		if artifact.Path != path.Join("phases", phase+".sql") || !fingerprintPattern.MatchString(artifact.Digest) {
 			return fmt.Errorf("phase %q has invalid path or digest", phase)
 		}
 	}
-	if m.Lineage != nil {
-		if m.Lineage.Relationship != "supersedes" && m.Lineage.Relationship != "continues" && m.Lineage.Relationship != "repairs" {
-			return fmt.Errorf("lineage relationship %q is invalid", m.Lineage.Relationship)
-		}
-		if !safeName(m.Lineage.BundleID) || m.Lineage.Generation < 1 {
-			return fmt.Errorf("lineage requires a valid bundle_id and positive generation")
-		}
-		if m.Lineage.BundleID == m.BundleID && m.Lineage.Generation >= m.Generation {
-			return fmt.Errorf("bundle lineage cannot point to the same or a future generation")
-		}
-	}
 	return nil
 }
 
-func (s SchemaSquareReceipt) Validate(baselineFingerprint, desiredFingerprint string) error {
-	for name, fingerprint := range map[string]string{
-		"base_code": s.BaseCodeFingerprint, "base_history": s.BaseHistoryFingerprint,
-		"head_code": s.HeadCodeFingerprint,
-	} {
-		if !fingerprintPattern.MatchString(fingerprint) {
-			return fmt.Errorf("%s fingerprint %q is invalid", name, fingerprint)
-		}
+// SemanticHints reads the compact product intent receipted by a bundle. The
+// expanded fingerprint-bound answers remain internal implementation evidence.
+func SemanticHints(artifact Artifact) ([]protocol.Hint, error) {
+	if artifact.Manifest.SemanticDigest == "" {
+		return nil, nil
 	}
-	if s.HeadHistoryFingerprint != "" && !fingerprintPattern.MatchString(s.HeadHistoryFingerprint) {
-		return fmt.Errorf("head history fingerprint %q is invalid", s.HeadHistoryFingerprint)
+	var receipt protocol.DecisionReceipt
+	if err := json.Unmarshal(artifact.Files["decisions.json"], &receipt); err != nil {
+		return nil, fmt.Errorf("decode decisions.json: %w", err)
 	}
-	if s.BaseHistoryDigest != "" && !fingerprintPattern.MatchString(s.BaseHistoryDigest) {
-		return fmt.Errorf("base history digest %q is invalid", s.BaseHistoryDigest)
+	if receipt.Protocol != protocol.DecisionsVersion {
+		return nil, fmt.Errorf("decisions.json protocol is %q, want %q", receipt.Protocol, protocol.DecisionsVersion)
 	}
-	if s.BaseCodeFingerprint != baselineFingerprint || s.HeadCodeFingerprint != desiredFingerprint {
-		return fmt.Errorf("schema square does not match planner source receipts")
-	}
-	if s.BaseIntegrity != "matched" || s.BaseCodeFingerprint != s.BaseHistoryFingerprint {
-		return fmt.Errorf("bundle requires matched base code and migration history")
-	}
-	switch s.HeadHistoryFidelity {
-	case "not_replayed":
-		if s.HeadHistoryFingerprint != "" {
-			return fmt.Errorf("not_replayed head history must not have a fingerprint")
-		}
-	case "matched":
-		if s.HeadHistoryFingerprint == "" || s.HeadHistoryFingerprint != s.HeadCodeFingerprint {
-			return fmt.Errorf("matched head history must equal head code")
-		}
-	case "mismatched", "deferred":
-	default:
-		return fmt.Errorf("head history fidelity %q is invalid", s.HeadHistoryFidelity)
-	}
-	return nil
+	return protocol.CanonicalHints(receipt.Hints)
 }
 
 func (s SourceReceipt) Validate() error {
-	if s.Kind != "database" && s.Kind != "ddl" && s.Kind != "ddl_export" && s.Kind != "adapter" && s.Kind != "git_migrations" && s.Kind != "onwardpg_history" && s.Kind != "typed_snapshot" {
+	if s.Kind != "database" && s.Kind != "ddl" && s.Kind != "ddl_export" && s.Kind != "onwardpg_history" {
 		return fmt.Errorf("kind %q is invalid", s.Kind)
 	}
 	if strings.TrimSpace(s.Description) == "" || strings.ContainsRune(s.Description, '\x00') || strings.Contains(s.Description, "://") || secretDSNPattern.MatchString(s.Description) {
@@ -742,9 +733,6 @@ func (s SourceReceipt) Validate() error {
 	}
 	if !fingerprintPattern.MatchString(s.Fingerprint) {
 		return fmt.Errorf("fingerprint %q is invalid", s.Fingerprint)
-	}
-	if s.GitCommit != "" && !commitPattern.MatchString(s.GitCommit) {
-		return fmt.Errorf("git_commit must be a full lowercase Git object ID")
 	}
 	if s.PostgresMajor != 0 && (s.PostgresMajor < 14 || s.PostgresMajor > 18) {
 		return fmt.Errorf("postgres_major must be between 14 and 18")

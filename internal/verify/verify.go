@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/protocol"
@@ -21,13 +22,23 @@ import (
 
 const Version = "onwardpg.verify/v1"
 
-var phases = []string{"expand", "migrate", "manual", "contract"}
+var phases = []string{"expand", "migrate", "contract"}
 
 type Failure struct {
-	BundleID string `json:"bundle_id"`
-	BatchID  string `json:"batch_id"`
-	Phase    string `json:"phase"`
-	Message  string `json:"message"`
+	Code          string `json:"code"`
+	BundleID      string `json:"bundle_id"`
+	BatchID       string `json:"batch_id,omitempty"`
+	Phase         string `json:"phase"`
+	CheckID       string `json:"check_id,omitempty"`
+	ExecutionMode string `json:"execution_mode,omitempty"`
+	Message       string `json:"message"`
+	Remediation   string `json:"remediation"`
+}
+
+type Finding struct {
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+	Remediation string `json:"remediation"`
 }
 
 type Report struct {
@@ -40,8 +51,11 @@ type Report struct {
 	ExecutedBatches     int              `json:"executed_batches"`
 	ObservedFingerprint string           `json:"observed_fingerprint,omitempty"`
 	DesiredFingerprint  string           `json:"desired_fingerprint,omitempty"`
+	WorkingFingerprint  string           `json:"working_fingerprint,omitempty"`
 	Residual            *protocol.Result `json:"residual,omitempty"`
 	Failure             *Failure         `json:"failure,omitempty"`
+	Findings            []Finding        `json:"findings,omitempty"`
+	ReceiptsUpdated     bool             `json:"receipts_updated,omitempty"`
 }
 
 type Input struct {
@@ -67,6 +81,16 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	postgresMajor, err := source.PostgresMajor(ctx, input.AdminURL)
+	if err != nil {
+		return Report{}, err
+	}
+	for _, entry := range chain.Entries {
+		recorded := entry.Artifact.Manifest.DesiredSource.PostgresMajor
+		if recorded != 0 && recorded != postgresMajor {
+			return Report{}, fmt.Errorf("history bundle %s targets PostgreSQL %d but the scratch server is PostgreSQL %d", entry.Directory, recorded, postgresMajor)
+		}
+	}
 	report := Report{
 		ProtocolVersion: Version, Outcome: "failed", Target: chain.Target,
 		BundleID: input.BundleID, HistoryHead: chain.HeadDigest, ThroughPhase: input.ThroughPhase,
@@ -78,6 +102,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	if failure != nil {
 		report.Failure = failure
+		report.Findings = []Finding{{Code: failure.Code, Message: failure.Message, Remediation: failure.Remediation}}
 		return report, nil
 	}
 	desired, _, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, "contract", input.Ignores)
@@ -86,6 +111,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	if failure != nil {
 		report.Failure = failure
+		report.Findings = []Finding{{Code: failure.Code, Message: failure.Message, Remediation: failure.Remediation}}
 		return report, nil
 	}
 	if err := source.ValidateIgnoreSelectors(input.Ignores, observed, desired); err != nil {
@@ -158,6 +184,34 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 			if phaseIndex(phase) > phaseIndex(limit) {
 				break
 			}
+			if entry.Artifact.Manifest.PhaseSource == "edited" {
+				receipt, exists := entry.Artifact.Manifest.Phases[phase]
+				if !exists {
+					continue
+				}
+				body := entry.Artifact.Files[receipt.Path]
+				parsed, err := bundle.ParsePhaseSQL(body, receipt.Transactional)
+				if err != nil {
+					connection.Close(context.Background())
+					return nil, batches, nil, fmt.Errorf("parse edited bundle %s phase %s: %w", entry.Directory, phase, err)
+				}
+				for index, batch := range parsed {
+					batches++
+					if err := executeRawBatch(ctx, connection, batch); err != nil {
+						connection.Close(context.Background())
+						return nil, batches, batchFailure(entry.Directory, fmt.Sprintf("edited-%s-%03d", phase, index+1), phase, batch.Transactional, err), nil
+					}
+				}
+				for _, plannedBatch := range plan.Batches {
+					if plannedBatch.Phase == phase {
+						if err := executeVerification(ctx, connection, plannedBatch); err != nil {
+							connection.Close(context.Background())
+							return nil, batches, batchFailure(entry.Directory, plannedBatch.ID, phase, plannedBatch.Transactional, err), nil
+						}
+					}
+				}
+				continue
+			}
 			for _, batch := range plan.Batches {
 				if batch.Phase != phase {
 					continue
@@ -165,7 +219,25 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 				batches++
 				if err := executeBatch(ctx, connection, batch); err != nil {
 					connection.Close(context.Background())
-					return nil, batches, &Failure{BundleID: entry.Directory, BatchID: batch.ID, Phase: phase, Message: err.Error()}, nil
+					return nil, batches, batchFailure(entry.Directory, batch.ID, phase, batch.Transactional, err), nil
+				}
+			}
+		}
+		if entry.Artifact.Manifest.PhaseSource == "edited" && limit == "contract" && entry.Artifact.Manifest.VerificationDigest != "" {
+			assertions, err := bundle.ParseAssertions(entry.Artifact.Files["verify.sql"])
+			if err != nil {
+				connection.Close(context.Background())
+				return nil, batches, nil, fmt.Errorf("parse bundle %s verify.sql: %w", entry.Directory, err)
+			}
+			for _, assertion := range assertions {
+				var passed bool
+				if err := connection.QueryRow(ctx, assertion.SQL).Scan(&passed); err != nil {
+					connection.Close(context.Background())
+					return nil, batches, assertionFailure(entry.Directory, assertion.ID, "assertion_query_failed", err.Error()), nil
+				}
+				if !passed {
+					connection.Close(context.Background())
+					return nil, batches, assertionFailure(entry.Directory, assertion.ID, "assertion_false", "verification assertion returned false"), nil
 				}
 			}
 		}
@@ -178,6 +250,45 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 		return nil, batches, nil, fmt.Errorf("inspect disposable result: %w", err)
 	}
 	return snapshot, batches, nil, nil
+}
+
+func batchFailure(bundleID, batchID, phase string, transactional bool, err error) *Failure {
+	mode, code := "non_transactional", "non_transactional_batch_failed"
+	if transactional {
+		mode, code = "transactional", "transactional_batch_failed"
+	}
+	return &Failure{
+		Code: code, BundleID: bundleID, BatchID: batchID, Phase: phase,
+		ExecutionMode: mode, Message: err.Error(),
+		Remediation: "review and edit phases/" + phase + ".sql, then rerun onwardpg verify; execution occurred only in a disposable database",
+	}
+}
+
+func assertionFailure(bundleID, checkID, code, message string) *Failure {
+	return &Failure{
+		Code: code, BundleID: bundleID, Phase: "verify", CheckID: checkID,
+		Message:     message,
+		Remediation: "correct the migration SQL or the named boolean assertion in verify.sql, then rerun onwardpg verify",
+	}
+}
+
+func executeRawBatch(ctx context.Context, connection *pgx.Conn, batch bundle.SQLBatch) error {
+	if !batch.Transactional {
+		_, err := connection.PgConn().Exec(ctx, batch.SQL).ReadAll()
+		return err
+	}
+	transaction, err := connection.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := transaction.Conn().PgConn().Exec(ctx, batch.SQL).ReadAll(); err != nil {
+		_ = transaction.Rollback(context.Background())
+		return err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 
 func executeBatch(ctx context.Context, connection *pgx.Conn, batch protocol.Batch) error {

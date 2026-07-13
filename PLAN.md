@@ -1,1088 +1,816 @@
-# onwardpg: ultimate agent-native migration DX plan
+# onwardpg: simple decisions, editable SQL, verified replay
 
-## North star
+This is the product and implementation plan for onwardpg. It replaces plans
+that made JSON an authoring language, taught the CLI about Git or pull requests,
+or tried to model application-specific migration orchestration.
 
-onwardpg should answer one question exceptionally well:
+The product should feel obvious:
 
-> Given a specific schema that exists, a specific schema we want, and the
-> developer's stated intent, what reviewed forward work gets us safely from
-> here to there?
-
-The tool is for developers and coding agents working in ordinary pull-request
-flows. A feature branch may change its declarative schema many times, be open
-for days while its base branch advances, and ultimately be squash-merged as one
-logical change. The migration should describe the final feature, not preserve
-the branch's exploratory history.
-
-The ideal experience is therefore more than schema diffing. It combines:
-
-- PostgreSQL-backed semantic diffing;
-- explicit, resumable decisions where schema state cannot prove intent;
-- one logical migration bundle per PR and database target;
-- safe regeneration as the PR base erodes;
-- expand/migrate/contract rollout guidance;
-- immutable receipts once any work is executed;
-- clone convergence proof; and
-- CI checks that explain exactly why a PR is stale, stacked, incomplete, or
-  unsafe to merge.
-
-onwardpg never applies a migration to production. It may apply reviewed plans
-only to disposable verification databases. Production execution remains an
-explicit operator/deployment-system action.
-
-## PostgreSQL reference checkpoint
-
-Stripe `pg-schema-diff` v1.0.7 is pinned at
-`6208f8f3ceccae8ca634055dc47907a6a864cb76` as a test-only executable
-reference. It must never become a production dependency or runtime planning
-authority. The authoritative receipts are:
-
-- `references/stripe-pg-schema-diff-v1.0.7.json` and
-  `THIRD_PARTY_NOTICES.md` for the immutable MIT-licensed pin;
-- `parity/stripe-pg-schema-diff-v1.0.7.json` for all 415 pinned acceptance
-  scenarios and their five comparison dimensions;
-- `parity/postgres-catalog-families.json` for the PostgreSQL 14–18
-  modeled/blocked/atomic catalog boundary; and
-- `docs/stripe-reference.md` for adopted, adapted, and rejected architecture.
-
-This feature-closing wave stops at the following proven boundary:
-
-- the guarded executable harness runs both planners only against disposable
-  PostgreSQL and compares ordering, hazards, timeouts, application,
-  idempotence, and residual diff;
-- continuous same-name standalone index replacement on ordinary tables,
-  materialized views, and independent local partitions, including
-  deterministic temporary names and phased concurrent cleanup, converges on
-  PostgreSQL 18 with Stripe differential evidence; standalone partitioned
-  parents now recursively use `ON ONLY` shells and bottom-up leaf attachment
-  across nested trees, and ordinary primary/unique
-  constraints without external dependents use a concurrent-build plus short
-  transactional swap;
-- sequence `OWNED BY` and complete identity option/add/confirmed-drop
-  transitions converge and have Stripe differential evidence;
-- typed RLS enable/force state, policies, policy dependency edges, and
-  ordinary/partitioned-table privileges converge with safe role rendering,
-  timeout/hazard metadata, fingerprint-bound authorization contractions, and
-  Stripe differential evidence; and
-- explicit ownership/ACL/default-privilege state, rules, text search, event
-  triggers, publications, extended statistics, and FDW/server/user mappings
-  now block with exact ignore receipts instead of disappearing; replica
-  identity, clustered/invalid indexes, table options, and relation tablespaces
-  also block rather than being silently discarded.
-
-The following work is deliberately deferred to later, demand-led PostgreSQL
-coverage waves rather than keeping this checkpoint open indefinitely:
-
-1. finish the modeled-attribute audit now that every PostgreSQL 14–18 catalog
-   table is classified; the blocker suite has run on all five majors, but the
-   matrix must retain its explicit `attribute_audit_in_progress` state until
-   every schema-bearing attribute is modeled, normalized, or blocked;
-2. retain the proven recursive partition-parent and matching prebuilt-child
-   attachment strategies; implement the remaining existing-local-constraint
-   variants or preserve explicit invariant-safe rejections;
-3. classify and differentially verify every Stripe acceptance scenario rather
-   than relying on family-level `weaker` classifications; and
-4. extend the real-PostgreSQL differential corpus across every supported major
-   before promoting individual `weaker` entries to verified support.
-
-This checkpoint does not claim Stripe parity: 40 of the 415 pinned scenarios
-are currently classified `supported`, 373 are conservatively `weaker`, and two
-are `out_of_scope`. The complete source corpus is inventoried, but only entries
-with direct onwardpg and differential evidence are promoted. That distinction
-is part of the release contract, not unfinished prose to be rounded up later.
-
-## Product doctrine
-
-1. **Diffs describe outcomes, not development history.** Intermediate branch
-   edits do not deserve permanent migration files merely because they existed
-   in a commit.
-2. **One migration per PR means one logical bundle per target.** A bundle may
-   contain several execution phases and transaction batches. It is not
-   necessarily one SQL file, one transaction, or one deployment moment.
-3. **The comparison boundary must be named.** A local dev reconciliation, a PR
-   contribution, and a production release plan can all produce different
-   correct diffs from the same branch.
-4. **Draft work is replaceable; executed work is immutable.** A feature-branch
-   bundle can be regenerated until any phase has run or the migration becomes
-   reachable from the protected base branch. After that, corrections are new
-   forward work linked to the original receipt.
-5. **A remote push does not itself make a migration immutable.** Squash-merge
-   workflows routinely rewrite feature-branch history. Execution or
-   publication into the protected migration lineage is the immutability gate.
-6. **Schema state cannot establish application intent.** Renames, destructive
-   operations, casts, backfills, rollout timing, refresh modes, and partition
-   data movement require explicit decisions.
-7. **No receipt, no merge.** Generated SQL without its source fingerprints,
-   decisions, planner options, and clone result is an unverifiable artifact.
-8. **No incomplete success.** Unknown catalog state, unused/stale answers,
-   missing phases, invalid transaction boundaries, or residual diff must
-   produce a non-success result.
-9. **PostgreSQL is the semantic authority.** Declarative DDL is materialized in
-   disposable PostgreSQL and catalog-inspected; onwardpg does not grow a
-   partial SQL parser.
-10. **Forward-only is an operational rule.** Recovery is another reviewed
-    forward plan. Generated down migrations are not a substitute for recovery
-    design.
-11. **Simple is a product constraint.** The ordinary workflow stays: identify
-    current and desired schemas, answer only genuine ambiguities, and receive
-    one reviewable forward plan. onwardpg is a CLI, not an integration
-    framework. Git-aware commands, bundle storage, and CI may support that
-    workflow; ORM journals and framework-specific adapters remain out of
-    scope. None may leak into the semantic engine or become prerequisites for
-    using the basic current-to-desired diff.
-12. **Complexity belongs in receipts, not incantations.** The CLI may perform
-    deep verification, but the golden path must remain one discoverable
-    command with actionable output. Advanced flags expose composition points;
-    they do not replace a good default.
-
-## The four comparison boundaries
-
-The current CLI exposes generic `--from` and `--to` sources. The next DX layer
-must make the purpose of each comparison explicit because using the wrong
-boundary produces a plausible but incorrect migration.
-
-| Mode | Current / `from` | Desired / `to` | Question answered | Durable output |
-| --- | --- | --- | --- | --- |
-| **Develop** | Developer's local/dev database | Current checkout's declarative schema | “What local database work lets me keep developing?” | Usually none; scratch plan only |
-| **PR** | Schema represented by the PR base commit/ref | Feature branch's final declarative schema | “What schema contribution does this PR make?” | One feature migration bundle per target |
-| **Release** | Real deployment database or fresh clone | Schema represented by the release commit | “What must this environment actually receive, including lag or drift?” | Reviewed deployment plan/receipt |
-| **Verify** | Disposable clone after applying selected phases | Expected checkpoint or final desired schema | “Did the reviewed work produce the promised state?” | Clone execution and residual-diff receipt |
-
-These modes share the same typed graph and planner, but they have different
-provenance and policy:
-
-- A dev database may contain abandoned experiments and must never silently
-  become the PR baseline.
-- `origin/main` describes repository history, not necessarily deployed
-  production state.
-- Production may lag main, contain approved hotfixes, or have accidental
-  drift; a production release plan is therefore not interchangeable with the
-  PR diff.
-- A PR bundle proves what the PR contributes relative to its base. A release
-  plan proves what a particular database still needs.
-
-The manifest and CLI must call these boundaries by name. Generic `plan` remains
-the low-level engine; agent-facing workflows use explicit modes.
-
-## The PR schema square
-
-A PR is not one diff. It has four schema states that must agree:
-
-```text
-base declarative schema ───── PR intent diff ─────► head declarative schema
-          │                                                   │
-          │ base integrity                                    │ history fidelity
-          ▼                                                   ▼
-base bundle chain replayed ── replay PR phases ──► head bundle chain replayed
+```sh
+onwardpg dev plan --target primary
+onwardpg draft --target primary --bundle customer-profile
+onwardpg verify --target primary --bundle customer-profile
 ```
 
-Name them explicitly:
+Given PostgreSQL as it exists and CREATE-statement DDL as it should exist,
+onwardpg explains the forward path. When schema state cannot establish intent,
+it emits bounded decisions. A developer or coding agent selects among those
+decisions, then takes ownership of readable phased SQL. onwardpg verifies the
+exact edited migration in databases it created and never applies it anywhere
+else.
 
-- **BC**: declarative code schema at the exact base commit;
-- **BM**: schema produced by replaying the base onwardpg bundle chain;
-- **HC**: declarative code schema at the PR head/working-tree digest; and
-- **HM**: schema produced by replaying the base chain plus the PR's complete
-  onwardpg phase bundle.
+The governing principle is:
 
-The ordinary invariant is `BC == BM` and `HC == HM`. The horizontal top diff
-is what the feature means. The horizontal bottom transition is what the
-reviewed onwardpg history will do on a fresh database. The vertical comparisons catch missing,
-stacked, stale, or hand-edited artifacts.
+> The agent states only intent that schema state cannot establish. onwardpg
+> infers the rest, binds accepted intent to observed state, and hands everything
+> richer to editable SQL and comments.
 
-If `BC != BM`, the base branch is already unhealthy. The feature PR must not
-quietly absorb that mismatch and call it its own migration. CI reports a base
-integrity failure or an explicitly accepted inherited exception. If `HC != HM`,
-the PR migration does not implement the schema its code declares.
+## Implementation checkpoint — 2026-07-13
 
-The local dev database is a fifth, deliberately non-authoritative state. Its
-diff to `HC` helps the developer work, but it never substitutes for any corner
-of the PR square.
+The foundation already exists:
 
-`HC` is the tree that would actually result from merging the PR contribution
-into the exact recorded base, not necessarily the raw feature-branch checkout.
-When the base advanced after the branch forked, the caller must supply that
-would-be merged tree and a content receipt. The optional Git wrapper constructs
-it from `base + (merge-base → head patch)` in isolation; GitHub CI may use the
-platform's synthetic merge ref. The core neither invokes Git nor trusts a ref
-name as schema content. A merge conflict is an explicit wrapper/CI blocked
-state, never a guessed desired schema. Dirty trees are identified by a digest
-of the actual compiled tree, not by a Git patch-format digest.
+- top-level `init`, `dev plan`, `draft`, `verify`, and `drift check` commands are
+  Git-free;
+- PostgreSQL catalogs and materialized CREATE-statement DDL feed the typed
+  dependency graph;
+- `init` and `draft` write deterministic hash-chained bundles;
+- `draft --bundle` plans from replayed history to working DDL, not from the
+  mutable development database;
+- generated plans are clone-verified before they are written;
+- agents may edit phase SQL and `verify.sql`, and verification receipts the
+  exact edited files;
+- repeated drafting preserves non-conflicting agent edits with conservative
+  phase-level three-way reconciliation;
+- the same selected bundle remains mutable as feature work evolves;
+- parent hashes detect base erosion without inspecting Git;
+- `verify --check` validates receipts without modifying the checkout; and
+- `drift check` is an explicit, read-only audit rather than part of ordinary
+  feature planning.
 
-Deferred contract work complicates exact `HC == HM` at merge time. In that
-case the bundle records a real-PostgreSQL post-expand checkpoint plus an
-explicit residual plan to final `HC`. CI requires every residual operation to
-be classified as deferred migrate/manual/contract work. Code compatibility
-with that intermediate schema is a developer assertion; it cannot be inferred
-from DDL alone.
+The first decision-loop slice is now implemented:
 
-## “One migration per PR” contract
+- strict semantic `rename`, `drop`, `type_change`, `rollout`, `confirm`, and
+  `manual_sql` hints use structured identifier arrays and reject unknown fields;
+- hints may be supplied before planning or copied directly from
+  `needs_decisions` output;
+- staged planner questions consume hints iteratively, including one drop hint
+  resolving both rename rejection and destructive confirmation;
+- unused, impossible, duplicate, contradictory, and malformed hints fail;
+- internal answers retain narrow scope fingerprints without exposing them to
+  the authoring exchange;
+- accepted hints persist in generated `decisions.json` receipts;
+- `onwardpg/draft/2` decision output contains only semantic choice sets and
+  choice-specific hazards;
+- `manual_sql` produces `needs_sql_edits` plus a phase-local `ONWARDPG TODO`,
+  never an incomplete success; and
+- real PostgreSQL acceptance tests cover semantic rename, clone verification,
+  base erosion, manual type SQL handoff, edited verification, and receipt
+  transition.
 
-The default rule is:
+The same semantic hints now work in `draft`, `dev plan`, and low-level `plan`.
+No command exposes the internal fingerprint-bound answer format as author
+input. Type-change and NOT NULL hints omit fields implied by their kind, and
+an agent may safely resend one complete ahead-of-time hints file. The unused
+free-form `intent.md` channel and low-level bundle writer have also been
+removed: bounded hints carry decisions, editable SQL carries everything richer,
+and only `draft` writes durable history.
 
-> For each configured database target whose declarative schema changes, a PR
-> owns exactly one logical migration bundle from its base schema to its head
-> schema.
+Same-phase conflicts preserve old-generated, current-edited, and new-generated
+SQL; generated statements include review comments; and `verify --check`
+rejects stale working DDL, unresolved TODOs, unreceipted edits, and invalid
+history with typed findings. Git-era commands, packages, fixtures, metadata,
+and source-receipt kinds have been removed. Transactional rollback,
+non-transactional failure, false assertions, cancellation, scratch cleanup,
+and the lifecycle have been exercised on PostgreSQL 14–18. Deterministic
+release archives, checksums, embedded versions, performance bounds, and an
+internal security review now exist. The vulnerability scan is clean with Go
+1.26.5 and pgx 5.9.2. Publishing remains deliberately blocked until the
+project has an explicit license.
 
-### What counts as one
+## North star walkthrough
 
-- One bundle can contain `expand`, `migrate`, `manual`, and deferred `contract`
-  artifacts.
-- Transactional and non-transactional batches remain separate even within one
-  phase.
-- A monorepo PR changing two independent databases has one bundle per target,
-  not one bundle for the whole repository.
-- A migration-only drift repair or delayed contract PR may have a bundle even
-  when the declarative application schema does not change, but its manifest
-  must declare that purpose and lineage explicitly.
-- A PR with no schema change must not add an empty migration bundle.
+### 1. Configure desired DDL and disposable PostgreSQL
 
-### What counts as stacking
+```toml
+# .onwardpg.toml
+version = 1
+bundle_root = "migrations/onward"
 
-CI should reject, unless an explicit exception applies:
-
-- multiple new onwardpg bundles for one target created by exploratory edits on
-  the same PR;
-- a new bundle plus unaccounted branch-local phase artifacts;
-- a bundle whose baseline predates migrations now present on the PR base;
-- a manually edited SQL file whose digest no longer matches `plan.json`;
-- an execution command that collapses phases or transaction boundaries without
-  an explicit reviewed receipt;
-- reordering, deleting, or editing any migration reachable from the protected
-  base branch; and
-- replacing any bundle generation that has an execution receipt.
-
-### Legitimate exceptions
-
-- multiple configured database targets;
-- a successor generation required because part of the original bundle was
-  already executed before the PR changed;
-- a deliberately separate follow-up contract PR linked to the original expand
-  bundle;
-- emergency forward repair after a failed or partially applied operation; and
-- explicitly modeled stacked PRs whose base is another feature branch. Once
-  the parent merges, the child must regenerate against the new protected base.
-
-Exceptions never erase history. They form a typed lineage (`supersedes`,
-`continues`, or `repairs`) inside one logical feature change.
-
-Manual control remains a core feature. Raw edits invalidate the generated
-receipt, but the developer may adopt an edit as a versioned amendment that
-records the affected statement IDs, rationale, phase, execution mode, hazards,
-and verification. The amended artifact must pass clone convergence. “No
-unreceipted edits” is the guardrail; “generated SQL is untouchable” is not.
-
-## Bundle lifecycle and immutability
-
-Each target-specific bundle follows this state machine:
-
-```text
-developing
-    │
-    ▼
-generated ──► needs_input ──► planned ──► clone_verified ──► reviewed
-    ▲               │             │              │              │
-    └── regenerate ─┴─────────────┴──────────────┘              │
-                                                                ▼
-                                                    expand_executed (immutable)
-                                                                │
-                                                    application_merged
-                                                                │
-                                                     migrate_observed
-                                                                │
-                                                      contract_ready
-                                                                │
-                                                         complete
+[targets.primary]
+schema_command = ["pnpm", "db:export-schema"]
+dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
 ```
 
-Before execution, a generation becomes stale and replaceable when:
+`schema_command` prints PostgreSQL CREATE statements. `schema_file` is the
+equivalent static-file option. Drizzle, Django, Prisma, SQLAlchemy, or a custom
+script may produce that DDL; onwardpg does not need framework adapters.
 
-- the base commit/ref advances;
-- the base schema fingerprint changes;
-- the head declarative schema changes;
-- planner version or schema-affecting options change;
-- a checked-in answer no longer matches the questions; or
-- generated SQL or exported DDL changes.
+The scratch server is also the source of truth for the PostgreSQL major. The
+detected major is receipted automatically; configuration does not repeat it.
 
-After any phase is executed, the generation is immutable. If the PR then
-changes, onwardpg produces a successor forward generation from the environment
-checkpoint to the new desired state. It must not rewrite the already executed
-SQL merely to recover the appearance of one file.
+The scratch URL must name a PostgreSQL server on which onwardpg may create and
+drop disposable databases. It is not an application database.
 
-Reachability from the protected base branch also makes bundles immutable,
-whether or not production has executed them yet. This protects the
-content-addressed onwardpg history chain.
-
-## Phase semantics in a squash-merge workflow
-
-One logical bundle does not imply every phase should run at the same time.
-
-| Phase | Typical timing | PR behavior |
-| --- | --- | --- |
-| `expand` | Before the application merge/deploy | Reviewed phase artifact may be run explicitly after approval |
-| `migrate` | After compatible code exists, often observed over time | Runbook or reviewed data job; never invented from schema state |
-| `manual` | At its explicitly reviewed operational point | Operator-owned SQL and verification with declared execution mode |
-| `contract` | After old code and old data paths are gone | Deferred artifact or separate linked contract PR; never accidentally collapsed into expand |
-
-For a purely additive change, `expand.sql` may be the entire deployable
-migration and can be applied ahead of squash merge. For a rename/type change,
-the safest plan often spans releases:
-
-1. expand with a shadow/new column or compatibility object;
-2. deploy dual-read/dual-write code;
-3. backfill and verify;
-4. deploy code that no longer uses the old shape; and
-5. contract in a later linked PR.
-
-A direct rename can still be planned when explicitly approved, but the tool
-must describe why it cannot safely be applied ahead of code that uses the old
-name.
-
-### Strategy selection beyond a raw diff
-
-For high-risk mutations, the best “how to get there” is often an intermediate
-schema that does not appear in either endpoint. The planner should offer typed
-strategy choices, not silently choose one:
-
-| Mutation | Possible reviewed strategies |
-| --- | --- |
-| Column/table rename | Direct contract rename; or add compatible shadow shape, dual-write/backfill, then later contract |
-| Type change | Direct cast with explicit `USING`; shadow column plus backfill/swap; or manual transition |
-| `NOT NULL` | Direct lock/scan; or check `NOT VALID`, validate, set not null, remove helper constraint |
-| Foreign key/check | Direct add; or `NOT VALID` then validate at an observed point |
-| Large index | Ordinary transactional create; or concurrent non-transactional create |
-| View/routine change with materialized dependent | Rebuild; retain where PostgreSQL proves identity; or explicit refresh contract |
-| Partition change | Direct supported attach/detach; or operator-authored reconfiguration/data-movement contract |
-
-onwardpg may generate structural scaffolding and checkpoints for a chosen
-strategy. It still cannot infer dual-write application code, backfill meaning,
-acceptable lock duration, cast correctness, or data verification. Those remain
-intent/manual receipts. Strategy selection should make sophisticated rollout
-patterns approachable without disguising them as automatic schema inference.
-
-If an expand phase is applied from an unmerged PR and the PR is abandoned, the
-database now intentionally differs from main. onwardpg must report that as an
-executed orphan expansion, not encourage deletion or a down migration. The
-operator chooses a forward cleanup bundle or leaves the compatible addition in
-place for future adoption.
-
-Pre-merge execution has two additional hard preconditions:
-
-- immediately before execution, the target database fingerprint must equal the
-  generation's expected deployment baseline; and
-- the operator must identify the exact bundle generation, phase digest, target,
-  and before/after fingerprints in an execution receipt.
-
-There is no application migration-runner journal to keep in sync. The catalog
-is the applied-state journal: replanning against the environment reports the
-residual expand/migrate/contract work. Execution receipts prove who ran which
-reviewed artifact and when; catalog inspection proves what state actually
-exists. If they disagree, onwardpg reports drift rather than guessing which
-bookkeeping source is authoritative.
-
-## Required bundle receipts
-
-The recommended repository shape is:
-
-```text
-migrations/onward/<target>/<feature-id>/
-├── manifest.json
-├── intent.md
-├── decisions/
-│   ├── attempt-001.json
-│   └── attempt-002.json
-├── answers.json
-├── amendments.json        # optional reviewed changes to generated statements
-├── plan.json
-├── phases/
-│   ├── expand.sql
-│   ├── migrate.sql
-│   ├── manual.sql
-│   └── contract.sql
-├── verification/
-│   ├── clone-before.json
-│   ├── execution.json
-│   ├── clone-after.json
-│   └── residual-plan.json
+```sh
+onwardpg config check
 ```
 
-Empty phase files are omitted. `contract.sql` is a deferred proposal unless a
-later execution receipt explicitly advances it. The bundle itself is the
-migration-history entry; there is no translation into Drizzle, Django, Prisma,
-Alembic, or another runner format.
+This materializes the DDL in disposable PostgreSQL, introspects it through the
+same catalog path used for live databases, and prints a stable fingerprint.
+Unknown catalog state blocks instead of disappearing.
 
-`manifest.json` is versioned and machine-readable. At minimum it records:
+### 2. Establish the replayable ground floor
+
+```sh
+onwardpg init --target primary
+```
+
+`init` creates the first receipted bundle from empty PostgreSQL to the current
+desired schema. For an existing application, this is a replayable baseline; it
+does not mean onwardpg applied anything to production.
+
+```text
+migrations/onward/primary/
+└── 0001_baseline/
+    ├── manifest.json
+    ├── plan.json
+    └── phases/
+        ├── expand.sql
+        ├── migrate.sql
+        └── contract.sql
+```
+
+Every later entry names its parent digest. Ordering comes from the chain, not
+from filenames, Git history, or an ORM journal.
+
+### 3. Iterate cheaply against the development database
+
+```sh
+onwardpg dev plan --target primary
+```
+
+This compares the development catalog with working DDL and prints phased SQL.
+It never executes that SQL. The agent may apply it through the project's normal
+database tooling, keep developing, and rerun the command.
+
+If another column is added tomorrow, the next `dev plan` shows only the local
+residual. Applying development SQL is not a migration-history event.
+
+### 4. Draft one logical feature migration
+
+```sh
+onwardpg draft \
+  --target primary \
+  --bundle customer-profile
+```
+
+`draft` replays every bundle except the explicitly selected feature bundle,
+materializes the current desired DDL, and plans the cumulative transition from
+history head to working schema. The bundle ID is the only feature identity
+onwardpg needs. It does not inspect branches, commits, merge bases, or PRs.
+
+Suppose history contains `users.name` and desired DDL contains
+`users.display_name`. Schema state cannot prove whether this is a rename or a
+replacement. Human output is concise and directly actionable:
+
+```text
+customer-profile needs 1 decision
+
+  users.display_name
+    rename users.name to users.display_name
+      --hint '{"kind":"rename","object":"column","from":["public","users","name"],"to":["public","users","display_name"]}'
+
+    confirm removal of users.name; display_name is already implied by the DDL
+      --hint '{"kind":"drop","object":"column","name":["public","users","name"]}'
+
+Run the same command with one of these hints.
+```
+
+The JSON form is non-interactive and carries the same finite choice set:
+
+```sh
+onwardpg draft \
+  --target primary \
+  --bundle customer-profile \
+  --output json
+```
 
 ```json
 {
-  "protocol_version": "onwardpg.bundle/v1",
-  "bundle_id": "customer-profile",
-  "target": "primary-postgres",
-  "purpose": "feature",
-  "history": {
-    "parent_digest": "sha256:...",
-    "entry_digest": "sha256:..."
-  },
-  "base_ref": "origin/main",
-  "base_commit": "<full git sha>",
-  "head_commit": "<full git sha or dirty-tree digest>",
-  "baseline_source": {
-    "kind": "onwardpg_history",
-    "fingerprint": "sha256:..."
-  },
-  "desired_source": {
-    "kind": "ddl_export",
-    "provenance": "schema_command",
-    "fingerprint": "sha256:..."
-  },
-  "planner": {
-    "version": "...",
-    "options": {}
-  },
-  "plan_digest": "sha256:...",
-  "phase_digests": {},
-  "amendments_digest": null,
-  "lineage": null
+  "protocol": "onwardpg/draft/2",
+  "status": "needs_decisions",
+  "decisions": [
+    {
+      "choices": [
+        {
+          "hint": {
+            "kind": "rename",
+            "object": "column",
+            "from": ["public", "users", "name"],
+            "to": ["public", "users", "display_name"]
+          }
+        },
+        {
+          "hint": {
+            "kind": "drop",
+            "object": "column",
+            "name": ["public", "users", "name"]
+          },
+          "hazards": ["data_loss"]
+        }
+      ]
+    }
+  ]
 }
 ```
 
-URLs, credentials, and secret environment values must never be persisted.
-Source receipts store safe identities, commit SHAs, PostgreSQL major version,
-and schema fingerprints.
+That is the entire machine exchange. The protocol and status are needed to
+interpret the response. The alternative semantic hints and choice-specific
+hazards are needed to choose safely. The target, bundle, source and desired
+graph fingerprints, question fingerprint, prose prompt, labels, opaque IDs,
+and rerun command are omitted because the caller or onwardpg already knows them
+or can derive them.
 
-## Onwardpg-owned history and DDL export
+The agent knows from product context that this is a rename. It supplies only the
+relationship schema state cannot establish:
 
-Each target has one append-only, content-addressed bundle chain. A merged
-bundle records the exact prior `parent_digest` it extends; its `entry_digest`
-commits to that parent plus the reviewed plan, decisions, amendments, and phase
-artifacts. Chain traversal, validation, and replay are pure and do not depend
-on directory names, timestamps, lexical SQL filenames, Git commit order, or an
-ORM journal.
+```json
+{"kind":"rename","object":"column","from":["public","users","name"],"to":["public","users","display_name"]}
+```
 
-This deliberately turns base erosion into an ordinary freshness event. Two PRs
-may begin from the same parent digest, but only the first merged child extends
-the protected chain. The other must regenerate against the new chain head;
-merge-queue CI enforces that serialization. A bundle path remains a stable
-human feature identity while the hash link supplies ordering and collision
-proof.
-
-The application has one responsibility at the boundary: export its desired
-schema as executable PostgreSQL genesis DDL. For example, a project may use a
-Drizzle command to render `schema.ts`, but onwardpg only consumes the resulting
-SQL. It never imports framework model formats or reads and writes migration
-journals, snapshots, or runtime ledgers. Framework-specific integration work
-is deferred until the core CLI workflow is mature—and should remain
-unnecessary wherever a reliable DDL export exists.
-
-`history init` establishes the chain ground floor. It plans empty PostgreSQL
-to the current declarative export, clone-verifies that `baseline` root entry
-before writing it, and refuses any target with existing history. For an
-existing application, the genesis is replay history for clones and new
-environments—not SQL to apply to the existing database.
-
-The ordinary invariants become:
-
-- `BC == BM`: base declarative export equals replay of the protected onwardpg
-  bundle chain;
-- `HC == HM`: head declarative export equals replay of that chain plus the
-  complete proposed PR bundle on a disposable database; and
-- a live environment's residual diff identifies phases it still owes without
-  consulting an applied-migration ledger.
-
-## Two speeds, one semantic engine
-
-The dev loop must stay cheap. An agent can compare a disposable/local
-development database with the current declarative export, review mostly
-expand-only SQL, apply it through the developer's normal database client, and
-re-diff. No bundle, Git receipt, history-chain update, or CI ceremony is
-required. onwardpg still emits rather than auto-applies SQL.
-
-The PR/release loop adds the ceremony that production work needs: exact source
-receipts, one logical bundle, explicit ambiguities, phased SQL, immutable
-history links, clone proof, and execution attestations. Both speeds use the
-same catalog snapshots and graph planner; the difference is durable policy,
-not schema semantics.
-
-For every environment, the catalog is the state journal. Bundle-chain history
-proves what the repository intends; execution receipts prove what an operator
-attempted; a fresh residual diff proves what the database still needs.
-
-## Proposed agent-facing CLI
-
-The existing `onwardpg plan --from ... --to ...` remains the low-level,
-source-explicit primitive. The next layer should make lifecycle intent obvious:
+For the common one-choice iteration, that object is passed directly:
 
 ```sh
-# Scratch reconciliation; no PR artifact by default.
-onwardpg dev diff --target primary-postgres
-
-# Inspect whether the branch needs a bundle and whether an existing one is stale.
-onwardpg pr status --base origin/main --target primary-postgres
-
-# Generate/replace one unpublished feature bundle from exact base to head.
-onwardpg pr regenerate \
-  --base origin/main \
-  --target primary-postgres \
-  --bundle customer-profile
-
-# Rerun with reviewed, fingerprint-bound answers.
-onwardpg pr regenerate \
-  --base origin/main \
-  --target primary-postgres \
+onwardpg draft \
+  --target primary \
   --bundle customer-profile \
-  --answers migrations/onward/primary-postgres/customer-profile/answers.json \
-  --replace-draft
-
-# Apply only to a disposable clone and demand phase/final convergence.
-onwardpg bundle verify migrations/onward/primary-postgres/customer-profile \
-  --clone "$CLONE_DATABASE_URL"
-
-# Compare actual deployment state with the release schema.
-onwardpg release plan \
-  --from "$PRODUCTION_READ_ONLY_URL" \
-  --release HEAD \
-  --target primary-postgres
-
-# Run the same deterministic repository policy as CI.
-onwardpg ci check --base origin/main --head HEAD
+  --hint '{"kind":"rename","object":"column","from":["public","users","name"],"to":["public","users","display_name"]}'
 ```
 
-The repository supplies `.onwardpg.toml` (or equivalent) with targets, DDL
-files or export commands, bundle paths, and policy. Commands
-resolve refs to full SHAs and record them. They do not silently fetch, rebase,
-checkout, commit, push, or apply production SQL.
+`--hint` is repeatable. For a batch, `--hints-file migration.hints.json` accepts
+an array of the same semantic objects. There is no second inline-JSON spelling.
 
-`pr status` is read-only. `pr regenerate` may replace only classified draft
-artifacts and must print its complete proposed mutation set before doing so.
+The format is intentionally predictable. If the coding agent already knows
+from the code diff and feature context that the column was renamed, it may pass
+the rename hint on the first invocation. It need not wait for onwardpg to ask.
+The same is true for an intentional drop or an offered structural strategy.
+onwardpg validates each predeclared hint against the actual graph diff, rejects
+unused or impossible intent, and binds accepted intent to the relevant observed
+object fingerprints in the receipt.
 
-## Agent decision loop
+Accepted hints are written into the selected draft's `decisions.json`
+immediately. If more decisions remain, the next invocation returns only those
+decisions; the agent does not resubmit accepted hints or maintain a parallel
+answer file. Valid intent survives later feature edits and base erosion through
+their hidden narrow-scope bindings.
 
-An agent may have developer intent in context, but every decision still leaves
-a typed receipt:
+The agent never copies schema fingerprints, planner IDs, or a question token.
+Object names are structured as identifier arrays so quoting and dots in names
+are unambiguous. A consumed hint becomes a fingerprint-bound receipt. If later
+state changes its meaning, onwardpg invalidates that receipt and returns the new
+semantic choices. The only continuation for `needs_decisions` is always to
+repeat the same command with one or more hints, so JSON does not echo the
+command the agent just invoked.
 
-1. Generate an answer-free PR plan and store the full `needs_input` result.
-2. For each question, cite the relevant intent in `intent.md`.
-3. Select an offered rename/drop/direct-conversion choice only when the intent
-   clearly establishes it.
-4. Supply freeform SQL only for a manual-work contract the developer/operator
-   actually specified and reviewed.
-5. Ask the developer when intent is absent, contradictory, or operationally
-   consequential.
-6. Rerun with a complete answer file. Stale, duplicate, contradictory, invalid,
-   or unused answers fail.
-7. Save the ready plan and render phase files from it.
-8. If SQL needs expert adjustment, import it as a typed amendment rather than
-   silently editing the rendered artifact.
-9. Replay the complete onwardpg bundle chain on a clone and save the empty
-   residual result or the explicit deferred residual plan.
+### 5. Take ownership of readable phased SQL
 
-The agent must never choose answers merely to reach exit code `0`. A clean
-`unsupported` or `needs_input` result is a successful guardrail when the
-alternative is guessed intent.
-
-## Main-branch erosion and regeneration
-
-Every PR bundle records an exact base commit and base schema fingerprint. CI
-fetches the current PR base and classifies the bundle:
-
-- **fresh:** exact base commit/fingerprint and head desired fingerprint match;
-- **provenance-stale:** the prepared tree receipt changed, even if the
-  resulting schema is equal;
-- **schema-stale:** base or head schema fingerprint changed;
-- **decision-stale:** questions/answers no longer match;
-- **artifact-stale:** plan or SQL digest differs; or
-- **immutable-successor-required:** a phase from the old generation was
-  executed, so replacement is forbidden.
-
-If `origin/main` gains unrelated migrations, regeneration should normally
-produce the same feature operations with a new baseline receipt and migration
-sequence/name. If it gains overlapping schema changes, the new diff may ask new
-questions or reject a conflict. That is useful information; onwardpg must not
-try to preserve the old SQL for aesthetic stability.
-
-Git classification uses two boundaries at once: the merge-base-to-head diff is
-the PR-owned contribution, while the exact current base tree defines protected
-migration history and the regeneration baseline. Files newly added to the base
-are not PR deletions. Editing or removing a file reachable from either the old
-merge base or current base is an immutable-history violation; adding a branch
-file at a path now occupied by the base is a concurrent identity collision.
-
-If only the Git commit changes while `BC`, `BM`, and the feature diff remain
-identical, onwardpg may fast-path semantic reuse, but it still reissues the
-provenance and history-parent receipt. An unrelated merged bundle changes the
-target's chain head even when it does not change this feature's SQL plan.
-
-The base is the PR's configured base branch, not always `origin/main`. GitHub
-Actions should use the pull request base SHA. A stacked PR may temporarily use
-its parent branch as base, but must regenerate after the parent is squash-merged
-because the commit and possibly migration identity changed.
-
-## GitHub Actions and CI policy
-
-Provide a versioned reusable action and a standalone `onwardpg ci check`
-command. CI must be read-only with respect to the branch: it reports and emits
-artifacts but never commits regenerated migrations behind the developer's back.
-
-### Required checks
-
-| Check | Failure condition |
-| --- | --- |
-| Schema-change detection | Head declarative schema differs from base but no target bundle exists |
-| Base integrity | Base declarative schema and replayed base migration history differ |
-| No-op bundle | Bundle exists without a declared schema/drift/contract purpose |
-| Bundle cardinality | More than one unlinked bundle for one changed target |
-| Base freshness | Manifest base SHA/fingerprint differs from the PR base |
-| Head freshness | Desired fingerprint differs from current checkout output |
-| Migration immutability | A base-reachable migration was edited, removed, or reordered |
-| Draft replacement safety | A generation with an execution receipt was replaced |
-| Answer validity | Missing, stale, contradictory, invalid, duplicate, or unused answer |
-| Receipt integrity | Planner/options/source/plan/phase digests do not agree |
-| History-chain integrity | Bundle parent is not the protected target chain head, entry digest is invalid, or history forks |
-| Phase artifact integrity | Checked-in phase SQL differs from the reviewed plan/amendments/metadata |
-| Phase policy | Deferred contract/manual work would be auto-applied with expand |
-| Transaction policy | Non-transactional statements are wrapped or batch boundaries changed |
-| Hazard policy | Repository-configured lock/rewrite/data-loss threshold lacks approval |
-| Clone replay | Base cannot materialize, migration fails, rollback semantics fail, or residual diff remains |
-| Unknown state | Catalog blocker is neither supported nor matched by a validated narrow ignore |
-
-### PR summary
-
-The action should publish a job summary and optional PR check annotation with:
-
-- base/head commits and schema fingerprints;
-- changed object counts by phase;
-- unresolved questions and unsupported objects;
-- hazards and transactional boundaries;
-- whether the bundle is fresh, replaceable, or immutable;
-- clone convergence status; and
-- the exact local regeneration command.
-
-It should upload the answer-free decision document and plan preview as CI
-artifacts without exposing connection URLs or secrets.
-
-### Merge queue
-
-The merge queue creates a new effective base containing earlier queued PRs.
-The action must run against the merge-group SHA and detect when the checked-in
-bundle was planned against an older base. Initial policy should fail with a
-clear regeneration requirement. Later, a bot may open/update a branch commit,
-but it must never silently change an approved or executed bundle.
-
-Repositories that require pre-merge production expand work may choose to leave
-the queue and regenerate after earlier schema PRs merge. Pretending the old
-baseline is still valid is not an acceptable optimization.
-
-## Lifecycle scenario matrix
-
-| Scenario | Expected onwardpg behavior |
-| --- | --- |
-| Feature schema changes repeatedly before review | Replace the same draft bundle generation; keep one logical PR bundle |
-| Main receives unrelated migrations | Mark base stale; regenerate and reverify against new base |
-| Main changes the same table/object | Re-diff; ask new intent questions or report conflict/unsupported transition |
-| Feature branch merges/rebases main | Recompute both git and schema provenance; never assume conflict resolution preserved intent |
-| Stacked PR targets another feature branch | Plan from parent branch; regenerate from protected base after parent squash merge |
-| Two PRs extend the same target history parent | First merged child wins; the other becomes parent-stale and regenerates |
-| PR has multiple exploratory onwardpg drafts | Replace the unexecuted draft with one final logical bundle |
-| Existing migration is already on main | Refuse edit/delete; generate forward successor |
-| Expand was applied before merge, then PR changes | Freeze executed generation; plan successor from recorded post-expand environment state |
-| Expand was applied, then PR is abandoned | Report orphan expansion; require explicit forward cleanup/adoption decision |
-| PR contains a destructive rename intended before merge | Explain old-code incompatibility; require staged design or explicit direct-operation approval |
-| Backfill is needed | Emit migrate/manual contract and verification requirements; never synthesize data semantics |
-| Contract must wait days/weeks | Leave the contract phase unapplied or create a linked contract PR; residual diff keeps it visible |
-| Production lags several main migrations | Release mode plans from actual clone to release desired; PR bundle is not reused blindly |
-| Production has drift absent from git | Release mode surfaces it as an explicit extra change/question |
-| Developer's local DB has abandoned objects | Dev mode reports them; PR mode ignores local DB as a baseline |
-| Declarative schema changed but migration is intentionally deferred | Require an explicit policy waiver with reason/expiry; do not accept silent absence |
-| Migration-only hotfix or drift repair | Allow declared `repair` purpose with database baseline and forward lineage |
-| Multiple databases change in one PR | One target-specific bundle and verification result per database |
-| Generated SQL is hand-edited | Digest failure until imported as a reviewed amendment or manual-work contract and reverified |
-| SQL is applied pre-merge | Require the exact bundle/phase digest plus before/after catalog fingerprints; residual planning determines what remains |
-| Main advances after pre-merge expand | Executed generation stays immutable; re-check live fingerprint and plan a successor instead of renumbering/replacing it |
-| No schema difference remains after rebase | Remove unexecuted draft bundle; retain immutable execution/history receipts if any |
-
-## Architecture evolution
-
-The typed graph planner remains the sole semantic planning engine. The
-lifecycle core is Git-free and consumes prepared directories, typed snapshots,
-and caller-supplied provenance receipts. The CLI may prepare Git trees and run
-a configured DDL export command, but there is no plugin or adapter ecosystem.
-This boundary is a release constraint: no core planning, freshness, bundle,
-history, or verification package may execute Git.
+After bounded decisions are resolved, the selected folder is the handoff:
 
 ```text
-prepared current + desired inputs
-                 │
-                 ├── live PostgreSQL / exported DDL
-                 └── prepared base/head directories + content receipts
-                                      │
-                               typed graph snapshots
-                                      │
-                               graph diff/planner
-                                      │
-                            questions + plan + hazards
-                                      │
-                           bundle/freshness/history core
-                                      │
-                    phase artifacts + clone verification
-
-optional CLI conveniences
-  Git CLI / GitHub Action ──► prepared directories + provenance receipts
-  project schema command ───► PostgreSQL DDL on stdout
+migrations/onward/primary/customer-profile/
+├── manifest.json       # chain, fingerprints, exact file receipts
+├── decisions.json      # consumed semantic hints and hidden state bindings
+├── plan.json           # generated operations, dependencies, hazards, batches
+├── verify.sql          # optional agent-owned boolean assertions
+└── phases/
+    ├── expand.sql      # additions usable before compatible code deploys
+    ├── migrate.sql     # backfills and staged transitions
+    └── contract.sql    # removals after compatibility windows close
 ```
 
-Required packages/interfaces:
+`decisions.json` is generated evidence. It is not the authoring interface and
+should not need hand editing.
 
-- `workspace.Config`: targets, DDL inputs, paths, phase policy, hazard policy;
-- `provenance.SourceReceipt`: safe database/DDL/tree identity and digest;
-- `workflow.PreparedInput`: caller-owned base/head directories, migration
-  snapshots, content digests, and opaque provenance;
-- `workspace.TargetCompiler`: repository file/command to PostgreSQL DDL;
-- `history.Chain`: validate and replay ordered onwardpg bundle history;
-- `history.Materializer`: bundle chain to disposable PostgreSQL;
-- `bundle.Manifest`: versioned lineage, digests, phases, and verification;
-- `bundle.Amendment`: reviewed statement additions/replacements/removals with
-  rationale, phase, hazards, and verification;
-- `bundle.Store`: read/validate/replace draft generations atomically;
-- `policy.Checker`: local/CI cardinality, freshness, phase, and hazard rules;
-- `verify.CloneRunner`: disposable-only batch execution and residual inspection;
-- `report.Summary`: stable JSON plus human-readable PR/terminal output.
+The SQL explains purpose and timing:
 
-The optional `gitbase` CLI helper may resolve refs, classify protected history,
-detect merge conflicts, and prepare trees. The CLI may call it to preserve the
-one-command local experience. The same core operation must also be callable
-with explicit directories and receipts, while CI owns authoritative
-Git-semantic checks such as reachability and mergeability. Git output is never
-parsed in a semantic core package.
+```sql
+-- EXPAND
+-- Purpose: introduce the replacement date while old application versions still
+-- read and write payments.settled_at.
+-- Timing: run before deploying dual-write application code.
+-- Lock: brief ACCESS EXCLUSIVE metadata lock; no table rewrite expected.
 
-The production CLI must not gain a generic “apply” command. Clone verification
-requires an explicitly disposable target and should stamp that fact in its
-receipt.
+ALTER TABLE public.payments ADD COLUMN settled_on date;
+```
 
-## Current foundation to preserve
+```sql
+-- MIGRATE
+-- Purpose: populate payments.settled_on before it becomes required.
+-- Product rule is not derivable from schema state.
+-- Replace this TODO with reviewed SQL and add a verification assertion.
 
-- `pgschema.Snapshot` is the sole production schema representation; the legacy
-  flat planner is removed.
-- Live URLs and `file://` DDL sources produce catalog-backed snapshots in a
-  consistent read-only inspection transaction.
-- Plans are forward-only and never auto-applied.
-- `onwardpg.plan/v1` provides fingerprints, typed questions/answers, hazards,
-  phases, and transactional/non-transactional batches.
-- Known unmodeled catalog state covered by the current blocker inventory is
-  explicit unsupported state unless matched by a validated narrow ignore
-  selector. Completing that inventory remains required before a production
-  safety claim.
-- PostgreSQL 14–18 is the supported server policy.
-- Schemas, tables, columns, common constraints/indexes, enums, standalone
-  sequences, extensions, ordinary/materialized views, modeled routines,
-  triggers, and substantial partition behavior are graph-modeled within the
-  documented feature boundary.
-- Rename and manual-work decisions are fingerprint-bound. Materialized-view
-  refresh and partition reconfiguration require operator-owned contracts.
-- `parity/pgmig-roadmap.json` remains the product-facing feature map.
-- `parity/atlas-postgres.json` remains a pinned reference-behavior study, not a
-  release or one-for-one compatibility goal. When PostgreSQL planner behavior
-  is unclear, the authenticated Atlas CLI may be used against disposable
-  schemas as evidence; onwardpg's safety policy is decided independently.
+-- ONWARDPG TODO: backfill public.payments.settled_on
+```
 
-### DX implementation progress
+```sql
+-- CONTRACT
+-- Timing: run only after all deployed application versions read settled_on and
+-- the backfill assertion succeeds.
+-- Hazard: drops data and takes an ACCESS EXCLUSIVE metadata lock.
 
-- Wave 0/1 foundation now includes deterministic statement IDs,
-  `onwardpg.bundle/v1`, canonical artifact digests, preserved decision history,
-  explicit safe draft replacement, strict `.onwardpg.toml` validation, and
-  `onwardpg.diagnostic/v1` errors.
-- Low-level `plan --bundle` writes non-empty phase files without changing the
-  normal plan JSON or exit behavior. Source descriptions are redacted, and a
-  real-PostgreSQL CLI integration test covers bundle creation.
-- Read-only `pr status` now resolves exact base/head/merge-base identities,
-  fingerprints dirty checkout state, separates PR-owned changes from base
-  erosion, and blocks base-history edits and concurrent migration-path
-  collisions.
-- `pr regenerate` materializes the exact base and synthetic would-be merge
-  tree, overlays fingerprinted dirty state without staging it, runs the
-  configured DDL export deterministically, validates and replays hash-chained
-  onwardpg history in PostgreSQL, and requires both `BC == BM` and `HC == HM`.
-- The discarded generic runner/handoff experiment never entered committed
-  history. In the accepted model, phase artifacts inside the bundle are the
-  migration history; no ORM runner translation is planned.
-- Core PR analysis no longer imports or executes `gitbase`.
-  Explicit prepared-tree inputs exercise the same engine as the convenient
-  Git wrapper.
-- `pr status --bundle` is now a read-only freshness oracle over freshly
-  prepared/compiled trees. It returns typed provenance/schema/decision/artifact
-  findings with remediation and never regenerates as a side effect.
-- Same-contract reruns now retain their generation, identical decision results
-  retain their attempt, and replacement checks bundle identity, generation,
-  phase/plan fidelity, lifecycle races, unsafe path tokens, and secret-bearing
-  source descriptions.
-- Hash-chained bundle ordering/replay, config-driven `dev plan`, disposable
-  clone verification, and strict `ci check` are implemented. Canonical staged
-  question receipts now let scoped answers survive repeated generation and
-  base-history changes. Execution/amendment receipts remain future work.
-  Low-level `plan --bundle` base/head flags are still caller receipts rather
-  than independently verified provenance.
+ALTER TABLE public.payments
+  ALTER COLUMN settled_on SET NOT NULL;
+ALTER TABLE public.payments
+  DROP COLUMN settled_at;
+```
 
-## REVIEW.md round-two decisions and work queue
+The coding agent may replace TODOs, rewrite generated statements, split work,
+add deduplication or batching, and strengthen `verify.sql`. This is intentional:
+the migration folder is reviewed code, not generated output that must remain
+pristine.
 
-The 2026-07-13 review is accepted as the current architectural correction.
-Its findings are not merely cleanup: the Git-free boundary, freshness oracle,
-answer survival, and generation semantics define whether the product remains
-simple enough for developers and agents.
+There is no JSON schema for a product-specific backfill, dual-write rollout,
+deployment wait, batch size, or business invariant. If onwardpg cannot derive
+that work, it identifies the structural need and hands over SQL ownership.
 
-| Priority | Accepted work |
-| --- | --- |
-| P0 architecture | Make PR analysis, regeneration, freshness, history replay, and verification consume prepared trees/snapshots and receipts. Keep Git only in optional CLI/CI orchestration. |
-| P0 DX | Implement a read-only freshness oracle that classifies fresh, provenance-stale, schema-stale, decision-stale, artifact-stale, and immutable-successor-required, each with a remediation command. `status` must never mutate a bundle. |
-| P0 lifecycle | Same base/head/schema/options stay in the same generation. Decision reruns increment attempts only when the decision document changes; a new generation represents changed source state or a forward successor. Idempotent reruns do not churn files. |
-| P0 integrity | Reject `.`/`..` identities, revalidate replacement immediately before swap, enforce bundle identity/generation compare-and-swap, recover or explicitly diagnose orphan backups, cross-check phase SQL against `plan.json`, and use length-framed digests. |
-| P0 history | Replace foreign/plain migration-path replay with an onwardpg-owned per-target hash chain and prove `BC == BM` / `HC == HM` from it. |
-| P1 decisions | **Foundation complete:** questions fingerprint participating object/dependency scopes; PR status/regeneration carry exact matches and report carried, invalidated, unanswered, and deferred decisions. Extend scenario coverage as lifecycle work continues. |
-| P1 receipts | Reserve and validate execution, verification, and amendment receipt slots so strict bundle reads do not deadlock the documented lifecycle. |
-| P1 amendments | Represent edited SQL as typed, statement-ID-bound amendments with rationale and reverification; never make a reviewed bundle unrecoverable through undocumented edits. |
-| P1 DDL input | Stabilize `schema_file` and deterministic `schema_command`; do not build framework adapters. Equivalent exported DDL must produce equivalent graphs. |
-| P1 diagnostics | Preserve typed merge-conflict/blocked results and add stable remediation fields to high-traffic diagnostics. |
-| P2 hardening | Use a minimal compiler environment, stronger deterministic-output evidence, config overlap validation, safe URL/libpq redaction, and consolidated hashing/path/exec validation. |
+### 6. Verify the exact edited migration
 
-The simplicity gate for every item is: does it make the default command more
-predictable or remove a decision from the developer? Features that merely add
-workflow policy without improving the current-to-desired plan remain optional.
+```sh
+onwardpg verify \
+  --target primary \
+  --bundle customer-profile
+```
 
-## Safety and code-quality debt carried from REVIEW.md
+`verify` creates fresh disposable databases, replays immutable parent history,
+executes the exact phase files in order, evaluates `verify.sql`, introspects the
+result, and proves an empty residual diff against current desired DDL. It then
+records exact file digests and verification evidence in the manifest.
 
-The detailed colleague review remains in `REVIEW.md`. Fixed findings require
-permanent regressions; they must not disappear from history merely because the
-DX plan changed. Remaining work includes:
+```text
+verified customer-profile
+  source:       sha256:97…
+  desired:      sha256:ab…
+  phases:       expand -> migrate -> contract
+  assertions:   2 passed
+  residual:     empty
+  receipts:     current
 
-| Priority | Work |
-| --- | --- |
-| P0/P1 regression | Prove source defaults are never evaluated on production; sparse `attnum`, one-sided ignores, FK/table rename, extension drop, partition children, type-before-default, batch phase validation, and typed transactionality remain covered on real PostgreSQL. |
-| P1 | Finish same-name standalone-sequence move ordering, matching the fixed standalone-index collision behavior. |
-| P1 | Add the combined serial plus nullability/comment real-database regression. |
-| P2 | Surface disposable-DDL database cleanup failures without replacing the primary result. |
-| Cleanup | Centralize safe identifier quoting and the modeled-object registry. |
-| Cleanup | Remove/populate fingerprinted dead fields and consolidate rename scaffolding only after behavior tests exist. |
-| Performance | Address O(n²) rename scans, ready-queue sorting, FK dependency lookup, and implicit constraint-index scans after correctness. |
-| Fixtures | Share integration executor, clone, and advisory-lock fixtures across packages. |
+next: review and commit the folder; onwardpg will not apply it
+```
 
-## Verification strategy for the DX layer
+`verify --check` is the read-only CI form. It rejects unreceipted edits, stale
+DDL or parent history, unresolved decisions or TODOs, failed assertions, broken
+chain history, and non-convergence.
 
-### Repository scenario tests
+Verification proves replay, declared assertions, and structural convergence. It
+does not claim that production timing, traffic, realistic data volume,
+application compatibility, or an insufficient assertion is safe.
 
-Create temporary real Git repositories and exercise:
+### 7. Keep editing the same feature
 
-- multiple branch schema edits collapsed into one bundle;
-- base-branch erosion with unrelated and overlapping migrations;
-- merge, rebase, squash, stacked-PR, and merge-queue base shapes;
-- migration number/name collisions;
-- attempts to edit base-reachable history;
-- replaceable versus executed draft generations;
-- dirty worktrees and unrelated uncommitted migration files;
-- multiple database targets; and
-- no-op, feature, repair, and contract-only bundles.
+The feature bundle does not lock or finalize. If desired DDL changes, rerun the
+same command with the same bundle ID:
 
-### DDL export contract tests
+```sh
+onwardpg draft --target primary --bundle customer-profile
+```
 
-Use small representative project commands without owning their framework
-integration:
+It remains one cumulative history-head-to-working-schema migration even if an
+earlier draft was applied to the developer database. Development state and
+durable migration state are separate.
 
-- equivalent desired schemas yield equivalent typed fingerprints;
-- DDL export runs without touching the user's migration machinery;
-- no ORM journal, snapshot, or runtime migration ledger is read or written;
-- the same onwardpg chain replay is used regardless of how DDL was produced;
-  and
-- command failure, nondeterminism, or undeclared output is explicit.
+When generated SQL changes, onwardpg compares:
 
-### Planner and PostgreSQL tests
+1. the last generated phase;
+2. the agent-edited receipted phase; and
+3. the newly generated phase.
 
-- Keep unit, property/fuzz, race, vet, formatting, and static-analysis gates.
-- Require real PostgreSQL convergence for every documented supported behavior.
-- Exercise PostgreSQL 14, 15, 16, 17, and 18, respecting feature floors.
-- Test failure and rollback for transactional batches and rejection of wrapping
-  non-transactional batches.
-- Preserve pinned-reference differential tests where they are useful evidence,
-  without turning them into the product definition.
+One-sided changes are preserved or refreshed. If the generator and agent both
+changed the same phase, onwardpg does not overwrite or attempt a SQL merge. It
+leaves the current files intact and emits both candidate inputs plus a concrete
+resolution action.
 
-### Bundle/protocol tests
+### 8. Absorb base erosion without Git integration
 
-- canonical serialization and stable digests;
-- stale base/head/planner/options/answer/artifact detection;
-- base-code/base-history and head-code/head-replay schema-square validation;
-- amended-plan integrity and rejection of unreceipted SQL edits;
-- lineage cycles and invalid successor relationships;
-- partial/corrupt receipt directories;
-- secret redaction;
-- phase execution policy; and
-- clone checkpoint and final residual fingerprints.
+During a multi-day feature, the developer or agent pulls and rebases normally.
+If new migration bundles arrive beneath the selected bundle, its recorded
+parent no longer names the chain head. The same draft command replays the new
+base and replans the selected bundle on top.
 
-## Delivery waves
+Unchanged scoped decisions survive. Changed decisions are invalidated
+individually and returned with new semantic choices. Agent-edited phase SQL is
+reconciled conservatively. A remaining fork, missing entry, altered receipt, or
+ambiguous head blocks with exact paths and digests.
 
-### Wave 0 — vocabulary and reproducible manifest
+Git answers which files are in the checkout. onwardpg answers whether those
+files form one safe replay chain and whether the selected migration still
+converges. Neither tool impersonates the other.
 
-- Document the four comparison boundaries everywhere.
-- Define `onwardpg.bundle/v1`, source receipts, phase digests, and lineage.
-- Add `.onwardpg.toml` target and DDL-input configuration.
-- Make planner build version, normalized options, and input provenance part of
-  every reproducible plan.
-- Formalize versioned structured error/diagnostic codes.
+### 9. Hand off; do not apply
 
-**Exit:** Given existing snapshots, onwardpg can write and validate a complete
-bundle without Git or ORM automation.
+The developer reviews and commits the bundle. Their existing deployment and
+database tools run each phase with the necessary operational visibility.
 
-### Wave 1 — phase-specific bundle generation
+onwardpg has no production apply command, no caller-database apply command, no
+migration runner, no down migrations, and no opinion about the repository's Git
+hosting or merge strategy.
 
-- Add atomic bundle storage and draft replacement.
-- Render separate expand/migrate/manual/contract artifacts.
-- Record execution mode and timing constraints without constructing an
-  auto-runner path.
-- Add reviewed amendments tied to stable generated statement IDs.
-- Preserve the current answer loop and SQL comments in each phase.
+### 10. Audit production drift separately
 
-**Exit:** One low-level plan becomes one self-contained, integrity-checked
-feature bundle.
+```sh
+onwardpg drift check \
+  --target primary \
+  --database "$PRODUCTION_DATABASE_URL"
+```
 
-### Wave 2 — Git-free freshness and regeneration core
+This explicit command compares replayed history with a live catalog read-only.
+It is useful for occasional erosion audits. It is never invoked implicitly by
+`draft`, and production is not the normal baseline for feature migrations.
 
-- Accept caller-prepared base/head directories, migration snapshots, and
-  content receipts without requiring a repository.
-- Implement the read-only bundle freshness oracle and remediation protocol.
-- Correct generation/attempt semantics and preserve unaffected answers.
-- Move existing Git behavior behind a thin convenience wrapper with the same
-  core result.
+## Product boundaries
 
-**Exit:** The exact same regeneration and freshness result is produced from
-explicit tree inputs and from the optional Git wrapper; status is read-only and
-idempotent reruns do not churn a bundle.
+### The four schemas
 
-### Wave 3 — onwardpg-owned history chain and replay (foundation complete)
+- **H — history head:** replay of accepted migration bundles. This is the
+  baseline for the next durable migration.
+- **D — developer database:** mutable local feature state.
+- **W — working schema:** CREATE-statement DDL exported from current code.
+- **P — production:** inspected only by an explicit drift audit.
 
-- Maintain per-target parent/entry digests and reject forks, cycles, stale parents,
-  missing entries, and altered merged history.
-- Replay the protected base chain and proposed PR plan in disposable
-  PostgreSQL, proving both sides of the schema square.
-- Keep the onwardpg bundle chain as the sole history source.
-- Keep one external-tool DDL export as a black-box fixture, not an integration.
+```text
+local development:      D --dev plan--> W
+feature migration:      H ---draft---> W
+occasional drift audit: H -drift check-> P
+```
 
-**Exit:** In a fixture repo, a multi-day feature branch can absorb new main
-bundles, regenerate one clean PR bundle, and prove `BC == BM` plus `HC == HM`
-without an ORM migration journal or Git inside the replay core.
+The most important invariant is that `draft` never derives the next production
+migration from D.
 
-### Wave 4 — clone verification and checkpoint receipts
+### Decisions are finite selections
 
-- Apply reviewed batches only to explicitly disposable clones.
-- Verify transaction/non-transaction boundaries, phase checkpoints, and final
-  residual diff.
-- Record before/after fingerprints and failure/rollback evidence.
-- Verify the complete committed onwardpg phase bundle exactly as reviewed.
+A decision must satisfy all of these rules:
 
-**Exit:** Every ready bundle can prove that its committed history entry converges on
-a representative clone.
+- onwardpg emitted it from a specific source/desired state;
+- every offered hint is a complete semantic statement of one valid choice;
+- the agent may copy an offered hint or predeclare the same semantic intent;
+- every distinct input hint resolves a real current decision or is rejected as
+  unused; resending an already-receipted identical hint is idempotent;
+- accepted intent is deterministically bound to the narrow participating-object
+  scope in its receipt;
+- unrelated schema changes do not invalidate it;
+- a changed object, candidate set, or planner meaning does invalidate a stored
+  receipt;
+- duplicate, contradictory, malformed, impossible, stale, and unused hints are
+  errors; and
+- accepted hints are persisted with their full hidden fingerprints as
+  receipts.
 
-### Wave 5 — CI and GitHub Action
+The exchange follows a strict minimality test:
 
-- Implement deterministic `ci check` and the required policy table above.
-- Publish a reusable action with PG14–18 services as appropriate.
-- Produce job summaries, annotations, safe artifacts, and exact remediation
-  commands.
-- Test pull-request and merge-group refs.
+- every field emitted by onwardpg must be required to parse the response or to
+  choose safely using product context;
+- every field returned by the agent must be information onwardpg cannot derive;
+- no invocation argument is echoed merely for correlation;
+- no fingerprint is copied back to the process that calculated it;
+- no opaque decision or choice token is introduced merely for correlation;
+- no prose is returned to a machine that already emitted the prose; and
+- no accepted hint must be resubmitted after onwardpg has receipted it, though
+  resending a complete unchanged hints file is safe.
 
-**Exit:** CI rejects missing, stacked, stale, mutated, incomplete, unsafe, or
-non-convergent migration bundles with actionable diagnostics.
+An outbound decision is only a set of alternative semantic hints plus hazards
+that differ between those alternatives. Human prompts and labels are rendered
+in text mode from the hints; they do not bloat the JSON contract.
 
-### Wave 6 — executed-phase and long-running rollout lifecycle
+Initial semantic hint families are intentionally small:
 
-- Add signed/attested execution receipt ingestion without production apply.
-- Freeze executed generations and generate typed successors.
-- Add explicit direct-versus-staged strategy choices and structural
-  expand/contract scaffolds for rename, type, nullability, constraint, index,
-  materialized-view, and partition transitions.
-- Model orphan expansions, delayed contracts, repair bundles, and phase
-  continuation across PRs/releases.
-- Add PR templates/rollout reports for pre-merge expand approval.
+- `rename`: object kind plus exact `from` and `to` identifier arrays;
+- `drop`: object kind plus exact current identifier array;
+- `type_change`: column identifier plus one explicitly supported strategy;
+- `rollout`: affected column identifier plus a supported NOT NULL strategy;
+- `manual_sql`: exact current/desired object scope handed to editable phase SQL.
 
-**Exit:** A feature can safely span pre-merge expand, squash merge, observed
-backfill, and later contract without rewriting executed history.
+A hint cannot contain arbitrary SQL, shell commands, prose, deployment steps,
+fingerprints, or an unvalidated object identifier. If the domain is not finite,
+onwardpg creates an editable SQL handoff instead.
 
-### Wave 7 — production hardening
+### Output, interactivity, and input are separate
 
-- Complete and test the PostgreSQL catalog-family blocker inventory before
-  making a no-silent-omission or production-safety claim.
-- Complete feature-map gaps according to developer demand.
-- Re-evaluate the evidence-linked gaps in
-  `docs/ecosystem-comparison.md`: Stripe-quality continuous same-name index
-  replacement remains the highest-value online-DDL reference area; domains,
-  composite types, table ownership, and non-table/default/column ACLs remain
-  candidate breadth work, not reasons to interrupt the developer-preview
-  workflow milestone.
-- Benchmark large repos/schemas and publish performance bounds.
-- Publish binaries, checksums, provenance/signing, changelog, release
-  automation, and support policy.
-- Complete code-quality/security review with no unresolved critical findings.
+The target CLI uses orthogonal controls:
 
-**Exit:** A clean production release can be built and its documented feature
-and workflow claims match observed CI behavior.
+- `--output text|json` chooses presentation;
+- repeatable `--hint '<json-object>'` supplies semantic intent;
+- `--hints-file <path>` supplies an array of the same objects.
 
-Framework adapters, plugin APIs, and migration-runner handoffs are explicit
-non-goals for these delivery waves. Reconsider them only after the CLI's dev
-iteration and PR-restacking loops are mature, and only for a demonstrated need
-that PostgreSQL DDL cannot satisfy.
+All modes are non-interactive. `--output json` never prompts. Text output is for
+humans and remains copyable; JSON output is a stable protocol for agents and CI.
+TTY detection does not change planning semantics.
 
-## Developer-preview milestone
+The CLI should expose one versioned envelope with stable statuses such as:
 
-The developer-preview acceptance suite now uses only the public CLI boundary
-(`schema_file` / `schema_command`) and real PostgreSQL. It proves:
+- `planned`;
+- `needs_decisions`;
+- `needs_sql_edits`;
+- `conflict`;
+- `blocked`;
+- `verified`; and
+- `drift_detected`.
 
-1. `history init` creates and clone-verifies exactly one root entry without
-   inspecting or applying to an application database, then refuses re-init.
-2. `dev plan` asks a scoped rename question, never applies its SQL, and reaches
-   an empty residual after deliberate local application.
-3. A feature schema evolves while retaining one replaceable logical bundle.
-4. Rename, staged `NOT NULL`, and application-owned backfill decisions survive
-   an unrelated feature edit and two new base-history migrations.
-5. The per-target parent/entry hash chain—not filenames—orders genesis, both
-   base migrations, and the final feature bundle without a fork.
-6. The final receipt contains canonical questions, fingerprinted answers,
-   plan JSON, hazards, and separate expand/manual/contract SQL.
-7. `bundle verify` proves the full chain converges and reports a residual when
-   only a deliberately incomplete checkpoint is selected.
-8. `ci check` accepts the committed one-bundle PR and rejects an incorrectly
-   stacked PR before database execution.
-9. Transactional clone work rolls back when a manual boolean postcondition
-   fails, and disposable verification databases are removed.
-10. No command applies SQL to a caller-supplied database, modifies Git history,
-    fetches/rebases, or commits/pushes without an explicit surrounding
-    developer workflow.
+Every nonterminal response includes structured diagnostics. A status has one
+documented continuation, so responses do not echo reconstructible command
+lines. Exit codes distinguish successful completion, required input,
+verification failure, safety blocking, and internal failure.
 
-Real-environment execution evidence and deployment orchestration remain
-outside onwardpg. Delayed contracts are represented as explicit future
-forward plans, not as a reason to grow an apply or rollout-tracking surface.
+### Receipts are detailed; replies are not
 
-## Explicit non-goals
+The manifest, `decisions.json`, and `plan.json` retain:
 
-- No production, staging, or development migration application.
-- No generated down migrations.
-- No inference of application intent from name similarity alone.
-- No promise that repository main, migration history, and production are
-  identical; the modes exist because they can diverge.
-- No hidden Git mutation or background branch rewriting.
-- No ORM-specific schema semantics inside the typed graph planner.
-- No claim of one-for-one Atlas or Migra compatibility.
-- No acceptance of an incomplete plan merely to keep CI green.
+- complete source and desired fingerprints;
+- narrow decision-scope fingerprints;
+- every candidate and accepted choice;
+- dependency and batch ordering;
+- planner version and options;
+- hazards and unsupported-state diagnostics;
+- generated and edited phase digests; and
+- disposable verification evidence.
 
-## Definition of the ultimate DX
+This detail makes a bundle auditable without making the agent echo it back.
+`answers.json` as a hand-authored API is retired. Existing internal answer types
+may remain as an implementation layer until semantic hints are translated and
+validated at the boundary.
 
-The experience is complete when an agent can join a multi-day feature branch,
-read the developer intent, and run one deterministic workflow that says:
+### SQL is the last-mile extension point
 
-- what the branch changed relative to its exact current base;
-- whether its migration bundle is absent, stacked, stale, replaceable, or
-  immutable;
-- which decisions are established by developer intent and which require a
-  person/operator;
-- what runs before merge, during observed data migration, and after old code is
-  gone;
-- how every operation is batched and what hazards it carries;
-- whether the committed onwardpg history entry converges on a clone;
-- whether production still differs from the release after accounting for drift;
-- exactly which receipts prove those claims.
+The phase files and `verify.sql` are the supported customization surface. We do
+not add:
 
-At that point “one migration per PR” stops being a fragile team convention. It
-becomes a checked, resumable, forward-only contract between declarative code,
-Git history, the real PostgreSQL catalog, the coding agent, and the operator.
+- a manual-operation JSON DSL;
+- framework adapters or plugin APIs;
+- ORM journal integration;
+- an embedded LLM or MCP server;
+- Git, PR, merge-base, or hosting-provider awareness;
+- migration-runner handoffs;
+- a production or development apply command; or
+- down migrations.
+
+An optional ordinary Markdown note may be allowed as an agent-owned bundle
+file, but it must not be required to complete or verify a migration. Critical
+sequencing and hazards belong beside the SQL they govern.
+
+### Precise safety claims
+
+- **chain-valid:** hashes and parents form one replayable chain.
+- **structurally convergent:** all phases end at desired catalog state in fresh
+  disposable PostgreSQL.
+- **receipted:** checked files match exact verified digests.
+- **drift-free:** an explicit live audit matched replayed history.
+- **deployment-safe:** never claimed by onwardpg.
+
+An unresolved decision, TODO, unknown catalog family, false assertion, stale
+receipt, or incomplete residual cannot be reported as success.
+
+## Target CLI
+
+```text
+onwardpg config check    validate configuration and desired DDL
+onwardpg init            create the replayable ground floor
+onwardpg dev plan        show caller-owned dev catalog -> working DDL
+onwardpg draft           create or refresh one selected feature bundle
+onwardpg verify          clone-verify and receipt exact edited SQL
+onwardpg drift check     compare history with a live catalog, read-only
+onwardpg plan            low-level explicit source-to-source diff
+```
+
+There is deliberately no `answer`, `lock`, `finalize`, `apply`, `deploy`, `pr`,
+or `rebase` command in the final surface. An agent repeats `draft` with semantic
+hints until it receives SQL, edits the SQL, and repeats `verify` until the exact
+bundle converges.
+
+## Implementation plan
+
+### Wave 1 — specify the minimal semantic hint contract
+
+- Define small discriminated `Hint` variants and the `Decision` choice-set
+  envelope.
+- Use structured identifier arrays and canonical JSON; do not expose internal
+  graph keys or opaque correlation tokens.
+- Define the canonical inline object and file-array forms.
+- Define rejection diagnostics for stale, duplicate, contradictory, unknown,
+  invalid, and unused hints.
+- Define `needs_decisions`, `needs_sql_edits`, and `conflict` independently.
+- Document protocol versioning and exit codes before changing the CLI.
+- Add a field-by-field minimality test to the protocol documentation: identify
+  the consumer and prove why each field cannot be inferred.
+
+Exit: golden protocol fixtures cover exact bytes, canonical ordering,
+ahead-of-time hints, stored-receipt staleness, and minimality.
+
+### Wave 2 — project existing questions into decisions
+
+- Keep existing fingerprint-bound answer validation as the internal safety
+  mechanism initially.
+- Add a boundary layer that turns planner questions and candidates into minimal
+  semantic choices and turns consumed hints into validated internal answers.
+- Scope binding to participating objects so unrelated base erosion preserves a
+  stored decision.
+- Enumerate credible rename candidates as ready-to-submit semantic hints.
+- Accept the same valid rename hint ahead of planning and reject any hint that
+  does not resolve an actual current diff.
+- Ensure `manual_sql` means “produce an incomplete editable handoff,” never
+  “ignore the operation” or “assume arbitrary intent.”
+- Persist accepted hints automatically; subsequent invocations request only
+  unresolved or newly invalidated decisions.
+- Persist the expanded internal evidence to generated `decisions.json` without
+  requiring the agent to author it.
+
+Exit: rename, destructive change, type conversion, and staged-transition tests
+can complete with the same hints whether supplied before or after the first
+planner response.
+
+### Wave 3 — make the CLI loop guessable
+
+- Add `--output text|json` consistently to high-level commands.
+- Add repeatable `--hint` and `--hints-file` to `draft` and the low-level
+  planning surface where decisions may arise.
+- Keep every mode non-interactive and deterministic.
+- Print exact copyable semantic hints; JSON returns only choice sets and
+  choice-specific hazards.
+- On stale input, return replacement decisions in the same response.
+- Reject hint flags on commands or states that cannot consume them.
+- Remove hand-authored `--answers` documentation, fixtures, and CLI aliases.
+
+Exit: a coding agent can discover and complete a two-pass rename solely from
+JSON responses without reading protocol documentation.
+
+### Wave 4 — improve the SQL ownership handoff
+
+- Render purpose, timing, lock, rewrite, data-loss, and availability comments
+  directly above the statements they describe.
+- Render product-specific unknowns as explicit blocking TODOs in the relevant
+  phase, with expected structural effect and suggested assertion shape.
+- Keep only `expand.sql`, `migrate.sql`, `contract.sql`, and `verify.sql` as the
+  normal editable surface.
+- Permit agents to replace or reorganize generated SQL without an amendment
+  DSL.
+- Improve same-phase reconciliation conflicts with old-generated,
+  agent-edited, and new-generated artifacts plus one concrete resolution path.
+- Never overwrite the current agent-edited file on a conflict.
+
+Exit: a timestamp-to-date migration can choose a staged structure, hand the
+business conversion to the agent, accept edited SQL and assertions, and verify
+the exact result.
+
+### Wave 5 — preserve decisions and edits through feature evolution
+
+- Rebind unchanged narrow-scope decisions when working DDL changes elsewhere.
+- Explicitly list invalidated and newly required decisions.
+- Preserve the same selected bundle across repeated local application and
+  further DDL edits.
+- Restack the selected bundle when its parent moves after incoming history.
+- Carry non-conflicting agent edits and `verify.sql` exactly.
+- Reject forks, altered base receipts, ambiguous heads, and multiple mutable
+  entries without consulting Git.
+
+Exit: a multi-day fixture absorbs two incoming migrations, preserves a rename
+and backfill, adds another feature column, and still produces one cumulative
+verified bundle.
+
+### Wave 6 — complete verification and CI diagnostics
+
+- Make `verify --check` the complete read-only gate for chain validity, desired
+  DDL freshness, decision completeness, TODOs, exact receipts, assertions, and
+  convergence.
+- Test transactional rollback, non-transactional failure, false assertions,
+  tampering, cancellation, and scratch cleanup.
+- Make partial-phase verification report an explicit expected residual without
+  claiming success.
+- Ensure every refusal identifies what onwardpg preserved and the exact next
+  command or file to edit.
+- Exercise the complete workflow on PostgreSQL 14–18.
+
+Exit: the README workflow is a real-PostgreSQL acceptance test and a thin CI job
+can gate a repository using only `verify --check`.
+
+### Wave 7 — remove superseded surfaces and release the preview
+
+- Delete transitional Git-aware `pr` and Git-derived CI packages and commands.
+- Delete or internalize the verbose answer-authoring API after semantic-hint
+  fixtures cover every decision family.
+- Remove filename-ordered replay after every fixture uses the hash chain.
+- Align README, CLI reference, protocol, bundle, architecture, and safety docs
+  with observed behavior.
+- Keep PostgreSQL feature tables honest: modeled, manually completable,
+  explicitly blocked, or unverified.
+- Add release artifacts, checksums, version metadata, changelog, and a supported
+  PostgreSQL policy.
+
+Exit: a clean developer-preview build contains one product story and no dead
+workflow that implies Git intelligence, JSON orchestration, or database apply.
+
+## Acceptance scenarios
+
+### A. Ordinary additive feature
+
+- Add a table, foreign key, nullable column, and index.
+- `draft` emits no decisions and readable expand SQL.
+- `verify` reaches an empty residual and receipts exact files.
+- A second identical draft is byte-stable.
+
+### B. Rename with multiple credible candidates
+
+- Remove two compatible columns and add one compatible column.
+- JSON lists every credible rename plus create/drop and manual choices.
+- Supplying the semantic rename before or after the question produces the same
+  intended rename.
+- An invented, stale, duplicate, or unused hint is rejected.
+
+### C. Destructive replacement
+
+- Remove a populated column and add an incompatible replacement.
+- onwardpg does not interpret similarity as permission to drop.
+- The decision offers only supported structural strategies.
+- Contract SQL is absent until destructive intent is explicitly selected.
+
+### D. Product-specific backfill
+
+- Add a date replacement for a timestamp column.
+- Select a staged structural strategy.
+- Receive a migrate TODO rather than invented business SQL.
+- Replace it with agent-authored SQL and boolean assertions.
+- Verify exact SQL and final convergence on disposable PostgreSQL.
+
+### E. Feature iteration after local application
+
+- Draft and apply feature SQL to a caller-owned dev database using external
+  tools.
+- Add another desired column.
+- `dev plan` reports only D -> W residual work.
+- `draft` refreshes the same cumulative H -> W bundle and preserves edits.
+
+### F. Base erosion
+
+- Insert two valid history entries beneath the selected bundle.
+- Redraft without any Git metadata.
+- Preserve unaffected intent and SQL, invalidate only affected receipts, and
+  produce one bundle on the new chain head.
+
+### G. Same-phase conflict
+
+- Edit expand SQL and independently change desired DDL so generated expand SQL
+  also changes.
+- Preserve the current file.
+- Return `conflict`, all three relevant artifacts, and a concrete resolution
+  action without attempting a SQL merge.
+
+### H. Failure and tampering
+
+- Modify each receipted artifact independently.
+- Fail transactional and non-transactional statements and an assertion.
+- Leave no false-success receipt, report cleanup, and never touch a
+  caller-owned database.
+
+### I. Drift remains separate
+
+- Create a live catalog with an extra index and a missing history change.
+- `draft` never inspects it.
+- Explicit `drift check` reports the divergence read-only.
+
+## Developer-preview definition of done
+
+A new developer or coding agent can follow the README to:
+
+1. configure exported DDL and scratch PostgreSQL;
+2. initialize a replayable ground floor;
+3. inspect D -> W development SQL without automatic application;
+4. draft one cumulative H -> W feature bundle;
+5. resolve a rename with a semantic hint it could have supplied in advance;
+6. edit a product-specific backfill directly in phased SQL;
+7. add verification assertions;
+8. verify and receipt the exact edited bundle;
+9. evolve the feature and restack it over incoming history without Git-aware
+   onwardpg commands;
+10. pass `verify --check`; and
+11. understand from the CLI alone that deployment application is outside the
+    product.
+
+Completion is demonstrated by real PostgreSQL 14–18 acceptance tests, not only
+unit tests or documentation. The same fixture must exercise rename intent,
+manual backfill, a later feature edit, two incoming base migrations,
+decision preservation and invalidation, edited-SQL reconciliation, exact
+receipts, CI verification, and empty final residual.
+
+## Immediate next slice
+
+Do not expand PostgreSQL feature coverage in this slice. The implementation is
+at the release-candidate boundary:
+
+1. choose and add the project license;
+2. cold-read the README and run its exact commands from a clean checkout;
+3. rerun the real PostgreSQL 14–18 matrix and deterministic archive build at
+   the release candidate; and
+4. publish the first preview tag only if the generated artifacts and observed
+   CLI output still match the documentation.
+
+This is the junction for every future proposal: if it does not make
+replay, draft, decision, SQL ownership, or verification simpler and safer, it
+does not belong in the developer-preview path.

@@ -11,16 +11,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"github.com/jokull/onwardpg/adapter"
 )
 
 const maxCompilerOutput = 64 << 20
-
-type TargetCompiler struct {
-	TargetName string
-	Target     Target
-}
 
 type CompiledDDL struct {
 	DDL        []byte
@@ -31,13 +24,11 @@ type CompiledDDL struct {
 // byte deterministic output. It is the narrow CLI boundary for schema_file
 // and schema_command; it does not expose a framework integration API.
 func CompileDDL(ctx context.Context, root, targetName string, target Target) (CompiledDDL, error) {
-	compiler := TargetCompiler{TargetName: targetName, Target: target}
-	request := adapter.CompileRequest{Root: root, Target: targetName, Revision: "working-tree"}
-	first, err := compiler.Compile(ctx, request)
+	first, err := compileDDLOnce(ctx, root, targetName, target)
 	if err != nil {
 		return CompiledDDL{}, err
 	}
-	second, err := compiler.Compile(ctx, request)
+	second, err := compileDDLOnce(ctx, root, targetName, target)
 	if err != nil {
 		return CompiledDDL{}, err
 	}
@@ -47,61 +38,54 @@ func CompileDDL(ctx context.Context, root, targetName string, target Target) (Co
 	return CompiledDDL{DDL: append([]byte(nil), first.DDL...), Provenance: first.Provenance}, nil
 }
 
-func (c TargetCompiler) Compile(ctx context.Context, request adapter.CompileRequest) (adapter.Artifact, error) {
-	if request.Root == "" || !filepath.IsAbs(request.Root) {
-		return adapter.Artifact{}, fmt.Errorf("compiler root must be absolute")
+func compileDDLOnce(ctx context.Context, root, targetName string, target Target) (CompiledDDL, error) {
+	if root == "" || !filepath.IsAbs(root) {
+		return CompiledDDL{}, fmt.Errorf("compiler root must be absolute")
 	}
-	if request.Target != "" && request.Target != c.TargetName {
-		return adapter.Artifact{}, fmt.Errorf("compiler target is %q, want %q", request.Target, c.TargetName)
+	if targetName == "" {
+		return CompiledDDL{}, fmt.Errorf("compiler target is required")
 	}
-	if err := c.Target.Validate(); err != nil {
-		return adapter.Artifact{}, err
+	if err := target.Validate(); err != nil {
+		return CompiledDDL{}, err
 	}
-	if c.Target.SchemaFile != "" {
-		name := filepath.Join(request.Root, filepath.FromSlash(c.Target.SchemaFile))
+	if target.SchemaFile != "" {
+		name := filepath.Join(root, filepath.FromSlash(target.SchemaFile))
 		data, err := os.ReadFile(name)
 		if err != nil {
-			return adapter.Artifact{}, fmt.Errorf("read declarative schema file: %w", err)
+			return CompiledDDL{}, fmt.Errorf("read declarative schema file: %w", err)
 		}
-		if len(bytes.TrimSpace(data)) == 0 {
-			return adapter.Artifact{}, fmt.Errorf("declarative schema file is empty")
-		}
-		return adapter.DDL("schema_file:"+c.Target.SchemaFile, data), nil
+		return CompiledDDL{DDL: append([]byte(nil), data...), Provenance: "schema_file:" + target.SchemaFile}, nil
 	}
 
-	before, err := digestTree(request.Root)
+	before, err := digestTree(root)
 	if err != nil {
-		return adapter.Artifact{}, fmt.Errorf("fingerprint DDL export tree before command: %w", err)
+		return CompiledDDL{}, fmt.Errorf("fingerprint DDL export tree before command: %w", err)
 	}
-	command := exec.CommandContext(ctx, c.Target.SchemaCommand[0], c.Target.SchemaCommand[1:]...)
-	command.Dir = request.Root
+	command := exec.CommandContext(ctx, target.SchemaCommand[0], target.SchemaCommand[1:]...)
+	command.Dir = root
 	command.Env = os.Environ()
 	stdout := &limitedBuffer{limit: maxCompilerOutput}
 	stderr := &limitedBuffer{limit: 1 << 20}
 	command.Stdout, command.Stderr = stdout, stderr
 	commandErr := command.Run()
-	after, digestErr := digestTree(request.Root)
+	after, digestErr := digestTree(root)
 	if digestErr != nil {
-		return adapter.Artifact{}, fmt.Errorf("fingerprint DDL export tree after command: %w", digestErr)
+		return CompiledDDL{}, fmt.Errorf("fingerprint DDL export tree after command: %w", digestErr)
 	}
 	if before != after {
-		return adapter.Artifact{}, fmt.Errorf("DDL export command modified its isolated input tree; undeclared outputs are not allowed")
+		return CompiledDDL{}, fmt.Errorf("DDL export command modified repository inputs; schema_command must be read-only")
 	}
 	if commandErr != nil {
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
 			message = commandErr.Error()
 		}
-		return adapter.Artifact{}, fmt.Errorf("DDL export command failed: %s", message)
+		return CompiledDDL{}, fmt.Errorf("DDL export command failed: %s", message)
 	}
 	if stdout.exceeded {
-		return adapter.Artifact{}, fmt.Errorf("DDL export output exceeds %d bytes", maxCompilerOutput)
+		return CompiledDDL{}, fmt.Errorf("DDL export output exceeds %d bytes", maxCompilerOutput)
 	}
-	data := stdout.Bytes()
-	if len(bytes.TrimSpace(data)) == 0 {
-		return adapter.Artifact{}, fmt.Errorf("DDL export produced empty output")
-	}
-	return adapter.DDL("schema_command", data), nil
+	return CompiledDDL{DDL: stdout.Bytes(), Provenance: "schema_command"}, nil
 }
 
 type limitedBuffer struct {

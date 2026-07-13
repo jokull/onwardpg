@@ -186,7 +186,7 @@ type Identity struct {
 // them as an integer column with an auto-owned sequence and nextval default.
 type Serial struct {
 	Type         string // smallserial, serial, or bigserial.
-	SequenceName string // catalog sequence name; empty is an adapter's canonical serial.
+	SequenceName string // catalog sequence name; empty is the canonical serial form.
 }
 
 type Generated struct {
@@ -525,7 +525,7 @@ func (s *Snapshot) IDs() []ID {
 }
 
 // ValidateObjectOrder verifies that order is an exact permutation of the
-// snapshot's object IDs. It is the boundary check for adapter-supplied
+// snapshot's object IDs. It is the boundary check for programmatically built
 // unsorted schema-dump orders: partial, duplicate, stale, or invented IDs
 // would otherwise silently fall back to a planner-selected order.
 func ValidateObjectOrder(snapshot *Snapshot, order []ID) error {
@@ -662,7 +662,9 @@ func (s *Snapshot) Batches() []Batch {
 	}
 	var batches []Batch
 	for len(ready) > 0 {
-		sort.Slice(ready, func(i, j int) bool { return componentKey(components[ready[i]]) < componentKey(components[ready[j]]) })
+		sort.Slice(ready, func(i, j int) bool {
+			return lessID(components[ready[i]][0], components[ready[j]][0])
+		})
 		componentIndex := ready[0]
 		ready = ready[1:]
 		component := components[componentIndex]
@@ -738,10 +740,27 @@ func (s *Snapshot) components() [][]ID {
 	return components
 }
 
-func componentKey(component []ID) string { return component[0].String() }
-
 func sortIDs(ids []ID) {
-	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	sort.Slice(ids, func(i, j int) bool { return lessID(ids[i], ids[j]) })
+}
+
+// lessID is the allocation-free canonical order for typed object identities.
+// It matches the field order represented by ID.String without formatting an
+// ID for every comparison in large graph sorts.
+func lessID(left, right ID) bool {
+	if left.Kind != right.Kind {
+		return left.Kind < right.Kind
+	}
+	if left.Schema != right.Schema {
+		return left.Schema < right.Schema
+	}
+	if left.Name != right.Name {
+		return left.Name < right.Name
+	}
+	if left.Part != right.Part {
+		return left.Part < right.Part
+	}
+	return left.Signature < right.Signature
 }
 
 func sortedStrings(values map[string]struct{}) []string {

@@ -2,8 +2,10 @@ module github.com/jokull/onwardpg
 
 go 1.26.0
 
+toolchain go1.26.5
+
 require (
-	github.com/jackc/pgx/v5 v5.8.0
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/pelletier/go-toml/v2 v2.2.4
 )
 

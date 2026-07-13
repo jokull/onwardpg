@@ -14,7 +14,7 @@ import (
 
 const Version = "onwardpg.history/v1"
 
-var phaseOrder = []string{"expand", "migrate", "manual", "contract"}
+var phaseOrder = []string{"expand", "migrate", "contract"}
 
 type Entry struct {
 	Directory string
@@ -57,61 +57,102 @@ func (c Chain) Through(bundleID string) (Chain, error) {
 // hash links. It rejects forks and disconnected entries instead of choosing a
 // filename, timestamp, or directory order.
 func Load(root, bundleRoot, target string) (Chain, error) {
+	chain, _, err := load(root, bundleRoot, target, "", false)
+	return chain, err
+}
+
+// LoadExcluding validates target history while omitting one explicitly selected
+// bundle from the returned chain. This is the Git-free draft boundary: the
+// selected bundle is the only mutable entry, while every other directory must
+// still form one complete hash chain. The excluded artifact is returned so a
+// caller can preserve valid decisions or diagnose a stale parent.
+func LoadExcluding(root, bundleRoot, target, bundleID string) (Chain, *Entry, error) {
+	if !safeName(bundleID) {
+		return Chain{}, nil, fmt.Errorf("bundle id %q is invalid", bundleID)
+	}
+	return load(root, bundleRoot, target, bundleID, false)
+}
+
+// LoadEditedDraft is the receipt-refresh path for one selected bundle. Base
+// history stays strict, while the selected artifact is prepared from
+// developer-owned phase SQL without writing its refreshed manifest.
+func LoadEditedDraft(root, bundleRoot, target, bundleID string) (Chain, *Entry, error) {
+	if !safeName(bundleID) {
+		return Chain{}, nil, fmt.Errorf("bundle id %q is invalid", bundleID)
+	}
+	return load(root, bundleRoot, target, bundleID, true)
+}
+
+func load(root, bundleRoot, target, excludedBundleID string, editedCandidate bool) (Chain, *Entry, error) {
 	chain := Chain{Target: target, RootDigest: bundle.HistoryRootDigest(), HeadDigest: bundle.HistoryRootDigest()}
 	if root == "" || !filepath.IsAbs(root) {
-		return Chain{}, fmt.Errorf("history root must be absolute")
+		return Chain{}, nil, fmt.Errorf("history root must be absolute")
 	}
 	if err := validateRelativePath(bundleRoot); err != nil {
-		return Chain{}, fmt.Errorf("bundle root: %w", err)
+		return Chain{}, nil, fmt.Errorf("bundle root: %w", err)
 	}
 	if !safeName(target) {
-		return Chain{}, fmt.Errorf("history target %q is invalid", target)
+		return Chain{}, nil, fmt.Errorf("history target %q is invalid", target)
 	}
 	base := filepath.Join(root, filepath.FromSlash(bundleRoot), target)
 	info, err := os.Lstat(base)
 	if os.IsNotExist(err) {
-		return chain, nil
+		return chain, nil, nil
 	}
 	if err != nil {
-		return Chain{}, fmt.Errorf("inspect target history: %w", err)
+		return Chain{}, nil, fmt.Errorf("inspect target history: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return Chain{}, fmt.Errorf("target history must be a real directory")
+		return Chain{}, nil, fmt.Errorf("target history must be a real directory")
 	}
 	directories, err := os.ReadDir(base)
 	if err != nil {
-		return Chain{}, fmt.Errorf("read target history: %w", err)
+		return Chain{}, nil, fmt.Errorf("read target history: %w", err)
 	}
 
 	byDigest := make(map[string]Entry, len(directories))
 	children := make(map[string][]string, len(directories))
+	var excluded *Entry
 	for _, directory := range directories {
 		if directory.Type()&os.ModeSymlink != 0 || !directory.IsDir() {
-			return Chain{}, fmt.Errorf("history contains unexpected entry %s", directory.Name())
+			return Chain{}, nil, fmt.Errorf("history contains unexpected entry %s", directory.Name())
 		}
 		name := directory.Name()
-		artifact, err := bundle.Read(filepath.Join(base, name))
+		var artifact bundle.Artifact
+		var err error
+		if name == excludedBundleID && editedCandidate {
+			artifact, err = bundle.PrepareEdited(filepath.Join(base, name))
+		} else {
+			artifact, err = bundle.Read(filepath.Join(base, name))
+		}
 		if err != nil {
-			return Chain{}, fmt.Errorf("read history bundle %s: %w", name, err)
+			return Chain{}, nil, fmt.Errorf("read history bundle %s: %w", name, err)
 		}
 		manifest := artifact.Manifest
 		if manifest.BundleID != name {
-			return Chain{}, fmt.Errorf("history directory %s contains bundle_id %s", name, manifest.BundleID)
+			return Chain{}, nil, fmt.Errorf("history directory %s contains bundle_id %s", name, manifest.BundleID)
 		}
 		if manifest.Target != target {
-			return Chain{}, fmt.Errorf("history bundle %s targets %s, want %s", name, manifest.Target, target)
+			return Chain{}, nil, fmt.Errorf("history bundle %s targets %s, want %s", name, manifest.Target, target)
+		}
+		entry := Entry{Directory: name, Artifact: artifact}
+		if name == excludedBundleID {
+			if manifest.History == nil {
+				return Chain{}, nil, fmt.Errorf("selected bundle %s has no hash-chain receipt", name)
+			}
+			excluded = &entry
+			continue
 		}
 		if manifest.State != "planned" {
-			return Chain{}, fmt.Errorf("history bundle %s is %s, want planned", name, manifest.State)
+			return Chain{}, nil, fmt.Errorf("history bundle %s is %s, want planned", name, manifest.State)
 		}
 		if manifest.History == nil {
-			return Chain{}, fmt.Errorf("history bundle %s has no hash-chain receipt", name)
+			return Chain{}, nil, fmt.Errorf("history bundle %s has no hash-chain receipt", name)
 		}
 		entryDigest := manifest.History.EntryDigest
 		if _, exists := byDigest[entryDigest]; exists {
-			return Chain{}, fmt.Errorf("history entry digest %s is duplicated", entryDigest)
+			return Chain{}, nil, fmt.Errorf("history entry digest %s is duplicated", entryDigest)
 		}
-		entry := Entry{Directory: name, Artifact: artifact}
 		byDigest[entryDigest] = entry
 		parent := manifest.History.ParentDigest
 		children[parent] = append(children[parent], entryDigest)
@@ -121,11 +162,11 @@ func Load(root, bundleRoot, target string) (Chain, error) {
 		parent := entry.Artifact.Manifest.History.ParentDigest
 		if parent != bundle.HistoryRootDigest() {
 			if _, exists := byDigest[parent]; !exists {
-				return Chain{}, fmt.Errorf("history bundle %s has missing parent %s", entry.Directory, parent)
+				return Chain{}, nil, fmt.Errorf("history bundle %s has missing parent %s", entry.Directory, parent)
 			}
 		}
 		if len(children[parent]) > 1 {
-			return Chain{}, fmt.Errorf("history fork at parent %s", parent)
+			return Chain{}, nil, fmt.Errorf("history fork at parent %s", parent)
 		}
 	}
 
@@ -138,17 +179,17 @@ func Load(root, bundleRoot, target string) (Chain, error) {
 		}
 		digest := next[0]
 		if seen[digest] {
-			return Chain{}, fmt.Errorf("history cycle at entry %s", digest)
+			return Chain{}, nil, fmt.Errorf("history cycle at entry %s", digest)
 		}
 		seen[digest] = true
 		chain.Entries = append(chain.Entries, byDigest[digest])
 		current = digest
 	}
 	if len(seen) != len(byDigest) {
-		return Chain{}, fmt.Errorf("history contains entries disconnected from root")
+		return Chain{}, nil, fmt.Errorf("history contains entries disconnected from root")
 	}
 	chain.HeadDigest = current
-	return chain, nil
+	return chain, excluded, nil
 }
 
 // Replay concatenates the already-validated phase artifacts in chain and

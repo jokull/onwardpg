@@ -61,6 +61,41 @@ func TestLoadRejectsForkAndMissingParent(t *testing.T) {
 	}
 }
 
+func TestLoadExcludingSelectedBundleResolvesItsFork(t *testing.T) {
+	root := t.TempDir()
+	baseline := writeBundle(t, root, "baseline", bundle.HistoryRootDigest(), "SELECT 1;", "expand")
+	upstream := writeBundle(t, root, "upstream", baseline, "SELECT 2;", "expand")
+	writeBundle(t, root, "feature", baseline, "SELECT 3;", "expand")
+
+	if _, err := Load(root, "migrations/onward", "primary"); err == nil || !strings.Contains(err.Error(), "fork") {
+		t.Fatalf("expected ordinary load to reject fork, got %v", err)
+	}
+	chain, selected, err := LoadExcluding(root, "migrations/onward", "primary", "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected == nil || selected.Directory != "feature" {
+		t.Fatalf("selected = %#v", selected)
+	}
+	if chain.HeadDigest != upstream || len(chain.Entries) != 2 || chain.Entries[1].Directory != "upstream" {
+		t.Fatalf("chain = %#v", chain)
+	}
+	if selected.Artifact.Manifest.History.ParentDigest != baseline {
+		t.Fatalf("selected parent = %s, want %s", selected.Artifact.Manifest.History.ParentDigest, baseline)
+	}
+}
+
+func TestLoadExcludingStillRejectsUnselectedFork(t *testing.T) {
+	root := t.TempDir()
+	baseline := writeBundle(t, root, "baseline", bundle.HistoryRootDigest(), "SELECT 1;", "expand")
+	writeBundle(t, root, "first", baseline, "SELECT 2;", "expand")
+	writeBundle(t, root, "second", baseline, "SELECT 3;", "expand")
+
+	if _, _, err := LoadExcluding(root, "migrations/onward", "primary", "feature"); err == nil || !strings.Contains(err.Error(), "fork") {
+		t.Fatalf("expected unselected fork rejection, got %v", err)
+	}
+}
+
 func TestLoadRejectsTamperedBundleAndDirectoryIdentity(t *testing.T) {
 	root := t.TempDir()
 	writeBundle(t, root, "feature", bundle.HistoryRootDigest(), "SELECT 1;", "expand")
@@ -121,8 +156,7 @@ func writeBundle(t *testing.T, root, id, parent, sql, phase string) string {
 		Batches: []protocol.Batch{{ID: "batch-1", Phase: phase, Transactional: true, Statements: []protocol.Statement{statement}}},
 	}
 	metadata := bundle.Metadata{
-		BundleID: id, Generation: 1, Target: "primary", Purpose: "feature", Mode: "pr",
-		BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), HeadRevision: strings.Repeat("b", 40),
+		BundleID: id, Generation: 1, Target: "primary", Purpose: "feature",
 		BaselineSource: bundle.SourceReceipt{Kind: "onwardpg_history", Description: "base history", Fingerprint: current, PostgresMajor: 16},
 		DesiredSource:  bundle.SourceReceipt{Kind: "ddl_export", Description: "desired schema", Fingerprint: desired, PostgresMajor: 16},
 		Planner:        bundle.PlannerReceipt{Version: "test"}, HistoryParentDigest: parent,

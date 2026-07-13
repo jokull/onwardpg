@@ -25,8 +25,17 @@ jobs:
           go test ./internal/protocol -fuzz=FuzzResolverAnswerValidation -fuzztime=5s -parallel=1
       - name: Vet
         run: go vet ./...
+      - name: Large-schema planner benchmark
+        run: go test ./internal/graphplan -run '^$' -bench 'BenchmarkBuildLargeAdditiveSchema/tables_1000$' -benchtime=1x -benchmem
+      - name: Reproduce release archives
+        run: |
+          scripts/build-release.sh v0.0.0-ci.1 /tmp/onwardpg-release-a
+          scripts/build-release.sh v0.0.0-ci.1 /tmp/onwardpg-release-b
+          diff -u /tmp/onwardpg-release-a/checksums.txt /tmp/onwardpg-release-b/checksums.txt
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: Check Go formatting
         run: bash scripts/check-gofmt.sh
       - name: Check whitespace errors
