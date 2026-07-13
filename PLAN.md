@@ -8,7 +8,8 @@ The product should feel obvious:
 
 ```sh
 onwardpg dev plan --target primary
-onwardpg draft --target primary --bundle customer-profile
+onwardpg history status --target primary
+onwardpg draft --target primary --bundle customer-profile --after baseline
 onwardpg verify --target primary --bundle customer-profile
 ```
 
@@ -29,20 +30,23 @@ The governing principle is:
 
 The foundation already exists:
 
-- top-level `init`, `dev plan`, `draft`, `verify`, and `drift check` commands are
-  Git-free;
+- top-level `init`, `history status`, `dev plan`, `draft`, `verify`, and
+  `drift check` commands are Git-free;
 - PostgreSQL catalogs and materialized CREATE-statement DDL feed the typed
   dependency graph;
 - `init` and `draft` write deterministic hash-chained bundles;
-- `draft --bundle` plans from replayed history to working DDL, not from the
-  mutable development database;
+- `draft --bundle --after` plans from an agent-asserted accepted history head
+  to working DDL, not from the mutable development database;
 - generated plans are clone-verified before they are written;
 - agents may edit phase SQL and `verify.sql`, and verification receipts the
   exact edited files;
 - repeated drafting preserves non-conflicting agent edits with conservative
   phase-level three-way reconciliation;
 - the same selected bundle remains mutable as feature work evolves;
-- parent hashes detect base erosion without inspecting Git;
+- parent hashes detect base erosion, while mandatory `--after` prevents a
+  feature from accidentally stacking on another unpublished bundle;
+- `history status` exposes the ordered head and whether a selected bundle is
+  current or stale without requiring a database or Git checkout;
 - `verify --check` validates receipts without modifying the checkout; and
 - `drift check` is an explicit, read-only audit rather than part of ordinary
   feature planning.
@@ -59,7 +63,7 @@ The first decision-loop slice is now implemented:
 - internal answers retain narrow scope fingerprints without exposing them to
   the authoring exchange;
 - accepted hints persist in generated `decisions.json` receipts;
-- `onwardpg/draft/2` decision output contains only semantic choice sets and
+- `onwardpg/draft/3` decision output contains only semantic choice sets and
   choice-specific hazards;
 - `manual_sql` produces `needs_sql_edits` plus a phase-local `ONWARDPG TODO`,
   never an incomplete success; and
@@ -166,16 +170,26 @@ residual. Applying development SQL is not a migration-history event.
 
 ### 4. Draft one logical feature migration
 
+The coding agent first uses its Git context to identify the accepted history
+tip in the base checkout, then asks onwardpg to validate that local history:
+
+```sh
+onwardpg history status --target primary
+```
+
 ```sh
 onwardpg draft \
   --target primary \
-  --bundle customer-profile
+  --bundle customer-profile \
+  --after baseline
 ```
 
 `draft` replays every bundle except the explicitly selected feature bundle,
 materializes the current desired DDL, and plans the cumulative transition from
-history head to working schema. The bundle ID is the only feature identity
-onwardpg needs. It does not inspect branches, commits, merge bases, or PRs.
+the asserted accepted history head to working schema. The bundle ID identifies
+the mutable feature; `--after` identifies the accepted predecessor onto which
+it must be restacked. onwardpg validates both against the hash chain. It does
+not inspect branches, commits, merge bases, or PRs.
 
 Suppose history contains `users.name` and desired DDL contains
 `users.display_name`. Schema state cannot prove whether this is a rename or a
@@ -200,13 +214,15 @@ The JSON form is non-interactive and carries the same finite choice set:
 onwardpg draft \
   --target primary \
   --bundle customer-profile \
+  --after baseline \
   --output json
 ```
 
 ```json
 {
-  "protocol": "onwardpg/draft/2",
+  "protocol_version": "onwardpg/draft/3",
   "status": "needs_decisions",
+  "next_action": "rerun_same_command_with_hints",
   "decisions": [
     {
       "choices": [
@@ -252,6 +268,7 @@ For the common one-choice iteration, that object is passed directly:
 onwardpg draft \
   --target primary \
   --bundle customer-profile \
+  --after baseline \
   --hint '{"kind":"rename","object":"column","from":["public","users","name"],"to":["public","users","display_name"]}'
 ```
 
@@ -277,8 +294,8 @@ Object names are structured as identifier arrays so quoting and dots in names
 are unambiguous. A consumed hint becomes a fingerprint-bound receipt. If later
 state changes its meaning, onwardpg invalidates that receipt and returns the new
 semantic choices. The only continuation for `needs_decisions` is always to
-repeat the same command with one or more hints, so JSON does not echo the
-command the agent just invoked.
+repeat the same command with one or more hints. `next_action` is a stable enum,
+not a rendered shell command.
 
 ### 5. Take ownership of readable phased SQL
 
@@ -377,10 +394,10 @@ application compatibility, or an insufficient assertion is safe.
 ### 7. Keep editing the same feature
 
 The feature bundle does not lock or finalize. If desired DDL changes, rerun the
-same command with the same bundle ID:
+same command with the same bundle ID and accepted predecessor:
 
 ```sh
-onwardpg draft --target primary --bundle customer-profile
+onwardpg draft --target primary --bundle customer-profile --after baseline
 ```
 
 It remains one cumulative history-head-to-working-schema migration even if an
@@ -401,18 +418,32 @@ resolution action.
 ### 8. Absorb base erosion without Git integration
 
 During a multi-day feature, the developer or agent pulls and rebases normally.
-If new migration bundles arrive beneath the selected bundle, its recorded
-parent no longer names the chain head. The same draft command replays the new
-base and replans the selected bundle on top.
+The agent identifies the new accepted history tip from its Git context, checks
+it with `history status`, and reruns the same bundle with the new anchor:
+
+```sh
+onwardpg history status --target primary --bundle customer-profile
+onwardpg draft \
+  --target primary \
+  --bundle customer-profile \
+  --after upstream-settings
+```
+
+If an unrelated unpublished bundle is also present after that accepted tip,
+onwardpg blocks instead of silently stacking the feature on it. If accepted
+history now contains the complete generated feature change, onwardpg removes
+the untouched redundant draft atomically and reports `absorbed`; it never
+discards agent-edited SQL this way.
 
 Unchanged scoped decisions survive. Changed decisions are invalidated
 individually and returned with new semantic choices. Agent-edited phase SQL is
 reconciled conservatively. A remaining fork, missing entry, altered receipt, or
 ambiguous head blocks with exact paths and digests.
 
-Git answers which files are in the checkout. onwardpg answers whether those
-files form one safe replay chain and whether the selected migration still
-converges. Neither tool impersonates the other.
+Git and the coding agent answer which files are accepted and name that tip.
+onwardpg proves that the files form one safe replay chain, that the asserted tip
+is the actual predecessor, and that the selected migration still converges.
+Neither tool impersonates the other.
 
 ### 9. Hand off; do not apply
 
@@ -581,17 +612,19 @@ receipt, or incomplete residual cannot be reported as success.
 ```text
 onwardpg config check    validate configuration and desired DDL
 onwardpg init            create the replayable ground floor
+onwardpg history status  inspect chain head and selected-bundle freshness
 onwardpg dev plan        show caller-owned dev catalog -> working DDL
-onwardpg draft           create or refresh one selected feature bundle
+onwardpg draft           create or refresh one anchored feature bundle
 onwardpg verify          clone-verify and receipt exact edited SQL
 onwardpg drift check     compare history with a live catalog, read-only
 onwardpg plan            low-level explicit source-to-source diff
 ```
 
 There is deliberately no `answer`, `lock`, `finalize`, `apply`, `deploy`, `pr`,
-or `rebase` command in the final surface. An agent repeats `draft` with semantic
-hints until it receives SQL, edits the SQL, and repeats `verify` until the exact
-bundle converges.
+or `rebase` command in the final surface. An agent supplies the accepted
+predecessor from its Git context, repeats `draft` with semantic hints until it
+receives SQL, edits the SQL, and repeats `verify` until the exact bundle
+converges.
 
 ## Implementation plan
 
@@ -758,9 +791,14 @@ workflow that implies Git intelligence, JSON orchestration, or database apply.
 ### F. Base erosion
 
 - Insert two valid history entries beneath the selected bundle.
-- Redraft without any Git metadata.
+- Have the coding agent supply the new accepted tip with `--after`, without
+  onwardpg reading Git metadata.
 - Preserve unaffected intent and SQL, invalidate only affected receipts, and
   produce one bundle on the new chain head.
+- Place a second unpublished bundle after the asserted accepted tip and prove
+  that drafting blocks instead of stacking on it.
+- Fully absorb an untouched generated draft into accepted history and prove
+  that onwardpg removes it atomically with `status: absorbed`.
 
 ### G. Same-phase conflict
 
@@ -783,6 +821,21 @@ workflow that implies Git intelligence, JSON orchestration, or database apply.
 - `draft` never inspects it.
 - Explicit `drift check` reports the divergence read-only.
 
+### J. PostgreSQL cannot express the requested physical order
+
+- Insert a desired column between retained columns in CREATE-statement DDL.
+- Return a typed `column_physical_order` unsupported finding before any bundle
+  is written.
+- Never enter a late fingerprint-mismatch regeneration loop.
+
+### K. Protocol, help, and partial verification
+
+- Every top-level JSON envelope uses `protocol_version` and `status`; decision
+  and SQL-edit handoffs include a stable `next_action`.
+- Every command and subcommand `--help` exits successfully.
+- Partial clone verification reports exactly which bundle phases were
+  simulated and which remain; it never implies those phases ran in production.
+
 ## Developer-preview definition of done
 
 A new developer or coding agent can follow the README to:
@@ -790,13 +843,14 @@ A new developer or coding agent can follow the README to:
 1. configure exported DDL and scratch PostgreSQL;
 2. initialize a replayable ground floor;
 3. inspect D -> W development SQL without automatic application;
-4. draft one cumulative H -> W feature bundle;
+4. identify the accepted predecessor and draft one cumulative H -> W feature
+   bundle;
 5. resolve a rename with a semantic hint it could have supplied in advance;
 6. edit a product-specific backfill directly in phased SQL;
 7. add verification assertions;
 8. verify and receipt the exact edited bundle;
-9. evolve the feature and restack it over incoming history without Git-aware
-   onwardpg commands;
+9. evolve the feature and restack it over incoming history by supplying the
+   new accepted predecessor, without Git-aware onwardpg commands;
 10. pass `verify --check`; and
 11. understand from the CLI alone that deployment application is outside the
     product.
@@ -807,16 +861,27 @@ manual backfill, a later feature edit, two incoming base migrations,
 decision preservation and invalidation, edited-SQL reconciliation, exact
 receipts, CI verification, and empty final residual.
 
+The PR-anchor audit additionally makes the accepted predecessor explicit,
+reports accidental unpublished stacking as a typed blocker, removes a
+generated-only bundle when incoming accepted history fully absorbs it, reports
+partial clone verification in terms of phases simulated and still remaining,
+and rejects physical column-order transitions PostgreSQL cannot express rather
+than failing late with an opaque fingerprint mismatch.
+
 ## Immediate next slice
 
-Do not expand PostgreSQL feature coverage in this slice. The implementation is
-at the release-candidate boundary. Cold-read documentation review, exact
-README execution, PostgreSQL 14–18 differential verification, reproducible
-archive builds, and MIT licensing are complete. What remains is deliberately
-human-owned:
+Do not expand PostgreSQL feature coverage in this slice. Finish the PR-anchor
+hardening as one coherent developer-preview change:
 
-1. publish the first preview tag only if the generated artifacts and observed
-   CLI output still match the documentation.
+1. require and validate `draft --after`, expose `history status`, and cover
+   stale, missing, conflicting, and absorbed bundle lifecycles;
+2. reject impossible physical column ordering before bundle generation;
+3. normalize command envelopes, help exits, config validation, and partial
+   verification reporting;
+4. execute the README, integration, race, static-analysis, and PostgreSQL 14–18
+   suites from disposable servers; and
+5. publish the first preview tag only if generated artifacts and observed CLI
+   output still match the documentation.
 
 This is the junction for every future proposal: if it does not make
 replay, draft, decision, SQL ownership, or verification simpler and safer, it

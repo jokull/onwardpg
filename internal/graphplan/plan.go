@@ -249,6 +249,9 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
+	if unreachable := unreachableColumnPhysicalOrder(current, desired, tableRenames, columnRenames); len(unreachable) > 0 {
+		return unsupportedResult(result, resolver, unreachable)
+	}
 	droppingSchemas, droppingTables := droppingParents(changes)
 	questions, approvedDrops, err := destructiveQuestions(changes, droppingSchemas, droppingTables, resolver, currentFingerprint, desiredFingerprint)
 	if err != nil {
@@ -437,6 +440,105 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 	}
 	return result, nil
+}
+
+// unreachableColumnPhysicalOrder identifies declarative column positions that
+// PostgreSQL cannot reach with ALTER TABLE. Dropped attributes disappear from
+// onwardpg's dense live-column ordinal, but retained columns cannot change
+// relative order and new columns append after them. Treating those snapshots
+// as equivalent would silently discard observable catalog state; allowing the
+// plan to proceed would fail only after clone execution with an opaque
+// fingerprint mismatch.
+func unreachableColumnPhysicalOrder(current, desired *pgschema.Snapshot, tableRenames []renameTable, columnRenames []renameColumn) []string {
+	tableTargets := make(map[pgschema.ID]pgschema.ID)
+	for _, object := range current.Objects() {
+		table, ok := object.(pgschema.Table)
+		if !ok {
+			continue
+		}
+		if _, exists := desired.Object(table.ObjectID()); exists {
+			tableTargets[table.ObjectID()] = table.ObjectID()
+		}
+	}
+	for _, rename := range tableRenames {
+		tableTargets[rename.from.ObjectID()] = rename.to.ObjectID()
+	}
+
+	columnTargets := make(map[pgschema.ID]pgschema.ID)
+	for _, rename := range columnRenames {
+		columnTargets[rename.from.ObjectID()] = rename.to.ObjectID()
+	}
+
+	var unsupported []string
+	for currentTable, desiredTable := range tableTargets {
+		currentColumns := tableColumns(current, currentTable)
+		desiredColumns := tableColumns(desired, desiredTable)
+		if len(currentColumns) == 0 || len(desiredColumns) == 0 {
+			continue
+		}
+		positionsKnown := true
+		for _, column := range append(append([]pgschema.Column(nil), currentColumns...), desiredColumns...) {
+			if column.Position <= 0 {
+				positionsKnown = false
+				break
+			}
+		}
+		if !positionsKnown {
+			continue
+		}
+		desiredByID := make(map[pgschema.ID]pgschema.Column, len(desiredColumns))
+		for _, column := range desiredColumns {
+			desiredByID[column.ObjectID()] = column
+		}
+		matchedDesired := make(map[pgschema.ID]bool, len(currentColumns))
+		var currentRetained []pgschema.ID
+		for _, before := range currentColumns {
+			targetID, renamed := columnTargets[before.ObjectID()]
+			if !renamed {
+				targetID = pgschema.ID{Kind: pgschema.KindColumn, Schema: desiredTable.Schema, Name: desiredTable.Name, Part: before.Name}
+			}
+			if _, exists := desiredByID[targetID]; !exists {
+				continue
+			}
+			matchedDesired[targetID] = true
+			currentRetained = append(currentRetained, targetID)
+		}
+		if len(currentRetained) == 0 {
+			continue
+		}
+		var desiredRetained []pgschema.ID
+		lastRetainedPosition := 0
+		for _, after := range desiredColumns {
+			if matchedDesired[after.ObjectID()] {
+				desiredRetained = append(desiredRetained, after.ObjectID())
+				lastRetainedPosition = after.Position
+			}
+		}
+		desiredOrdinal := make(map[pgschema.ID]int, len(desiredRetained))
+		for index, id := range desiredRetained {
+			desiredOrdinal[id] = index + 1
+		}
+		for index, id := range currentRetained {
+			if index < len(desiredRetained) && desiredRetained[index] == id {
+				continue
+			}
+			after := desiredByID[id]
+			unsupported = append(unsupported, fmt.Sprintf(
+				"column_physical_order:%s.%s:retained_column:%s:current_order=%d:desired_order=%d",
+				desiredTable.Schema, desiredTable.Name, after.Name, index+1, desiredOrdinal[id],
+			))
+		}
+		for _, after := range desiredColumns {
+			if matchedDesired[after.ObjectID()] || after.Position > lastRetainedPosition {
+				continue
+			}
+			unsupported = append(unsupported, fmt.Sprintf(
+				"column_physical_order:%s.%s:inserted_column:%s:desired=%d:last_retained=%d",
+				desiredTable.Schema, desiredTable.Name, after.Name, after.Position, lastRetainedPosition,
+			))
+		}
+	}
+	return unionStrings(unsupported, nil)
 }
 
 func unsupportedResult(result protocol.Result, resolver *protocol.Resolver, unsupported []string) (protocol.Result, error) {

@@ -275,6 +275,12 @@ func inspectFile(root, path string) ([]caseEntry, sourceFile, error) {
 
 func applyCaseOverrides(entry *caseEntry, family, name string) {
 	switch {
+	case family == "column" && name == "Add one column and change ordering":
+		entry.OnwardPGTests = []string{
+			"internal/graphplan#TestPlanRejectsUnreachablePhysicalColumnOrder",
+			"cmd/onwardpg#TestDraftReportsUnreachableColumnOrderBeforeWritingBundleOnPostgreSQL",
+		}
+		entry.Notes = "PostgreSQL can append a column but cannot insert it before retained physical columns. onwardpg blocks that declarative transition with a typed column_physical_order finding before writing or replacing a bundle instead of accepting a plan that leaves a residual diff."
 	case family == "index" && name == "Alter index columns (index replacement and prioritized builds)":
 		entry.Classification = "supported"
 		entry.Dimensions.Mutation = "supported"

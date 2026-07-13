@@ -20,7 +20,7 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg.verify/v1"
+const Version = "onwardpg.verify/v2"
 
 var phases = []string{"expand", "migrate", "contract"}
 
@@ -43,11 +43,13 @@ type Finding struct {
 
 type Report struct {
 	ProtocolVersion     string           `json:"protocol_version"`
-	Outcome             string           `json:"outcome"`
+	Outcome             string           `json:"status"`
 	Target              string           `json:"target"`
 	BundleID            string           `json:"bundle_id"`
 	HistoryHead         string           `json:"history_head"`
 	ThroughPhase        string           `json:"through_phase"`
+	SimulatedPhases     []string         `json:"simulated_bundle_phases,omitempty"`
+	RemainingPhases     []string         `json:"remaining_bundle_phases,omitempty"`
 	ExecutedBatches     int              `json:"executed_batches"`
 	ObservedFingerprint string           `json:"observed_fingerprint,omitempty"`
 	DesiredFingerprint  string           `json:"desired_fingerprint,omitempty"`
@@ -95,6 +97,17 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		ProtocolVersion: Version, Outcome: "failed", Target: chain.Target,
 		BundleID: input.BundleID, HistoryHead: chain.HeadDigest, ThroughPhase: input.ThroughPhase,
 	}
+	targetManifest := chain.Entries[len(chain.Entries)-1].Artifact.Manifest
+	for _, phase := range phases {
+		if _, exists := targetManifest.Phases[phase]; !exists {
+			continue
+		}
+		if phaseIndex(phase) <= phaseIndex(input.ThroughPhase) {
+			report.SimulatedPhases = append(report.SimulatedPhases, phase)
+		} else {
+			report.RemainingPhases = append(report.RemainingPhases, phase)
+		}
+	}
 	observed, batches, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, input.ThroughPhase, input.Ignores)
 	report.ExecutedBatches = batches
 	if err != nil {
@@ -125,9 +138,8 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	target := chain.Entries[len(chain.Entries)-1].Artifact.Manifest
-	if target.DesiredSource.Fingerprint != report.DesiredFingerprint {
-		return Report{}, fmt.Errorf("full history fingerprint %s does not match bundle desired fingerprint %s", report.DesiredFingerprint, target.DesiredSource.Fingerprint)
+	if targetManifest.DesiredSource.Fingerprint != report.DesiredFingerprint {
+		return Report{}, fmt.Errorf("full history fingerprint %s does not match bundle desired fingerprint %s", report.DesiredFingerprint, targetManifest.DesiredSource.Fingerprint)
 	}
 	residual, err := graphplan.Build(observed, desired, protocol.Answers{}, input.Options)
 	if err != nil {

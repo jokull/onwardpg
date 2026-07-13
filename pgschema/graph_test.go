@@ -37,6 +37,40 @@ func TestBatchesOrdersDependenciesDeterministically(t *testing.T) {
 	}
 }
 
+func TestBatchesPreserveColumnPositionsWithinOneRelation(t *testing.T) {
+	snapshot := New()
+	schema := Schema{Name: "public"}
+	table := Table{Schema: "public", Name: "accounts"}
+	first := Column{Table: table.ObjectID(), Name: "zeta", Position: 1, Type: "text"}
+	second := Column{Table: table.ObjectID(), Name: "alpha", Position: 2, Type: "text"}
+	for _, object := range []Object{second, first, table, schema} {
+		if err := snapshot.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]ID{
+		{table.ObjectID(), schema.ObjectID()},
+		{first.ObjectID(), table.ObjectID()},
+		{second.ObjectID(), table.ObjectID()},
+	} {
+		if err := snapshot.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var got []string
+	for _, batch := range snapshot.Batches() {
+		for _, object := range batch.Objects {
+			if column, ok := object.(Column); ok {
+				got = append(got, column.Name)
+			}
+		}
+	}
+	if want := []string{"zeta", "alpha"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("column batch order = %#v, want %#v", got, want)
+	}
+}
+
 func TestBatchesPreserveForeignKeyCycle(t *testing.T) {
 	snapshot := New()
 	a := Table{Schema: "public", Name: "accounts"}

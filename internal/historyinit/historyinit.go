@@ -18,7 +18,7 @@ import (
 	"github.com/jokull/onwardpg/internal/workspace"
 )
 
-const Version = "onwardpg.history-init/v1"
+const Version = "onwardpg.history-init/v2"
 
 type Finding struct {
 	Code        string `json:"code"`
@@ -28,7 +28,7 @@ type Finding struct {
 
 type Report struct {
 	ProtocolVersion    string           `json:"protocol_version"`
-	Outcome            string           `json:"outcome"`
+	Outcome            string           `json:"status"`
 	Target             string           `json:"target"`
 	BundleID           string           `json:"bundle_id"`
 	Path               string           `json:"path,omitempty"`

@@ -14,6 +14,8 @@ import (
 
 const Version = "onwardpg.history/v1"
 
+const StatusVersion = "onwardpg.history-status/v1"
+
 var phaseOrder = []string{"expand", "migrate", "contract"}
 
 type Entry struct {
@@ -33,6 +35,102 @@ type Replay struct {
 	Files      []string
 	Digest     string
 	Provenance string
+}
+
+type StatusEntry struct {
+	BundleID     string `json:"bundle_id"`
+	Generation   int    `json:"generation"`
+	ParentDigest string `json:"parent_digest"`
+	EntryDigest  string `json:"entry_digest"`
+}
+
+type SelectedStatus struct {
+	BundleID     string `json:"bundle_id"`
+	State        string `json:"state"`
+	Generation   int    `json:"generation"`
+	ParentDigest string `json:"parent_digest"`
+	EntryDigest  string `json:"entry_digest"`
+	Relationship string `json:"relationship"`
+}
+
+type StatusFinding struct {
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+	Remediation string `json:"remediation,omitempty"`
+}
+
+type StatusReport struct {
+	ProtocolVersion string          `json:"protocol_version"`
+	Status          string          `json:"status"`
+	Target          string          `json:"target"`
+	HistoryHead     string          `json:"history_head"`
+	HeadBundle      string          `json:"head_bundle,omitempty"`
+	Entries         []StatusEntry   `json:"entries,omitempty"`
+	Selected        *SelectedStatus `json:"selected,omitempty"`
+	Findings        []StatusFinding `json:"findings,omitempty"`
+}
+
+// Inspect returns the repository-local hash-chain state without consulting
+// Git or any database. When selectedBundle is supplied, that one mutable
+// bundle is excluded so the report describes the base it is actually stacked
+// on and whether its receipted parent is current.
+func Inspect(root, bundleRoot, target, selectedBundle string) (StatusReport, error) {
+	report := StatusReport{ProtocolVersion: StatusVersion, Status: "valid", Target: target}
+	var (
+		chain    Chain
+		selected *Entry
+		err      error
+	)
+	if selectedBundle == "" {
+		chain, err = Load(root, bundleRoot, target)
+	} else {
+		chain, selected, err = LoadExcluding(root, bundleRoot, target, selectedBundle)
+		if err != nil {
+			chain, selected, err = LoadEditedDraft(root, bundleRoot, target, selectedBundle)
+		}
+	}
+	if err != nil {
+		return report, err
+	}
+	report.HistoryHead = chain.HeadDigest
+	for _, entry := range chain.Entries {
+		receipt := entry.Artifact.Manifest.History
+		report.Entries = append(report.Entries, StatusEntry{
+			BundleID: entry.Directory, Generation: entry.Artifact.Manifest.Generation,
+			ParentDigest: receipt.ParentDigest, EntryDigest: receipt.EntryDigest,
+		})
+	}
+	if len(chain.Entries) > 0 {
+		report.HeadBundle = chain.Entries[len(chain.Entries)-1].Directory
+	}
+	if selectedBundle == "" {
+		return report, nil
+	}
+	if selected == nil {
+		report.Status = "missing"
+		report.Findings = []StatusFinding{{
+			Code: "selected_bundle_missing", Message: fmt.Sprintf("selected bundle %s does not exist", selectedBundle),
+			Remediation: "draft the selected bundle only after identifying the accepted base head",
+		}}
+		return report, nil
+	}
+	receipt := selected.Artifact.Manifest.History
+	relationship := "current"
+	if receipt.ParentDigest != chain.HeadDigest {
+		relationship = "stale"
+		report.Status = "stale"
+		report.Findings = []StatusFinding{{
+			Code:        "stale_history_parent",
+			Message:     fmt.Sprintf("selected bundle parent %s is stale; current base head is %s", receipt.ParentDigest, chain.HeadDigest),
+			Remediation: "rerun draft with the same bundle id and an explicit --after assertion for the accepted base head",
+		}}
+	}
+	report.Selected = &SelectedStatus{
+		BundleID: selectedBundle, State: selected.Artifact.Manifest.State,
+		Generation: selected.Artifact.Manifest.Generation, ParentDigest: receipt.ParentDigest,
+		EntryDigest: receipt.EntryDigest, Relationship: relationship,
+	}
+	return report, nil
 }
 
 // Through returns the chain prefix ending at bundleID. It is used by

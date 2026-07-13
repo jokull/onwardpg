@@ -1,9 +1,10 @@
 # Forward-only migration workflow
 
-The normal durable workflow is one command repeated with the same bundle ID:
+The normal durable workflow is one command repeated with the same bundle ID
+and accepted predecessor:
 
 ```sh
-onwardpg draft --target primary --bundle payment-settlement
+onwardpg draft --target primary --bundle payment-settlement --after baseline
 ```
 
 onwardpg replays accepted history, materializes the configured CREATE-statement
@@ -17,8 +18,9 @@ semantic choices. For example:
 
 ```json
 {
-  "protocol": "onwardpg/draft/2",
+  "protocol_version": "onwardpg/draft/3",
   "status": "needs_decisions",
+  "next_action": "rerun_same_command_with_hints",
   "decisions": [
     {
       "choices": [
@@ -48,7 +50,7 @@ The agent reruns the same command with the choice justified by its feature
 context:
 
 ```sh
-onwardpg draft --target primary --bundle payment-settlement \
+onwardpg draft --target primary --bundle payment-settlement --after baseline \
   --hint '{"kind":"rename","object":"column","from":["app","users","name"],"to":["app","users","display_name"]}'
 ```
 
@@ -64,7 +66,7 @@ other operation that onwardpg cannot derive, choose `manual_sql`. The hint
 contains no SQL:
 
 ```sh
-onwardpg draft --target primary --bundle payment-settlement \
+onwardpg draft --target primary --bundle payment-settlement --after baseline \
   --hint '{"kind":"type_change","name":["app","payments","settled_on"],"strategy":"manual_sql"}'
 ```
 
@@ -88,8 +90,9 @@ application code, complete data work while both shapes are supported, and
 delay contract until old code is gone. Concurrent index operations remain in
 their required non-transactional batches.
 
-Keep rerunning `draft` with the same bundle ID while the feature changes or
-after new base migrations arrive. The selected bundle remains the one
+Keep rerunning `draft` with the same bundle ID while the feature changes. After
+new base migrations arrive, use the new accepted head in `--after`. The
+selected bundle remains the one
 cumulative history-head-to-working-schema transition. There is no lock or
 finalize command, no down migration, and no automatic application command.
 

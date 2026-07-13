@@ -46,7 +46,11 @@ grep -q '"status":"valid"' config-check.json
 grep -q '"fingerprint":"sha256:' config-check.json
 
 "$binary" init --target primary --bundle baseline >init.json
-grep -q '"outcome":"initialized"' init.json
+grep -q '"status":"initialized"' init.json
+
+"$binary" history status --target primary >history.json
+grep -q '"status":"valid"' history.json
+grep -q '"head_bundle":"baseline"' history.json
 
 "$binary" dev plan --target primary --output text >dev-plan.sql
 grep -q 'EXPAND' dev-plan.sql
@@ -70,7 +74,7 @@ CREATE INDEX customer_profiles_kind_id_idx
 EOF
 
 set +e
-"$binary" draft --target primary --bundle customer-profile >decisions.json
+"$binary" draft --target primary --bundle customer-profile --after baseline >decisions.json
 decision_exit=$?
 set -e
 test "$decision_exit" -eq 2
@@ -85,6 +89,7 @@ set +e
 "$binary" draft \
   --target primary \
   --bundle customer-profile \
+  --after baseline \
   --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}' \
   --hint '{"kind":"type_change","name":["app","accounts","occurred_at"],"strategy":"manual_sql"}' \
   >sql-handoff.json
@@ -110,11 +115,11 @@ WHERE table_schema = 'app'
 EOF
 
 "$binary" verify --target primary --bundle customer-profile >verify.json
-grep -q '"outcome":"verified"' verify.json
+grep -q '"status":"verified"' verify.json
 grep -q '"receipts_updated":true' verify.json
 
 "$binary" verify --target primary --bundle customer-profile --check >check.json
-grep -q '"outcome":"verified"' check.json
+grep -q '"status":"verified"' check.json
 
 test ! -e .git
 test -f migrations/onward/primary/customer-profile/manifest.json

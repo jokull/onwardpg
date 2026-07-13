@@ -2,10 +2,11 @@
 
 onwardpg has one small contract with a coding agent:
 
-1. onwardpg derives everything PostgreSQL catalog state can prove.
-2. The agent supplies only product intent that the schemas cannot prove.
-3. Intricate product work is edited as SQL, not encoded as orchestration JSON.
-4. onwardpg receipts and clone-verifies the resulting bundle, but never applies
+1. The agent identifies the accepted base bundle from its Git context.
+2. onwardpg derives everything PostgreSQL catalog state can prove.
+3. The agent supplies only product intent that the schemas cannot prove.
+4. Intricate product work is edited as SQL, not encoded as orchestration JSON.
+5. onwardpg receipts and clone-verifies the resulting bundle, but never applies
    it to a caller-owned database.
 
 The agent may already know the intent before planning. That is useful: semantic
@@ -18,23 +19,24 @@ graph diff.
 Start or refresh one logical feature bundle:
 
 ```sh
-onwardpg draft --target primary --bundle profile-name
+onwardpg draft --target primary --bundle profile-name --after baseline
 ```
 
 Branch on the documented result:
 
 | Status / exit | Agent action |
 | --- | --- |
-| `planned` / `0` | Review phases and hazards, then run `verify --check` in CI. |
+| `planned`, `no_changes`, or `absorbed` / `0` | Review phases and hazards, or remove the redundant PR migration when absorbed; then run the applicable CI check. |
 | `needs_decisions` / `2` | Select an offered semantic hint only when feature context establishes it; otherwise ask the developer. |
 | `needs_sql_edits` / `2` | Edit the named phase files, remove every TODO, add useful assertions, and run `verify`. |
 | `unsupported` / `3` | Stop. Change the design, narrow an explicitly accepted ignore, or add planner support. |
 | blocker / `4` | Repair history, convergence, or receipt integrity. |
 | error / `1` | Fix invocation, credentials, DDL, or environment. |
 
-Repeat `draft` with the same bundle ID whenever the declarative schema changes
-or the accepted base history moves. There is no finalize state. Applying SQL to
-a local developer database does not advance the durable history head.
+Repeat `draft` with the same bundle ID whenever the declarative schema changes.
+When accepted base history moves, update `--after` to the new accepted tip.
+There is no finalize state. Applying SQL to a local developer database does
+not advance the durable history head.
 
 ## Decisions: predictable ahead of time, offered when needed
 
@@ -45,6 +47,7 @@ already knows that from the feature request, it can start with:
 onwardpg draft \
   --target primary \
   --bundle profile-name \
+  --after baseline \
   --hint '{"kind":"rename","object":"column","from":["app","users","name"],"to":["app","users","display_name"]}'
 ```
 
@@ -53,8 +56,9 @@ object as a choice alongside the destructive alternative:
 
 ```json
 {
-  "protocol": "onwardpg/draft/2",
+  "protocol_version": "onwardpg/draft/3",
   "status": "needs_decisions",
+  "next_action": "rerun_same_command_with_hints",
   "decisions": [
     {
       "choices": [
@@ -113,6 +117,7 @@ offered manual strategy:
 onwardpg draft \
   --target primary \
   --bundle payment-settlement \
+  --after baseline \
   --hint '{"kind":"type_change","name":["app","payments","settled_on"],"strategy":"manual_sql"}'
 ```
 
@@ -120,8 +125,9 @@ onwardpg creates the bundle and reports only the files needing ownership:
 
 ```json
 {
-  "protocol": "onwardpg/draft/2",
+  "protocol_version": "onwardpg/draft/3",
   "status": "needs_sql_edits",
+  "next_action": "edit_files_then_verify",
   "path": "migrations/onward/primary/payment-settlement",
   "edit": ["phases/migrate.sql"]
 }
@@ -185,7 +191,9 @@ file remains unreceipted until disposable-clone verification succeeds.
 
 ## Boundaries
 
-The agent owns Git operations, deployment timing, application compatibility,
+The agent owns Git operations, identification of the accepted predecessor,
+enforcement that one PR introduces at most one mutable bundle per target,
+deployment timing, application compatibility,
 representative data, and execution through the project's normal tooling.
 onwardpg owns history-chain validation, schema materialization, graph planning,
 decision validation, deterministic bundle generation, and disposable-clone

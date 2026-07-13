@@ -85,6 +85,27 @@ func TestLoadExcludingSelectedBundleResolvesItsFork(t *testing.T) {
 	}
 }
 
+func TestInspectExplainsSelectedBundleAgainstCurrentBase(t *testing.T) {
+	root := t.TempDir()
+	baseline := writeBundle(t, root, "baseline", bundle.HistoryRootDigest(), "SELECT 1;", "expand")
+	upstream := writeBundle(t, root, "upstream", baseline, "SELECT 2;", "expand")
+	writeBundle(t, root, "feature", baseline, "SELECT 3;", "expand")
+
+	report, err := Inspect(root, "migrations/onward", "primary", "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "stale" || report.HistoryHead != upstream || report.HeadBundle != "upstream" || len(report.Entries) != 2 {
+		t.Fatalf("status report = %#v", report)
+	}
+	if report.Selected == nil || report.Selected.BundleID != "feature" || report.Selected.Relationship != "stale" || report.Selected.ParentDigest != baseline {
+		t.Fatalf("selected status = %#v", report.Selected)
+	}
+	if len(report.Findings) != 1 || report.Findings[0].Code != "stale_history_parent" {
+		t.Fatalf("status findings = %#v", report.Findings)
+	}
+}
+
 func TestLoadExcludingStillRejectsUnselectedFork(t *testing.T) {
 	root := t.TempDir()
 	baseline := writeBundle(t, root, "baseline", bundle.HistoryRootDigest(), "SELECT 1;", "expand")

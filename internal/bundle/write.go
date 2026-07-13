@@ -262,6 +262,55 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 	return nil
 }
 
+// RemoveDraft atomically removes one strictly receipted mutable bundle. The
+// caller must already have proved that no retained history entry depends on
+// it. The manifest digest comparison prevents deleting a bundle that changed
+// after that proof was made.
+func RemoveDraft(destination string, expected Artifact) error {
+	if destination == "" {
+		return fmt.Errorf("bundle destination is required")
+	}
+	if err := expected.Validate(); err != nil {
+		return fmt.Errorf("validate expected draft: %w", err)
+	}
+	lock := destination + ".onwardpg-lock"
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("bundle lifecycle operation is already in progress: %s", lock)
+		}
+		return fmt.Errorf("acquire bundle lifecycle lock: %w", err)
+	}
+	defer os.Remove(lock)
+	if err := validateReplaceableBundle(destination); err != nil {
+		return err
+	}
+	current, err := Read(destination)
+	if err != nil {
+		return err
+	}
+	if Digest(current.Files["manifest.json"]) != Digest(expected.Files["manifest.json"]) {
+		return fmt.Errorf("bundle changed after removal was prepared")
+	}
+	backup := destination + ".onwardpg-absorbed"
+	if _, err := os.Stat(backup); err == nil {
+		return fmt.Errorf("absorbed bundle backup exists at %s; recover or remove it before continuing", backup)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(destination, backup); err != nil {
+		return fmt.Errorf("preserve absorbed bundle before removal: %w", err)
+	}
+	parent := filepath.Dir(destination)
+	if err := syncDirectory(parent); err != nil {
+		_ = os.Rename(backup, destination)
+		return fmt.Errorf("sync absorbed bundle removal: %w", err)
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("remove absorbed bundle backup: %w", err)
+	}
+	return syncDirectory(parent)
+}
+
 func writeFileDurable(name string, body []byte, mode os.FileMode) error {
 	file, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {

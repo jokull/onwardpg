@@ -79,8 +79,10 @@ dev_database_env names the read-only development catalog.
 scratch_database_env names a PostgreSQL administrative URL that may create and
 drop disposable databases. For compatibility, omitting scratch_database_env
 falls back to dev_database_env; new repositories should keep them separate.
-Credentials are never written to bundles. The PostgreSQL major is discovered
-from the scratch server, recorded in receipts, and never duplicated in config.
+Credentials are never written to bundles. `config check` connects to both
+URLs, materializes the DDL, validates the history chain, and requires the
+development, scratch, and existing history PostgreSQL majors to agree. The
+major is recorded in receipts and never duplicated in config.
 
 ~~~sh
 onwardpg config check
@@ -88,6 +90,24 @@ onwardpg config check
 
 DDL is materialized in random onwardpg_ddl_* databases and verification uses
 onwardpg_verify_* databases. They are dropped after use.
+
+For a disposable local trial, one PostgreSQL server may fill both roles:
+
+~~~sh
+docker run --rm --name onwardpg-preview-pg -d \
+  -e POSTGRES_PASSWORD=onwardpg \
+  -p 55432:5432 postgres:16
+until docker exec onwardpg-preview-pg pg_isready -U postgres; do sleep 1; done
+docker exec onwardpg-preview-pg createdb -U postgres onwardpg_dev
+
+export ONWARDPG_DEV_DATABASE_URL='postgres://postgres:onwardpg@localhost:55432/onwardpg_dev?sslmode=disable'
+export ONWARDPG_SCRATCH_DATABASE_URL='postgres://postgres:onwardpg@localhost:55432/postgres?sslmode=disable'
+onwardpg config check
+~~~
+
+The development user needs catalog read access. The scratch user must be able
+to create and drop databases. Keep these privileges away from production
+credentials.
 
 ## 1. Establish the replayable ground floor
 
@@ -141,28 +161,46 @@ the complete `H → W` transition.
 
 ## 3. Keep one logical feature migration current
 
-Create or refresh the feature's selected bundle at any point:
+First identify the accepted history tip in the base checkout the agent intends
+to build on:
+
+~~~sh
+onwardpg history status --target primary
+~~~
+
+The response returns the ordered chain, `head_bundle`, and `history_head`.
+Git remains outside onwardpg: the coding agent runs this against the rebased
+main checkout or otherwise uses its Git context to identify that accepted tip.
+It then creates or refreshes the PR-owned bundle explicitly after it:
 
 ~~~sh
 onwardpg draft \
   --target primary \
-  --bundle payment-settlement
+  --bundle payment-settlement \
+  --after baseline
 ~~~
 
-The bundle ID is the only lifecycle context onwardpg needs. Keep using the same
-ID while the feature evolves. The command does
-not inspect the Git branch, origin/main, commits, merge bases, or pull requests.
+Keep using the same bundle ID and accepted predecessor while the feature
+evolves. `--after` is the one fact supplied from the agent's Git context. The
+command does not inspect the branch, origin/main, commits, merge bases, or pull
+requests.
 
 draft:
 
 1. excludes only payment-settlement from the candidate base;
 2. validates every other bundle as one hash chain;
-3. replays that history on disposable PostgreSQL;
-4. exports and materializes the working DDL;
-5. plans H → W through the typed PostgreSQL graph;
-6. stops for intent it cannot infer;
-7. writes or refreshes that same selected bundle; and
-8. clone-verifies generated complete plans before writing them.
+3. requires that chain to end at the bundle named by `--after`;
+4. replays that history on disposable PostgreSQL;
+5. exports and materializes the working DDL;
+6. plans H → W through the typed PostgreSQL graph;
+7. stops for intent it cannot infer;
+8. writes or refreshes that same selected bundle; and
+9. clone-verifies generated complete plans before writing them.
+
+This prevents accidental stacking. If another unpublished feature bundle sits
+between `baseline` and `payment-settlement`, the actual base head does not
+match `--after baseline`, so draft exits 4 without writing. The agent must make
+the checkout contain accepted history plus only the PR-owned mutable bundle.
 
 The selected bundle remains a mutable cumulative `H → W` draft even after its
 SQL has been deliberately applied to the developer database. There is no
@@ -172,8 +210,9 @@ If accounts became customers, onwardpg asks rather than guessing:
 
 ~~~json
 {
-  "protocol": "onwardpg/draft/2",
+  "protocol_version": "onwardpg/draft/3",
   "status": "needs_decisions",
+  "next_action": "rerun_same_command_with_hints",
   "decisions": [
     {
       "choices": [
@@ -206,6 +245,7 @@ the offered semantic hint:
 onwardpg draft \
   --target primary \
   --bundle customer-rename \
+  --after baseline \
   --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}'
 ~~~
 
@@ -250,6 +290,7 @@ than a JSON orchestration contract:
 onwardpg draft \
   --target primary \
   --bundle event-date \
+  --after baseline \
   --hint '{"kind":"type_change","name":["app","events","occurred_on"],"strategy":"manual_sql"}'
 ~~~
 
@@ -262,7 +303,7 @@ Planner exits are stable for agents:
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Complete plan, including an empty plan |
+| 0 | Complete plan, no changes, or a generated bundle absorbed by the new base |
 | 2 | A semantic decision or SQL edit is required |
 | 3 | Unsupported schema state |
 | 4 | History, convergence, or policy blocker |
@@ -368,6 +409,9 @@ onwardpg verify \
   --through expand
 ~~~
 
+The report names `simulated_bundle_phases` and
+`remaining_bundle_phases`. These describe disposable-clone execution only;
+they are not a journal claiming that an environment ran anything.
 
 Verification proves structural replay and declared manual postconditions. It
 does not prove production timing, realistic data volume, application
@@ -376,12 +420,14 @@ compatibility, or business correctness.
 ## 6. Absorb a moving base without Git integration
 
 Suppose another migration lands while the feature is open. The developer or
-coding agent pulls and rebases normally, then reruns:
+coding agent pulls and rebases normally, identifies the new accepted tip from
+that Git base, then reruns:
 
 ~~~sh
 onwardpg draft \
   --target primary \
-  --bundle customer-rename
+  --bundle customer-rename \
+  --after upstream-audit
 ~~~
 
 The checkout now contains the new upstream entry and customer-rename still
@@ -389,7 +435,9 @@ names its old parent. Selecting customer-rename lets onwardpg exclude that one
 entry, validate the new base chain, and detect the stale parent from content
 digests alone.
 
-onwardpg replans `new-head → W` and replaces the same logical bundle. It carries
+If the checkout does not actually contain one base chain ending at
+`upstream-audit`, onwardpg refuses the restack. Otherwise it replans
+`new-head → W` and replaces the same logical bundle. It carries
 only answers whose dependency scope is unchanged. For developer-edited SQL it
 compares the previous generated phase, the edited phase, and the newly
 generated phase:
@@ -406,15 +454,23 @@ generated phase:
 This is intentionally phase-grained, not a semantic SQL merge. Remaining forks
 or ambiguous entries are blockers.
 
+If the new base already produces W and the selected bundle contains only
+generated SQL, the result is `status: "absorbed"`: onwardpg removes the
+redundant selected folder rather than committing an empty history entry. If
+the bundle contains developer-owned SQL, onwardpg does not guess that the data
+work is redundant; it preserves a review handoff for the agent.
+
 This is the responsibility split:
 
 - Git tells the coding agent which files belong in the checkout.
 - The explicit bundle ID tells onwardpg which migration is mutable.
+- `--after` tells it which accepted predecessor the agent intends.
 - Parent digests reveal whether the ground moved.
 - Disposable replay proves whether the resulting chain converges.
 
 The same mechanism handles ordinary feature iteration. Apply the current SQL
-locally, change the DDL again, and rerun `draft --bundle` with the same ID. The
+locally, change the DDL again, and rerun `draft --bundle ... --after ...` with
+the same identities. The
 bundle remains the complete migration that will be reviewed for merge; it does
 not stack a second feature migration merely because D moved.
 
@@ -430,9 +486,28 @@ the feature draft and creates a successor for later work.
 There is no production apply command, migration-runner integration, down
 migration, embedded coding agent, framework adapter, or hidden Git mutation.
 
-verify --check is the Git-free read-only gate over the same bundle contract.
-Git-aware `pr` and `ci` commands are not exposed. The caller brings any branch
-or merge-base knowledge and selects the stable bundle ID.
+`history status --target primary --bundle customer-rename` is the Git-free
+chain inspection command. It reports whether the selected bundle is current,
+stale, missing, or blocked and names its actual base head. `verify --check` is
+the read-only clone gate over that same bundle contract.
+
+In PR CI, the coding agent or ordinary Git-aware CI step—not onwardpg—discovers
+which bundle directory changed relative to the merge base. The policy is:
+
+1. exactly one mutable bundle per target may be introduced by the PR;
+2. its manifest parent must be the accepted main head brought into the
+   checkout;
+3. `onwardpg history status --target TARGET --bundle ID` must be current; and
+4. `onwardpg verify --target TARGET --bundle ID --check` must succeed.
+
+Two changed feature bundle directories are a PR-policy failure even if each is
+individually valid. Git-aware `pr` and `ci` commands are intentionally not
+exposed; the caller already has the correct merge-base knowledge.
+
+The deployment system owns a separate record of which exact phase digest ran
+in which environment. onwardpg's phase and assertion digests are the handoff
+material, not an environment journal. In particular, `verify --through` never
+claims expand or migrate has run outside its disposable clone.
 
 ## 8. Audit production drift separately
 
@@ -509,6 +584,10 @@ or return unsupported.
 
 Current notable gaps include:
 
+- physical column reordering and middle insertion are explicitly unsupported
+  because ordinary PostgreSQL `ALTER TABLE` cannot move retained attributes;
+  append new declarative columns or use a separately reviewed replacement-table
+  migration;
 - a table rename is offered only when retained child identities are provably
   compatible; exports that regenerate table-derived primary-key, constraint,
   or index names can currently appear as destructive replacement unless those

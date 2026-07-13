@@ -15,7 +15,7 @@ onwardpg init --target primary
 Create or refresh one feature entry:
 
 ~~~sh
-onwardpg draft --target primary --bundle customer-profile
+onwardpg draft --target primary --bundle customer-profile --after baseline
 ~~~
 
 Verify generated history:
@@ -25,9 +25,11 @@ onwardpg verify --target primary --bundle customer-profile
 ~~~
 
 The explicitly selected bundle is the only mutable entry for a draft command.
-Every other entry is immutable base history. Selecting a new bundle naturally
-makes the previously verified entry part of the base chain; no Git-derived
-draft status or promotion service is required.
+Every other entry is immutable base history, and that base must end at the
+bundle asserted by `--after`. This is supplied by the coding agent from its Git
+context; onwardpg validates the chain without inspecting Git. A second
+unpublished bundle in the base causes an anchor mismatch instead of silently
+stacking migrations.
 
 Applying an earlier version to a developer database does not change this
 lifecycle. Keep selecting the same bundle while the feature evolves; `draft`
@@ -126,7 +128,8 @@ nothing. verify --check never updates receipts.
 `verify --check` also requires the selected bundle to be the history head and
 materializes the repository's current configured DDL. A bundle that converges
 to its own old target but no longer matches the working schema is `stale`, not
-verified; the finding points back to the same `draft --bundle` loop.
+verified; the finding points back to the same
+`draft --bundle ... --after ...` loop.
 
 Files without directives are transactional. Exact -- onwardpg:batch comments
 split transactional and nontransactional chunks without requiring onwardpg to
@@ -143,20 +146,25 @@ that exact file; `verify --check` continues to reject it until then.
 ## Moving base
 
 If an upstream bundle lands beside an older feature bundle, both may initially
-name the same parent. Ordinary history loading rejects that fork.
+name the same parent. Ordinary history loading rejects that fork. After the
+agent rebases and identifies the accepted upstream tip, it runs:
 
 ~~~sh
-onwardpg draft --target primary --bundle customer-profile
+onwardpg draft --target primary --bundle customer-profile --after upstream-audit
 ~~~
 
 By naming customer-profile, the developer tells onwardpg which one entry to
-exclude. The remaining entries must form one valid base chain. The selected
-draft is then regenerated from the new head to the current desired DDL. No Git
-API is involved.
+exclude. By naming upstream-audit, it asserts where the remaining valid base
+chain must end. The selected draft is then regenerated from that head to the
+current desired DDL. No Git API is involved.
 
 A fork that remains after excluding the selected bundle is ambiguous and
 blocks. Selecting a historical entry with descendants also blocks because the
 remaining chain has a missing parent.
+
+If upstream completely absorbs a generated feature, draft removes that
+selected folder and reports `absorbed`; empty history entries are not retained.
+Developer-edited SQL is never discarded by this inference.
 
 ## Verification
 

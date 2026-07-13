@@ -149,6 +149,13 @@ lists and the trigger `WHEN` predicate. It never rewrites trigger identity,
 relation targets, routines, or arbitrary expression text. A broader trigger
 change remains an independent reviewed transition.
 
+Column physical order is catalog state but PostgreSQL has no ordinary
+`ALTER TABLE` operation that moves retained columns or inserts a new column in
+the middle. Such a desired snapshot returns stable
+`column_physical_order:...` unsupported reasons before a bundle is written.
+Append new declarative columns after retained columns, or deliberately design a
+replacement-table migration outside the current structural planner boundary.
+
 Partition children are graph-modeled. The planner supports an explicit attach
 or detach of an existing range/list/hash/default child and marks the
 lock/possible-scan hazards in the `migrate` phase. Moving a child to a

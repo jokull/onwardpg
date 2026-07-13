@@ -725,10 +725,10 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestMutationPlanConvergesOnPostgreSQL",
-        "internal/graphplan#TestIdentityGenerationStartAndIncrementConvergeOnPostgreSQL"
+        "internal/graphplan#TestPlanRejectsUnreachablePhysicalColumnOrder",
+        "cmd/onwardpg#TestDraftReportsUnreachableColumnOrderBeforeWritingBundleOnPostgreSQL"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "notes": "PostgreSQL can append a column but cannot insert it before retained physical columns. onwardpg blocks that declarative transition with a typed column_physical_order finding before writing or replacing a bundle instead of accepting a plan that leaves a residual diff."
     },
     {
       "id": "column.add_identity_column_always_no_cycle",

@@ -138,7 +138,7 @@ CREATE TABLE app.customer_profiles (
 CREATE INDEX customer_profiles_account_id_idx ON app.customer_profiles (account_id);
 `)
 	drafted := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-profiles"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-profiles", "--after", "baseline"}, repository)
 	})
 	if drafted.code != 0 {
 		t.Fatalf("additive draft exit = %d, stdout = %s", drafted.code, drafted.stdout)
@@ -168,7 +168,7 @@ CREATE INDEX customer_profiles_account_id_idx ON app.customer_profiles (account_
 	}
 
 	redrafted := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-profiles"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-profiles", "--after", "baseline"}, repository)
 	})
 	if redrafted.code != 0 {
 		t.Fatalf("identical redraft exit = %d, stdout = %s", redrafted.code, redrafted.stdout)
@@ -185,6 +185,195 @@ CREATE INDEX customer_profiles_account_id_idx ON app.customer_profiles (account_
 	})
 	if checked.code != 0 {
 		t.Fatalf("additive verify --check exit = %d, stdout = %s", checked.code, checked.stdout)
+	}
+}
+
+func TestExplicitBaseAnchorPreventsAccidentalPRStackingOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n")
+	initialized := captureStdout(t, func() int {
+		return runInitAt([]string{"--target", "primary"}, repository)
+	})
+	if initialized.code != 0 {
+		t.Fatalf("init exit = %d, stdout = %s", initialized.code, initialized.stdout)
+	}
+	status := captureStdout(t, func() int {
+		return runHistoryStatusAt([]string{"status", "--target", "primary"}, repository)
+	})
+	if status.code != 0 {
+		t.Fatalf("history status exit = %d, stdout = %s", status.code, status.stdout)
+	}
+	var historyStatus history.StatusReport
+	if err := json.Unmarshal([]byte(status.stdout), &historyStatus); err != nil {
+		t.Fatal(err)
+	}
+	if historyStatus.Status != "valid" || historyStatus.HeadBundle != "baseline" || len(historyStatus.Entries) != 1 {
+		t.Fatalf("history status = %#v", historyStatus)
+	}
+
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text);\n")
+	missing := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-timezone"}, repository)
+	})
+	if missing.code != 4 || !strings.Contains(missing.stdout, `"code":"base_anchor_required"`) {
+		t.Fatalf("missing anchor = %d, %s", missing.code, missing.stdout)
+	}
+	wrong := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-timezone", "--after", "not-main"}, repository)
+	})
+	if wrong.code != 4 || !strings.Contains(wrong.stdout, `"code":"base_anchor_mismatch"`) || !strings.Contains(wrong.stdout, `"base_bundle":"baseline"`) {
+		t.Fatalf("wrong anchor = %d, %s", wrong.code, wrong.stdout)
+	}
+	planned := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-timezone", "--after", "baseline"}, repository)
+	})
+	if planned.code != 0 {
+		t.Fatalf("anchored draft = %d, %s", planned.code, planned.stdout)
+	}
+	selectedStatus := captureStdout(t, func() int {
+		return runHistoryStatusAt([]string{"status", "--target", "primary", "--bundle", "account-timezone"}, repository)
+	})
+	if selectedStatus.code != 0 {
+		t.Fatalf("selected status = %d, %s", selectedStatus.code, selectedStatus.stdout)
+	}
+	if err := json.Unmarshal([]byte(selectedStatus.stdout), &historyStatus); err != nil {
+		t.Fatal(err)
+	}
+	if historyStatus.HeadBundle != "baseline" || historyStatus.Selected == nil || historyStatus.Selected.Relationship != "current" {
+		t.Fatalf("selected history status = %#v", historyStatus)
+	}
+
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text, locale text);\n")
+	stacked := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-locale", "--after", "baseline"}, repository)
+	})
+	if stacked.code != 4 || !strings.Contains(stacked.stdout, `"code":"base_anchor_mismatch"`) || !strings.Contains(stacked.stdout, `"base_bundle":"account-timezone"`) {
+		t.Fatalf("accidental stack was not blocked = %d, %s", stacked.code, stacked.stdout)
+	}
+}
+
+func TestDraftReportsUnreachableColumnOrderBeforeWritingBundleOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, email text);\n")
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text, email text);\n")
+	drafted := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-timezone", "--after", "baseline"}, repository)
+	})
+	if drafted.code != 3 || !strings.Contains(drafted.stdout, "column_physical_order:app.accounts") {
+		t.Fatalf("unreachable order = %d, %s", drafted.code, drafted.stdout)
+	}
+	if _, err := os.Stat(filepath.Join(repository, "onward-bundles", "primary", "account-timezone")); !os.IsNotExist(err) {
+		t.Fatalf("unsupported draft wrote a bundle: %v", err)
+	}
+
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, email text, zeta text, alpha text);\n")
+	if appended := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-timezone", "--after", "baseline"}, repository)
+	}); appended.code != 0 {
+		t.Fatalf("appendable order = %d, %s", appended.code, appended.stdout)
+	}
+	destination := filepath.Join(repository, "onward-bundles", "primary", "account-timezone")
+	before, err := bundle.Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text, email text, zeta text, alpha text);\n")
+	rejected := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-timezone", "--after", "baseline"}, repository)
+	})
+	if rejected.code != 3 || !strings.Contains(rejected.stdout, "column_physical_order:app.accounts") {
+		t.Fatalf("unreachable replacement = %d, %s", rejected.code, rejected.stdout)
+	}
+	after, err := bundle.Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("unsupported redraft replaced the last complete selected bundle")
+	}
+}
+
+func TestRestackRemovesGeneratedBundleAbsorbedByBaseOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n"
+	desiredDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text);\n"
+	writeTestFile(t, repository, "schema.sql", baseDDL)
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+	writeTestFile(t, repository, "schema.sql", desiredDDL)
+	if drafted := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-timezone", "--after", "baseline"}, repository)
+	}); drafted.code != 0 {
+		t.Fatalf("feature draft = %d, %s", drafted.code, drafted.stdout)
+	}
+	featurePath := filepath.Join(repository, "onward-bundles", "primary", "account-timezone")
+	parkedPath := filepath.Join(repository, "account-timezone.parked")
+	if err := os.Rename(featurePath, parkedPath); err != nil {
+		t.Fatal(err)
+	}
+	writeHistoryTransitionFixture(t, repository, adminURL, "upstream-timezone", desiredDDL)
+	if err := os.Rename(parkedPath, featurePath); err != nil {
+		t.Fatal(err)
+	}
+	absorbed := captureStdout(t, func() int {
+		return runDraftAt([]string{"--target", "primary", "--bundle", "account-timezone", "--after", "upstream-timezone"}, repository)
+	})
+	if absorbed.code != 0 {
+		t.Fatalf("absorbed restack = %d, %s", absorbed.code, absorbed.stdout)
+	}
+	var report draftflow.Report
+	if err := json.Unmarshal([]byte(absorbed.stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "absorbed" || !report.RemovedBundle || len(report.Findings) != 1 || report.Findings[0].Code != "feature_absorbed_by_base" {
+		t.Fatalf("absorbed report = %#v", report)
+	}
+	if _, err := os.Stat(featurePath); !os.IsNotExist(err) {
+		t.Fatalf("absorbed bundle still exists: %v", err)
+	}
+	chain, err := history.Load(repository, "onward-bundles", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.Entries) != 2 || chain.Entries[1].Directory != "upstream-timezone" {
+		t.Fatalf("absorbed chain = %#v", chain)
 	}
 }
 
@@ -220,20 +409,20 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	featureDDL := "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at timestamp);\n"
 	writeTestFile(t, repository, "schema.sql", featureDDL)
 	pendingOutput := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--after", "baseline"}, repository)
 	})
 	if pendingOutput.code != 2 {
 		t.Fatalf("pending draft exit = %d, stdout = %s", pendingOutput.code, pendingOutput.stdout)
 	}
 	var pending struct {
-		Protocol  string              `json:"protocol"`
-		Status    string              `json:"status"`
-		Decisions []protocol.Decision `json:"decisions"`
+		ProtocolVersion string              `json:"protocol_version"`
+		Status          string              `json:"status"`
+		Decisions       []protocol.Decision `json:"decisions"`
 	}
 	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending.Protocol != draftflow.Version || pending.Status != "needs_decisions" || len(pending.Decisions) == 0 {
+	if pending.ProtocolVersion != draftflow.Version || pending.Status != "needs_decisions" || len(pending.Decisions) == 0 {
 		t.Fatalf("pending draft = %#v", pending)
 	}
 	var renameHint *protocol.Hint
@@ -253,7 +442,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		t.Fatal(err)
 	}
 	plannedOutput := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--hint", string(hintData)}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--after", "baseline", "--hint", string(hintData)}, repository)
 	})
 	if plannedOutput.code != 0 {
 		t.Fatalf("planned draft exit = %d, stdout = %s", plannedOutput.code, plannedOutput.stdout)
@@ -296,7 +485,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	featureDDL = "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date);\n"
 	writeTestFile(t, repository, "schema.sql", featureDDL)
 	typePendingOutput := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--after", "baseline"}, repository)
 	})
 	if typePendingOutput.code != 2 {
 		t.Fatalf("type decision exit = %d, stdout = %s", typePendingOutput.code, typePendingOutput.stdout)
@@ -316,7 +505,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		t.Fatal(err)
 	}
 	typeHandoffOutput := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--hint", string(hintData), "--hint", string(manualHintData)}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--after", "baseline", "--hint", string(hintData), "--hint", string(manualHintData)}, repository)
 	})
 	if typeHandoffOutput.code != 2 || !strings.Contains(typeHandoffOutput.stdout, "needs_sql_edits") {
 		t.Fatalf("type SQL handoff exit = %d, stdout = %s", typeHandoffOutput.code, typeHandoffOutput.stdout)
@@ -358,7 +547,7 @@ WHERE table_schema = 'app'
 	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date); CREATE TABLE app.audit_log (id bigint);\n")
 
 	restackedOutput := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--after", "upstream-audit"}, repository)
 	})
 	if restackedOutput.code != 0 {
 		t.Fatalf("restacked draft exit = %d, stdout = %s", restackedOutput.code, restackedOutput.stdout)
@@ -391,7 +580,7 @@ WHERE table_schema = 'app'
 	}
 	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date); CREATE TABLE app.audit_log (id bigint); CREATE TABLE app.settings (id bigint);\n")
 	secondRestackOutput := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--after", "upstream-settings"}, repository)
 	})
 	if secondRestackOutput.code != 0 {
 		t.Fatalf("second base restack exit = %d, stdout = %s", secondRestackOutput.code, secondRestackOutput.stdout)
@@ -527,7 +716,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	}
 
 	redraftedOutput := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--after", "upstream-settings"}, repository)
 	})
 	if redraftedOutput.code != 0 {
 		t.Fatalf("same-bundle redraft exit = %d, stdout = %s", redraftedOutput.code, redraftedOutput.stdout)
@@ -580,7 +769,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	}
 	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint, occurred_at date, timezone text); CREATE TABLE app.audit_log (id bigint, note text); CREATE TABLE app.settings (id bigint);\n")
 	conflictedOutput := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "customer-rename", "--after", "upstream-settings"}, repository)
 	})
 	if conflictedOutput.code != 4 {
 		t.Fatalf("same-phase conflict exit = %d, stdout = %s", conflictedOutput.code, conflictedOutput.stdout)
@@ -642,21 +831,21 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.events (id bigint, occurred_on date);\n")
 	hint := `{"kind":"type_change","name":["app","events","occurred_on"],"strategy":"manual_sql"}`
 	drafted := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "event-date", "--hint", hint}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "event-date", "--after", "baseline", "--hint", hint}, repository)
 	})
 	if drafted.code != 2 {
 		t.Fatalf("manual draft exit = %d, stdout = %s", drafted.code, drafted.stdout)
 	}
 	var handoff struct {
-		Protocol string   `json:"protocol"`
-		Status   string   `json:"status"`
-		Path     string   `json:"path"`
-		Edit     []string `json:"edit"`
+		ProtocolVersion string   `json:"protocol_version"`
+		Status          string   `json:"status"`
+		Path            string   `json:"path"`
+		Edit            []string `json:"edit"`
 	}
 	if err := json.Unmarshal([]byte(drafted.stdout), &handoff); err != nil {
 		t.Fatal(err)
 	}
-	if handoff.Protocol != draftflow.Version || handoff.Status != string(protocol.NeedsSQLEdits) || len(handoff.Edit) != 1 || handoff.Edit[0] != "phases/migrate.sql" {
+	if handoff.ProtocolVersion != draftflow.Version || handoff.Status != string(protocol.NeedsSQLEdits) || len(handoff.Edit) != 1 || handoff.Edit[0] != "phases/migrate.sql" {
 		t.Fatalf("handoff = %#v", handoff)
 	}
 	bundlePath := filepath.Join(repository, filepath.FromSlash(handoff.Path))
@@ -768,7 +957,7 @@ dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 
 	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".users (id bigint PRIMARY KEY); CREATE TABLE "`+schemaName+`".projects (id bigint PRIMARY KEY);`)
 	feature := captureStdout(t, func() int {
-		return runDraftAt([]string{"--target", "primary", "--bundle", "projects"}, repository)
+		return runDraftAt([]string{"--target", "primary", "--bundle", "projects", "--after", "ground-floor"}, repository)
 	})
 	if feature.code != 0 {
 		t.Fatalf("draft after history init exit = %d, stdout = %s", feature.code, feature.stdout)
@@ -839,21 +1028,46 @@ scratch_database_env = "ONWARDPG_CONFIG_CHECK_URL"
 		ProtocolVersion string `json:"protocol_version"`
 		Status          string `json:"status"`
 		Targets         []struct {
-			Name          string `json:"name"`
-			Provenance    string `json:"provenance"`
-			Fingerprint   string `json:"fingerprint"`
-			PostgresMajor int    `json:"postgres_major"`
+			Name                 string `json:"name"`
+			Provenance           string `json:"provenance"`
+			Fingerprint          string `json:"fingerprint"`
+			DevPostgresMajor     int    `json:"dev_postgres_major"`
+			ScratchPostgresMajor int    `json:"scratch_postgres_major"`
+			HistoryPostgresMajor int    `json:"history_postgres_major"`
 		} `json:"targets"`
 	}
 	if err := json.Unmarshal([]byte(output.stdout), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.ProtocolVersion != "onwardpg.config-check/v2" || report.Status != "valid" || len(report.Targets) != 1 {
+	if report.ProtocolVersion != "onwardpg.config-check/v3" || report.Status != "valid" || len(report.Targets) != 1 {
 		t.Fatalf("config check report = %#v", report)
 	}
 	target := report.Targets[0]
-	if target.Name != "primary" || target.Provenance != "schema_file:schema.sql" || !strings.HasPrefix(target.Fingerprint, "sha256:") || target.PostgresMajor < 14 || target.PostgresMajor > 18 {
+	if target.Name != "primary" || target.Provenance != "schema_file:schema.sql" || !strings.HasPrefix(target.Fingerprint, "sha256:") || target.DevPostgresMajor < 14 || target.DevPostgresMajor > 18 || target.ScratchPostgresMajor != target.DevPostgresMajor {
 		t.Fatalf("config check target = %#v", target)
+	}
+	if target.HistoryPostgresMajor != 0 {
+		t.Fatalf("uninitialized config unexpectedly reported a history major: %#v", target)
+	}
+
+	initialized := captureStdout(t, func() int {
+		return runInitAt([]string{"--target", "primary"}, repository)
+	})
+	if initialized.code != 0 {
+		t.Fatalf("config fixture init = %d, %s", initialized.code, initialized.stdout)
+	}
+	withHistory := captureStdout(t, func() int {
+		return runConfig([]string{"check", "--config", filepath.Join(repository, ".onwardpg.toml")})
+	})
+	if withHistory.code != 0 {
+		t.Fatalf("config check with history = %d, %s", withHistory.code, withHistory.stdout)
+	}
+	if err := json.Unmarshal([]byte(withHistory.stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	target = report.Targets[0]
+	if target.HistoryPostgresMajor != target.DevPostgresMajor {
+		t.Fatalf("config check did not validate the history major: %#v", target)
 	}
 }
 
@@ -889,14 +1103,14 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 		t.Fatalf("pending exit = %d, stdout = %s", pendingOutput.code, pendingOutput.stdout)
 	}
 	var pending struct {
-		Protocol  string              `json:"protocol"`
-		Status    string              `json:"status"`
-		Decisions []protocol.Decision `json:"decisions"`
+		ProtocolVersion string              `json:"protocol_version"`
+		Status          string              `json:"status"`
+		Decisions       []protocol.Decision `json:"decisions"`
 	}
 	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending.Protocol != "onwardpg/dev-plan/2" || pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
+	if pending.ProtocolVersion != "onwardpg/dev-plan/3" || pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
 		t.Fatalf("pending = %#v", pending)
 	}
 	var renameHint *protocol.Hint
@@ -981,7 +1195,7 @@ dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := json.Unmarshal([]byte(partial.stdout), &partialReport); err != nil {
 		t.Fatal(err)
 	}
-	if partialReport.Outcome != "residual" || partialReport.Residual == nil || partialReport.Residual.Status != protocol.NeedsInput {
+	if partialReport.Outcome != "residual" || partialReport.Residual == nil || partialReport.Residual.Status != protocol.NeedsInput || len(partialReport.SimulatedPhases) != 0 || !reflect.DeepEqual(partialReport.RemainingPhases, []string{"contract"}) {
 		t.Fatalf("partial report = %#v", partialReport)
 	}
 

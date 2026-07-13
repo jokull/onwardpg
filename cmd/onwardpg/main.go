@@ -31,7 +31,7 @@ func main() { os.Exit(run()) }
 
 func run() int {
 	if len(os.Args) < 2 {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg <init|dev|draft|verify|drift|plan|config|version>"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg <init|history|dev|draft|verify|drift|plan|config|version>"))
 	}
 	switch os.Args[1] {
 	case "version", "--version":
@@ -41,6 +41,8 @@ func run() int {
 		return 0
 	case "init":
 		return runInit(os.Args[2:])
+	case "history":
+		return runHistoryStatus(os.Args[2:])
 	case "plan":
 		return runPlan(os.Args[2:])
 	case "dev":
@@ -72,6 +74,59 @@ func runVerifyAt(arguments []string, start string) int {
 	return runBundleAt(append([]string{"verify"}, arguments...), start)
 }
 
+func runHistoryStatus(arguments []string) int { return runHistoryStatusAt(arguments, ".") }
+
+func runHistoryStatusAt(arguments []string, start string) int {
+	if len(arguments) == 0 || arguments[0] != "status" {
+		return writeError("invalid_invocation", errors.New("usage: onwardpg history status --target NAME [--bundle ID]"))
+	}
+	flags := flag.NewFlagSet("history status", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	targetName := flags.String("target", "", "configured database target name")
+	bundleID := flags.String("bundle", "", "selected mutable bundle to exclude from its base")
+	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return writeError("invalid_invocation", err)
+	}
+	if *targetName == "" {
+		return writeError("invalid_invocation", errors.New("history status requires --target"))
+	}
+	configPath := *configName
+	if !filepath.IsAbs(configPath) {
+		configPath = filepath.Join(start, configPath)
+	}
+	configPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	config, err := workspace.Load(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	if _, err := config.Target(*targetName); err != nil {
+		return writeError("invalid_config", err)
+	}
+	report, err := history.Inspect(filepath.Dir(configPath), config.BundleRoot, *targetName, *bundleID)
+	if err != nil {
+		_ = json.NewEncoder(os.Stdout).Encode(history.StatusReport{
+			ProtocolVersion: history.StatusVersion, Status: "blocked", Target: *targetName,
+			Findings: []history.StatusFinding{{
+				Code: "invalid_history", Message: err.Error(),
+				Remediation: "restore one complete hash-chained target history before drafting or verifying",
+			}},
+		})
+		return 4
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(report)
+	if report.Status == "valid" {
+		return 0
+	}
+	return 4
+}
+
 func runDrift(arguments []string) int { return runDriftAt(arguments, ".") }
 
 func runDriftAt(arguments []string, start string) int {
@@ -86,6 +141,9 @@ func runDriftAt(arguments []string, start string) int {
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
 	if err := flags.Parse(arguments[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return writeError("invalid_invocation", err)
 	}
 	if *targetName == "" || *databaseURL == "" {
@@ -160,6 +218,9 @@ func runHistoryAt(arguments []string, start string) int {
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
 	if err := flags.Parse(arguments[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return writeError("invalid_invocation", err)
 	}
 	if *targetName == "" {
@@ -239,6 +300,9 @@ func runDevAt(arguments []string, start string) int {
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
 	if err := flags.Parse(arguments[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return writeError("invalid_invocation", err)
 	}
 	if *targetName == "" {
@@ -313,7 +377,7 @@ func runDevAt(arguments []string, start string) int {
 		if *output == "text" {
 			outputErr = writeDecisionsText(os.Stdout, "dev plan", decisions)
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg/dev-plan/2", decisions)
+			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg/dev-plan/3", decisions)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -340,6 +404,7 @@ func runDraftAt(arguments []string, start string) int {
 	flags.SetOutput(os.Stderr)
 	targetName := flags.String("target", "", "configured database target name")
 	bundleID := flags.String("bundle", "", "stable logical feature bundle identifier")
+	afterBundle := flags.String("after", "", "accepted base-head bundle this PR-owned bundle must follow")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
 	var inlineHints stringsFlag
 	flags.Var(&inlineHints, "hint", "semantic JSON hint; repeat for multiple decisions")
@@ -355,6 +420,9 @@ func runDraftAt(arguments []string, start string) int {
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
 	if err := flags.Parse(arguments); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return writeError("invalid_invocation", err)
 	}
 	if *targetName == "" || *bundleID == "" {
@@ -404,6 +472,7 @@ func runDraftAt(arguments []string, start string) int {
 		Target:         target,
 		AdminURL:       adminURL,
 		BundleID:       *bundleID,
+		AfterBundle:    *afterBundle,
 		BuildVersion:   buildVersion,
 		Purpose:        *purpose,
 		Hints:          hints,
@@ -419,6 +488,8 @@ func runDraftAt(arguments []string, start string) int {
 	}
 	switch report.Outcome {
 	case string(protocol.Planned):
+		return 0
+	case "no_changes", "absorbed":
 		return 0
 	case string(protocol.NeedsInput), string(protocol.NeedsSQLEdits):
 		return 2
@@ -443,6 +514,9 @@ func runBundleAt(arguments []string, start string) int {
 	check := flags.Bool("check", false, "read-only verification; reject unreceipted edits")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
 	if err := flags.Parse(arguments[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return writeError("invalid_invocation", err)
 	}
 	if *targetName == "" || *bundleID == "" {
@@ -491,7 +565,7 @@ func runBundleAt(arguments []string, start string) int {
 		if selected.Artifact.Manifest.History.ParentDigest != base.HeadDigest {
 			return writeVerifyFinding(*targetName, *bundleID, base.HeadDigest, *through, "stale", "stale_history_parent",
 				fmt.Sprintf("edited bundle parent %s is stale; current history head is %s", selected.Artifact.Manifest.History.ParentDigest, base.HeadDigest),
-				"run onwardpg draft --target "+*targetName+" --bundle "+*bundleID+" to restack the selected bundle")
+				"identify the accepted head with onwardpg history status --target "+*targetName+", then rerun draft with the same bundle and --after <accepted-head-bundle>")
 		}
 		if *check {
 			return writeVerifyFinding(*targetName, *bundleID, base.HeadDigest, *through, "blocked", "unreceipted_sql_edits",
@@ -561,7 +635,7 @@ func runBundleAt(arguments []string, start string) int {
 			Findings: []verify.Finding{{
 				Code:        "working_schema_changed",
 				Message:     "the current exported DDL no longer matches the desired schema receipted by this bundle",
-				Remediation: "run onwardpg draft --target " + *targetName + " --bundle " + *bundleID + " before verifying again",
+				Remediation: "identify the accepted head with onwardpg history status --target " + *targetName + ", then rerun draft with the same bundle and --after <accepted-head-bundle>",
 			}},
 		})
 		return 4
@@ -623,6 +697,9 @@ func runPlan(arguments []string) int {
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "selector to exclude")
 	if err := flags.Parse(arguments); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return writeError("invalid_invocation", err)
 	}
 	if *from == "" || *to == "" {
@@ -677,7 +754,7 @@ func runPlan(arguments []string) int {
 		if *output == "text" {
 			outputErr = writeDecisionsText(os.Stdout, "plan", decisions)
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg/plan/2", decisions)
+			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg/plan/3", decisions)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -720,6 +797,9 @@ func runConfig(arguments []string) int {
 	flags.SetOutput(os.Stderr)
 	name := flags.String("config", ".onwardpg.toml", "repository configuration path")
 	if err := flags.Parse(arguments[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return writeError("invalid_invocation", err)
 	}
 	configPath, err := filepath.Abs(*name)
@@ -736,16 +816,22 @@ func runConfig(arguments []string) int {
 	}
 	sort.Strings(targets)
 	type checkedTarget struct {
-		Name          string `json:"name"`
-		Provenance    string `json:"provenance"`
-		Fingerprint   string `json:"fingerprint"`
-		PostgresMajor int    `json:"postgres_major"`
+		Name                 string `json:"name"`
+		Provenance           string `json:"provenance"`
+		Fingerprint          string `json:"fingerprint"`
+		DevPostgresMajor     int    `json:"dev_postgres_major"`
+		ScratchPostgresMajor int    `json:"scratch_postgres_major"`
+		HistoryPostgresMajor int    `json:"history_postgres_major,omitempty"`
 	}
 	checked := make([]checkedTarget, 0, len(targets))
 	ctx := context.Background()
 	root := filepath.Dir(configPath)
 	for _, targetName := range targets {
 		target := config.Targets[targetName]
+		devURL := os.Getenv(target.DevDatabaseEnv)
+		if devURL == "" {
+			return writeError("source_error", fmt.Errorf("target %s requires environment variable %s", targetName, target.DevDatabaseEnv))
+		}
 		adminEnv := target.ScratchEnv()
 		adminURL := os.Getenv(adminEnv)
 		if adminURL == "" {
@@ -763,18 +849,43 @@ func runConfig(arguments []string) int {
 		if err != nil {
 			return writeError("source_error", fmt.Errorf("target %s fingerprint: %w", targetName, err))
 		}
-		major, err := source.PostgresMajor(ctx, adminURL)
+		scratchMajor, err := source.PostgresMajor(ctx, adminURL)
 		if err != nil {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
 		}
-		checked = append(checked, checkedTarget{Name: targetName, Provenance: compiled.Provenance, Fingerprint: fingerprint, PostgresMajor: major})
+		devMajor, err := source.PostgresMajor(ctx, devURL)
+		if err != nil {
+			return writeError("source_error", fmt.Errorf("target %s development database: %w", targetName, err))
+		}
+		chain, err := history.Load(root, config.BundleRoot, targetName)
+		if err != nil {
+			return writeError("invalid_history", fmt.Errorf("target %s: %w", targetName, err))
+		}
+		historyMajor := 0
+		for _, entry := range chain.Entries {
+			recorded := entry.Artifact.Manifest.DesiredSource.PostgresMajor
+			if recorded == 0 {
+				continue
+			}
+			if historyMajor != 0 && historyMajor != recorded {
+				return writeError("invalid_history", fmt.Errorf("target %s history mixes PostgreSQL %d and %d receipts", targetName, historyMajor, recorded))
+			}
+			historyMajor = recorded
+		}
+		if historyMajor != 0 && (historyMajor != scratchMajor || historyMajor != devMajor) {
+			return writeError("incompatible_postgres_major", fmt.Errorf("target %s history requires PostgreSQL %d; development is %d and scratch is %d", targetName, historyMajor, devMajor, scratchMajor))
+		}
+		checked = append(checked, checkedTarget{
+			Name: targetName, Provenance: compiled.Provenance, Fingerprint: fingerprint,
+			DevPostgresMajor: devMajor, ScratchPostgresMajor: scratchMajor, HistoryPostgresMajor: historyMajor,
+		})
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(struct {
 		ProtocolVersion string          `json:"protocol_version"`
 		Status          string          `json:"status"`
 		ConfigVersion   int             `json:"config_version"`
 		Targets         []checkedTarget `json:"targets"`
-	}{ProtocolVersion: "onwardpg.config-check/v2", Status: "valid", ConfigVersion: config.Version, Targets: checked})
+	}{ProtocolVersion: "onwardpg.config-check/v3", Status: "valid", ConfigVersion: config.Version, Targets: checked})
 	return 0
 }
 
@@ -833,11 +944,12 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 	}
 	if report.Outcome == string(protocol.NeedsSQLEdits) {
 		return json.NewEncoder(writer).Encode(struct {
-			Protocol string   `json:"protocol"`
-			Status   string   `json:"status"`
-			Path     string   `json:"path"`
-			Edit     []string `json:"edit"`
-		}{Protocol: draftflow.Version, Status: string(protocol.NeedsSQLEdits), Path: report.Path, Edit: report.EditFiles})
+			ProtocolVersion string   `json:"protocol_version"`
+			Status          string   `json:"status"`
+			NextAction      string   `json:"next_action"`
+			Path            string   `json:"path"`
+			Edit            []string `json:"edit"`
+		}{ProtocolVersion: draftflow.Version, Status: string(protocol.NeedsSQLEdits), NextAction: "edit_files_then_verify", Path: report.Path, Edit: report.EditFiles})
 	}
 	return json.NewEncoder(writer).Encode(report)
 }
@@ -871,10 +983,11 @@ func writeDecisionsText(writer io.Writer, subject string, decisions []protocol.D
 
 func writeDecisionEnvelope(writer io.Writer, version string, decisions []protocol.Decision) error {
 	return json.NewEncoder(writer).Encode(struct {
-		Protocol  string              `json:"protocol"`
-		Status    string              `json:"status"`
-		Decisions []protocol.Decision `json:"decisions"`
-	}{Protocol: version, Status: "needs_decisions", Decisions: decisions})
+		ProtocolVersion string              `json:"protocol_version"`
+		Status          string              `json:"status"`
+		NextAction      string              `json:"next_action"`
+		Decisions       []protocol.Decision `json:"decisions"`
+	}{ProtocolVersion: version, Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisions})
 }
 
 func writeError(code string, err error) int {

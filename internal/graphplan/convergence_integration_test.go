@@ -3657,14 +3657,14 @@ func TestApprovedDestructiveDropsConvergeOnPostgreSQL(t *testing.T) {
 	schemaName := "onwardpg_drop_" + time.Now().UTC().Format("20060102150405")
 	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
 	currentDDL := `CREATE SCHEMA "` + schemaName + `";
-CREATE TABLE "` + schemaName + `".keep (id bigint, old_column text);
+CREATE TABLE "` + schemaName + `".keep (id bigint, old_column text, retained_column text);
 CREATE INDEX keep_old_column_idx ON "` + schemaName + `".keep (old_column);
 CREATE TABLE "` + schemaName + `".remove_me (id bigint);`
 	if _, err := conn.Exec(ctx, currentDDL); err != nil {
 		t.Fatal(err)
 	}
 	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
-CREATE TABLE "` + schemaName + `".keep (id bigint);`
+CREATE TABLE "` + schemaName + `".keep (id bigint, retained_column text);`
 	path := filepath.Join(t.TempDir(), "desired.sql")
 	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
 		t.Fatal(err)

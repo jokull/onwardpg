@@ -2652,3 +2652,98 @@ func joinSQL(result protocol.Result) string {
 }
 
 func stringPointer(value string) *string { return &value }
+
+func TestPlanRejectsUnreachablePhysicalColumnOrder(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(schema); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.AddDependency(table.ObjectID(), schema.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, column := range []pgschema.Column{
+		{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint"},
+		{Table: table.ObjectID(), Name: "email", Position: 2, Type: "text"},
+	} {
+		if err := current.Add(column); err != nil {
+			t.Fatal(err)
+		}
+		if err := current.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, column := range []pgschema.Column{
+		{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint"},
+		{Table: table.ObjectID(), Name: "timezone", Position: 2, Type: "text"},
+		{Table: table.ObjectID(), Name: "email", Position: 3, Type: "text"},
+	} {
+		if err := desired.Add(column); err != nil {
+			t.Fatal(err)
+		}
+		if err := desired.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Unsupported || len(result.Unsupported) != 1 {
+		t.Fatalf("unreachable column order result = %#v", result)
+	}
+	joined := strings.Join(result.Unsupported, "\n")
+	if !strings.Contains(joined, "inserted_column:timezone:desired=2:last_retained=3") {
+		t.Fatalf("unreachable column order diagnostics = %q", joined)
+	}
+}
+
+func TestPlanAllowsDenseColumnOrderToCloseAfterMiddleDrop(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(schema); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.AddDependency(table.ObjectID(), schema.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, name := range []string{"id", "legacy", "email"} {
+		column := pgschema.Column{Table: table.ObjectID(), Name: name, Position: index + 1, Type: "text"}
+		if err := current.Add(column); err != nil {
+			t.Fatal(err)
+		}
+		if err := current.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, name := range []string{"id", "email"} {
+		column := pgschema.Column{Table: table.ObjectID(), Name: name, Position: index + 1, Type: "text"}
+		if err := desired.Add(column); err != nil {
+			t.Fatal(err)
+		}
+		if err := desired.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status == protocol.Unsupported && strings.Contains(strings.Join(result.Unsupported, "\n"), "column_physical_order") {
+		t.Fatalf("middle-column drop was incorrectly treated as a physical reorder: %#v", result)
+	}
+}

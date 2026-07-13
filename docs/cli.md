@@ -5,8 +5,9 @@ The preferred developer-preview surface is:
 ~~~text
 onwardpg config check
 onwardpg init --target TARGET
+onwardpg history status --target TARGET [--bundle ID]
 onwardpg dev plan --target TARGET
-onwardpg draft --target TARGET --bundle ID
+onwardpg draft --target TARGET --bundle ID --after ACCEPTED_HEAD_BUNDLE
 onwardpg verify --target TARGET --bundle ID
 onwardpg drift check --target TARGET --database URL
 onwardpg plan --from SOURCE --to SOURCE
@@ -22,9 +23,22 @@ configured and otherwise fall back to dev_database_env for compatibility.
 onwardpg config check [--config .onwardpg.toml]
 ~~~
 
-Validates the versioned repository configuration, deterministically exports
-every target's DDL, materializes it in disposable PostgreSQL, inspects the typed
-catalog, and prints each target's fingerprint and detected PostgreSQL major.
+Validates the versioned repository configuration, connects to the development
+and scratch URLs, deterministically exports every target's DDL, materializes it
+in disposable PostgreSQL, validates existing history, and requires all three
+PostgreSQL-major receipts to agree.
+
+## history status
+
+~~~sh
+onwardpg history status --target primary [--bundle payment-settlement]
+~~~
+
+Inspects only repository receipts. Without `--bundle`, it returns the ordered
+chain, `head_bundle`, and digest. With `--bundle`, that selected mutable entry
+is excluded and the command reports whether its parent is current, stale, or
+missing. Invalid forks, missing parents, and altered history exit 4. The
+command does not inspect Git or connect to PostgreSQL.
 
 ## init
 
@@ -79,6 +93,7 @@ Planner options include:
 onwardpg draft \
   --target primary \
   --bundle payment-settlement \
+  --after baseline \
   [--hint '{"kind":"..."}'] \
   [--hints-file hints.json] \
   [--output text|json] \
@@ -89,15 +104,18 @@ draft is the durable H → W loop:
 
 1. the named bundle is the only excluded/mutable history entry;
 2. every other bundle must form one valid content-addressed chain;
-3. the chain is replayed in disposable PostgreSQL;
-4. working DDL is compiled twice and materialized in disposable PostgreSQL;
-5. the typed graph planner emits semantic choices or a complete plan;
-6. a complete generated plan is clone-verified before the bundle is written.
+3. that chain must end at the accepted predecessor named by `--after`;
+4. the chain is replayed in disposable PostgreSQL;
+5. working DDL is compiled twice and materialized in disposable PostgreSQL;
+6. the typed graph planner emits semantic choices or a complete plan;
+7. a complete generated plan is clone-verified before the bundle is written.
 
 The command is deliberately Git-free. A coding agent is responsible for
-pulling, rebasing, and selecting the bundle ID. If new history makes the
-selected bundle's parent stale, the same command replans it on the new head.
-Only exact participating-object scope matches are carried across that change.
+pulling, rebasing, selecting the bundle ID, and naming the accepted base tip in
+`--after`. A mismatch blocks accidental stacking on another unpublished
+bundle. If new accepted history makes the selected parent stale, rerun the
+same command with the new predecessor. Only exact participating-object scope
+matches are carried across that change.
 
 `--hint` is repeatable and accepts one strict semantic JSON object.
 `--hints-file` accepts an array of the same objects. Current kinds are rename,
@@ -116,10 +134,15 @@ unreceipted basis, and return all three SQL versions plus the `verify` next
 step.
 
 draft supports the same planner flags as dev plan.
-Its decision output protocol is `onwardpg/draft/2`: `needs_decisions` contains
+Its decision output protocol is `onwardpg/draft/3`: `needs_decisions` contains
 only semantic choice sets, while `needs_sql_edits` names the bundle path and
 files the agent must edit. Fingerprint-bound answers are generated receipts,
 not an agent-facing authoring format.
+
+If the asserted base already produces the desired schema, a generated-only
+selected bundle is removed with `status: "absorbed"`. An edited bundle is
+preserved for explicit reconciliation because onwardpg cannot infer whether
+its data work remains necessary.
 
 ## verify
 
@@ -134,6 +157,8 @@ Creates disposable databases, executes validated history through the selected
 phase, catalog-inspects the result, and compares it with a separate full-chain
 execution. Full verification exits zero only for an empty residual. Edited
 phase files and verify.sql assertions are receipted only after this succeeds.
+Partial output includes `simulated_bundle_phases` and
+`remaining_bundle_phases`; these never claim a real environment applied them.
 
 Use --check for read-only CI-style verification. It rejects unreceipted edits
 instead of refreshing their receipts, requires the selected bundle to be the
@@ -190,7 +215,7 @@ history.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Complete plan or successful full verification |
+| 0 | Complete plan, no changes, absorbed generated draft, or successful full verification |
 | 2 | A semantic decision or SQL edit remains |
 | 3 | Unsupported schema state |
 | 4 | History, convergence, residual, or policy blocker |

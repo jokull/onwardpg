@@ -22,7 +22,7 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg/draft/2"
+const Version = "onwardpg/draft/3"
 
 type Finding struct {
 	Code        string `json:"code"`
@@ -32,12 +32,14 @@ type Finding struct {
 
 type Report struct {
 	ProtocolVersion    string                     `json:"protocol_version"`
-	Outcome            string                     `json:"outcome"`
+	Outcome            string                     `json:"status"`
 	Target             string                     `json:"target"`
 	BundleID           string                     `json:"bundle_id"`
 	Path               string                     `json:"path,omitempty"`
 	Generation         int                        `json:"generation,omitempty"`
 	HistoryHead        string                     `json:"history_head,omitempty"`
+	BaseBundle         string                     `json:"base_bundle,omitempty"`
+	AssertedBaseBundle string                     `json:"asserted_base_bundle,omitempty"`
 	PreviousParent     string                     `json:"previous_parent,omitempty"`
 	ParentChanged      bool                       `json:"parent_changed,omitempty"`
 	CurrentFingerprint string                     `json:"current_fingerprint,omitempty"`
@@ -49,6 +51,7 @@ type Report struct {
 	EditReconciliation *bundle.EditReconciliation `json:"edit_reconciliation,omitempty"`
 	Verification       *verify.Report             `json:"verification,omitempty"`
 	Findings           []Finding                  `json:"findings,omitempty"`
+	RemovedBundle      bool                       `json:"removed_bundle,omitempty"`
 }
 
 type Input struct {
@@ -58,6 +61,7 @@ type Input struct {
 	Target         workspace.Target
 	AdminURL       string
 	BundleID       string
+	AfterBundle    string
 	BuildVersion   string
 	Purpose        string
 	Hints          []protocol.Hint
@@ -92,6 +96,16 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if input.Purpose == "" {
 		input.Purpose = "feature"
 	}
+	report.AssertedBaseBundle = input.AfterBundle
+	if input.AfterBundle == "" {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "base_anchor_required",
+			Message:     "draft requires the coding agent to identify the accepted base bundle explicitly",
+			Remediation: "run onwardpg history status --target " + input.TargetName + " in the intended base checkout, then rerun draft with --after <head_bundle>",
+		}}
+		return report, nil
+	}
 	postgresMajor, err := source.PostgresMajor(ctx, input.AdminURL)
 	if err != nil {
 		return report, err
@@ -106,7 +120,13 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		strictErr := err
 		chain, selected, err = history.LoadEditedDraft(input.Root, input.Config.BundleRoot, input.TargetName, input.BundleID)
 		if err != nil {
-			return report, fmt.Errorf("load history beneath selected bundle: %v; prepare selected edited draft: %w", strictErr, err)
+			report.Outcome = "blocked"
+			report.Findings = []Finding{{
+				Code:        "invalid_history",
+				Message:     fmt.Sprintf("strict history validation failed: %v; editable bundle preparation failed: %v", strictErr, err),
+				Remediation: "restore one complete hash-chained base and keep only the PR-owned bundle selected for replacement",
+			}}
+			return report, nil
 		}
 	}
 	if len(chain.Entries) == 0 {
@@ -125,6 +145,18 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}
 	}
 	report.HistoryHead = chain.HeadDigest
+	if len(chain.Entries) > 0 {
+		report.BaseBundle = chain.Entries[len(chain.Entries)-1].Directory
+	}
+	if report.BaseBundle != input.AfterBundle {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "base_anchor_mismatch",
+			Message:     fmt.Sprintf("asserted base bundle %q does not match the replayable base head %q (%s)", input.AfterBundle, report.BaseBundle, chain.HeadDigest),
+			Remediation: "use Git to identify the accepted main-branch head, make the working tree contain that chain plus only this PR-owned bundle, then rerun draft with the accepted head in --after",
+		}}
+		return report, nil
+	}
 	if selected != nil {
 		report.PreviousParent = selected.Artifact.Manifest.History.ParentDigest
 		report.ParentChanged = report.PreviousParent != chain.HeadDigest
@@ -165,6 +197,37 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	report.CurrentFingerprint = plan.CurrentFingerprint
 	report.DesiredFingerprint = plan.DesiredFingerprint
 	report.Outcome = string(plan.Status)
+	if plan.Status == protocol.Unsupported {
+		// Unsupported state is actionable output, not durable migration history.
+		// In particular, do not replace an existing selected draft with an
+		// incomplete artifact while the agent changes the schema or strategy.
+		return report, nil
+	}
+	if plan.Status == protocol.Planned && len(plan.Statements) == 0 {
+		if selected == nil {
+			report.Outcome = "no_changes"
+			return report, nil
+		}
+		if selected.Artifact.Manifest.PhaseSource != "edited" {
+			if err := bundle.RemoveDraft(destination, selected.Artifact); err != nil {
+				return report, fmt.Errorf("remove upstream-absorbed draft: %w", err)
+			}
+			relative, pathErr := filepath.Rel(input.Root, destination)
+			if pathErr != nil {
+				return report, pathErr
+			}
+			report.Path = filepath.ToSlash(relative)
+			report.Generation = selected.Artifact.Manifest.Generation
+			report.Outcome = "absorbed"
+			report.RemovedBundle = true
+			report.Findings = []Finding{{
+				Code:        "feature_absorbed_by_base",
+				Message:     "the accepted base already produces the desired schema; the generated-only PR bundle was removed instead of recording an empty migration",
+				Remediation: "remove the now-empty migration change from the PR and continue without stacking a replacement",
+			}}
+			return report, nil
+		}
+	}
 
 	metadata := bundle.Metadata{
 		BundleID: input.BundleID,

@@ -11,7 +11,7 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg.drift-check/v1"
+const Version = "onwardpg.drift-check/v2"
 
 type Difference struct {
 	Kind     string          `json:"kind"`
@@ -22,7 +22,7 @@ type Difference struct {
 
 type Report struct {
 	ProtocolVersion     string       `json:"protocol_version"`
-	Outcome             string       `json:"outcome"`
+	Outcome             string       `json:"status"`
 	Target              string       `json:"target"`
 	HistoryHead         string       `json:"history_head"`
 	ExpectedFingerprint string       `json:"expected_fingerprint"`

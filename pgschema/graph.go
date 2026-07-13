@@ -663,7 +663,7 @@ func (s *Snapshot) Batches() []Batch {
 	var batches []Batch
 	for len(ready) > 0 {
 		sort.Slice(ready, func(i, j int) bool {
-			return lessID(components[ready[i]][0], components[ready[j]][0])
+			return s.lessComponent(components[ready[i]], components[ready[j]])
 		})
 		componentIndex := ready[0]
 		ready = ready[1:]
@@ -681,6 +681,24 @@ func (s *Snapshot) Batches() []Batch {
 		}
 	}
 	return batches
+}
+
+// lessComponent preserves PostgreSQL column declaration order when otherwise
+// independent columns of the same relation become ready together. Their
+// graph edges correctly say that either may be created after the table, but
+// ADD COLUMN order determines the physical attnum that catalog inspection
+// observes and that onwardpg receipts. All other ties retain canonical object
+// identity ordering.
+func (s *Snapshot) lessComponent(left, right []ID) bool {
+	if len(left) == 1 && len(right) == 1 && left[0].Kind == KindColumn && right[0].Kind == KindColumn &&
+		left[0].Schema == right[0].Schema && left[0].Name == right[0].Name {
+		leftColumn, leftOK := s.objects[left[0]].(Column)
+		rightColumn, rightOK := s.objects[right[0]].(Column)
+		if leftOK && rightOK && leftColumn.Position != rightColumn.Position {
+			return leftColumn.Position < rightColumn.Position
+		}
+	}
+	return lessID(left[0], right[0])
 }
 
 func (s *Snapshot) cyclic(component []ID) bool {

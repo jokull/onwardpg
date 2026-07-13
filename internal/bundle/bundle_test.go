@@ -262,6 +262,32 @@ func TestWriteRequiresExplicitSafeDraftReplacement(t *testing.T) {
 	}
 }
 
+func TestRemoveDraftRequiresExactReceiptedArtifact(t *testing.T) {
+	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "bundle")
+	if err := Write(destination, artifact, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	staleMetadata := metadata()
+	staleMetadata.Purpose = "repair"
+	stale, err := Build(Input{Metadata: staleMetadata, Result: plannedResult()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveDraft(destination, stale); err == nil {
+		t.Fatal("remove accepted a stale in-memory artifact")
+	}
+	if err := RemoveDraft(destination, artifact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("removed draft still exists: %v", err)
+	}
+}
+
 func TestArtifactValidationRejectsTamperedPhase(t *testing.T) {
 	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult(statement("CREATE TABLE app.users (id bigint);", "expand", true))})
 	if err != nil {

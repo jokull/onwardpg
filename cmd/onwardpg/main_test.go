@@ -57,7 +57,7 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	if err := writeDraftReport(&output, report, "json"); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"protocol\":\"onwardpg/draft/2\",\"status\":\"needs_decisions\",\"decisions\":[{\"choices\":[{\"hint\":{\"kind\":\"drop\",\"object\":\"column\",\"name\":[\"public\",\"users\",\"legacy\"]},\"hazards\":[\"data_loss\"]}]}]}\n"
+	want := "{\"protocol_version\":\"onwardpg/draft/3\",\"status\":\"needs_decisions\",\"next_action\":\"rerun_same_command_with_hints\",\"decisions\":[{\"choices\":[{\"hint\":{\"kind\":\"drop\",\"object\":\"column\",\"name\":[\"public\",\"users\",\"legacy\"]},\"hazards\":[\"data_loss\"]}]}]}\n"
 	if output.String() != want {
 		t.Fatalf("decision protocol bytes changed:\n got: %s\nwant: %s", output.String(), want)
 	}
@@ -65,7 +65,7 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document) != 3 || string(document["protocol"]) != `"onwardpg/draft/2"` || string(document["status"]) != `"needs_decisions"` {
+	if len(document) != 4 || string(document["protocol_version"]) != `"onwardpg/draft/3"` || string(document["status"]) != `"needs_decisions"` || string(document["next_action"]) != `"rerun_same_command_with_hints"` {
 		t.Fatalf("document = %s", output.String())
 	}
 	if _, exists := document["target"]; exists {
@@ -108,6 +108,49 @@ func TestVersionedDiagnosticContract(t *testing.T) {
 	}
 	if !contains(string(data), protocol.DiagnosticVersion) || !contains(string(data), `"code":"invalid_invocation"`) {
 		t.Fatalf("diagnostic = %s", data)
+	}
+}
+
+func TestHelpIsSuccessfulForEveryCommandSurface(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func() int
+	}{
+		{name: "init", run: func() int { return runInitAt([]string{"--help"}, t.TempDir()) }},
+		{name: "history-status", run: func() int { return runHistoryStatusAt([]string{"status", "--help"}, t.TempDir()) }},
+		{name: "dev-plan", run: func() int { return runDevAt([]string{"plan", "--help"}, t.TempDir()) }},
+		{name: "draft", run: func() int { return runDraftAt([]string{"--help"}, t.TempDir()) }},
+		{name: "verify", run: func() int { return runVerifyAt([]string{"--help"}, t.TempDir()) }},
+		{name: "drift-check", run: func() int { return runDriftAt([]string{"check", "--help"}, t.TempDir()) }},
+		{name: "plan", run: func() int { return runPlan([]string{"--help"}) }},
+		{name: "config-check", run: func() int { return runConfig([]string{"check", "--help"}) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if code := test.run(); code != 0 {
+				t.Fatalf("help exit = %d", code)
+			}
+		})
+	}
+}
+
+func TestConfigCheckReportsMissingDevelopmentURLBeforeConnecting(t *testing.T) {
+	repository := t.TempDir()
+	t.Setenv("ONWARDPG_MISSING_DEV_URL", "")
+	t.Setenv("ONWARDPG_MISSING_SCRATCH_URL", "")
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_MISSING_DEV_URL"
+scratch_database_env = "ONWARDPG_MISSING_SCRATCH_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE TABLE public.accounts (id bigint);\n")
+	output := captureStdout(t, func() int {
+		return runConfig([]string{"check", "--config", filepath.Join(repository, ".onwardpg.toml")})
+	})
+	if output.code != 1 || !strings.Contains(output.stdout, `"code":"source_error"`) || !strings.Contains(output.stdout, "ONWARDPG_MISSING_DEV_URL") {
+		t.Fatalf("config missing development URL = %#v", output)
 	}
 }
 

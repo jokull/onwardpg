@@ -20,6 +20,10 @@ The planner's core safety rules are:
   explicit phase-local SQL TODO rather than accepting SQL inside decision JSON;
 - never report an incomplete plan as converged: `needs_decisions`,
   `needs_sql_edits`, and `unsupported` are blocking states;
+- require every mutable PR draft to name its accepted predecessor explicitly;
+  the validated base chain must end there before planning begins;
+- reject declarative physical column reordering that PostgreSQL cannot perform
+  with `ALTER TABLE`, with a stable `column_physical_order` unsupported reason;
 - preserve execution constraints through explicit transactional batches; and
 - surface destructive, lock, rewrite, validation, and availability concerns as
   statement safety/hazard metadata for review.
@@ -66,6 +70,14 @@ The read-only `verify --check` gate additionally recompiles current configured
 DDL, requires the selected bundle to be the chain head, and compares its desired
 fingerprint before clone execution. Self-consistency with a stale recorded
 target is not sufficient.
+
+The agent, not onwardpg, identifies the accepted base from Git. `draft --after`
+turns that external fact into a checked hash-chain boundary: another
+unpublished bundle in the candidate base produces `base_anchor_mismatch`.
+`history status` exposes the repository chain and selected relationship without
+reading Git. If accepted history fully absorbs generated feature work, the
+selected bundle is removed as `absorbed`; developer-owned SQL is never removed
+by that inference.
 
 Transactional batches are intended to be atomic execution boundaries. The real
 PostgreSQL integration suite includes a failure case that proves an earlier
