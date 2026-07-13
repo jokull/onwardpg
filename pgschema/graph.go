@@ -1,0 +1,692 @@
+// Package graph defines the typed PostgreSQL schema graph used by onwardpg.
+//
+// A node is a database object and an edge points from that node to an object it
+// depends on. Keeping the direction explicit makes both creation order and
+// destructive reverse order mechanical instead of a collection of hard-coded
+// planner buckets.
+package pgschema
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+)
+
+type Kind string
+
+const (
+	KindSchema       Kind = "schema"
+	KindExtension    Kind = "extension"
+	KindEnum         Kind = "enum"
+	KindDomain       Kind = "domain"
+	KindComposite    Kind = "composite"
+	KindSequence     Kind = "sequence"
+	KindTable        Kind = "table"
+	KindColumn       Kind = "column"
+	KindConstraint   Kind = "constraint"
+	KindIndex        Kind = "index"
+	KindView         Kind = "view"
+	KindMatView      Kind = "materialized_view"
+	KindRoutine      Kind = "routine"
+	KindTrigger      Kind = "trigger"
+	KindPolicy       Kind = "policy"
+	KindForeignTable Kind = "foreign_table"
+)
+
+// ID identifies an object independently of its Go representation. Part is
+// used for child resources (a column, constraint or index) and Signature
+// distinguishes overloaded routines.
+type ID struct {
+	Kind      Kind
+	Schema    string
+	Name      string
+	Part      string
+	Signature string
+}
+
+func (id ID) String() string {
+	parts := []string{string(id.Kind)}
+	if id.Schema != "" {
+		parts = append(parts, id.Schema)
+	}
+	if id.Name != "" {
+		parts = append(parts, id.Name)
+	}
+	if id.Part != "" {
+		parts = append(parts, id.Part)
+	}
+	if id.Signature != "" {
+		parts = append(parts, "("+id.Signature+")")
+	}
+	return strings.Join(parts, ":")
+}
+
+func (id ID) Valid() bool { return id.Kind != "" && id.Name != "" }
+
+// Object is a strongly typed schema resource. Payload types deliberately do
+// not use an unstructured map: a mutation can only be planned after its
+// relevant PostgreSQL attributes have a home in the graph.
+type Object interface {
+	ObjectID() ID
+	object()
+}
+
+type Schema struct {
+	Name    string
+	Comment *string
+}
+
+func (o Schema) ObjectID() ID { return ID{Kind: KindSchema, Name: o.Name} }
+func (Schema) object()        {}
+
+type Extension struct {
+	Schema  string
+	Name    string
+	Version string
+}
+
+func (o Extension) ObjectID() ID { return ID{Kind: KindExtension, Schema: o.Schema, Name: o.Name} }
+func (Extension) object()        {}
+
+type Enum struct {
+	Schema string
+	Name   string
+	Labels []string
+}
+
+func (o Enum) ObjectID() ID { return ID{Kind: KindEnum, Schema: o.Schema, Name: o.Name} }
+func (Enum) object()        {}
+
+type Domain struct {
+	Schema   string
+	Name     string
+	BaseType string
+	Default  *string
+	NotNull  bool
+}
+
+func (o Domain) ObjectID() ID { return ID{Kind: KindDomain, Schema: o.Schema, Name: o.Name} }
+func (Domain) object()        {}
+
+type Composite struct {
+	Schema string
+	Name   string
+}
+
+func (o Composite) ObjectID() ID { return ID{Kind: KindComposite, Schema: o.Schema, Name: o.Name} }
+func (Composite) object()        {}
+
+type Sequence struct {
+	Schema    string
+	Name      string
+	Type      string
+	Start     int64
+	Increment int64
+	Min       int64
+	Max       int64
+	Cache     int64
+	Cycle     bool
+	Comment   *string
+}
+
+func (o Sequence) ObjectID() ID { return ID{Kind: KindSequence, Schema: o.Schema, Name: o.Name} }
+func (Sequence) object()        {}
+
+type Table struct {
+	Schema      string
+	Name        string
+	Unlogged    bool
+	Comment     *string
+	Partition   *Partition
+	PartitionOf *PartitionOf
+}
+
+func (o Table) ObjectID() ID { return ID{Kind: KindTable, Schema: o.Schema, Name: o.Name} }
+func (Table) object()        {}
+
+type Column struct {
+	Table     ID
+	Name      string
+	Position  int
+	Type      string
+	NotNull   bool
+	Default   *string
+	Identity  *Identity
+	Serial    *Serial
+	Generated *Generated
+	Collation string
+	Comment   *string
+}
+
+func (o Column) ObjectID() ID {
+	return ID{Kind: KindColumn, Schema: o.Table.Schema, Name: o.Table.Name, Part: o.Name}
+}
+func (Column) object() {}
+
+type Identity struct {
+	Generation string // ALWAYS or BY DEFAULT
+	Start      int64
+	Increment  int64
+	Min        *int64
+	Max        *int64
+	Cache      int64
+	Cycle      bool
+}
+
+// Serial records PostgreSQL's legacy serial pseudo-types. Catalogs represent
+// them as an integer column with an auto-owned sequence and nextval default.
+type Serial struct {
+	Type         string // smallserial, serial, or bigserial.
+	SequenceName string // catalog sequence name; empty is an adapter's canonical serial.
+}
+
+type Generated struct {
+	Expression string
+	Kind       string // PostgreSQL currently supports STORED.
+}
+
+type Constraint struct {
+	Table ID
+	Name  string
+	// Parent identifies the partitioned-table constraint from which this
+	// constraint was propagated. It is an explicit graph edge, not a naming
+	// convention inferred by the planner.
+	Parent     *ID
+	Type       ConstraintType
+	Definition string
+	Validated  bool
+	NoInherit  bool
+	Deferrable bool
+	Deferred   bool
+	Reference  *ID
+	UsingIndex string
+	Comment    *string
+}
+
+type ConstraintType string
+
+const (
+	ConstraintPrimary   ConstraintType = "primary_key"
+	ConstraintUnique    ConstraintType = "unique"
+	ConstraintCheck     ConstraintType = "check"
+	ConstraintForeign   ConstraintType = "foreign_key"
+	ConstraintExclusion ConstraintType = "exclusion"
+)
+
+func (o Constraint) ObjectID() ID {
+	return ID{Kind: KindConstraint, Schema: o.Table.Schema, Name: o.Table.Name, Part: o.Name}
+}
+func (Constraint) object() {}
+
+type Index struct {
+	Table ID
+	Name  string
+	// Parent identifies the partitioned index from which this child index was
+	// propagated by PostgreSQL.
+	Parent           *ID
+	Unique           bool
+	Method           string
+	Parts            []IndexPart
+	Include          []string
+	Predicate        string
+	Storage          IndexStorage
+	NullsNotDistinct bool
+	Comment          *string
+	Primary          bool
+	Exclusion        bool
+	Constraint       string
+	// Definition is a non-semantic diagnostic compatibility field from
+	// pg_get_indexdef. It is intentionally excluded from fingerprints and
+	// planning: structured fields above are the source of truth.
+	Definition string `json:"-"`
+	Concurrent bool
+}
+
+func (o Index) ObjectID() ID {
+	return ID{Kind: KindIndex, Schema: o.Table.Schema, Name: o.Table.Name, Part: o.Name}
+}
+func (Index) object() {}
+
+type IndexPart struct {
+	Column     string
+	Expression string
+	Descending bool
+	NullsFirst bool
+	NullsLast  bool
+	OpClass    *OpClass
+}
+
+type OpClass struct {
+	Name       string
+	IsDefault  bool
+	Parameters []Option
+}
+
+type Option struct {
+	Name  string
+	Value string
+}
+
+type IndexStorage struct {
+	AutoSummarize *bool
+	PagesPerRange *int64
+	// Options preserves every reloption reported by PostgreSQL. The named
+	// fields above make BRIN's Atlas-visible options convenient to inspect;
+	// Options prevents a newer or extension-provided reloption from vanishing
+	// from a typed snapshot.
+	Options []Option
+}
+
+type Partition struct {
+	Strategy string // RANGE, LIST or HASH.
+	Parts    []PartitionPart
+	Raw      string // Canonical pg_get_partkeydef output retained losslessly.
+}
+
+// PartitionOf describes a declarative partition child. Bound is PostgreSQL's
+// canonical FOR VALUES clause from pg_get_expr(relpartbound, ...).
+type PartitionOf struct {
+	Parent ID
+	Bound  string
+}
+
+type PartitionPart struct {
+	Column     string
+	Expression string
+	Collation  string
+}
+
+type View struct {
+	Schema       string
+	Name         string
+	Definition   string
+	Materialized bool
+	// Populated records the WITH [NO] DATA state of a materialized view.
+	// PostgreSQL does not expose this state for ordinary views.
+	Populated bool
+	// Options is the canonical reloptions set (for example security_barrier
+	// and security_invoker). Retaining it avoids treating a view whose access
+	// semantics changed as equal merely because its SELECT text is equal.
+	Options []Option
+	Comment *string
+}
+
+func (o View) ObjectID() ID {
+	kind := KindView
+	if o.Materialized {
+		kind = KindMatView
+	}
+	return ID{Kind: kind, Schema: o.Schema, Name: o.Name}
+}
+func (View) object() {}
+
+type Routine struct {
+	Schema     string
+	Name       string
+	Signature  string
+	Kind       string // function or procedure
+	Definition string
+	Comment    *string
+}
+
+func (o Routine) ObjectID() ID {
+	return ID{Kind: KindRoutine, Schema: o.Schema, Name: o.Name, Signature: o.Signature}
+}
+func (Routine) object() {}
+
+// Trigger is a table-bound executable rule. Definition is PostgreSQL's own
+// pg_get_triggerdef output; Routine is a typed edge to the invoked routine.
+// Enabled uses PostgreSQL's tg_enabled codes (O, D, R, A) so a state change is
+// not lost merely because its CREATE TRIGGER text is unchanged.
+type Trigger struct {
+	Table      ID
+	Name       string
+	Routine    ID
+	Definition string
+	Enabled    string
+}
+
+func (o Trigger) ObjectID() ID {
+	return ID{Kind: KindTrigger, Schema: o.Table.Schema, Name: o.Table.Name, Part: o.Name}
+}
+func (Trigger) object() {}
+
+// Snapshot stores a complete catalog view. Objects and dependencies are kept
+// private so every write validates IDs and references at the boundary.
+type Snapshot struct {
+	objects     map[ID]Object
+	deps        map[ID]map[ID]struct{}
+	unsupported map[string]struct{}
+	ignored     map[string]struct{}
+}
+
+func New() *Snapshot {
+	return &Snapshot{
+		objects: make(map[ID]Object), deps: make(map[ID]map[ID]struct{}),
+		unsupported: make(map[string]struct{}), ignored: make(map[string]struct{}),
+	}
+}
+
+func (s *Snapshot) Add(object Object) error {
+	if column, ok := object.(Column); ok {
+		column.Default = NormalizeDefault(column.Default)
+		object = column
+	}
+	id := object.ObjectID()
+	if !id.Valid() {
+		return fmt.Errorf("invalid object id %q", id.String())
+	}
+	if _, exists := s.objects[id]; exists {
+		return fmt.Errorf("duplicate object %s", id)
+	}
+	s.objects[id] = object
+	s.deps[id] = make(map[ID]struct{})
+	return nil
+}
+
+// NormalizeDefault provides a deliberately narrow semantic normalization for
+// PostgreSQL defaults that are provably equivalent without evaluating them.
+// More complex expressions remain lossless catalog SQL and therefore cannot be
+// silently treated as equal.
+func NormalizeDefault(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	normalized := strings.TrimSpace(*value)
+	for hasOuterParens(normalized) {
+		normalized = strings.TrimSpace(normalized[1 : len(normalized)-1])
+	}
+	switch strings.ToLower(normalized) {
+	case "current_timestamp", "transaction_timestamp()", "now()":
+		normalized = "now()"
+	}
+	return &normalized
+}
+
+func hasOuterParens(value string) bool {
+	if len(value) < 2 || value[0] != '(' || value[len(value)-1] != ')' {
+		return false
+	}
+	depth := 0
+	for i, r := range value {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i != len(value)-1 {
+				return false
+			}
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
+}
+
+func (s *Snapshot) AddDependency(object, dependency ID) error {
+	if _, exists := s.objects[object]; !exists {
+		return fmt.Errorf("dependency source %s is not in snapshot", object)
+	}
+	if _, exists := s.objects[dependency]; !exists {
+		return fmt.Errorf("dependency target %s is not in snapshot", dependency)
+	}
+	s.deps[object][dependency] = struct{}{}
+	return nil
+}
+
+func (s *Snapshot) Object(id ID) (Object, bool) {
+	object, ok := s.objects[id]
+	return object, ok
+}
+
+func (s *Snapshot) Objects() []Object {
+	ids := s.IDs()
+	objects := make([]Object, 0, len(ids))
+	for _, id := range ids {
+		objects = append(objects, s.objects[id])
+	}
+	return objects
+}
+
+func (s *Snapshot) IDs() []ID {
+	ids := make([]ID, 0, len(s.objects))
+	for id := range s.objects {
+		ids = append(ids, id)
+	}
+	sortIDs(ids)
+	return ids
+}
+
+// ValidateObjectOrder verifies that order is an exact permutation of the
+// snapshot's object IDs. It is the boundary check for adapter-supplied
+// unsorted schema-dump orders: partial, duplicate, stale, or invented IDs
+// would otherwise silently fall back to a planner-selected order.
+func ValidateObjectOrder(snapshot *Snapshot, order []ID) error {
+	if snapshot == nil {
+		return fmt.Errorf("object order requires a snapshot")
+	}
+	ids := snapshot.IDs()
+	if len(order) != len(ids) {
+		return fmt.Errorf("object order has %d IDs, want %d", len(order), len(ids))
+	}
+	known := make(map[ID]struct{}, len(ids))
+	for _, id := range ids {
+		known[id] = struct{}{}
+	}
+	seen := make(map[ID]struct{}, len(order))
+	for _, id := range order {
+		if !id.Valid() {
+			return fmt.Errorf("object order contains invalid ID %q", id.String())
+		}
+		if _, exists := known[id]; !exists {
+			return fmt.Errorf("object order contains unknown ID %s", id)
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("object order contains duplicate ID %s", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func (s *Snapshot) Dependencies(id ID) []ID {
+	deps := make([]ID, 0, len(s.deps[id]))
+	for dependency := range s.deps[id] {
+		deps = append(deps, dependency)
+	}
+	sortIDs(deps)
+	return deps
+}
+
+func (s *Snapshot) AddUnsupported(selector string) error {
+	if selector == "" {
+		return fmt.Errorf("unsupported selector is empty")
+	}
+	s.unsupported[selector] = struct{}{}
+	return nil
+}
+
+func (s *Snapshot) AddIgnored(selector string) error {
+	if selector == "" {
+		return fmt.Errorf("ignored selector is empty")
+	}
+	s.ignored[selector] = struct{}{}
+	return nil
+}
+
+func (s *Snapshot) Unsupported() []string { return sortedStrings(s.unsupported) }
+func (s *Snapshot) Ignored() []string     { return sortedStrings(s.ignored) }
+
+type canonicalNode struct {
+	ID           ID     `json:"id"`
+	Object       Object `json:"object"`
+	Dependencies []ID   `json:"dependencies,omitempty"`
+}
+
+type canonicalSnapshot struct {
+	Nodes       []canonicalNode `json:"nodes"`
+	Unsupported []string        `json:"unsupported,omitempty"`
+	Ignored     []string        `json:"ignored,omitempty"`
+}
+
+// CanonicalJSON is the stable representation used for fingerprints, source
+// equivalence, persisted answers, and convergence checks. Node insertion and
+// dependency insertion order do not affect the output.
+func (s *Snapshot) CanonicalJSON() ([]byte, error) {
+	nodes := make([]canonicalNode, 0, len(s.objects))
+	for _, id := range s.IDs() {
+		nodes = append(nodes, canonicalNode{ID: id, Object: s.objects[id], Dependencies: s.Dependencies(id)})
+	}
+	return json.Marshal(canonicalSnapshot{Nodes: nodes, Unsupported: s.Unsupported(), Ignored: s.Ignored()})
+}
+
+func (s *Snapshot) Fingerprint() (string, error) {
+	canonical, err := s.CanonicalJSON()
+	if err != nil {
+		return "", fmt.Errorf("encode canonical schema graph: %w", err)
+	}
+	sum := sha256.Sum256(canonical)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// Batch is a dependency-safe group. Components with more than one object (or
+// a self-edge) are cycles: a planner must explicitly detach a cycle-safe edge,
+// such as a foreign key, rather than relying on map iteration order.
+type Batch struct {
+	Objects []Object
+	Cyclic  bool
+}
+
+// Batches returns strongly connected components in dependency order. It is
+// deterministic and does not silently flatten a cycle.
+func (s *Snapshot) Batches() []Batch {
+	components := s.components()
+	componentOf := make(map[ID]int, len(s.objects))
+	for i, component := range components {
+		for _, id := range component {
+			componentOf[id] = i
+		}
+	}
+
+	dependents := make([]map[int]struct{}, len(components))
+	remaining := make([]int, len(components))
+	for i := range components {
+		dependents[i] = make(map[int]struct{})
+	}
+	for id, dependencies := range s.deps {
+		from := componentOf[id]
+		for dependency := range dependencies {
+			to := componentOf[dependency]
+			if from == to {
+				continue
+			}
+			if _, exists := dependents[to][from]; !exists {
+				dependents[to][from] = struct{}{}
+				remaining[from]++
+			}
+		}
+	}
+
+	ready := make([]int, 0, len(components))
+	for i, count := range remaining {
+		if count == 0 {
+			ready = append(ready, i)
+		}
+	}
+	var batches []Batch
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool { return componentKey(components[ready[i]]) < componentKey(components[ready[j]]) })
+		componentIndex := ready[0]
+		ready = ready[1:]
+		component := components[componentIndex]
+		objects := make([]Object, 0, len(component))
+		for _, id := range component {
+			objects = append(objects, s.objects[id])
+		}
+		batches = append(batches, Batch{Objects: objects, Cyclic: s.cyclic(component)})
+		for dependent := range dependents[componentIndex] {
+			remaining[dependent]--
+			if remaining[dependent] == 0 {
+				ready = append(ready, dependent)
+			}
+		}
+	}
+	return batches
+}
+
+func (s *Snapshot) cyclic(component []ID) bool {
+	if len(component) > 1 {
+		return true
+	}
+	_, selfEdge := s.deps[component[0]][component[0]]
+	return selfEdge
+}
+
+func (s *Snapshot) components() [][]ID {
+	var (
+		index      int
+		stack      []ID
+		onStack    = make(map[ID]bool, len(s.objects))
+		indices    = make(map[ID]int, len(s.objects))
+		lowlink    = make(map[ID]int, len(s.objects))
+		components [][]ID
+	)
+	for _, id := range s.IDs() {
+		indices[id] = -1
+	}
+	var visit func(ID)
+	visit = func(id ID) {
+		indices[id], lowlink[id] = index, index
+		index++
+		stack, onStack[id] = append(stack, id), true
+		for _, dependency := range s.Dependencies(id) {
+			if indices[dependency] == -1 {
+				visit(dependency)
+				lowlink[id] = min(lowlink[id], lowlink[dependency])
+			} else if onStack[dependency] {
+				lowlink[id] = min(lowlink[id], indices[dependency])
+			}
+		}
+		if lowlink[id] != indices[id] {
+			return
+		}
+		var component []ID
+		for {
+			last := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			onStack[last] = false
+			component = append(component, last)
+			if last == id {
+				break
+			}
+		}
+		sortIDs(component)
+		components = append(components, component)
+	}
+	for _, id := range s.IDs() {
+		if indices[id] == -1 {
+			visit(id)
+		}
+	}
+	return components
+}
+
+func componentKey(component []ID) string { return component[0].String() }
+
+func sortIDs(ids []ID) {
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+}
+
+func sortedStrings(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}

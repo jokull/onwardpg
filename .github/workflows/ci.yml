@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -race ./...
+      - name: Fuzz safety boundaries
+        run: |
+          go test ./pgschema -fuzz=FuzzBatchesContainEveryObjectExactlyOnce -fuzztime=5s -parallel=1
+          go test ./internal/graphplan -fuzz=FuzzQuoteIdentifierRoundTrip -fuzztime=5s -parallel=1
+          go test ./internal/protocol -fuzz=FuzzResolverAnswerValidation -fuzztime=5s -parallel=1
+      - name: Vet
+        run: go vet ./...
+      - name: Check Go formatting
+        run: bash scripts/check-gofmt.sh
+      - name: Check whitespace errors
+        run: git diff --check
+
+  postgres:
+    name: PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['14', '15', '16', '17', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: pgmig
+          POSTGRES_PASSWORD: pgmig
+          POSTGRES_DB: pgmig
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pgmig -d pgmig"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check out pinned Atlas reference
+        uses: actions/checkout@v4
+        with:
+          repository: ariga/atlas
+          ref: a5e0aecc2bb64143bf522734f8ad88e04885fca6
+          path: .atlas
+          fetch-depth: 1
+      - name: Build pinned Atlas
+        run: (cd .atlas/cmd/atlas && go build -o "$GITHUB_WORKSPACE/.tools/atlas-pinned" .)
+      - name: Integration and differential suite
+        env:
+          ONWARDPG_TEST_DATABASE_URL: postgres://pgmig:pgmig@localhost:5432/pgmig?sslmode=disable
+          ATLAS_PINNED_BIN: ${{ github.workspace }}/.tools/atlas-pinned
+        run: go test ./... -count=1
