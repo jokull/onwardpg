@@ -12,7 +12,7 @@ development, staging, or production database.
 ### Added
 
 - A typed PostgreSQL dependency graph populated from consistent read-only
-  catalog snapshots on PostgreSQL 14–18.
+  catalog snapshots on PostgreSQL 15–18.
 - Live PostgreSQL and deterministic `schema_file` / `schema_command` inputs;
   CREATE-statement DDL is materialized in disposable PostgreSQL rather than
   partially parsed.
@@ -51,6 +51,12 @@ development, staging, or production database.
 
 ### Changed
 
+- The ordinary developer-preview loop is now `init`, one evolving `plan`,
+  `status`, and `verify`. It keeps durable H → W planning separate from
+  workspace-safe D → W SQL; strict local decisions use scoped `--dev-hint`
+  rather than being reused as durable migration intent.
+- The supported PostgreSQL range is 15–18. PostgreSQL 14 is rejected by both
+  live inspection and recorded source receipts.
 - Product-specific backfills and orchestration are edited directly in phase SQL
   rather than authored through a JSON operation language.
 - The normal lifecycle has exactly three phases: expand, migrate, and contract.
@@ -118,7 +124,7 @@ development, staging, or production database.
 - The Git-free lifecycle, edited SQL handoff, partial/full convergence,
   transactional rollback, non-transactional failure, false assertions,
   cancellation, cleanup, and major-version receipts have been exercised on
-  real PostgreSQL 14, 15, 16, 17, and 18.
+  real PostgreSQL 15, 16, 17, and 18.
 - CI builds release archives twice and compares their checksums before a
   preview tag is published.
 

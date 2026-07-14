@@ -13,7 +13,7 @@ behaviour around identity, collations, generated columns, partition keys,
 foreign-key cycles, index concurrency and other options.
 
 The Atlas reference supports older PostgreSQL majors, but onwardpg deliberately
-supports PostgreSQL 14 through 18 only. This is a new library: its supported
+supports PostgreSQL 15 through 18 only. This is a new library: its supported
 server policy is independent of Atlas's historical compatibility range.
 
 Atlas source-level renderer support and CLI schema-diff behavior are not always

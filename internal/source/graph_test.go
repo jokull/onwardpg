@@ -102,8 +102,11 @@ func TestValidatePostgresVersion(t *testing.T) {
 	if err := validatePostgresVersion(130000); err == nil {
 		t.Fatal("PostgreSQL 13 must be rejected")
 	}
-	if err := validatePostgresVersion(140000); err != nil {
-		t.Fatalf("PostgreSQL 14 must be accepted: %v", err)
+	if err := validatePostgresVersion(140000); err == nil {
+		t.Fatal("PostgreSQL 14 must be rejected")
+	}
+	if err := validatePostgresVersion(150000); err != nil {
+		t.Fatalf("PostgreSQL 15 must be accepted: %v", err)
 	}
 	if err := validatePostgresVersion(180000); err != nil {
 		t.Fatalf("PostgreSQL 18 must be accepted: %v", err)

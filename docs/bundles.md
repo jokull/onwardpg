@@ -12,18 +12,23 @@ Create the ground floor once:
 onwardpg init --target primary
 ~~~
 
-Create one feature entry after copying `head_ref` from `history status`:
+Create one feature entry from the worktree with the preferred high-level
+command:
 
 ~~~sh
-BASE_HEAD=$(onwardpg history status --target primary | jq -r .head_ref)
-onwardpg draft --target primary --bundle customer-profile --after "$BASE_HEAD" --create
+onwardpg plan customer-profile --target primary
 ~~~
 
 Verify generated history:
 
 ~~~sh
-onwardpg verify --target primary --bundle customer-profile
+onwardpg verify --target primary
 ~~~
+
+`plan` creates a worktree-local PlanID that selects the bundle on later calls;
+`status --target primary` shows that anchor. The compatibility `draft` command
+below documents the older explicit `history status` / `--after` interface for
+automation and diagnosis, not the default authoring loop.
 
 The explicitly selected bundle is the only mutable entry for a draft command.
 Every other entry is immutable base history, and that base must end at the

@@ -82,7 +82,7 @@ current documented boundary; its catalog inventory is still incomplete.
 | Partitioning | Create/hierarchy/attach/detach and propagated resources; reconfiguration requires manual contract | Historical create/attach/detach support | Explicitly blocked | Strong creation/attachment and partition/local-index coverage; difficult reconfiguration rejected |
 | Ownership / grants / RLS | Typed table grants and RLS/policies with intent questions; ownership deviations, default/column/non-table ACLs, and grant chains block | Optional privileges and RLS/policies; sequence ownership | Table ownership on current `main`; other security blocked | Table privileges and RLS/policies; ownership generally absent |
 | Unknown catalog state | Inventoried blockers stop explicitly; preview inventory is not exhaustive | No general unknown-object stop | A few explicit blockers, not a complete unknown-state inventory | Unmodeled families are outside its snapshot rather than a general stop |
-| PostgreSQL versions | 14–18 | Historical/deprecated; no current support policy | 14–18 in CI | 14–17 in documented CI |
+| PostgreSQL versions | 15–18 | Historical/deprecated; no current support policy | 14–18 in CI | 14–17 in documented CI |
 
 Reference points:
 

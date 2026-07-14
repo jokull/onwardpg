@@ -77,6 +77,7 @@ func NextCoordinatesFromArtifact(artifact Artifact, metadata Metadata, result pr
 
 func samePlanningContract(manifest Manifest, metadata Metadata) bool {
 	return manifest.BundleID == metadata.BundleID &&
+		manifest.PlanID == metadata.PlanID &&
 		manifest.Target == metadata.Target &&
 		manifest.Purpose == metadata.Purpose &&
 		sameSourcePlanningContract(manifest.BaselineSource, metadata.BaselineSource) &&

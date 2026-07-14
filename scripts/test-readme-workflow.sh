@@ -18,6 +18,7 @@ bundle_root = "migrations/onward"
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+dev_mode = "workspace"
 EOF
 
 cat >"$fixture/schema.sql" <<'EOF'
@@ -48,15 +49,6 @@ grep -q '"fingerprint":"sha256:' config-check.json
 "$binary" init --target primary --bundle baseline >init.json
 grep -q '"status":"initialized"' init.json
 
-"$binary" history status --target primary >history.json
-grep -q '"status":"valid"' history.json
-grep -q '"head_bundle":"baseline"' history.json
-head_ref=$(jq -r .head_ref history.json)
-test -n "$head_ref"
-
-"$binary" dev plan --target primary --output text >dev-plan.sql
-grep -q 'EXPAND' dev-plan.sql
-
 cat >schema.sql <<'EOF'
 CREATE SCHEMA app;
 CREATE TABLE app.customers (
@@ -76,22 +68,20 @@ CREATE INDEX customer_profiles_kind_id_idx
 EOF
 
 set +e
-"$binary" draft --target primary --bundle customer-profile --after "$head_ref" --create >decisions.json
+"$binary" plan customer-profile --target primary >decisions.json
 decision_exit=$?
 set -e
 test "$decision_exit" -eq 2
-grep -q '"status":"needs_decisions"' decisions.json
+grep -q '"status":"needs_input"' decisions.json
 if ! grep -q '"kind":"rename"' decisions.json; then
-  echo "draft did not offer the expected rename decision" >&2
+  echo "plan did not offer the expected rename decision" >&2
   sed -n '1,160p' decisions.json >&2
   exit 1
 fi
 
 set +e
-"$binary" draft \
+"$binary" plan \
   --target primary \
-  --bundle customer-profile \
-  --after "$head_ref" \
   --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}' \
   --hint '{"kind":"type_change","name":["app","accounts","occurred_at"],"strategy":"manual_sql"}' \
   >sql-handoff.json
@@ -116,12 +106,19 @@ WHERE table_schema = 'app'
   AND column_name = 'occurred_at';
 EOF
 
-"$binary" verify --target primary --bundle customer-profile >verify.json
+"$binary" verify --target primary >verify.json
 grep -q '"status":"verified"' verify.json
 grep -q '"receipts_updated":true' verify.json
 
-"$binary" verify --target primary --bundle customer-profile --check >check.json
+"$binary" verify --target primary --check >check.json
 grep -q '"status":"verified"' check.json
+
+"$binary" status --target primary >status.json
+grep -q '"plan_id":"plan_' status.json
+
+"$binary" plan --target primary --output sql >dev-plan.sql
+grep -q 'development workspace reconciliation' dev-plan.sql
+grep -q 'CREATE TABLE' dev-plan.sql
 
 test ! -e .git
 test -f migrations/onward/primary/customer-profile/manifest.json

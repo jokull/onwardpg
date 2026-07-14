@@ -2,7 +2,7 @@
   "schema_version": 1,
   "atlas_commit": "a5e0aecc2bb64143bf522734f8ad88e04885fca6",
   "inventory_status": "in_progress",
-  "postgres_versions": [14, 15, 16, 17, 18],
+  "postgres_versions": [15, 16, 17, 18],
   "entries": [
     {"id":"schema.create","area":"schema","behavior":"supported","status":"implemented","since":10,"atlas_evidence":["sql/postgres/migrate.go:115"],"atlas_tests":["sql/postgres/migrate_test.go#TestPlanChanges"],"onwardpg_tests":["internal/graphplan#TestBuildCreatesDependencyOrderedGraphPlan","internal/graphplan#TestCreatePlanConvergesOnPostgreSQL","internal/differential#TestPinnedAtlasAndOnwardPGConvergeForCreateCorpus"]},
     {"id":"schema.create_if_not_exists","area":"schema","behavior":"supported","status":"implemented","since":10,"atlas_evidence":["sql/postgres/migrate.go:118"],"atlas_tests":["sql/postgres/migrate_test.go#TestPlanChanges"],"onwardpg_tests":["internal/graphplan#TestBuildRendersIdempotentSchemaAndTableOptions"]},

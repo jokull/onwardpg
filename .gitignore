@@ -5,3 +5,4 @@
 /.tools/
 /.stripe-pg-schema-diff/
 /dist/
+/.onwardpg/

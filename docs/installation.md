@@ -58,7 +58,7 @@ the same `checksums.txt`. GNU tar or BSD tar is supported.
 
 ## PostgreSQL requirements
 
-onwardpg supports PostgreSQL 14–18. The PostgreSQL major is discovered from the
+onwardpg supports PostgreSQL 15–18. The PostgreSQL major is discovered from the
 configured scratch server and receipted automatically. The development URL may
 be read-only; the scratch URL must be able to create and force-drop disposable
 databases.

@@ -91,10 +91,14 @@ func TestPostgresCatalogFamilyMatrixKeepsSafetyBlockersVisible(t *testing.T) {
 	if err := json.Unmarshal(data, &matrix); err != nil {
 		t.Fatal(err)
 	}
-	if matrix.SchemaVersion != 2 || matrix.InventoryStatus != "catalog_tables_classified_attribute_audit_in_progress" || !reflect.DeepEqual(matrix.Versions, []int{14, 15, 16, 17, 18}) {
+	if matrix.SchemaVersion != 2 || matrix.InventoryStatus != "catalog_tables_classified_attribute_audit_in_progress" || !reflect.DeepEqual(matrix.Versions, []int{15, 16, 17, 18}) {
 		t.Fatalf("invalid catalog matrix header: %#v", matrix)
 	}
-	if len(matrix.Evidence) != len(matrix.Versions) || len(matrix.CatalogTables) != len(matrix.Versions) {
+	// The catalog file keeps historical PG14 material as reference data, but the
+	// declared versions are the supported policy boundary. Every supported
+	// version must therefore have evidence and an inventory; extra historical
+	// entries must not silently widen support.
+	if len(matrix.Evidence) < len(matrix.Versions) || len(matrix.CatalogTables) < len(matrix.Versions) {
 		t.Fatalf("catalog matrix lacks per-version evidence: %#v", matrix)
 	}
 	required := map[string]bool{

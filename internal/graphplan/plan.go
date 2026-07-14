@@ -37,6 +37,16 @@ type Options struct {
 	// DefaultEquivalent is an optional PostgreSQL-backed semantic comparator
 	// for non-identical column default expressions.
 	DefaultEquivalent func(current, desired string) (bool, error)
+	// PreserveSurplus turns the diff into a development-workspace plan. Objects
+	// present only in current are retained and reported rather than interpreted
+	// as permission to contract the caller-owned database. Exact clone
+	// verification and durable history planning keep this false.
+	PreserveSurplus bool
+	// IgnoreColumnPhysicalOrder permits a development workspace to retain a
+	// PostgreSQL column order that cannot be reached with ALTER TABLE. The
+	// planner still creates required appended columns and records the exact
+	// mismatch in Result.Compatibility; strict planning never enables this.
+	IgnoreColumnPhysicalOrder bool
 }
 
 type decisions struct {
@@ -141,6 +151,9 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	}
 
 	changes := change.Between(current, desired)
+	if options.PreserveSurplus {
+		changes, result.Preserved = preserveSurplus(changes)
+	}
 	if options.UnsortedDump {
 		for _, item := range changes {
 			if item.Kind != change.Create {
@@ -250,7 +263,12 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return result, nil
 	}
 	if unreachable := unreachableColumnPhysicalOrder(current, desired, tableRenames, columnRenames); len(unreachable) > 0 {
-		return unsupportedResult(result, resolver, unreachable)
+		if options.IgnoreColumnPhysicalOrder {
+			result.Compatibility = append(result.Compatibility, unreachable...)
+			sort.Strings(result.Compatibility)
+		} else {
+			return unsupportedResult(result, resolver, unreachable)
+		}
 	}
 	droppingSchemas, droppingTables := droppingParents(changes)
 	questions, approvedDrops, err := destructiveQuestions(changes, droppingSchemas, droppingTables, resolver, currentFingerprint, desiredFingerprint)
@@ -440,6 +458,20 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 	}
 	return result, nil
+}
+
+func preserveSurplus(changes []change.Change) ([]change.Change, []string) {
+	kept := make([]change.Change, 0, len(changes))
+	preserved := make([]string, 0)
+	for _, item := range changes {
+		if item.Kind == change.Drop {
+			preserved = append(preserved, item.ID.String())
+			continue
+		}
+		kept = append(kept, item)
+	}
+	sort.Strings(preserved)
+	return kept, preserved
 }
 
 // unreachableColumnPhysicalOrder identifies declarative column positions that

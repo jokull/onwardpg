@@ -73,6 +73,7 @@ type FileReceipt struct {
 type Manifest struct {
 	ProtocolVersion string `json:"protocol_version"`
 	BundleID        string `json:"bundle_id"`
+	PlanID          string `json:"plan_id,omitempty"`
 	Generation      int    `json:"generation"`
 	Target          string `json:"target"`
 	Purpose         string `json:"purpose"`
@@ -96,6 +97,7 @@ type Manifest struct {
 
 type Metadata struct {
 	BundleID            string
+	PlanID              string
 	Generation          int
 	Target              string
 	Purpose             string
@@ -298,7 +300,7 @@ func Build(input Input) (Artifact, error) {
 	}
 	manifest := Manifest{
 		ProtocolVersion: Version,
-		BundleID:        input.Metadata.BundleID, Generation: input.Metadata.Generation,
+		BundleID:        input.Metadata.BundleID, PlanID: input.Metadata.PlanID, Generation: input.Metadata.Generation,
 		Target: input.Metadata.Target, Purpose: input.Metadata.Purpose,
 		State:          string(input.Result.Status),
 		BaselineSource: input.Metadata.BaselineSource, DesiredSource: input.Metadata.DesiredSource,
@@ -623,6 +625,9 @@ func (m Manifest) Validate() error {
 	if !safeName(m.BundleID) || !safeName(m.Target) {
 		return fmt.Errorf("bundle_id and target must contain only letters, numbers, dot, underscore, or dash")
 	}
+	if m.PlanID != "" && (!strings.HasPrefix(m.PlanID, "plan_") || len(m.PlanID) != len("plan_")+32 || !safeName(m.PlanID)) {
+		return fmt.Errorf("plan_id %q is invalid", m.PlanID)
+	}
 	if m.Generation < 1 {
 		return fmt.Errorf("bundle generation must be positive")
 	}
@@ -734,8 +739,8 @@ func (s SourceReceipt) Validate() error {
 	if !fingerprintPattern.MatchString(s.Fingerprint) {
 		return fmt.Errorf("fingerprint %q is invalid", s.Fingerprint)
 	}
-	if s.PostgresMajor != 0 && (s.PostgresMajor < 14 || s.PostgresMajor > 18) {
-		return fmt.Errorf("postgres_major must be between 14 and 18")
+	if s.PostgresMajor != 0 && (s.PostgresMajor < 15 || s.PostgresMajor > 18) {
+		return fmt.Errorf("postgres_major must be between 15 and 18")
 	}
 	return nil
 }

@@ -1,13 +1,13 @@
 # PostgreSQL version policy
 
-onwardpg supports PostgreSQL **14, 15, 16, 17, and 18**. This is deliberately
+onwardpg supports PostgreSQL **15, 16, 17, and 18**. This is deliberately
 independent of the historical versions accepted by the pinned Atlas reference:
-onwardpg is a new library and does not claim compatibility with PostgreSQL 13
+onwardpg is a new library and does not claim compatibility with PostgreSQL 14
 or older.
 
 ## Admission and retirement
 
-- A server outside 14--18 is rejected before catalog inspection. In particular,
+- A server outside 15--18 is rejected before catalog inspection. In particular,
   a new major is not implicitly accepted merely because the catalog connection
   succeeds.
 - Each supported major is covered by the `postgres` GitHub Actions matrix. The
@@ -22,9 +22,8 @@ or older.
 ## Feature gating
 
 Tests must gate only an unavailable feature, never an entire integration suite.
-For example, `NULLS NOT DISTINCT` is available from PostgreSQL 15, so its
-fixture skips on PostgreSQL 14 while the rest of the PG14 suite still runs.
-Catalog selectors preserve the relevant PostgreSQL-version boundaries for
+`NULLS NOT DISTINCT` is available throughout the supported range. Catalog
+selectors preserve relevant historical PostgreSQL-version boundaries for
 features that predate the supported range (such as generated columns and index
 `INCLUDE`) so a future policy change cannot accidentally erase that knowledge.
 

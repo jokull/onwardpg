@@ -30,6 +30,7 @@ type Target struct {
 	SchemaCommand      []string `toml:"schema_command" json:"schema_command,omitempty"`
 	DevDatabaseEnv     string   `toml:"dev_database_env" json:"dev_database_env"`
 	ScratchDatabaseEnv string   `toml:"scratch_database_env" json:"scratch_database_env,omitempty"`
+	DevMode            string   `toml:"dev_mode" json:"dev_mode,omitempty"`
 }
 
 func Load(name string) (Config, error) {
@@ -119,8 +120,16 @@ func (t Target) Validate() error {
 	if t.ScratchDatabaseEnv != "" && !envNamePattern.MatchString(t.ScratchDatabaseEnv) {
 		return fmt.Errorf("scratch_database_env must name an environment variable, not contain a URL")
 	}
+	if t.DevMode != "" && t.DevMode != "workspace" && t.DevMode != "strict" {
+		return fmt.Errorf("dev_mode must be workspace or strict")
+	}
 	return nil
 }
+
+// WorkspaceMode is deliberately the default: long-lived developer databases
+// may retain objects from other branches, so absence from exported DDL is not
+// enough authority to drop them.
+func (t Target) WorkspaceMode() bool { return t.DevMode == "" || t.DevMode == "workspace" }
 
 // ScratchEnv returns the environment variable containing the disposable
 // PostgreSQL administrative URL. Falling back to dev_database_env preserves

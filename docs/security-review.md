@@ -56,6 +56,6 @@ not a third-party audit.
   attribute-level audit remains ongoing and is documented as a preview limit.
 
 Before a preview tag, rerun race tests, vet, static analysis, formatting,
-PostgreSQL 14–18 integration tests, deterministic release builds, and the Go
+PostgreSQL 15–18 integration tests, deterministic release builds, and the Go
 vulnerability scan. Release archives must retain the repository's MIT
 License.

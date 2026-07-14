@@ -19,8 +19,9 @@ type SQLBatch struct {
 }
 
 type Assertion struct {
-	ID  string
-	SQL string
+	ID                   string
+	SQL                  string
+	DevSafePostcondition bool
 }
 
 type EditConflict struct {
@@ -396,7 +397,11 @@ func parseBatchDirective(line string) (transactional, directive, invalid bool) {
 }
 
 // ParseAssertions treats verify.sql as one boolean query unless explicit
-// "-- onwardpg:assert ID" comments split it into multiple assertions.
+// "-- onwardpg:assert ID" comments split it into multiple assertions. An
+// assertion becomes eligible for caller-owned development evidence only with
+// the explicit "-- onwardpg:dev-postcondition" marker. The marker does not
+// authorize writes: callers still execute it in a PostgreSQL read-only
+// transaction.
 func ParseAssertions(body []byte) ([]Assertion, error) {
 	if bytes.IndexByte(body, 0) >= 0 {
 		return nil, fmt.Errorf("verification SQL contains a NUL byte")
@@ -406,13 +411,15 @@ func ParseAssertions(body []byte) ([]Assertion, error) {
 	var assertions []Assertion
 	seen := false
 	id := "verification"
+	devSafe := false
 	flush := func() {
 		if strings.TrimSpace(current.String()) == "" {
 			current.Reset()
 			return
 		}
-		assertions = append(assertions, Assertion{ID: id, SQL: current.String()})
+		assertions = append(assertions, Assertion{ID: id, SQL: current.String(), DevSafePostcondition: devSafe})
 		current.Reset()
+		devSafe = false
 	}
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -429,6 +436,17 @@ func ParseAssertions(body []byte) ([]Assertion, error) {
 				seen = true
 			}
 			id = value
+			current.WriteString(line)
+			continue
+		}
+		if trimmed == "-- onwardpg:dev-postcondition" {
+			if !seen {
+				return nil, fmt.Errorf("development postcondition marker requires an onwardpg assertion")
+			}
+			if devSafe {
+				return nil, fmt.Errorf("duplicate development postcondition marker for assertion %q", id)
+			}
+			devSafe = true
 			current.WriteString(line)
 			continue
 		}
