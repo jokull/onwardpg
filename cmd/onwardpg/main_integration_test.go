@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jokull/onwardpg/internal/activeplan"
 	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/draftflow"
 	"github.com/jokull/onwardpg/internal/driftcheck"
@@ -257,6 +258,385 @@ CREATE INDEX customer_profiles_account_id_idx ON app.customer_profiles (account_
 	})
 	if checked.code != 0 {
 		t.Fatalf("additive verify --check exit = %d, stdout = %s", checked.code, checked.stdout)
+	}
+}
+
+func TestPlanAnchorsAndRestacksOneFeatureWithoutExplicitAfterOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	devURL, cleanupDev := createTestDatabase(t, adminURL)
+	defer cleanupDev()
+	t.Setenv("ONWARDPG_PLAN_DEV_DATABASE_URL", devURL)
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_PLAN_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+dev_mode = "workspace"
+`)
+	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n"
+	writeTestFile(t, repository, "schema.sql", baseDDL)
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+
+	featureDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, booking_date date);\n"
+	writeTestFile(t, repository, "schema.sql", featureDDL)
+	first := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"booking-dates", "--target", "primary"}, repository)
+	})
+	if first.code != 0 {
+		t.Fatalf("first plan = %d, %s", first.code, first.stdout)
+	}
+	var firstReport workflowPlanReport
+	if err := json.Unmarshal([]byte(first.stdout), &firstReport); err != nil {
+		t.Fatal(err)
+	}
+	if firstReport.Durable.Outcome != string(protocol.Planned) || firstReport.Development.Status != protocol.Planned {
+		t.Fatalf("first workflow report = %#v", firstReport)
+	}
+	anchor, found, err := activeplan.Load(repository, "primary")
+	if err != nil || !found {
+		t.Fatalf("active plan = %#v, %v, %v", anchor, found, err)
+	}
+	featurePath := filepath.Join(repository, "onward-bundles", "primary", "booking-dates")
+	firstArtifact, err := bundle.Read(featurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstArtifact.Manifest.PlanID == "" || firstArtifact.Manifest.PlanID != anchor.PlanID {
+		t.Fatalf("feature manifest/anchor identity mismatch: %#v / %#v", firstArtifact.Manifest, anchor)
+	}
+	// The developer deliberately applies only the separately rendered D -> W
+	// SQL. onwardpg did not apply it; the next plan must observe that local
+	// state and emit only the subsequent residual.
+	firstLocalSQL := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"--target", "primary", "--output", "sql"}, repository)
+	})
+	if firstLocalSQL.code != 0 || !strings.Contains(firstLocalSQL.stdout, `CREATE TABLE "app"."accounts"`) {
+		t.Fatalf("first workspace SQL = %d, %s", firstLocalSQL.code, firstLocalSQL.stdout)
+	}
+	devConnection, err := pgx.Connect(context.Background(), devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := devConnection.Exec(context.Background(), firstLocalSQL.stdout); err != nil {
+		devConnection.Close(context.Background())
+		t.Fatalf("apply first workspace SQL externally: %v\n%s", err, firstLocalSQL.stdout)
+	}
+	if err := devConnection.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// An ordinary feature revision replaces the same bundle and keeps its local
+	// logical identity.
+	featureDDL = "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, booking_date date, note text);\n"
+	writeTestFile(t, repository, "schema.sql", featureDDL)
+	second := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"--target", "primary"}, repository) })
+	if second.code != 0 {
+		t.Fatalf("feature revision = %d, %s", second.code, second.stdout)
+	}
+	var secondReport workflowPlanReport
+	if err := json.Unmarshal([]byte(second.stdout), &secondReport); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondReport.Development.Result.Statements) != 1 || !strings.Contains(secondReport.Development.Result.Statements[0].SQL, `ADD COLUMN "note"`) {
+		t.Fatalf("feature revision should emit only the local note residual: %#v", secondReport.Development.Result)
+	}
+	secondLocalSQL := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"--target", "primary", "--output", "sql"}, repository)
+	})
+	if secondLocalSQL.code != 0 {
+		t.Fatalf("second workspace SQL = %d, %s", secondLocalSQL.code, secondLocalSQL.stdout)
+	}
+	devConnection, err = pgx.Connect(context.Background(), devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := devConnection.Exec(context.Background(), secondLocalSQL.stdout); err != nil {
+		devConnection.Close(context.Background())
+		t.Fatalf("apply second workspace SQL externally: %v\n%s", err, secondLocalSQL.stdout)
+	}
+	if err := devConnection.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	secondArtifact, err := bundle.Read(featurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondArtifact.Manifest.PlanID != anchor.PlanID || secondArtifact.Manifest.Generation <= firstArtifact.Manifest.Generation {
+		t.Fatalf("feature revision did not preserve/advance identity: first=%#v second=%#v", firstArtifact.Manifest, secondArtifact.Manifest)
+	}
+
+	// Simulate Git bringing an accepted sibling bundle into the checkout. The
+	// high-level command knows only its local selected plan; excluding it leaves
+	// one accepted chain, so no copied head_ref is required.
+	parked := filepath.Join(repository, "booking-dates.parked")
+	if err := os.Rename(featurePath, parked); err != nil {
+		t.Fatal(err)
+	}
+	upstreamDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text);\n"
+	writeHistoryTransitionFixture(t, repository, adminURL, "upstream-timezone", upstreamDDL)
+	// An accepted upstream bundle may provide explicit evidence for a data
+	// effect. This marker is the only verification SQL onwardpg will inspect on
+	// the caller-owned development database during the later restack.
+	upstreamPath := filepath.Join(repository, "onward-bundles", "primary", "upstream-timezone")
+	writeTestFile(t, upstreamPath, "verify.sql", "-- onwardpg:assert accepted_history_is_reviewed\n-- onwardpg:dev-postcondition\nSELECT true;\n")
+	preparedUpstream, err := bundle.PrepareEdited(upstreamPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.InstallReceipts(upstreamPath, preparedUpstream); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parked, featurePath); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text, booking_date date, note text);\n")
+	restacked := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"--target", "primary"}, repository) })
+	if restacked.code != 0 {
+		t.Fatalf("restack = %d, %s", restacked.code, restacked.stdout)
+	}
+	var restackedReport workflowPlanReport
+	if err := json.Unmarshal([]byte(restacked.stdout), &restackedReport); err != nil {
+		t.Fatal(err)
+	}
+	if !restackedReport.Durable.ParentChanged || restackedReport.Durable.PlanID != anchor.PlanID {
+		t.Fatalf("restacked workflow report = %#v", restackedReport)
+	}
+	if len(restackedReport.Development.Postconditions) != 1 || restackedReport.Development.Postconditions[0].Status != "passed" || restackedReport.Development.Postconditions[0].ID != "accepted_history_is_reviewed" {
+		t.Fatalf("restacked development evidence = %#v", restackedReport.Development.Postconditions)
+	}
+	chain, err := history.Load(repository, "onward-bundles", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.Entries) != 3 || chain.Entries[1].Directory != "upstream-timezone" || chain.Entries[2].Directory != "booking-dates" {
+		t.Fatalf("restacked chain = %#v", chain)
+	}
+	// SQL mode is intentionally the direct development reconciliation, never
+	// the accumulated feature bundle. It remains available after a restack.
+	localSQL := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"--target", "primary", "--output", "sql"}, repository)
+	})
+	if localSQL.code != 0 || !strings.Contains(localSQL.stdout, "development workspace reconciliation") || !strings.Contains(localSQL.stdout, `ADD COLUMN "timezone"`) || strings.Contains(localSQL.stdout, `ADD COLUMN "booking_date"`) {
+		t.Fatalf("workspace SQL after restack = %d, %s", localSQL.code, localSQL.stdout)
+	}
+	devConnection, err = pgx.Connect(context.Background(), devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := devConnection.Exec(context.Background(), localSQL.stdout); err != nil {
+		devConnection.Close(context.Background())
+		t.Fatalf("apply restacked workspace SQL externally: %v\n%s", err, localSQL.stdout)
+	}
+	if err := devConnection.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	converged := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"--target", "primary"}, repository) })
+	if converged.code != 0 {
+		t.Fatalf("converged development plan = %d, %s", converged.code, converged.stdout)
+	}
+	var convergedReport workflowPlanReport
+	if err := json.Unmarshal([]byte(converged.stdout), &convergedReport); err != nil {
+		t.Fatal(err)
+	}
+	if len(convergedReport.Development.Result.Statements) != 0 || len(convergedReport.Development.Result.Preserved) != 0 || len(convergedReport.Development.Result.Compatibility) == 0 || !strings.Contains(strings.Join(convergedReport.Development.Result.Compatibility, "\n"), "column_physical_order") {
+		t.Fatalf("development did not reach the expected workspace-compatible state after deliberate external SQL: %#v", convergedReport.Development.Result)
+	}
+}
+
+func TestPlanAcceptsScopedDevelopmentHintsWithoutReusingDurableHintsOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	devURL, cleanupDev := createTestDatabase(t, adminURL)
+	defer cleanupDev()
+	t.Setenv("ONWARDPG_SCOPED_HINT_DEV_DATABASE_URL", devURL)
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_SCOPED_HINT_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+dev_mode = "strict"
+`)
+	// H already knows the desired customer table. D instead contains an older
+	// same-shape accounts table, so only D -> W needs rename intent. H -> W has
+	// an unrelated additive enum change and must not consume that local hint.
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint);\n")
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+	connection, err := pgx.Connect(context.Background(), devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(context.Background(), "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);"); err != nil {
+		connection.Close(context.Background())
+		t.Fatal(err)
+	}
+	if err := connection.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.customers (id bigint); CREATE TYPE app.event_kind AS ENUM ('created');\n")
+	pendingOutput := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"customer-audit", "--target", "primary"}, repository)
+	})
+	if pendingOutput.code != 2 {
+		t.Fatalf("plan with development decision = %d, %s", pendingOutput.code, pendingOutput.stdout)
+	}
+	var pending workflowPlanReport
+	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Durable.Outcome != string(protocol.Planned) || pending.Development.Status != protocol.NeedsInput || pending.Development.NextAction != "rerun_plan_with_dev_hints" {
+		t.Fatalf("scoped decision report = %#v", pending)
+	}
+	var renameHint *protocol.Hint
+	for _, decision := range pending.Development.Decisions {
+		for _, choice := range decision.Choices {
+			if choice.Hint.Kind == "rename" {
+				hint := choice.Hint
+				renameHint = &hint
+			}
+		}
+	}
+	if renameHint == nil {
+		t.Fatalf("development rename decision = %#v", pending.Development.Decisions)
+	}
+	hintData, err := json.Marshal(renameHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plannedOutput := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"--target", "primary", "--dev-hint", string(hintData)}, repository)
+	})
+	if plannedOutput.code != 0 {
+		t.Fatalf("plan with scoped development hint = %d, %s", plannedOutput.code, plannedOutput.stdout)
+	}
+	var planned workflowPlanReport
+	if err := json.Unmarshal([]byte(plannedOutput.stdout), &planned); err != nil {
+		t.Fatal(err)
+	}
+	if planned.Durable.Outcome != string(protocol.Planned) || planned.Development.Status != protocol.Planned || planned.Development.NextAction != "" {
+		t.Fatalf("scoped planned report = %#v", planned)
+	}
+	statements := protocol.RenderSQL(planned.Development.Result, "")
+	if !strings.Contains(statements, `RENAME TO "customers"`) || !strings.Contains(statements, `CREATE TYPE "app"."event_kind" AS ENUM ('created')`) {
+		t.Fatalf("scoped development SQL = %s", statements)
+	}
+}
+
+func TestPlanSwitchesParkedWorktreePlansOnlyWhenActiveBundleIsAbsentOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	devURL, cleanupDev := createTestDatabase(t, adminURL)
+	defer cleanupDev()
+	t.Setenv("ONWARDPG_SWITCH_DEV_DATABASE_URL", devURL)
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_SWITCH_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+dev_mode = "workspace"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n")
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, booking_date date);\n")
+	if first := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"booking-dates", "--target", "primary"}, repository) }); first.code != 0 {
+		t.Fatalf("first feature plan = %d, %s", first.code, first.stdout)
+	}
+	firstAnchor, found, err := activeplan.Load(repository, "primary")
+	if err != nil || !found {
+		t.Fatalf("first anchor = %#v, %v, %v", firstAnchor, found, err)
+	}
+	featureRoot := filepath.Join(repository, "onward-bundles", "primary")
+	bookingPath := filepath.Join(featureRoot, "booking-dates")
+	parkedBooking := filepath.Join(repository, "booking-dates.parked")
+	if err := os.Rename(bookingPath, parkedBooking); err != nil {
+		t.Fatal(err)
+	}
+
+	// This models a normal branch switch without asking onwardpg for Git state:
+	// the old feature bundle is absent from the new checkout, so a named plan
+	// may be created while the old local identity is parked for later return.
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, payment_date date);\n")
+	if second := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"payment-dates", "--target", "primary"}, repository) }); second.code != 0 {
+		t.Fatalf("second feature plan = %d, %s", second.code, second.stdout)
+	}
+	secondAnchor, found, err := activeplan.Load(repository, "primary")
+	if err != nil || !found || secondAnchor.BundleID != "payment-dates" {
+		t.Fatalf("second anchor = %#v, %v, %v", secondAnchor, found, err)
+	}
+	if saved, exists := secondAnchor.FindParked("booking-dates"); !exists || saved.PlanID != firstAnchor.PlanID {
+		t.Fatalf("booking plan was not parked: %#v", secondAnchor)
+	}
+
+	paymentPath := filepath.Join(featureRoot, "payment-dates")
+	parkedPayment := filepath.Join(repository, "payment-dates.parked")
+	if err := os.Rename(paymentPath, parkedPayment); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parkedBooking, bookingPath); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, booking_date date);\n")
+	if restored := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"booking-dates", "--target", "primary"}, repository) }); restored.code != 0 {
+		t.Fatalf("restored feature plan = %d, %s", restored.code, restored.stdout)
+	}
+	restoredAnchor, found, err := activeplan.Load(repository, "primary")
+	if err != nil || !found || restoredAnchor.PlanID != firstAnchor.PlanID || restoredAnchor.BundleID != "booking-dates" {
+		t.Fatalf("restored anchor = %#v, %v, %v", restoredAnchor, found, err)
+	}
+	if _, exists := restoredAnchor.FindParked("payment-dates"); !exists {
+		t.Fatalf("payment plan was not parked on return: %#v", restoredAnchor)
+	}
+}
+
+func TestPlanPersistsActiveAnchorWhenDevelopmentInspectionFailsAfterDurablePlanOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	t.Setenv("ONWARDPG_UNAVAILABLE_DEV_DATABASE_URL", "postgres://127.0.0.1:1/unavailable?connect_timeout=1")
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_UNAVAILABLE_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n")
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, note text);\n")
+	output := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"booking-note", "--target", "primary"}, repository) })
+	if output.code != 1 || !strings.Contains(output.stdout, "development_plan_error") {
+		t.Fatalf("unavailable development database = %d, %s", output.code, output.stdout)
+	}
+	anchor, found, err := activeplan.Load(repository, "primary")
+	if err != nil || !found || anchor.BundleID != "booking-note" {
+		t.Fatalf("durable plan anchor = %#v, %v, %v", anchor, found, err)
+	}
+	artifact, err := bundle.Read(filepath.Join(repository, "onward-bundles", "primary", "booking-note"))
+	if err != nil || artifact.Manifest.PlanID != anchor.PlanID {
+		t.Fatalf("durable plan bundle = %#v, %v", artifact.Manifest, err)
 	}
 }
 
@@ -1134,7 +1514,7 @@ scratch_database_env = "ONWARDPG_CONFIG_CHECK_URL"
 		t.Fatalf("config check report = %#v", report)
 	}
 	target := report.Targets[0]
-	if target.Name != "primary" || target.Provenance != "schema_file:schema.sql" || !strings.HasPrefix(target.Fingerprint, "sha256:") || target.DevPostgresMajor < 14 || target.DevPostgresMajor > 18 || target.ScratchPostgresMajor != target.DevPostgresMajor {
+	if target.Name != "primary" || target.Provenance != "schema_file:schema.sql" || !strings.HasPrefix(target.Fingerprint, "sha256:") || target.DevPostgresMajor < 15 || target.DevPostgresMajor > 18 || target.ScratchPostgresMajor != target.DevPostgresMajor {
 		t.Fatalf("config check target = %#v", target)
 	}
 	if target.HistoryPostgresMajor != 0 {
@@ -1201,7 +1581,7 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending.ProtocolVersion != "onwardpg.dev-plan/v3" || pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
+	if pending.ProtocolVersion != "onwardpg.dev-plan/v4" || pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
 		t.Fatalf("pending = %#v", pending)
 	}
 	var renameHint *protocol.Hint
@@ -1228,7 +1608,7 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 	if err := json.Unmarshal([]byte(plannedOutput.stdout), &planned); err != nil {
 		t.Fatal(err)
 	}
-	if planned.ProtocolVersion != "onwardpg.dev-plan/v3" || planned.Status != protocol.Planned || len(planned.Statements) == 0 || planned.Statements[0].Phase != "contract" {
+	if planned.ProtocolVersion != "onwardpg.dev-plan/v4" || planned.Status != protocol.Planned || len(planned.Statements) == 0 || planned.Statements[0].Phase != "contract" {
 		t.Fatalf("planned = %#v", planned)
 	}
 	var oldExists, newExists bool
@@ -1259,7 +1639,7 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 	if err := json.Unmarshal([]byte(residualOutput.stdout), &residual); err != nil {
 		t.Fatal(err)
 	}
-	if residual.ProtocolVersion != "onwardpg.dev-plan/v3" || residual.Status != "no_changes" || residual.Changed || residual.CurrentFingerprint != residual.DesiredFingerprint {
+	if residual.ProtocolVersion != "onwardpg.dev-plan/v4" || residual.Status != "no_changes" || residual.Changed || residual.CurrentFingerprint != residual.DesiredFingerprint {
 		t.Fatalf("residual = %#v", residual)
 	}
 }

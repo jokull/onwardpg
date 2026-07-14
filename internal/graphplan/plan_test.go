@@ -93,6 +93,37 @@ func TestBuildNullableColumnWithoutDefaultDoesNotClaimTableRewrite(t *testing.T)
 	}
 }
 
+func TestBuildWorkspaceModePreservesSurplusObjectsWithoutDropQuestion(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	legacy := pgschema.Table{Schema: "app", Name: "legacy"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(schema); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := current.Add(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.AddDependency(legacy.ObjectID(), schema.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	strict, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strict.Status != protocol.NeedsInput {
+		t.Fatalf("strict result = %#v", strict)
+	}
+	workspace, err := Build(current, desired, protocol.Answers{}, Options{PreserveSurplus: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.Status != protocol.Planned || len(workspace.Statements) != 0 || !reflect.DeepEqual(workspace.Preserved, []string{legacy.ObjectID().String()}) {
+		t.Fatalf("workspace result = %#v", workspace)
+	}
+}
+
 func FuzzQuoteIdentifierRoundTrip(f *testing.F) {
 	for _, seed := range []string{"orders", `a"b`, "select", "", "emoji_😀", "line\nname"} {
 		f.Add(seed)

@@ -21,7 +21,7 @@ func TestPostgresMajorDiscoversTheConnectedServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if major < 14 || major > 18 {
+	if major < 15 || major > 18 {
 		t.Fatalf("PostgresMajor = %d", major)
 	}
 }

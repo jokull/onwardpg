@@ -20,15 +20,17 @@ The planner's core safety rules are:
   explicit phase-local SQL TODO rather than accepting SQL inside decision JSON;
 - never report an incomplete plan as converged: `needs_decisions`,
   `needs_sql_edits`, and `unsupported` are blocking states;
-- require every mutable PR draft to name its accepted predecessor explicitly;
-  the validated base chain must end there before planning begins;
+- require every mutable PR plan to have one explicit local PlanID; the
+  preferred `plan` command excludes it and requires the remaining accepted
+  history to form one valid chain before planning begins. The lower-level
+  `draft --after` interface retains an exact predecessor assertion;
 - reject declarative physical column reordering that PostgreSQL cannot perform
   with `ALTER TABLE`, with a stable `column_physical_order` unsupported reason;
 - preserve execution constraints through explicit transactional batches; and
 - surface destructive, lock, rewrite, validation, and availability concerns as
   statement safety/hazard metadata for review.
 
-Every PostgreSQL 14–18 `pg_catalog` table is classified in the developer
+Every supported PostgreSQL `pg_catalog` table is classified in the developer
 preview inventory. The attribute-level audit remains in progress. The current
 blockers include domains, composites, aggregates, standalone collations,
 range/multirange types, foreign tables, explicit ownership deviations,
@@ -66,21 +68,27 @@ relevant phase; the semantic hint itself cannot carry SQL. Every TODO must be
 replaced before verification. Optional `verify.sql` postconditions must each
 return one boolean `true` row during clone verification. Edited SQL and its
 batch directives are receipted only after execution and convergence succeed.
+Only an assertion explicitly marked `-- onwardpg:dev-postcondition` is ever
+queried against a caller-owned development database, and it runs inside a
+PostgreSQL read-only transaction. Its result is narrow evidence about a
+historical data effect, never authorization to replay phase SQL or infer a
+repair.
 The read-only `verify --check` gate additionally recompiles current configured
 DDL, requires the selected bundle to be the chain head, and compares its desired
 fingerprint before clone execution. Self-consistency with a stale recorded
 target is not sufficient.
 
-The agent, not onwardpg, identifies the accepted base from Git. `history status`
-returns its exact `head_ref`; `draft --after` turns that external fact into a
-checked name-and-digest boundary. Another unpublished bundle or a coherently
-rewritten same-name head produces `base_anchor_mismatch`. One-shot `--create`
-prevents an accidentally missing feature folder from being treated as a fresh
-draft during restacking. Target lifecycle locks and final artifact comparison
-reject concurrent onwardpg history forks or ordinary path-based edits during
-long clone verification. The final commit point also rematerializes configured
-DDL, reloads `.onwardpg.toml`, and rejects configuration or schema export state
-that changed during planning or verification.
+The agent, not onwardpg, manages Git. The preferred `plan` command derives its
+base by excluding the active local PlanID and validating the remaining
+content-addressed chain; a fork, missing parent, descendant, or altered history
+blocks. A missing active bundle is parked locally during a normal checkout
+switch rather than overwritten. `history status` and `draft --after` retain an
+exact `head_ref` boundary for expert diagnostics and compatibility. Target
+lifecycle locks and final artifact comparison reject concurrent onwardpg
+history forks or ordinary path-based edits during long clone verification. The
+final commit point also rematerializes configured DDL, reloads
+`.onwardpg.toml`, and rejects configuration or schema export state that changed
+during planning or verification.
 `history status` exposes the repository chain and selected relationship without
 reading Git. If accepted history fully absorbs generated feature work, the
 selected bundle is removed as `absorbed`; developer-owned SQL is never removed

@@ -101,6 +101,6 @@ Stripe selects a direct cast while onwardpg requires the cast as a
 validated semantic decision. onwardpg's extra intent questions are an intentional
 workflow difference, not normalized away by the harness. The catalog-family
 inventory and the new partition-attachment convergence cases have been
-observed on PostgreSQL 14–18. CI remains the authoritative cross-version proof
+observed on PostgreSQL 15–18. CI remains the authoritative cross-version proof
 for every commit; most of the 415-case Stripe corpus is still conservatively
 classified `weaker`, not claimed as differential parity.

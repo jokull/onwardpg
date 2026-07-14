@@ -395,6 +395,17 @@ func metadata() Metadata {
 	}
 }
 
+func TestSourceReceiptRejectsUnsupportedPostgresMajor(t *testing.T) {
+	receipt := SourceReceipt{Kind: "ddl_export", Description: "project schema", Fingerprint: currentFingerprint, PostgresMajor: 14}
+	if err := receipt.Validate(); err == nil || !strings.Contains(err.Error(), "between 15 and 18") {
+		t.Fatalf("PostgreSQL 14 receipt validation = %v", err)
+	}
+	receipt.PostgresMajor = 15
+	if err := receipt.Validate(); err != nil {
+		t.Fatalf("PostgreSQL 15 receipt validation = %v", err)
+	}
+}
+
 func statement(sql, phase string, transactional bool) protocol.Statement {
 	result := protocol.Statement{SQL: sql, Phase: phase, Safety: "review", NonTransactional: !transactional}
 	result.ID = protocol.StableStatementID(result)

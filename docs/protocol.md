@@ -1,9 +1,10 @@
 # JSON protocol
 
-`draft` is the agent-facing authoring protocol. `plan` retains a more detailed
-low-level protocol used by internal receipts and explicit source-to-source
-callers. Consumers must branch on the version field before interpreting either
-document; incompatible changes receive a new identifier.
+`plan` is the agent-facing authoring protocol. It carries one durable H → W
+report and one separately scoped D → W development report. `draft` and `diff`
+retain lower-level protocols for explicit history and source-to-source callers.
+Consumers must branch on the version field before interpreting any document;
+incompatible changes receive a new identifier.
 
 ## Minimal draft decisions
 
@@ -101,10 +102,11 @@ full clone verification transitions the exact edited files to `planned`.
 `--output text` renders the same choices as copyable `--hint` arguments. It
 does not change planning semantics or prompt on a TTY.
 
-## Low-level plan protocol
+## Source-to-source compatibility protocol
 
-`onwardpg plan` writes JSON to standard output by default. Its public command
-protocol is `onwardpg.plan/v3` for planned, decision, and unsupported results.
+`onwardpg diff` (and the compatibility spelling `onwardpg plan --from --to`)
+writes JSON to standard output by default. Its public command protocol is
+`onwardpg.plan/v3` for planned, decision, and unsupported results.
 The receipted planner document embedded in bundles retains its separately
 versioned internal `onwardpg.plan/v1` schema.
 
@@ -236,11 +238,32 @@ and conflicting phase paths; a conflict leaves the existing bundle untouched.
 Decision and SQL-edit handoffs exit `2`; unsupported state exits `3`; history
 or convergence blockers exit `4`.
 
-`dev plan` and low-level `plan` consistently emit public command protocols
-`onwardpg.dev-plan/v3` and `onwardpg.plan/v3` across decision and planned
-results. A converged development diff uses `status: "no_changes"` and
-`changed: false` rather than requiring an agent to infer equality from
-fingerprints. They do not write bundle state.
+`dev plan` emits `onwardpg.dev-plan/v4`. It reports `preserved` typed objects
+when workspace mode intentionally retains D-only catalog state, and uses
+`status: "workspace_compatible"` for a converged safe local reconciliation.
+`diff` (and the compatibility `plan --from --to`) retains the source-to-source
+`onwardpg.plan/v3` protocol; neither writes bundle state.
+
+The preferred high-level `plan` command emits `onwardpg.plan/v4`. Its envelope
+contains a durable H → W `draft` report and a separate development D → W
+report, keyed by one worktree-local PlanID. Consumers must not treat the
+development statements as the durable bundle, and should branch independently
+on each nested report's status. `--output sql` writes only D → W statements to
+stdout and leaves incomplete-plan diagnostics on stderr.
+
+When `development.status` is `needs_input`, its `next_action` is
+`rerun_plan_with_dev_hints`. Re-run `onwardpg plan` with one `--dev-hint` per
+development decision (or `--dev-hints-file`). The ordinary `--hint` and
+`--hints-file` flags remain durable H → W intent only. This scope split keeps a
+long-lived development database from accidentally authorizing a PR migration,
+or vice versa.
+
+The development report may include `accepted_postconditions`. These are only
+assertions from newly accepted history explicitly marked
+`-- onwardpg:dev-postcondition` in `verify.sql`; onwardpg runs each in a
+read-only PostgreSQL transaction and reports `passed` or `failed`. An omitted
+assertion is deliberately not evaluated, and either result is evidence rather
+than proof that a historical migration phase ran.
 
 `init` emits `onwardpg.history-init/v2`. A successful document has
 `status: "initialized"`, target and bundle identity, installed path, history
@@ -254,6 +277,11 @@ exit `4`.
 head bundle/digest, exact `head_ref`, and optional selected-bundle relationship.
 The `head_ref` is the only accepted `draft --after` value. It never reads Git
 or connects to PostgreSQL.
+
+`status` emits `onwardpg.status/v1`. It reads the local active-plan anchor and
+content-addressed repository history without Git or PostgreSQL access. A
+missing anchor is an explicit `no_active_plan` status rather than an inferred
+branch state.
 
 `verify` emits `onwardpg.verify/v3` with the selected phase checkpoint, total
 and selected-bundle batch counts, assertion IDs, observed/full fingerprints,

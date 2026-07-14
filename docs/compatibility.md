@@ -32,8 +32,8 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | Down migrations | No separate planner model | Never | Recovery is a new reviewed forward migration. |
 | Expand / migrate / contract sections | No | **Plannable** | SQL is annotated for application rollout sequencing. |
 | Typed ambiguity decisions | No | **Decision required** | Agent-facing hints use semantic object names; onwardpg binds generated receipts to both schema fingerprints. Hints may be supplied before the first plan. |
-| Unknown catalog object | Inspector dependent | Catalog tables classified; attribute audit incomplete | Every PG14–18 catalog table has a machine-readable modeled/blocked/atomic/out-of-scope classification. Less-common attributes inside modeled families remain preview audit work. |
-| Server policy | Historical project support | PG 14–18 | Support is a policy boundary, not an assertion about every object variation. |
+| Unknown catalog object | Inspector dependent | Catalog tables classified; attribute audit incomplete | Every supported PostgreSQL catalog table has a machine-readable modeled/blocked/atomic/out-of-scope classification. Less-common attributes inside modeled families remain preview audit work. |
+| Server policy | Historical project support | PG 15–18 | Support is a policy boundary, not an assertion about every object variation. |
 
 ## Schemas, extensions, tables, and columns
 

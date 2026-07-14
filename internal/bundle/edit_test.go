@@ -37,6 +37,19 @@ func TestParseAssertionsSupportsNamedBooleanQueries(t *testing.T) {
 	}
 }
 
+func TestParseAssertionsRequiresExplicitDevelopmentPostconditionMarker(t *testing.T) {
+	assertions, err := ParseAssertions([]byte("-- onwardpg:assert rows_backfilled\n-- onwardpg:dev-postcondition\nSELECT true;\n-- onwardpg:assert review_only\nSELECT true;\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assertions) != 2 || !assertions[0].DevSafePostcondition || assertions[1].DevSafePostcondition {
+		t.Fatalf("assertions = %#v", assertions)
+	}
+	if _, err := ParseAssertions([]byte("-- onwardpg:dev-postcondition\nSELECT true;\n")); err == nil {
+		t.Fatal("accepted a development marker without an assertion")
+	}
+}
+
 func TestPrepareEditedAndInstallReceiptsExactSQL(t *testing.T) {
 	meta := metadata()
 	meta.HistoryParentDigest = HistoryRootDigest()

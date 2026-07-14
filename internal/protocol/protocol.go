@@ -30,7 +30,16 @@ type Result struct {
 	Batches            []Batch     `json:"batches,omitempty"`
 	Questions          []Question  `json:"questions,omitempty"`
 	Ignored            []string    `json:"ignored,omitempty"`
-	Unsupported        []string    `json:"unsupported,omitempty"`
+	// Preserved names catalog objects intentionally left in place by a
+	// workspace-compatible plan. They are not ignored: they are observed
+	// surplus state and must remain visible to the caller.
+	Preserved []string `json:"preserved,omitempty"`
+	// Compatibility records known catalog differences deliberately tolerated by
+	// a workspace plan. They are neither ignored nor converged: a caller-owned
+	// development database may retain them while still gaining the required W
+	// shape. Strict history and clone planning leave this empty.
+	Compatibility []string `json:"workspace_compatibility,omitempty"`
+	Unsupported   []string `json:"unsupported,omitempty"`
 }
 
 type Statement struct {

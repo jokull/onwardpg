@@ -159,11 +159,11 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 }
 
 func validatePostgresVersion(version int) error {
-	if version < 140000 {
-		return fmt.Errorf("PostgreSQL %d is unsupported; onwardpg supports PostgreSQL 14 through 18", version)
+	if version < 150000 {
+		return fmt.Errorf("PostgreSQL %d is unsupported; onwardpg supports PostgreSQL 15 through 18", version)
 	}
 	if version >= 190000 {
-		return fmt.Errorf("PostgreSQL %d is unsupported; onwardpg supports PostgreSQL 14 through 18", version)
+		return fmt.Errorf("PostgreSQL %d is unsupported; onwardpg supports PostgreSQL 15 through 18", version)
 	}
 	return nil
 }

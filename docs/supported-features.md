@@ -9,14 +9,14 @@ reference-behavior study used to find regressions and design cases; it is not a
 promise of one-for-one compatibility. The
 [`parity/stripe-pg-schema-diff-v1.0.7.json`](../parity/stripe-pg-schema-diff-v1.0.7.json)
 matrix indexes Stripe's complete pinned acceptance corpus and records observed
-or still-unverified differences. The supported PostgreSQL server range is 14–18.
+or still-unverified differences. The supported PostgreSQL server range is 15–18.
 
 `implemented` means code and at least one project test exist. It does **not**
 mean a feature is ready for unattended production use. A preview feature earns
 stronger confidence only with current real-PostgreSQL convergence evidence.
 
 For explicitly inventoried unsupported families, onwardpg blocks rather than
-silently ignoring the object. Every PostgreSQL 14–18 catalog table is
+silently ignoring the object. Every supported PostgreSQL catalog table is
 classified, while the finer modeled-attribute audit remains open; see [the
 safety model](safety-model.md) for that distinction and ignore-selector
 semantics, and the [reference behavior
@@ -61,7 +61,7 @@ not emit a statement referring to the new base name before that rename exists.
 For a materialized dependent, onwardpg permits PostgreSQL's native retained
 catalog rewrite only when a protected-token comparison proves its desired
 definition differs solely in deparsed relation references. This handles the
-PG14–18 variation in target-list qualification without rewriting literals,
+PG15–18 variation in target-list qualification without rewriting literals,
 comments, dollar strings, function calls, or arbitrary SQL. Any other
 materialized-dependent definition change remains conservative because its
 rebuild is destructive and needs a separately reviewed transition.
@@ -94,7 +94,7 @@ the same routine OID does not request a refresh.
 For a confirmed column rename, onwardpg also recognizes PostgreSQL's native
 rewrite of a direct ordinary or materialized dependent only for the strict
 deparsed shape `SELECT column FROM relation`. PostgreSQL preserves the view
-output name by rendering `SELECT new_column AS old_column`; PG14–15 may qualify
+output name by rendering `SELECT new_column AS old_column`; PostgreSQL may qualify
 the projected column, which is handled without parsing arbitrary SQL. Any
 expression, multi-column projection, alias, quoted identifier, or other
 dependent-view change is a structured unsupported result rather than an

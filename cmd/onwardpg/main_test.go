@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jokull/onwardpg/internal/devflow"
 	"github.com/jokull/onwardpg/internal/draftflow"
 	"github.com/jokull/onwardpg/internal/protocol"
 )
@@ -92,6 +93,64 @@ func TestWriteDecisionsTextProducesCopyableHints(t *testing.T) {
 	}
 }
 
+func TestWriteDecisionsTextWithFlagScopesDevelopmentHints(t *testing.T) {
+	var output bytes.Buffer
+	err := writeDecisionsTextWithFlag(&output, "development workspace", "--dev-hint", []protocol.Decision{{Choices: []protocol.DecisionChoice{
+		{Hint: protocol.Hint{Kind: "rename", Object: "table", From: []string{"app", "accounts"}, To: []string{"app", "customers"}}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "development workspace needs 1 decision(s)") ||
+		!strings.Contains(output.String(), `--dev-hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}'`) ||
+		strings.Contains(output.String(), "    --hint ") {
+		t.Fatalf("scoped decision text = %s", output.String())
+	}
+}
+
+func TestWorkflowSQLWarnsOnlyForUnprovableAcceptedWork(t *testing.T) {
+	durable := draftflow.Report{
+		Outcome: string(protocol.Planned),
+		AcceptedSteps: []draftflow.AcceptedStep{
+			{Path: "upstream/phases/expand.sql", Kind: "generated_structural_phase"},
+			{Path: "upstream/phases/migrate.sql", Kind: "agent_authored_phase", RequiresReview: true},
+		},
+	}
+	development := devflow.Report{Status: protocol.Planned, Result: protocol.Result{
+		Statements: []protocol.Statement{{SQL: `CREATE TABLE "app"."events" ();`, Phase: "expand", Safety: "safe"}},
+	}}
+	var output bytes.Buffer
+	if err := writeWorkflowPlanReport(&output, "sql", durable, development); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "agent_authored_phase") {
+		t.Fatalf("missing review warning: %s", text)
+	}
+	if strings.Contains(text, "generated_structural_phase") {
+		t.Fatalf("structural phase should not be rendered as an unprovable warning: %s", text)
+	}
+}
+
+func TestWorkflowPostconditionFailureNeedsDevelopmentReview(t *testing.T) {
+	development := devflow.Report{Status: protocol.Planned, Postconditions: []devflow.PostconditionResult{{
+		BundleID: "upstream", Path: "upstream/verify.sql", ID: "backfill", Status: "failed", Message: "assertion returned false",
+	}}}
+	if status := workflowPlanStatus(string(protocol.Planned), development); status != "needs_development_review" {
+		t.Fatalf("status = %q", status)
+	}
+	if code := workflowPlanExitCode(string(protocol.Planned), development); code != 2 {
+		t.Fatalf("exit code = %d", code)
+	}
+	var output bytes.Buffer
+	if err := writeWorkflowPlanReport(&output, "sql", draftflow.Report{Outcome: string(protocol.Planned)}, development); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "postcondition failed") || !strings.Contains(output.String(), "assertion returned false") {
+		t.Fatalf("SQL evidence = %s", output.String())
+	}
+}
+
 func TestShellQuoteProtectsAgentCopyableHints(t *testing.T) {
 	if quoted := shellQuote("it's"); quoted != `'it'"'"'s'` {
 		t.Fatalf("single-quote escaping = %s", quoted)
@@ -127,6 +186,7 @@ func TestHelpIsSuccessfulForEveryCommandSurface(t *testing.T) {
 		run  func() int
 	}{
 		{name: "init", run: func() int { return runInitAt([]string{"--help"}, t.TempDir()) }},
+		{name: "status", run: func() int { return runStatusAt([]string{"--help"}, t.TempDir()) }},
 		{name: "history-group", run: func() int { return runHistoryStatusAt([]string{"--help"}, t.TempDir()) }},
 		{name: "history-status", run: func() int { return runHistoryStatusAt([]string{"status", "--help"}, t.TempDir()) }},
 		{name: "dev-group", run: func() int { return runDevAt([]string{"--help"}, t.TempDir()) }},
@@ -155,6 +215,60 @@ func TestRootHelpExplainsTheNoApplyBoundary(t *testing.T) {
 	output := captureStdout(t, run)
 	if output.code != 0 || !strings.Contains(output.stdout, "history status") || !strings.Contains(output.stdout, "never applies them to caller databases") {
 		t.Fatalf("root help = %#v", output)
+	}
+}
+
+func TestPlanRequiresAnActivePlanOrInitialNameBeforeDatabaseAccess(t *testing.T) {
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_UNUSED_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_UNUSED_SCRATCH_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app;\n")
+	output := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"--target", "primary"}, repository)
+	})
+	if output.code != 4 || !strings.Contains(output.stdout, `"code":"active_plan_required"`) {
+		t.Fatalf("plan without active anchor = %d, %s", output.code, output.stdout)
+	}
+}
+
+func TestVerifyUsesActivePlanOnlyWhenOneExists(t *testing.T) {
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_UNUSED_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_UNUSED_SCRATCH_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app;\n")
+	output := captureStdout(t, func() int {
+		return runVerifyAt([]string{"--target", "primary"}, repository)
+	})
+	if output.code != 1 || !strings.Contains(output.stdout, `"code":"active_plan_required"`) {
+		t.Fatalf("verify without active anchor = %d, %s", output.code, output.stdout)
+	}
+}
+
+func TestStatusReportsNoActivePlanWithoutDatabaseAccess(t *testing.T) {
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_UNUSED_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_UNUSED_SCRATCH_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app;\n")
+	output := captureStdout(t, func() int {
+		return runStatusAt([]string{"--target", "primary"}, repository)
+	})
+	if output.code != 0 || !strings.Contains(output.stdout, `"status":"no_active_plan"`) {
+		t.Fatalf("status without active anchor = %d, %s", output.code, output.stdout)
 	}
 }
 

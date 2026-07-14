@@ -5,17 +5,68 @@ The preferred developer-preview surface is:
 ~~~text
 onwardpg config check
 onwardpg init --target TARGET
-onwardpg history status --target TARGET [--bundle ID]
-onwardpg dev plan --target TARGET
-onwardpg draft --target TARGET --bundle ID --after ACCEPTED_HEAD_REF [--create]
-onwardpg verify --target TARGET --bundle ID
+onwardpg plan NAME --target TARGET
+onwardpg plan --target TARGET --output sql
+onwardpg status --target TARGET
+onwardpg verify --target TARGET
 onwardpg drift check --target TARGET --database URL
-onwardpg plan --from SOURCE --to SOURCE
+onwardpg diff --from SOURCE --to SOURCE
 ~~~
 
 All commands print JSON by default. onwardpg never applies migration SQL to a
-caller-owned database. init, draft, and verify use scratch_database_env when
+caller-owned database. `plan` keeps one worktree-local active migration anchor;
+it derives the durable bundle from accepted history to working DDL and, when a
+development database is configured, separately prints a safe D → W
+reconciliation with `--output sql`. init, plan, and verify use scratch_database_env when
 configured and otherwise fall back to dev_database_env for compatibility.
+
+`draft`, `dev plan`, `history status`, and source-to-source `plan --from --to`
+remain lower-level compatibility interfaces. New integrations should use
+`plan`, `status`, and `diff` above. They are documented below because their
+receipts and protocols remain supported during the developer preview.
+
+## plan
+
+~~~sh
+onwardpg plan [NAME] --target primary \
+  [--bundle ID] [--hint JSON] [--hints-file FILE] \
+  [--dev-hint JSON] [--dev-hints-file FILE] \
+  [--output json|text|sql]
+~~~
+
+`plan NAME` starts one evolving logical migration in the current worktree.
+Later `plan --target primary` calls resume it; there is no lock or finalize
+command. The bundle is always recalculated from replayed accepted history (H)
+to exported working DDL (W), so an incoming accepted migration becomes part of
+the ground beneath the same feature bundle rather than a second feature
+migration. `--bundle` selects the same anchor in a clean CI checkout.
+
+When development configuration is present, `plan --output sql` writes only the
+direct development reconciliation (D → W) to stdout. It is deliberately not
+the cumulative PR bundle and it preserves surplus dev objects in workspace
+mode, preventing branch switches from suggesting destructive cleanup. JSON and
+text output contain the reviewable H → W bundle report plus that D → W report.
+No output is applied automatically.
+
+`plan` exits `2` when either comparison needs a decision or editable SQL. A
+durable question is answered with the same strict `--hint` form as `draft`.
+Development questions are reported independently and are answered on the same
+command with `--dev-hint` (or `--dev-hints-file`). A valid history-to-working
+answer is never guessed to mean the same thing for an arbitrary long-lived
+development database. Workspace mode preserves an absence-only object from D
+rather than proposing a local rename or drop; scoped development hints are for
+strict/disposable databases or an actual incompatible D → W transition.
+
+## status
+
+~~~sh
+onwardpg status --target primary
+~~~
+
+Reads the worktree-local active-plan anchor and repository history only. It
+reports the PlanID, selected bundle, and whether its parent is current, stale,
+or invalid. It does not read Git or contact PostgreSQL. `verify --target` uses
+this same anchor by default.
 
 ## config check
 
@@ -198,10 +249,10 @@ unexpected, and changed objects. Exit zero means drift_free; drift exits 4.
 The audit never generates repair SQL, changes history, or participates in
 ordinary draft generation.
 
-## plan
+## diff (and compatibility `plan --from --to`)
 
 ~~~sh
-onwardpg plan --from SOURCE --to SOURCE [options]
+onwardpg diff --from SOURCE --to SOURCE [options]
 ~~~
 
 SOURCE is either a PostgreSQL URL or file:///absolute/path/schema.sql. Live URLs
@@ -218,16 +269,17 @@ DDL.
 | --hints-file FILE | Array of semantic decisions |
 | --output text\|json | JSON by default; text renders decisions or SQL |
 
-The remaining planner and ignore flags match dev plan. `plan` never writes a
-bundle. Use `draft` when the result belongs to the configured append-only
-history.
+The remaining planner and ignore flags match dev plan. `diff` never writes a
+bundle. `plan --from --to` is retained as a compatibility spelling. Use the
+high-level `plan NAME --target TARGET` when the result belongs to configured
+onwardpg history.
 
 ## Exit codes
 
 | Exit | Meaning |
 | --- | --- |
 | 0 | Complete plan, no changes, absorbed generated draft, or successful full verification |
-| 2 | A semantic decision or SQL edit remains |
+| 2 | A semantic decision, SQL edit, or explicitly checked development postcondition needs review |
 | 3 | Unsupported schema state |
 | 4 | History, convergence, residual, or policy blocker |
 | 1 | Invocation, configuration, source, or internal error |

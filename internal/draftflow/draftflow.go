@@ -33,31 +33,58 @@ type Finding struct {
 	Remediation string `json:"remediation,omitempty"`
 }
 
+// AcceptedStep inventories one artifact in base history that arrived beneath
+// the selected feature plan. It is evidence only: onwardpg never replays these
+// bytes into a caller-owned development database. Generated structural phases
+// are listed separately from work whose data or operational effects cannot be
+// proven from a catalog snapshot.
+type AcceptedStep struct {
+	BundleID       string `json:"bundle_id"`
+	Path           string `json:"path"`
+	Kind           string `json:"kind"`
+	Reason         string `json:"reason"`
+	RequiresReview bool   `json:"requires_review"`
+}
+
+// DevelopmentPostcondition is an explicitly opted-in boolean assertion from
+// newly accepted history. SQL stays internal to the command handoff; the
+// public report exposes only its evaluated evidence. It is run only in a
+// read-only transaction against a caller-owned development database.
+type DevelopmentPostcondition struct {
+	BundleID string
+	Path     string
+	ID       string
+	SQL      string
+}
+
 type Report struct {
-	ProtocolVersion    string                     `json:"protocol_version"`
-	Outcome            string                     `json:"status"`
-	Target             string                     `json:"target"`
-	BundleID           string                     `json:"bundle_id"`
-	Path               string                     `json:"path,omitempty"`
-	Generation         int                        `json:"generation,omitempty"`
-	HistoryHead        string                     `json:"history_head,omitempty"`
-	BaseBundle         string                     `json:"base_bundle,omitempty"`
-	BaseRef            string                     `json:"base_ref,omitempty"`
-	AssertedBaseRef    string                     `json:"asserted_base_ref,omitempty"`
-	PreviousParent     string                     `json:"previous_parent,omitempty"`
-	ParentChanged      bool                       `json:"parent_changed,omitempty"`
-	CurrentFingerprint string                     `json:"current_fingerprint,omitempty"`
-	DesiredFingerprint string                     `json:"desired_fingerprint,omitempty"`
-	Plan               *protocol.Result           `json:"plan,omitempty"`
-	Decisions          []protocol.Decision        `json:"decisions,omitempty"`
-	EditFiles          []string                   `json:"edit_files,omitempty"`
-	AnswerRebind       *protocol.RebindReport     `json:"answer_rebind,omitempty"`
-	EditReconciliation *bundle.EditReconciliation `json:"edit_reconciliation,omitempty"`
-	Verification       *verify.Report             `json:"verification,omitempty"`
-	Findings           []Finding                  `json:"findings,omitempty"`
-	RemovedBundle      bool                       `json:"removed_bundle,omitempty"`
-	CreatedBundle      bool                       `json:"created_bundle,omitempty"`
-	WrittenReceipts    []string                   `json:"written_receipts,omitempty"`
+	ProtocolVersion           string                     `json:"protocol_version"`
+	Outcome                   string                     `json:"status"`
+	Target                    string                     `json:"target"`
+	BundleID                  string                     `json:"bundle_id"`
+	PlanID                    string                     `json:"plan_id,omitempty"`
+	Path                      string                     `json:"path,omitempty"`
+	Generation                int                        `json:"generation,omitempty"`
+	HistoryHead               string                     `json:"history_head,omitempty"`
+	BaseBundle                string                     `json:"base_bundle,omitempty"`
+	BaseRef                   string                     `json:"base_ref,omitempty"`
+	AssertedBaseRef           string                     `json:"asserted_base_ref,omitempty"`
+	PreviousParent            string                     `json:"previous_parent,omitempty"`
+	ParentChanged             bool                       `json:"parent_changed,omitempty"`
+	AcceptedSteps             []AcceptedStep             `json:"accepted_steps_requiring_review,omitempty"`
+	DevelopmentPostconditions []DevelopmentPostcondition `json:"-"`
+	CurrentFingerprint        string                     `json:"current_fingerprint,omitempty"`
+	DesiredFingerprint        string                     `json:"desired_fingerprint,omitempty"`
+	Plan                      *protocol.Result           `json:"plan,omitempty"`
+	Decisions                 []protocol.Decision        `json:"decisions,omitempty"`
+	EditFiles                 []string                   `json:"edit_files,omitempty"`
+	AnswerRebind              *protocol.RebindReport     `json:"answer_rebind,omitempty"`
+	EditReconciliation        *bundle.EditReconciliation `json:"edit_reconciliation,omitempty"`
+	Verification              *verify.Report             `json:"verification,omitempty"`
+	Findings                  []Finding                  `json:"findings,omitempty"`
+	RemovedBundle             bool                       `json:"removed_bundle,omitempty"`
+	CreatedBundle             bool                       `json:"created_bundle,omitempty"`
+	WrittenReceipts           []string                   `json:"written_receipts,omitempty"`
 }
 
 type Input struct {
@@ -68,7 +95,9 @@ type Input struct {
 	Target         workspace.Target
 	AdminURL       string
 	BundleID       string
+	PlanID         string
 	AfterRef       string
+	InferBase      bool
 	Create         bool
 	BuildVersion   string
 	Purpose        string
@@ -88,6 +117,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		Outcome:         "error",
 		Target:          input.TargetName,
 		BundleID:        input.BundleID,
+		PlanID:          input.PlanID,
 	}
 	if input.Root == "" || !filepath.IsAbs(input.Root) {
 		return report, fmt.Errorf("draft root must be absolute")
@@ -108,7 +138,8 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		input.Purpose = "feature"
 	}
 	report.AssertedBaseRef = input.AfterRef
-	if input.AfterRef == "" {
+	var assertedBundle, assertedDigest string
+	if input.AfterRef == "" && !input.InferBase {
 		statusCommand := "onwardpg history status --target " + input.TargetName
 		if !input.Create {
 			statusCommand += " --bundle " + input.BundleID
@@ -121,15 +152,22 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}}
 		return report, nil
 	}
-	assertedBundle, assertedDigest, err := history.ParseHeadRef(input.AfterRef)
-	if err != nil {
-		report.Outcome = "blocked"
-		report.Findings = []Finding{{
-			Code:        "invalid_base_anchor",
-			Message:     err.Error(),
-			Remediation: "copy head_ref exactly from onwardpg history status --target " + input.TargetName,
-		}}
-		return report, nil
+	if input.AfterRef != "" {
+		var parseErr error
+		assertedBundle, assertedDigest, parseErr = history.ParseHeadRef(input.AfterRef)
+		if parseErr == nil {
+			// The explicit anchor remains a supported expert/CI assertion.
+			// Ordinary `onwardpg plan` sets InferBase and derives this same head
+			// after excluding its selected mutable bundle.
+		} else {
+			report.Outcome = "blocked"
+			report.Findings = []Finding{{
+				Code:        "invalid_base_anchor",
+				Message:     parseErr.Error(),
+				Remediation: "copy head_ref exactly from onwardpg history status --target " + input.TargetName,
+			}}
+			return report, nil
+		}
 	}
 	lock, err := targetlock.Acquire(input.ConfigPath, input.TargetName)
 	if err != nil {
@@ -212,6 +250,26 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}}
 		return report, nil
 	}
+	if selected != nil && input.PlanID != "" {
+		if selected.Artifact.Manifest.PlanID == "" {
+			report.Outcome = "blocked"
+			report.Findings = []Finding{{
+				Code:        "selected_bundle_has_no_plan_id",
+				Message:     fmt.Sprintf("selected bundle %s predates active-plan identity", input.BundleID),
+				Remediation: "continue it with onwardpg draft, or create a new onwardpg plan with a new feature name",
+			}}
+			return report, nil
+		}
+		if selected.Artifact.Manifest.PlanID != input.PlanID {
+			report.Outcome = "blocked"
+			report.Findings = []Finding{{
+				Code:        "active_plan_identity_mismatch",
+				Message:     fmt.Sprintf("local active plan %s does not match selected bundle plan id %s", input.PlanID, selected.Artifact.Manifest.PlanID),
+				Remediation: "select the correct feature plan explicitly or remove the stale local active-plan anchor",
+			}}
+			return report, nil
+		}
+	}
 	for _, entry := range chain.Entries {
 		recorded := entry.Artifact.Manifest.DesiredSource.PostgresMajor
 		if recorded != 0 && recorded != postgresMajor {
@@ -223,7 +281,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.BaseBundle = chain.Entries[len(chain.Entries)-1].Directory
 	}
 	report.BaseRef = history.HeadRef(chain)
-	if report.BaseBundle != assertedBundle || chain.HeadDigest != assertedDigest {
+	if input.AfterRef != "" && (report.BaseBundle != assertedBundle || chain.HeadDigest != assertedDigest) {
 		report.Outcome = "blocked"
 		report.Findings = []Finding{{
 			Code:        "base_anchor_mismatch",
@@ -235,6 +293,13 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if selected != nil {
 		report.PreviousParent = selected.Artifact.Manifest.History.ParentDigest
 		report.ParentChanged = report.PreviousParent != chain.HeadDigest
+		if report.ParentChanged {
+			report.AcceptedSteps = acceptedStepsSince(chain, report.PreviousParent)
+			report.DevelopmentPostconditions, err = developmentPostconditionsSince(chain, report.PreviousParent)
+			if err != nil {
+				return report, fmt.Errorf("inventory accepted development postconditions: %w", err)
+			}
+		}
 	}
 
 	replay, err := chain.Replay()
@@ -328,6 +393,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 
 	metadata := bundle.Metadata{
 		BundleID: input.BundleID,
+		PlanID:   input.PlanID,
 		Target:   input.TargetName,
 		Purpose:  input.Purpose,
 		BaselineSource: bundle.SourceReceipt{
@@ -475,6 +541,125 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.WrittenReceipts = bundle.SortedFiles(artifact.Files)
 	}
 	return report, nil
+}
+
+func acceptedStepsSince(chain history.Chain, previousParent string) []AcceptedStep {
+	found := previousParent == chain.RootDigest
+	seen := make(map[string]bool)
+	var steps []AcceptedStep
+	for _, entry := range chain.Entries {
+		if !found {
+			if entry.Artifact.Manifest.History != nil && entry.Artifact.Manifest.History.EntryDigest == previousParent {
+				found = true
+			}
+			continue
+		}
+		manifest := entry.Artifact.Manifest
+		for _, phase := range orderedPhaseNames(manifest.Phases) {
+			receipt := manifest.Phases[phase]
+			step := classifyAcceptedPhase(entry.Directory, phase, receipt.Path, manifest.PhaseSource)
+			key := step.Path + "/" + step.Kind
+			if !seen[key] {
+				seen[key] = true
+				steps = append(steps, step)
+			}
+		}
+		if manifest.VerificationDigest != "" {
+			step := AcceptedStep{
+				BundleID:       entry.Directory,
+				Path:           entry.Directory + "/verify.sql",
+				Kind:           "verification_assertions",
+				Reason:         "assertions_are_not_evidence_that_historical_data_work_ran_in_development",
+				RequiresReview: true,
+			}
+			key := step.Path + "/" + step.Kind
+			if !seen[key] {
+				seen[key] = true
+				steps = append(steps, step)
+			}
+		}
+	}
+	sort.Slice(steps, func(i, j int) bool {
+		if steps[i].Path != steps[j].Path {
+			return steps[i].Path < steps[j].Path
+		}
+		return steps[i].Kind < steps[j].Kind
+	})
+	return steps
+}
+
+func orderedPhaseNames(phases map[string]bundle.PhaseArtifact) []string {
+	names := make([]string, 0, len(phases))
+	for phase := range phases {
+		names = append(names, phase)
+	}
+	rank := map[string]int{"expand": 0, "migrate": 1, "manual": 2, "contract": 3}
+	sort.Slice(names, func(i, j int) bool {
+		left, leftKnown := rank[names[i]]
+		right, rightKnown := rank[names[j]]
+		if leftKnown && rightKnown {
+			return left < right
+		}
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		return names[i] < names[j]
+	})
+	return names
+}
+
+func classifyAcceptedPhase(bundleID, phase, path, phaseSource string) AcceptedStep {
+	step := AcceptedStep{BundleID: bundleID, Path: bundleID + "/" + path}
+	switch {
+	case phaseSource == "edited":
+		step.Kind = "agent_authored_phase"
+		step.Reason = "agent_authored_sql_may_include_data_or_operational_work_not_provable_from_catalog"
+		step.RequiresReview = true
+	case phase == "migrate" || phase == "manual":
+		step.Kind = "generated_migrate_or_manual_phase"
+		step.Reason = "phase_may_include_validation_or_other_effects_not_provable_from_catalog"
+		step.RequiresReview = true
+	default:
+		step.Kind = "generated_structural_phase"
+		step.Reason = "structural_destination_is_accounted_for_by_development_catalog_reconciliation"
+	}
+	return step
+}
+
+func developmentPostconditionsSince(chain history.Chain, previousParent string) ([]DevelopmentPostcondition, error) {
+	found := previousParent == chain.RootDigest
+	var checks []DevelopmentPostcondition
+	for _, entry := range chain.Entries {
+		if !found {
+			if entry.Artifact.Manifest.History != nil && entry.Artifact.Manifest.History.EntryDigest == previousParent {
+				found = true
+			}
+			continue
+		}
+		manifest := entry.Artifact.Manifest
+		if manifest.VerificationDigest == "" {
+			continue
+		}
+		assertions, err := bundle.ParseAssertions(entry.Artifact.Files["verify.sql"])
+		if err != nil {
+			return nil, fmt.Errorf("parse %s/verify.sql: %w", entry.Directory, err)
+		}
+		for _, assertion := range assertions {
+			if !assertion.DevSafePostcondition {
+				continue
+			}
+			checks = append(checks, DevelopmentPostcondition{
+				BundleID: entry.Directory, Path: entry.Directory + "/verify.sql", ID: assertion.ID, SQL: assertion.SQL,
+			})
+		}
+	}
+	sort.Slice(checks, func(i, j int) bool {
+		if checks[i].BundleID != checks[j].BundleID {
+			return checks[i].BundleID < checks[j].BundleID
+		}
+		return checks[i].ID < checks[j].ID
+	})
+	return checks, nil
 }
 
 func ensureInputsUnchanged(ctx context.Context, input Input, lock *targetlock.Lock, expected history.Chain, selected *history.Entry, desiredFingerprint string) error {
