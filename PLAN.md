@@ -9,7 +9,7 @@ The product should feel obvious:
 ```sh
 onwardpg dev plan --target primary
 onwardpg history status --target primary
-onwardpg draft --target primary --bundle customer-profile --after baseline
+onwardpg draft --target primary --bundle customer-profile --after "$BASE_HEAD" --create
 onwardpg verify --target primary --bundle customer-profile
 ```
 
@@ -43,8 +43,14 @@ The foundation already exists:
 - repeated drafting preserves non-conflicting agent edits with conservative
   phase-level three-way reconciliation;
 - the same selected bundle remains mutable as feature work evolves;
-- parent hashes detect base erosion, while mandatory `--after` prevents a
-  feature from accidentally stacking on another unpublished bundle;
+- `history status` emits an exact name-and-digest `head_ref`; mandatory
+  `--after` prevents stacking on another unpublished or same-named rewritten
+  bundle;
+- one-shot `--create` distinguishes a new feature from refresh, so a bundle
+  accidentally lost during rebase cannot silently discard agent-authored SQL;
+- a repository-scoped OS advisory lock plus final configuration, DDL, history, and
+  artifact comparisons reject concurrent onwardpg forks and changing inputs
+  during draft or verification;
 - `history status` exposes the ordered head and whether a selected bundle is
   current or stale without requiring a database or Git checkout;
 - `verify --check` validates receipts without modifying the checkout; and
@@ -63,8 +69,8 @@ The first decision-loop slice is now implemented:
 - internal answers retain narrow scope fingerprints without exposing them to
   the authoring exchange;
 - accepted hints persist in generated `decisions.json` receipts;
-- `onwardpg/draft/3` decision output contains only semantic choice sets and
-  choice-specific hazards;
+- `onwardpg.draft/v4` decision output contains semantic choice sets,
+  choice-specific hazards, and the paths of decision receipts it wrote;
 - `manual_sql` produces `needs_sql_edits` plus a phase-local `ONWARDPG TODO`,
   never an incomplete success; and
 - real PostgreSQL acceptance tests cover semantic rename, clone verification,
@@ -175,13 +181,15 @@ tip in the base checkout, then asks onwardpg to validate that local history:
 
 ```sh
 onwardpg history status --target primary
+BASE_HEAD=$(onwardpg history status --target primary | jq -r .head_ref)
 ```
 
 ```sh
 onwardpg draft \
   --target primary \
   --bundle customer-profile \
-  --after baseline
+  --after "$BASE_HEAD" \
+  --create
 ```
 
 `draft` replays every bundle except the explicitly selected feature bundle,
@@ -214,13 +222,13 @@ The JSON form is non-interactive and carries the same finite choice set:
 onwardpg draft \
   --target primary \
   --bundle customer-profile \
-  --after baseline \
+  --after "$BASE_HEAD" \
   --output json
 ```
 
 ```json
 {
-  "protocol_version": "onwardpg/draft/3",
+  "protocol_version": "onwardpg.draft/v4",
   "status": "needs_decisions",
   "next_action": "rerun_same_command_with_hints",
   "decisions": [
@@ -268,7 +276,7 @@ For the common one-choice iteration, that object is passed directly:
 onwardpg draft \
   --target primary \
   --bundle customer-profile \
-  --after baseline \
+  --after "$BASE_HEAD" \
   --hint '{"kind":"rename","object":"column","from":["public","users","name"],"to":["public","users","display_name"]}'
 ```
 
@@ -397,7 +405,7 @@ The feature bundle does not lock or finalize. If desired DDL changes, rerun the
 same command with the same bundle ID and accepted predecessor:
 
 ```sh
-onwardpg draft --target primary --bundle customer-profile --after baseline
+onwardpg draft --target primary --bundle customer-profile --after "$BASE_HEAD"
 ```
 
 It remains one cumulative history-head-to-working-schema migration even if an
@@ -426,7 +434,7 @@ onwardpg history status --target primary --bundle customer-profile
 onwardpg draft \
   --target primary \
   --bundle customer-profile \
-  --after upstream-settings
+  --after "$NEW_BASE_HEAD"
 ```
 
 If an unrelated unpublished bundle is also present after that accepted tip,
@@ -831,10 +839,25 @@ workflow that implies Git intelligence, JSON orchestration, or database apply.
 ### K. Protocol, help, and partial verification
 
 - Every top-level JSON envelope uses `protocol_version` and `status`; decision
-  and SQL-edit handoffs include a stable `next_action`.
+  and SQL-edit handoffs include a stable `next_action`; written decision
+  receipts are reported instead of silently dirtying the checkout.
 - Every command and subcommand `--help` exits successfully.
-- Partial clone verification reports exactly which bundle phases were
-  simulated and which remain; it never implies those phases ran in production.
+- Text hints are shell-safe and preserve mutually exclusive decision groups.
+- Partial clone verification returns `partial_verified` only after the prefix
+  and full continuation both succeed; it never implies those phases ran in
+  production.
+
+### L. Restack continuity and concurrency
+
+- `history status` emits an exact content-bound `head_ref`; a same-name head
+  with different bytes does not satisfy `draft --after`.
+- First creation requires `--create`; refresh requires the folder to exist.
+- Restack unreceipted but valid edited SQL after incoming history without a
+  receipt-install deadlock.
+- Serialize target lifecycle commands and revalidate the exact base and
+  selected artifact before replacement, receipt installation, or removal.
+- Selecting an accepted historical non-head reports
+  `selected_bundle_not_head`, not generic invalid history.
 
 ## Developer-preview definition of done
 
@@ -870,18 +893,15 @@ than failing late with an opaque fingerprint mismatch.
 
 ## Immediate next slice
 
-Do not expand PostgreSQL feature coverage in this slice. Finish the PR-anchor
-hardening as one coherent developer-preview change:
+Do not expand PostgreSQL feature coverage. The PR-anchor and restack hardening
+above is implemented; the remaining work is release proof:
 
-1. require and validate `draft --after`, expose `history status`, and cover
-   stale, missing, conflicting, and absorbed bundle lifecycles;
-2. reject impossible physical column ordering before bundle generation;
-3. normalize command envelopes, help exits, config validation, and partial
-   verification reporting;
-4. execute the README, integration, race, static-analysis, and PostgreSQL 14–18
-   suites from disposable servers; and
-5. publish the first preview tag only if generated artifacts and observed CLI
-   output still match the documentation.
+1. rerun the executable README flow and all real-PostgreSQL restack scenarios;
+2. run formatting, vet, race, static analysis, protocol/matrix validation, and
+   the PostgreSQL 14–18 CI matrix;
+3. perform one final blind cold read against the updated CLI and docs; and
+4. publish the first preview tag only if generated artifacts and observed CLI
+   output match the documentation with no unresolved critical finding.
 
 This is the junction for every future proposal: if it does not make
 replay, draft, decision, SQL ownership, or verification simpler and safer, it

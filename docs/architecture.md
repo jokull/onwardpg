@@ -26,9 +26,13 @@ production ───────────────────────
 - Plans are forward-only artifacts. Applying them is outside the planner.
 - Git state is supplied by the coding agent through the files in the checkout;
   the core sees only history, one explicitly selected draft, the accepted
-  predecessor asserted by `--after`, and desired DDL. The assertion must equal
-  the validated base-chain head, preventing accidental unpublished stacking
-  without teaching onwardpg about Git.
+  predecessor `head_ref` asserted by `--after`, and desired DDL. The exact
+  name-and-digest assertion must equal the validated base-chain head,
+  preventing accidental unpublished or same-named rewritten stacking without
+  teaching onwardpg about Git. One-shot `--create` distinguishes first creation
+  from refresh. A repository-scoped OS advisory lock serializes lifecycle commands;
+  their commit points reload configuration and revalidate DDL, history, and
+  exact artifacts before writing.
 - PostgreSQL physical column positions are preserved catalog state. A desired
   order that `ALTER TABLE` cannot reach is an explicit unsupported result, not
   silent equivalence or a late fingerprint-only failure.

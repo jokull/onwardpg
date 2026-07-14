@@ -149,6 +149,11 @@ onwardpg dev plan --target primary
 This compares D → W. It prints a versioned plan and never runs it. A coding
 agent may deliberately apply the SQL through the project's own tools, observe
 the application, change the declarative schema, and run the command again.
+When the two catalogs already agree, JSON says `status: "no_changes"` and
+`changed: false`; text output says `-- onwardpg: no changes`.
+All JSON outcomes use `onwardpg.dev-plan/v3`; low-level `plan` likewise uses
+`onwardpg.plan/v3` rather than changing protocol identity between questions
+and complete plans.
 
 After a pull or rebase, D may be missing both upstream and feature work.
 dev plan simply reports the complete local reconciliation. It does not affect
@@ -168,28 +173,50 @@ to build on:
 onwardpg history status --target primary
 ~~~
 
-The response returns the ordered chain, `head_bundle`, and `history_head`.
+The response returns the ordered chain, `head_bundle`, `history_head`, and a
+copyable `head_ref` that binds the name to the exact content digest:
+
+~~~json
+{
+  "status": "valid",
+  "head_bundle": "baseline",
+  "history_head": "sha256:…",
+  "head_ref": "baseline@sha256:…"
+}
+~~~
+
+In a shell walkthrough, the same copy step can be written as:
+
+~~~sh
+BASE_HEAD=$(onwardpg history status --target primary | jq -r .head_ref)
+~~~
+
 Git remains outside onwardpg: the coding agent runs this against the rebased
 main checkout or otherwise uses its Git context to identify that accepted tip.
-It then creates or refreshes the PR-owned bundle explicitly after it:
+It copies that exact `head_ref` into the first draft invocation:
 
 ~~~sh
 onwardpg draft \
   --target primary \
-  --bundle payment-settlement \
-  --after baseline
+  --bundle customer-rename \
+  --after "$BASE_HEAD" \
+  --create
 ~~~
 
-Keep using the same bundle ID and accepted predecessor while the feature
-evolves. `--after` is the one fact supplied from the agent's Git context. The
-command does not inspect the branch, origin/main, commits, merge bases, or pull
-requests.
+Here `$BASE_HEAD` is the exact `head_ref`, not merely `baseline`. `--create` is
+used once. Every later call omits it and therefore asserts that the selected
+bundle must still exist. That small distinction prevents a rebase that
+accidentally dropped hand-authored SQL from silently recreating a weaker
+bundle. Keep using the same bundle ID and accepted head while the feature
+evolves. The command does not inspect the branch, origin/main, commits, merge
+bases, or pull requests.
 
 draft:
 
-1. excludes only payment-settlement from the candidate base;
+1. excludes only customer-rename from the candidate base;
 2. validates every other bundle as one hash chain;
-3. requires that chain to end at the bundle named by `--after`;
+3. requires that chain to end at the exact name-and-digest `head_ref` named by
+   `--after`;
 4. replays that history on disposable PostgreSQL;
 5. exports and materializes the working DDL;
 6. plans H → W through the typed PostgreSQL graph;
@@ -198,8 +225,8 @@ draft:
 9. clone-verifies generated complete plans before writing them.
 
 This prevents accidental stacking. If another unpublished feature bundle sits
-between `baseline` and `payment-settlement`, the actual base head does not
-match `--after baseline`, so draft exits 4 without writing. The agent must make
+between `baseline` and `customer-rename`, the actual base head does not match
+the supplied `head_ref`, so draft exits 4 without writing. The agent must make
 the checkout contain accepted history plus only the PR-owned mutable bundle.
 
 The selected bundle remains a mutable cumulative `H → W` draft even after its
@@ -208,11 +235,20 @@ SQL has been deliberately applied to the developer database. There is no
 
 If accounts became customers, onwardpg asks rather than guessing:
 
+This example assumes the table's dependent objects keep stable explicit names.
+Today, renaming a table while also regenerating table-derived constraint or
+index names can make the structural match too weak to offer a table rename;
+use stable explicit names if rename detection is required. If only destructive
+drop/create is offered, stop and review it rather than assuming data is
+preserved.
+
 ~~~json
 {
-  "protocol_version": "onwardpg/draft/3",
+  "protocol_version": "onwardpg.draft/v4",
   "status": "needs_decisions",
-  "next_action": "rerun_same_command_with_hints",
+  "next_action": "rerun_without_create_with_hints",
+  "path": "migrations/onward/primary/customer-rename",
+  "written_receipts": ["manifest.json", "questions.json", "decisions/attempt-001.json"],
   "decisions": [
     {
       "choices": [
@@ -245,7 +281,7 @@ the offered semantic hint:
 onwardpg draft \
   --target primary \
   --bundle customer-rename \
-  --after baseline \
+  --after "$BASE_HEAD" \
   --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}'
 ~~~
 
@@ -290,7 +326,8 @@ than a JSON orchestration contract:
 onwardpg draft \
   --target primary \
   --bundle event-date \
-  --after baseline \
+  --after "$BASE_HEAD" \
+  --create \
   --hint '{"kind":"type_change","name":["app","events","occurred_on"],"strategy":"manual_sql"}'
 ~~~
 
@@ -331,6 +368,12 @@ migrations/onward/primary/customer-rename/
 Only non-empty phases are written. SQL includes phase, batch, transaction, and
 hazard comments. CREATE INDEX CONCURRENTLY and similar operations are separated
 from transactional batches.
+
+The report's top-level `status` is the bundle lifecycle result. The nested
+`plan` is the immutable generator basis kept for receipts and three-way
+regeneration, so an edited, clone-verified bundle can still contain the
+original nested `plan.status: "needs_sql_edits"`. Consumers must not treat that
+nested historical value as the current bundle status.
 
 `decisions.json`, `questions.json`, and `answers.json` are generated receipts.
 Only the compact semantic hint is authored by the agent; fingerprints and
@@ -400,7 +443,7 @@ receipted bundle without changing the checkout. It also recompiles the current
 configured DDL and rejects a bundle whose recorded desired fingerprint is
 stale, directing the agent back to `draft`.
 
-A partial checkpoint is diagnostic:
+A partial checkpoint is clone-verified but does not receipt environment state:
 
 ~~~sh
 onwardpg verify \
@@ -409,25 +452,43 @@ onwardpg verify \
   --through expand
 ~~~
 
-The report names `simulated_bundle_phases` and
-`remaining_bundle_phases`. These describe disposable-clone execution only;
-they are not a journal claiming that an environment ran anything.
+The report returns `status: "partial_verified"`, names
+`simulated_bundle_phases`, `remaining_bundle_phases`, and the expected residual
+to the final schema. It proves that the exact prefix executes and that the same
+prefix followed by the remaining phases converges on independent disposable
+clones. It does not install edited-file receipts or claim that any real
+environment ran anything.
 
 Verification proves structural replay and declared manual postconditions. It
 does not prove production timing, realistic data volume, application
-compatibility, or business correctness.
+compatibility, or business correctness. Clone history normally contains schema
+but no production rows, so a data assertion may pass vacuously; use it to prove
+the behavior of data created by the migration itself, and test production-like
+backfills separately on a representative clone. Successful full reports list
+`verified_assertions`, `selected_bundle_executed_batches`, and
+`total_executed_batches` so the receipt is reviewable without guessing which
+work belonged to earlier history. A partial report does not claim that
+assertions requiring later phases passed on the prefix clone; it lists those
+independently proven by the full continuation as
+`full_continuation_assertions`.
 
 ## 6. Absorb a moving base without Git integration
 
 Suppose another migration lands while the feature is open. The developer or
 coding agent pulls and rebases normally, identifies the new accepted tip from
-that Git base, then reruns:
+that Git base, then reruns (the agent may parse the JSON directly):
+
+~~~sh
+NEW_BASE_HEAD=$(onwardpg history status \
+  --target primary \
+  --bundle customer-rename | jq -r .head_ref)
+~~~
 
 ~~~sh
 onwardpg draft \
   --target primary \
   --bundle customer-rename \
-  --after upstream-audit
+  --after "$NEW_BASE_HEAD"
 ~~~
 
 The checkout now contains the new upstream entry and customer-rename still
@@ -435,8 +496,8 @@ names its old parent. Selecting customer-rename lets onwardpg exclude that one
 entry, validate the new base chain, and detect the stale parent from content
 digests alone.
 
-If the checkout does not actually contain one base chain ending at
-`upstream-audit`, onwardpg refuses the restack. Otherwise it replans
+If the checkout does not actually contain the exact chain identified by
+`$NEW_BASE_HEAD`, onwardpg refuses the restack. Otherwise it replans
 `new-head → W` and replaces the same logical bundle. It carries
 only answers whose dependency scope is unchanged. For developer-edited SQL it
 compares the previous generated phase, the edited phase, and the newly
@@ -464,7 +525,8 @@ This is the responsibility split:
 
 - Git tells the coding agent which files belong in the checkout.
 - The explicit bundle ID tells onwardpg which migration is mutable.
-- `--after` tells it which accepted predecessor the agent intends.
+- `--after` carries the accepted predecessor's exact `head_ref` from the
+  agent's Git-aware checkout.
 - Parent digests reveal whether the ground moved.
 - Disposable replay proves whether the resulting chain converges.
 

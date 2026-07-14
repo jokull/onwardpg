@@ -5,6 +5,7 @@ package historyinit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
+	"github.com/jokull/onwardpg/internal/targetlock"
 	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
 )
@@ -41,6 +43,7 @@ type Report struct {
 
 type Input struct {
 	Root           string
+	ConfigPath     string
 	Config         workspace.Config
 	TargetName     string
 	Target         workspace.Target
@@ -63,6 +66,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	if input.Root == "" || !filepath.IsAbs(input.Root) {
 		return report, fmt.Errorf("history init root must be absolute")
+	}
+	if input.ConfigPath == "" || !filepath.IsAbs(input.ConfigPath) {
+		return report, fmt.Errorf("history init configuration path must be absolute")
 	}
 	if input.AdminURL == "" {
 		return report, fmt.Errorf("disposable database admin URL is required")
@@ -154,20 +160,20 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("build baseline bundle: %w", err)
 	}
-	lock := filepath.Join(input.Root, ".onwardpg-history-init-"+input.TargetName+".lock")
-	if err := os.Mkdir(lock, 0o700); err != nil {
-		if os.IsExist(err) {
+	lock, err := targetlock.Acquire(input.ConfigPath, input.TargetName)
+	if err != nil {
+		if errors.Is(err, targetlock.ErrBusy) {
 			report.Outcome = "blocked"
 			report.Findings = []Finding{{
 				Code:        "history_init_in_progress",
-				Message:     "another history initialization owns the target lock",
-				Remediation: "wait for the other command; if it crashed, inspect target history before removing the stale lock",
+				Message:     "another history lifecycle command owns the target lock",
+				Remediation: "wait for the other command and retry; the operating system releases this lock automatically if its owner exits",
 			}}
 			return report, nil
 		}
-		return report, fmt.Errorf("acquire history init lock: %w", err)
+		return report, err
 	}
-	defer os.Remove(lock)
+	defer lock.Release()
 	chain, err = history.Load(input.Root, input.Config.BundleRoot, input.TargetName)
 	if err != nil {
 		return report, err
@@ -222,6 +228,45 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			Code:        "history_changed_during_init",
 			Message:     "target history changed while the baseline was being verified",
 			Remediation: "inspect the new history head and do not overwrite it",
+		}}
+		return report, nil
+	}
+	if err := lock.ValidatePath(); err != nil {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "configuration_changed_during_init",
+			Message:     err.Error(),
+			Remediation: "rerun init against the current stable configuration; no baseline was installed",
+		}}
+		return report, nil
+	}
+	if err := workspace.RequireUnchanged(input.ConfigPath, input.Config); err != nil {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "configuration_changed_during_init",
+			Message:     err.Error(),
+			Remediation: "rerun init against the current stable configuration; no baseline was installed",
+		}}
+		return report, nil
+	}
+	compiledAfter, err := workspace.CompileDDL(ctx, input.Root, input.TargetName, input.Target)
+	if err != nil {
+		return report, fmt.Errorf("recompile desired schema after baseline verification: %w", err)
+	}
+	desiredAfter, err := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, input.AdminURL, input.Ignores)
+	if err != nil {
+		return report, fmt.Errorf("rematerialize desired schema after baseline verification: %w", err)
+	}
+	desiredAfterFingerprint, err := desiredAfter.Fingerprint()
+	if err != nil {
+		return report, fmt.Errorf("fingerprint desired schema after baseline verification: %w", err)
+	}
+	if desiredAfterFingerprint != plan.DesiredFingerprint {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "desired_schema_changed_during_init",
+			Message:     fmt.Sprintf("configured desired schema changed from %s to %s during baseline verification", plan.DesiredFingerprint, desiredAfterFingerprint),
+			Remediation: "rerun init against the current stable DDL; no baseline was installed",
 		}}
 		return report, nil
 	}

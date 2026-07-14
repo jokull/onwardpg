@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const DecisionsVersion = "onwardpg/decisions/1"
+const DecisionsVersion = "onwardpg.decisions/v1"
 
 // Hint is the complete semantic intent an agent may add to a schema diff.
 // It deliberately contains no planner IDs or fingerprints: onwardpg validates

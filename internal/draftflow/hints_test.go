@@ -1,6 +1,7 @@
 package draftflow
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -8,6 +9,26 @@ import (
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/pgschema"
 )
+
+func TestRefreshRebindAfterHintsReportsFinalResolvedState(t *testing.T) {
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version,
+		Answers:         []protocol.Answer{{Kind: "rename_table", Key: "app:accounts", Value: "app:customers"}},
+	}
+	report := &protocol.RebindReport{
+		ProtocolVersion: protocol.RebindVersion,
+		Unanswered:      []string{"rename_table:app:accounts"},
+		Deferred:        []string{"rename_table:app:accounts", "type_change:app:accounts:created_at"},
+	}
+	refreshRebindAfterHints(report, answers, protocol.Result{Status: protocol.Planned})
+	if !reflect.DeepEqual(report.Answers, answers) || len(report.Unanswered) != 0 || len(report.Deferred) != 0 {
+		t.Fatalf("resolved rebind retained pending state: %#v", report)
+	}
+	wantInvalidated := []protocol.RebindFinding{{Decision: "type_change:app:accounts:created_at", Reason: "question_no_longer_present"}}
+	if !reflect.DeepEqual(report.Invalidated, wantInvalidated) {
+		t.Fatalf("resolved rebind invalidations = %#v", report.Invalidated)
+	}
+}
 
 func TestBuildPlanConsumesAheadOfTimeRenameHint(t *testing.T) {
 	current, desired := columnRenameSnapshots(t)

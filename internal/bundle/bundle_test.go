@@ -288,6 +288,42 @@ func TestRemoveDraftRequiresExactReceiptedArtifact(t *testing.T) {
 	}
 }
 
+func TestMoveToVerifiedBackupRestoresAChangedDraft(t *testing.T) {
+	expected, err := Build(Input{Metadata: metadata(), Result: plannedResult(
+		statement("CREATE TABLE app.users (id bigint);", "expand", true),
+	)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "bundle")
+	if err := Write(destination, expected, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := Build(Input{Metadata: metadata(), Result: plannedResult(
+		statement("CREATE TABLE app.users (id bigint, email text);", "expand", true),
+	)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(destination, changed, WriteOptions{ReplaceDraft: true}); err != nil {
+		t.Fatal(err)
+	}
+	backup := destination + ".backup"
+	if err := moveToVerifiedBackup(destination, backup, expected); err == nil || !strings.Contains(err.Error(), "changed during lifecycle operation") {
+		t.Fatalf("expected exact-artifact mismatch, got %v", err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("mismatched backup was not restored: %v", err)
+	}
+	restored, err := Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !artifactsEqual(restored, changed) {
+		t.Fatal("restore did not preserve the changed draft exactly")
+	}
+}
+
 func TestArtifactValidationRejectsTamperedPhase(t *testing.T) {
 	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult(statement("CREATE TABLE app.users (id bigint);", "expand", true))})
 	if err != nil {

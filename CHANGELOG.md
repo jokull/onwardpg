@@ -68,16 +68,33 @@ development, staging, or production database.
 - Product-authored SQL that resolves a generated TODO is preserved and
   re-verified when the same logical bundle is restacked over a new history
   parent.
-- `draft` now requires `--after` with the accepted predecessor supplied by the
-  coding agent. This rejects accidental stacking on another unpublished PR
-  bundle without adding Git awareness.
+- `history status` now emits a content-bound `head_ref`; `draft --after`
+  requires that exact name-and-digest predecessor from the coding agent. A
+  one-shot `--create` distinguishes first creation from refresh, preventing an
+  accidentally missing bundle from silently losing agent-authored SQL.
+- A repository-config OS advisory lock, final history/configuration/DDL
+  revalidation, post-install receipt validation, and complete backup comparison
+  reject concurrent onwardpg forks and ordinary path-based editor races. Valid
+  unreceipted SQL can be restacked over incoming history before its old parent
+  can be verified again; concurrent external saves remain outside the supported
+  operating model.
 - Generated-only bundles fully absorbed by incoming accepted history are
   removed with an explicit `absorbed` result instead of leaving empty entries.
-- All command envelopes use `protocol_version` and `status`; decision handoffs
-  include a stable `next_action`, help exits successfully, and history-chain
-  blockers consistently exit 4.
-- Partial clone verification names simulated and remaining bundle phases.
-  `config check` validates both database URLs and existing history majors.
+- All command envelopes use consistently named `protocol_version` and `status`
+  values; decision handoffs include a stable `next_action`, written paths and
+  shell-safe grouped choices. Help exits successfully, invocation errors are
+  machine-clean, and history-chain blockers consistently exit 4.
+- `dev plan` reports an explicit `no_changes` result. Partial clone verification
+  returns `partial_verified` only after the prefix and full continuation both
+  succeed, and names simulated and remaining bundle phases. `config check`
+  validates both database URLs and existing history majors.
+- Verification distinguishes total and selected-bundle batch counts, and lists
+  successful assertion IDs while documenting the empty-clone data boundary.
+  Partial reports attribute continuation-only assertions separately instead of
+  implying the selected prefix ran them.
+- Hint-resolved restacks clear historical pending answer-rebind fields, and a
+  nullable `ADD COLUMN` without a default no longer claims a possible table
+  rewrite.
 
 ### Removed
 

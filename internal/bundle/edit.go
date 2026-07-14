@@ -310,6 +310,16 @@ func InstallReceipts(directory string, expected Artifact) error {
 	if err := os.Rename(temporaryName, filepath.Join(directory, "manifest.json")); err != nil {
 		return fmt.Errorf("install receipted manifest: %w", err)
 	}
+	if err := syncDirectory(directory); err != nil {
+		return fmt.Errorf("sync receipted bundle directory: %w", err)
+	}
+	installed, err := Read(directory)
+	if err != nil {
+		return fmt.Errorf("validate bundle after receipt installation: %w", err)
+	}
+	if !artifactsEqual(installed, current) {
+		return fmt.Errorf("bundle changed while receipts were installed")
+	}
 	return nil
 }
 

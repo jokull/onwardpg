@@ -1,10 +1,11 @@
 # Forward-only migration workflow
 
-The normal durable workflow is one command repeated with the same bundle ID
-and accepted predecessor:
+The normal durable workflow copies the exact accepted `head_ref`, creates one
+bundle once, then refreshes it without `--create`:
 
 ```sh
-onwardpg draft --target primary --bundle payment-settlement --after baseline
+BASE_HEAD=$(onwardpg history status --target primary | jq -r .head_ref)
+onwardpg draft --target primary --bundle payment-settlement --after "$BASE_HEAD" --create
 ```
 
 onwardpg replays accepted history, materializes the configured CREATE-statement
@@ -18,9 +19,9 @@ semantic choices. For example:
 
 ```json
 {
-  "protocol_version": "onwardpg/draft/3",
+  "protocol_version": "onwardpg.draft/v4",
   "status": "needs_decisions",
-  "next_action": "rerun_same_command_with_hints",
+  "next_action": "rerun_without_create_with_hints",
   "decisions": [
     {
       "choices": [
@@ -50,7 +51,7 @@ The agent reruns the same command with the choice justified by its feature
 context:
 
 ```sh
-onwardpg draft --target primary --bundle payment-settlement --after baseline \
+onwardpg draft --target primary --bundle payment-settlement --after "$BASE_HEAD" \
   --hint '{"kind":"rename","object":"column","from":["app","users","name"],"to":["app","users","display_name"]}'
 ```
 
@@ -66,7 +67,7 @@ other operation that onwardpg cannot derive, choose `manual_sql`. The hint
 contains no SQL:
 
 ```sh
-onwardpg draft --target primary --bundle payment-settlement --after baseline \
+onwardpg draft --target primary --bundle payment-settlement --after "$BASE_HEAD" \
   --hint '{"kind":"type_change","name":["app","payments","settled_on"],"strategy":"manual_sql"}'
 ```
 
@@ -91,7 +92,7 @@ delay contract until old code is gone. Concurrent index operations remain in
 their required non-transactional batches.
 
 Keep rerunning `draft` with the same bundle ID while the feature changes. After
-new base migrations arrive, use the new accepted head in `--after`. The
+new base migrations arrive, use the new exact accepted `head_ref` in `--after`. The
 selected bundle remains the one
 cumulative history-head-to-working-schema transition. There is no lock or
 finalize command, no down migration, and no automatic application command.

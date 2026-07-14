@@ -2805,7 +2805,14 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			return nil, nil, []string{"serial_sequence_name:" + object.ObjectID().String()}, nil
 		}
 		sql := "ALTER TABLE " + qualified(object.Table.Schema, object.Table.Name) + " ADD COLUMN " + renderColumn(object) + ";"
-		statements := []protocol.Statement{statement(sql, "expand", "review", true, "table_lock", "table_rewrite_possible")}
+		hazards := []string{"table_lock"}
+		if object.Default != nil || object.Identity != nil || object.Serial != nil || object.Generated != nil {
+			hazards = append(hazards, "table_rewrite_possible")
+		}
+		if object.NotNull {
+			hazards = append(hazards, "validation_scan_possible")
+		}
+		statements := []protocol.Statement{statement(sql, "expand", "review", true, hazards...)}
 		if object.Comment != nil {
 			statements = append(statements, statement("COMMENT ON COLUMN "+qualified(object.Table.Schema, object.Table.Name)+"."+quote(object.Name)+" IS "+literal(*object.Comment)+";", "expand", "safe", true))
 		}

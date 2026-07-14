@@ -32,7 +32,7 @@ jobs:
           mkdir -p /tmp/onwardpg-release-check
           tar -xzf "dist/onwardpg_${GITHUB_REF_NAME#v}_linux_amd64.tar.gz" -C /tmp/onwardpg-release-check
           binary=$(find /tmp/onwardpg-release-check -type f -name onwardpg -print -quit)
-          test "$("$binary" version)" = "{\"version\":\"$GITHUB_REF_NAME\"}"
+          test "$("$binary" version)" = "{\"protocol_version\":\"onwardpg.version/v1\",\"status\":\"ok\",\"version\":\"$GITHUB_REF_NAME\"}"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

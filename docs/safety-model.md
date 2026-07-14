@@ -71,13 +71,35 @@ DDL, requires the selected bundle to be the chain head, and compares its desired
 fingerprint before clone execution. Self-consistency with a stale recorded
 target is not sufficient.
 
-The agent, not onwardpg, identifies the accepted base from Git. `draft --after`
-turns that external fact into a checked hash-chain boundary: another
-unpublished bundle in the candidate base produces `base_anchor_mismatch`.
+The agent, not onwardpg, identifies the accepted base from Git. `history status`
+returns its exact `head_ref`; `draft --after` turns that external fact into a
+checked name-and-digest boundary. Another unpublished bundle or a coherently
+rewritten same-name head produces `base_anchor_mismatch`. One-shot `--create`
+prevents an accidentally missing feature folder from being treated as a fresh
+draft during restacking. Target lifecycle locks and final artifact comparison
+reject concurrent onwardpg history forks or ordinary path-based edits during
+long clone verification. The final commit point also rematerializes configured
+DDL, reloads `.onwardpg.toml`, and rejects configuration or schema export state
+that changed during planning or verification.
 `history status` exposes the repository chain and selected relationship without
 reading Git. If accepted history fully absorbs generated feature work, the
 selected bundle is removed as `absorbed`; developer-owned SQL is never removed
 by that inference.
+
+The repository lifecycle lock is an operating-system advisory lock on the
+existing `.onwardpg.toml` file itself. Physical-path aliases and cache settings
+therefore resolve to the same lock inode without creating an untracked lock
+artifact. It is released automatically when its process exits, so there is no
+stale lock directory to delete and an old owner cannot unlock a replacement
+inode. Atomic replacement of the config file is detected before commit. The
+lock coordinates onwardpg processes, not editors. Do not save a
+selected bundle while `draft`, `verify`, or `init` is running. A process that
+already holds an open file descriptor to a file which onwardpg atomically
+replaces can write to the detached inode after verification; no portable
+filesystem protocol can attribute that late write to the new path. The command
+post-validates the installed artifact, but concurrent external editing remains
+an explicit unsupported operating condition rather than a claim of magic
+locking.
 
 Transactional batches are intended to be atomic execution boundaries. The real
 PostgreSQL integration suite includes a failure case that proves an earlier

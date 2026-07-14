@@ -15,6 +15,10 @@ import (
 type WriteOptions struct {
 	ReplaceDraft   bool
 	PreserveEdited []string
+	// ExpectedPrevious authorizes replacement of this exact already-prepared
+	// artifact, including valid but not-yet-receipted developer SQL. Callers
+	// must have clone-verified the replacement before installation.
+	ExpectedPrevious *Artifact
 }
 
 // NextCoordinates returns deterministic generation and decision-attempt
@@ -28,6 +32,18 @@ func NextCoordinates(destination string, metadata Metadata, result protocol.Resu
 	}
 	if readErr != nil {
 		return 0, 0, fmt.Errorf("read existing bundle: %w", readErr)
+	}
+	return NextCoordinatesFromArtifact(artifact, metadata, result)
+}
+
+// NextCoordinatesFromArtifact returns deterministic generation and
+// decision-attempt numbers from an artifact that the caller has already
+// loaded. This is the lifecycle-safe form for a prepared edited draft: its
+// SQL receipts may exist only in memory until disposable verification has
+// succeeded, so rereading the directory strictly would reject the edits.
+func NextCoordinatesFromArtifact(artifact Artifact, metadata Metadata, result protocol.Result) (generation, attempt int, err error) {
+	if err := artifact.Validate(); err != nil {
+		return 0, 0, fmt.Errorf("validate existing bundle: %w", err)
 	}
 	manifest := artifact.Manifest
 	maxAttempt := 0
@@ -130,6 +146,9 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 	if len(options.PreserveEdited) > 0 && !options.ReplaceDraft {
 		return fmt.Errorf("preserving edited files requires draft replacement")
 	}
+	if options.ExpectedPrevious != nil && !options.ReplaceDraft {
+		return fmt.Errorf("expected previous artifact requires draft replacement")
+	}
 	parent := filepath.Dir(destination)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("create bundle parent: %w", err)
@@ -155,11 +174,24 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 		if !options.ReplaceDraft {
 			return fmt.Errorf("bundle destination %s already exists and replacement was not authorized by the owning workflow", destination)
 		}
-		if err := validateReplaceableBundle(destination); err != nil {
-			return err
+		if options.ExpectedPrevious == nil {
+			if err := validateReplaceableBundle(destination); err != nil {
+				return err
+			}
+			previous, err = Read(destination)
+			if err != nil {
+				return err
+			}
+		} else {
+			previous, err = readLifecycleArtifact(destination)
+			if err != nil {
+				return err
+			}
+			if !reflect.DeepEqual(previous, *options.ExpectedPrevious) {
+				return fmt.Errorf("bundle changed after replacement was prepared")
+			}
 		}
-		previous, err = Read(destination)
-		if err != nil {
+		if err := validateReplaceableArtifact(previous); err != nil {
 			return err
 		}
 		if previous.Manifest.BundleID != artifact.Manifest.BundleID || previous.Manifest.Target != artifact.Manifest.Target {
@@ -170,7 +202,7 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 			if !sameManifestPlanningContract(previous.Manifest, artifact.Manifest) {
 				return fmt.Errorf("same-generation replacement changed its source or planner contract")
 			}
-			artifact, err = preserveDecisionHistory(destination, artifact)
+			artifact, err = preserveDecisionHistory(previous, artifact)
 			if err != nil {
 				return err
 			}
@@ -228,17 +260,17 @@ func Write(destination string, artifact Artifact, options WriteOptions) error {
 		return fmt.Errorf("sync temporary bundle: %w", err)
 	}
 	if replacing {
-		current, err := Read(destination)
+		current, err := readLifecycleArtifact(destination)
 		if err != nil {
 			return fmt.Errorf("bundle changed before replacement: %w", err)
 		}
-		if Digest(current.Files["manifest.json"]) != Digest(previous.Files["manifest.json"]) {
+		if !reflect.DeepEqual(current, previous) {
 			return fmt.Errorf("bundle changed after replacement was prepared")
 		}
-		if err := validateReplaceableBundle(destination); err != nil {
+		if err := validateReplaceableArtifact(current); err != nil {
 			return fmt.Errorf("bundle became immutable before replacement: %w", err)
 		}
-		if err := os.Rename(destination, backup); err != nil {
+		if err := moveToVerifiedBackup(destination, backup, previous); err != nil {
 			return fmt.Errorf("preserve existing bundle for replacement: %w", err)
 		}
 		if err := os.Rename(temporary, destination); err != nil {
@@ -297,7 +329,7 @@ func RemoveDraft(destination string, expected Artifact) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.Rename(destination, backup); err != nil {
+	if err := moveToVerifiedBackup(destination, backup, expected); err != nil {
 		return fmt.Errorf("preserve absorbed bundle before removal: %w", err)
 	}
 	parent := filepath.Dir(destination)
@@ -309,6 +341,37 @@ func RemoveDraft(destination string, expected Artifact) error {
 		return fmt.Errorf("remove absorbed bundle backup: %w", err)
 	}
 	return syncDirectory(parent)
+}
+
+// moveToVerifiedBackup closes the final filesystem race before replacing or
+// deleting a draft. A strict read before rename cannot prevent an editor from
+// saving between that read and the rename. Reading the renamed directory and
+// comparing every receipted byte proves that the backup is exactly the
+// artifact the caller authorized. On mismatch it restores the original path.
+func moveToVerifiedBackup(destination, backup string, expected Artifact) error {
+	if err := os.Rename(destination, backup); err != nil {
+		return err
+	}
+	observed, err := readLifecycleArtifact(backup)
+	if err == nil && artifactsEqual(observed, expected) {
+		return nil
+	}
+	reason := "artifact differs from the expected draft"
+	if err != nil {
+		reason = fmt.Sprintf("read renamed backup: %v", err)
+	}
+	if restoreErr := os.Rename(backup, destination); restoreErr != nil {
+		return fmt.Errorf("%s; restore backup %s to %s: %w", reason, backup, destination, restoreErr)
+	}
+	return fmt.Errorf("bundle changed during lifecycle operation: %s", reason)
+}
+
+func artifactsEqual(left, right Artifact) bool {
+	// manifest.json is part of Files, so exact equality of the complete file map
+	// commits to both the manifest and every artifact it receipts. Comparing the
+	// decoded Manifest as well would incorrectly distinguish nil from empty
+	// slices after a JSON round trip even though the receipted bytes are equal.
+	return reflect.DeepEqual(left.Files, right.Files)
 }
 
 func writeFileDurable(name string, body []byte, mode os.FileMode) error {
@@ -369,11 +432,7 @@ func manifestHistoryParent(manifest Manifest) string {
 	return manifest.History.ParentDigest
 }
 
-func preserveDecisionHistory(destination string, next Artifact) (Artifact, error) {
-	previousArtifact, err := Read(destination)
-	if err != nil {
-		return Artifact{}, err
-	}
+func preserveDecisionHistory(previousArtifact Artifact, next Artifact) (Artifact, error) {
 	previous := previousArtifact.Manifest
 	byPath := make(map[string]FileReceipt, len(previous.Decisions)+len(next.Manifest.Decisions))
 	for _, decision := range previous.Decisions {
@@ -431,9 +490,25 @@ func validateReplaceableBundle(destination string) error {
 	if err != nil {
 		return fmt.Errorf("refuse to replace invalid bundle: %w", err)
 	}
+	return validateReplaceableArtifact(artifact)
+}
+
+func validateReplaceableArtifact(artifact Artifact) error {
 	manifest := artifact.Manifest
 	if manifest.State != "planned" && manifest.State != "needs_sql_edits" && manifest.State != "needs_input" && manifest.State != "unsupported" {
 		return fmt.Errorf("bundle state %q is immutable", manifest.State)
 	}
 	return nil
+}
+
+func readLifecycleArtifact(directory string) (Artifact, error) {
+	artifact, err := Read(directory)
+	if err == nil {
+		return artifact, nil
+	}
+	edited, editErr := PrepareEdited(directory)
+	if editErr != nil {
+		return Artifact{}, fmt.Errorf("strict read failed: %v; edited preparation failed: %w", err, editErr)
+	}
+	return edited, nil
 }

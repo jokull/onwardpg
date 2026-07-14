@@ -57,7 +57,7 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	if err := writeDraftReport(&output, report, "json"); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"protocol_version\":\"onwardpg/draft/3\",\"status\":\"needs_decisions\",\"next_action\":\"rerun_same_command_with_hints\",\"decisions\":[{\"choices\":[{\"hint\":{\"kind\":\"drop\",\"object\":\"column\",\"name\":[\"public\",\"users\",\"legacy\"]},\"hazards\":[\"data_loss\"]}]}]}\n"
+	want := "{\"protocol_version\":\"onwardpg.draft/v4\",\"status\":\"needs_decisions\",\"next_action\":\"rerun_same_command_with_hints\",\"decisions\":[{\"choices\":[{\"hint\":{\"kind\":\"drop\",\"object\":\"column\",\"name\":[\"public\",\"users\",\"legacy\"]},\"hazards\":[\"data_loss\"]}]}]}\n"
 	if output.String() != want {
 		t.Fatalf("decision protocol bytes changed:\n got: %s\nwant: %s", output.String(), want)
 	}
@@ -65,7 +65,7 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document) != 4 || string(document["protocol_version"]) != `"onwardpg/draft/3"` || string(document["status"]) != `"needs_decisions"` || string(document["next_action"]) != `"rerun_same_command_with_hints"` {
+	if len(document) != 4 || string(document["protocol_version"]) != `"onwardpg.draft/v4"` || string(document["status"]) != `"needs_decisions"` || string(document["next_action"]) != `"rerun_same_command_with_hints"` {
 		t.Fatalf("document = %s", output.String())
 	}
 	if _, exists := document["target"]; exists {
@@ -85,9 +85,19 @@ func TestWriteDecisionsTextProducesCopyableHints(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), "dev plan needs 1 decision(s)") ||
-		!strings.Contains(output.String(), `--hint "{\"kind\":\"type_change\",\"name\":[\"public\",\"events\",\"occurred_on\"],\"strategy\":\"manual_sql\"}"`) ||
+		!strings.Contains(output.String(), `--hint '{"kind":"type_change","name":["public","events","occurred_on"],"strategy":"manual_sql"}'`) ||
+		!strings.Contains(output.String(), "Decision 1: choose exactly one") ||
 		!strings.Contains(output.String(), "hazards: manual_sql") {
 		t.Fatalf("text decisions = %s", output.String())
+	}
+}
+
+func TestShellQuoteProtectsAgentCopyableHints(t *testing.T) {
+	if quoted := shellQuote("it's"); quoted != `'it'"'"'s'` {
+		t.Fatalf("single-quote escaping = %s", quoted)
+	}
+	if quoted := shellQuote("$(touch /tmp/nope) `$HOME`"); quoted != "'$(touch /tmp/nope) `$HOME`'" {
+		t.Fatalf("expansion escaping = %s", quoted)
 	}
 }
 
@@ -117,12 +127,16 @@ func TestHelpIsSuccessfulForEveryCommandSurface(t *testing.T) {
 		run  func() int
 	}{
 		{name: "init", run: func() int { return runInitAt([]string{"--help"}, t.TempDir()) }},
+		{name: "history-group", run: func() int { return runHistoryStatusAt([]string{"--help"}, t.TempDir()) }},
 		{name: "history-status", run: func() int { return runHistoryStatusAt([]string{"status", "--help"}, t.TempDir()) }},
+		{name: "dev-group", run: func() int { return runDevAt([]string{"--help"}, t.TempDir()) }},
 		{name: "dev-plan", run: func() int { return runDevAt([]string{"plan", "--help"}, t.TempDir()) }},
 		{name: "draft", run: func() int { return runDraftAt([]string{"--help"}, t.TempDir()) }},
 		{name: "verify", run: func() int { return runVerifyAt([]string{"--help"}, t.TempDir()) }},
+		{name: "drift-group", run: func() int { return runDriftAt([]string{"--help"}, t.TempDir()) }},
 		{name: "drift-check", run: func() int { return runDriftAt([]string{"check", "--help"}, t.TempDir()) }},
 		{name: "plan", run: func() int { return runPlan([]string{"--help"}) }},
+		{name: "config-group", run: func() int { return runConfig([]string{"--help"}) }},
 		{name: "config-check", run: func() int { return runConfig([]string{"check", "--help"}) }},
 	}
 	for _, test := range tests {
@@ -131,6 +145,16 @@ func TestHelpIsSuccessfulForEveryCommandSurface(t *testing.T) {
 				t.Fatalf("help exit = %d", code)
 			}
 		})
+	}
+}
+
+func TestRootHelpExplainsTheNoApplyBoundary(t *testing.T) {
+	previous := os.Args
+	defer func() { os.Args = previous }()
+	os.Args = []string{"onwardpg", "--help"}
+	output := captureStdout(t, run)
+	if output.code != 0 || !strings.Contains(output.stdout, "history status") || !strings.Contains(output.stdout, "never applies them to caller databases") {
+		t.Fatalf("root help = %#v", output)
 	}
 }
 
@@ -160,7 +184,7 @@ func TestVersionCommandReportsEmbeddedBuildVersion(t *testing.T) {
 	os.Args = []string{"onwardpg", "version"}
 	buildVersion = "v0.1.0-preview.1"
 	output := captureStdout(t, run)
-	if output.code != 0 || strings.TrimSpace(output.stdout) != `{"version":"v0.1.0-preview.1"}` {
+	if output.code != 0 || strings.TrimSpace(output.stdout) != `{"protocol_version":"onwardpg.version/v1","status":"ok","version":"v0.1.0-preview.1"}` {
 		t.Fatalf("version output = %#v", output)
 	}
 }

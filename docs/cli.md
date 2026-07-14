@@ -7,7 +7,7 @@ onwardpg config check
 onwardpg init --target TARGET
 onwardpg history status --target TARGET [--bundle ID]
 onwardpg dev plan --target TARGET
-onwardpg draft --target TARGET --bundle ID --after ACCEPTED_HEAD_BUNDLE
+onwardpg draft --target TARGET --bundle ID --after ACCEPTED_HEAD_REF [--create]
 onwardpg verify --target TARGET --bundle ID
 onwardpg drift check --target TARGET --database URL
 onwardpg plan --from SOURCE --to SOURCE
@@ -35,10 +35,11 @@ onwardpg history status --target primary [--bundle payment-settlement]
 ~~~
 
 Inspects only repository receipts. Without `--bundle`, it returns the ordered
-chain, `head_bundle`, and digest. With `--bundle`, that selected mutable entry
-is excluded and the command reports whether its parent is current, stale, or
-missing. Invalid forks, missing parents, and altered history exit 4. The
-command does not inspect Git or connect to PostgreSQL.
+chain, `head_bundle`, digest, and exact `head_ref`. With `--bundle`, the selected
+head entry is excluded and the command reports whether its parent is current,
+stale, or missing. Selecting a valid historical non-head is blocked explicitly.
+Invalid forks, missing parents, and altered history exit 4. The command does
+not inspect Git or connect to PostgreSQL.
 
 ## init
 
@@ -93,29 +94,34 @@ Planner options include:
 onwardpg draft \
   --target primary \
   --bundle payment-settlement \
-  --after baseline \
+  --after "$BASE_HEAD" \
+  [--create] \
   [--hint '{"kind":"..."}'] \
   [--hints-file hints.json] \
   [--output text|json] \
   [--purpose feature|repair|contract]
 ~~~
 
-draft is the durable H → W loop:
+draft is the durable H → W loop. `$BASE_HEAD` denotes the exact `head_ref`
+copied from `history status`; it is not a bare bundle name.
 
 1. the named bundle is the only excluded/mutable history entry;
 2. every other bundle must form one valid content-addressed chain;
-3. that chain must end at the accepted predecessor named by `--after`;
+3. that chain must end at the exact accepted name-and-digest `head_ref` named
+   by `--after`;
 4. the chain is replayed in disposable PostgreSQL;
 5. working DDL is compiled twice and materialized in disposable PostgreSQL;
 6. the typed graph planner emits semantic choices or a complete plan;
 7. a complete generated plan is clone-verified before the bundle is written.
 
 The command is deliberately Git-free. A coding agent is responsible for
-pulling, rebasing, selecting the bundle ID, and naming the accepted base tip in
-`--after`. A mismatch blocks accidental stacking on another unpublished
-bundle. If new accepted history makes the selected parent stale, rerun the
-same command with the new predecessor. Only exact participating-object scope
-matches are carried across that change.
+pulling, rebasing, selecting the bundle ID, and copying the accepted base
+`head_ref` into `--after`. `--create` is required once when the bundle is absent;
+later refreshes reject a missing folder so a rebase cannot silently lose agent
+SQL. A mismatch blocks accidental stacking on another unpublished or
+same-named rewritten bundle. If new accepted history makes the selected parent
+stale, rerun the same command with the new exact head reference. Only exact
+participating-object scope matches are carried across that change.
 
 `--hint` is repeatable and accepts one strict semantic JSON object.
 `--hints-file` accepts an array of the same objects. Current kinds are rename,
@@ -134,10 +140,11 @@ unreceipted basis, and return all three SQL versions plus the `verify` next
 step.
 
 draft supports the same planner flags as dev plan.
-Its decision output protocol is `onwardpg/draft/3`: `needs_decisions` contains
-only semantic choice sets, while `needs_sql_edits` names the bundle path and
-files the agent must edit. Fingerprint-bound answers are generated receipts,
-not an agent-facing authoring format.
+Its decision output protocol is `onwardpg.draft/v4`: `needs_decisions` contains
+semantic choice sets plus the path and receipts it wrote, while
+`needs_sql_edits` names the bundle path and files the agent must edit.
+Fingerprint-bound answers are generated receipts, not an agent-facing
+authoring format.
 
 If the asserted base already produces the desired schema, a generated-only
 selected bundle is removed with `status: "absorbed"`. An edited bundle is
@@ -157,8 +164,12 @@ Creates disposable databases, executes validated history through the selected
 phase, catalog-inspects the result, and compares it with a separate full-chain
 execution. Full verification exits zero only for an empty residual. Edited
 phase files and verify.sql assertions are receipted only after this succeeds.
-Partial output includes `simulated_bundle_phases` and
-`remaining_bundle_phases`; these never claim a real environment applied them.
+Partial verification exits zero with `partial_verified` only after the exact
+prefix and its full continuation both succeed on independent disposable
+clones. Output includes `simulated_bundle_phases`, `remaining_bundle_phases`,
+and the expected residual; these never claim a real environment applied them.
+Assertions that run only after the continuation are named separately as
+`full_continuation_assertions`, not `verified_assertions`.
 
 Use --check for read-only CI-style verification. It rejects unreceipted edits
 instead of refreshing their receipts, requires the selected bundle to be the

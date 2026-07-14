@@ -20,7 +20,7 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg.verify/v2"
+const Version = "onwardpg.verify/v3"
 
 var phases = []string{"expand", "migrate", "contract"}
 
@@ -42,22 +42,25 @@ type Finding struct {
 }
 
 type Report struct {
-	ProtocolVersion     string           `json:"protocol_version"`
-	Outcome             string           `json:"status"`
-	Target              string           `json:"target"`
-	BundleID            string           `json:"bundle_id"`
-	HistoryHead         string           `json:"history_head"`
-	ThroughPhase        string           `json:"through_phase"`
-	SimulatedPhases     []string         `json:"simulated_bundle_phases,omitempty"`
-	RemainingPhases     []string         `json:"remaining_bundle_phases,omitempty"`
-	ExecutedBatches     int              `json:"executed_batches"`
-	ObservedFingerprint string           `json:"observed_fingerprint,omitempty"`
-	DesiredFingerprint  string           `json:"desired_fingerprint,omitempty"`
-	WorkingFingerprint  string           `json:"working_fingerprint,omitempty"`
-	Residual            *protocol.Result `json:"residual,omitempty"`
-	Failure             *Failure         `json:"failure,omitempty"`
-	Findings            []Finding        `json:"findings,omitempty"`
-	ReceiptsUpdated     bool             `json:"receipts_updated,omitempty"`
+	ProtocolVersion        string           `json:"protocol_version"`
+	Outcome                string           `json:"status"`
+	Target                 string           `json:"target"`
+	BundleID               string           `json:"bundle_id"`
+	HistoryHead            string           `json:"history_head"`
+	ThroughPhase           string           `json:"through_phase"`
+	SimulatedPhases        []string         `json:"simulated_bundle_phases,omitempty"`
+	RemainingPhases        []string         `json:"remaining_bundle_phases,omitempty"`
+	ExecutedBatches        int              `json:"total_executed_batches"`
+	SelectedBatches        int              `json:"selected_bundle_executed_batches"`
+	VerifiedAssertions     []string         `json:"verified_assertions,omitempty"`
+	ContinuationAssertions []string         `json:"full_continuation_assertions,omitempty"`
+	ObservedFingerprint    string           `json:"observed_fingerprint,omitempty"`
+	DesiredFingerprint     string           `json:"desired_fingerprint,omitempty"`
+	WorkingFingerprint     string           `json:"working_fingerprint,omitempty"`
+	Residual               *protocol.Result `json:"residual,omitempty"`
+	Failure                *Failure         `json:"failure,omitempty"`
+	Findings               []Finding        `json:"findings,omitempty"`
+	ReceiptsUpdated        bool             `json:"receipts_updated,omitempty"`
 }
 
 type Input struct {
@@ -108,6 +111,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			report.RemainingPhases = append(report.RemainingPhases, phase)
 		}
 	}
+	report.SelectedBatches, err = selectedBatchCount(chain.Entries[len(chain.Entries)-1].Artifact, input.ThroughPhase)
+	if err != nil {
+		return Report{}, err
+	}
 	observed, batches, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, input.ThroughPhase, input.Ignores)
 	report.ExecutedBatches = batches
 	if err != nil {
@@ -117,6 +124,16 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Failure = failure
 		report.Findings = []Finding{{Code: failure.Code, Message: failure.Message, Remediation: failure.Remediation}}
 		return report, nil
+	}
+	var assertionIDs []string
+	if targetManifest.PhaseSource == "edited" && targetManifest.VerificationDigest != "" {
+		assertions, parseErr := bundle.ParseAssertions(chain.Entries[len(chain.Entries)-1].Artifact.Files["verify.sql"])
+		if parseErr != nil {
+			return Report{}, fmt.Errorf("parse selected bundle assertions: %w", parseErr)
+		}
+		for _, assertion := range assertions {
+			assertionIDs = append(assertionIDs, assertion.ID)
+		}
 	}
 	desired, _, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, "contract", input.Ignores)
 	if err != nil {
@@ -146,12 +163,51 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return Report{}, fmt.Errorf("plan verification residual: %w", err)
 	}
 	report.Residual = &residual
-	if report.ObservedFingerprint == report.DesiredFingerprint && residual.Status == protocol.Planned && len(residual.Statements) == 0 {
+	if len(report.RemainingPhases) > 0 {
+		// The same exact prefix followed by the remaining phases converged in
+		// the independent full execution above. Residual work is therefore an
+		// expected checkpoint, not a failed verification.
+		report.Outcome = "partial_verified"
+		report.ContinuationAssertions = assertionIDs
+	} else if report.ObservedFingerprint == report.DesiredFingerprint && residual.Status == protocol.Planned && len(residual.Statements) == 0 {
 		report.Outcome = "verified"
+		report.VerifiedAssertions = assertionIDs
 	} else {
 		report.Outcome = "residual"
 	}
 	return report, nil
+}
+
+func selectedBatchCount(artifact bundle.Artifact, throughPhase string) (int, error) {
+	if artifact.Manifest.PhaseSource == "edited" {
+		count := 0
+		for _, phase := range phases {
+			if phaseIndex(phase) > phaseIndex(throughPhase) {
+				break
+			}
+			receipt, exists := artifact.Manifest.Phases[phase]
+			if !exists {
+				continue
+			}
+			batches, err := bundle.ParsePhaseSQL(artifact.Files[receipt.Path], receipt.Transactional)
+			if err != nil {
+				return 0, fmt.Errorf("parse selected bundle phase %s: %w", phase, err)
+			}
+			count += len(batches)
+		}
+		return count, nil
+	}
+	var plan protocol.Result
+	if err := json.Unmarshal(artifact.Files["plan.json"], &plan); err != nil {
+		return 0, fmt.Errorf("decode selected bundle plan: %w", err)
+	}
+	count := 0
+	for _, batch := range plan.Batches {
+		if phaseIndex(batch.Phase) <= phaseIndex(throughPhase) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func executeDisposable(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignores []string) (snapshot *pgschema.Snapshot, batches int, failure *Failure, resultErr error) {

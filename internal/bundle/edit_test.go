@@ -81,6 +81,72 @@ func TestPrepareEditedAndInstallReceiptsExactSQL(t *testing.T) {
 	}
 }
 
+func TestNextCoordinatesFromPreparedEditedDraftDoesNotRequireStrictReread(t *testing.T) {
+	meta := metadata()
+	meta.HistoryParentDigest = HistoryRootDigest()
+	artifact, err := Build(Input{Metadata: meta, Result: plannedResult(statement("CREATE TABLE app.users (id bigint);", "expand", true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "customer-profile")
+	if err := Write(destination, artifact, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "phases", "migrate.sql"), []byte("UPDATE app.users SET id = id;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareEdited(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NextCoordinates(destination, meta, plannedResult()); err == nil {
+		t.Fatal("strict path-based coordinate calculation accepted unreceipted files")
+	}
+	generation, attempt, err := NextCoordinatesFromArtifact(prepared, meta, plannedResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 || attempt != 1 {
+		t.Fatalf("next coordinates = (%d, %d), want (1, 1)", generation, attempt)
+	}
+}
+
+func TestWriteCanReplaceExactPreparedUnreceiptedDraft(t *testing.T) {
+	meta := metadata()
+	meta.HistoryParentDigest = HistoryRootDigest()
+	first, err := Build(Input{Metadata: meta, Result: plannedResult(statement("CREATE TABLE app.users (id bigint);", "expand", true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "customer-profile")
+	if err := Write(destination, first, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "phases", "migrate.sql"), []byte("UPDATE app.users SET id = id;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareEdited(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.Generation = 2
+	meta.HistoryParentDigest = desiredFingerprint
+	next, err := Build(Input{Metadata: meta, Result: plannedResult(statement("CREATE TABLE app.users (id bigint, email text);", "expand", true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(destination, next, WriteOptions{ReplaceDraft: true, ExpectedPrevious: &prepared}); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.Manifest.Generation != 2 || installed.Manifest.History.ParentDigest != desiredFingerprint {
+		t.Fatalf("installed manifest = %#v", installed.Manifest)
+	}
+}
+
 func TestReconcileEditedDraftPreservesUntouchedAgentPhase(t *testing.T) {
 	meta := metadata()
 	meta.HistoryParentDigest = HistoryRootDigest()

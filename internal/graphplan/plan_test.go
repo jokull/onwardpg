@@ -57,6 +57,42 @@ func TestBuildCreatesDependencyOrderedGraphPlan(t *testing.T) {
 	}
 }
 
+func TestBuildNullableColumnWithoutDefaultDoesNotClaimTableRewrite(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	id := pgschema.Column{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	displayName := pgschema.Column{Table: table.ObjectID(), Name: "display_name", Position: 2, Type: "text"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		for _, object := range []pgschema.Object{schema, table, id} {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, edge := range [][2]pgschema.ID{{table.ObjectID(), schema.ObjectID()}, {id.ObjectID(), table.ObjectID()}} {
+			if err := snapshot.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := desired.Add(displayName); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddDependency(displayName.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Planned || len(result.Statements) != 1 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if !reflect.DeepEqual(result.Statements[0].Hazards, []string{"table_lock"}) {
+		t.Fatalf("nullable metadata-only ADD COLUMN hazards = %#v", result.Statements[0].Hazards)
+	}
+}
+
 func FuzzQuoteIdentifierRoundTrip(f *testing.F) {
 	for _, seed := range []string{"orders", `a"b`, "select", "", "emoji_😀", "line\nname"} {
 		f.Add(seed)

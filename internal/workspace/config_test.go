@@ -38,6 +38,34 @@ scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
 	}
 }
 
+func TestRequireUnchangedReloadsCompleteConfiguration(t *testing.T) {
+	directory := t.TempDir()
+	name := filepath.Join(directory, ".onwardpg.toml")
+	first := `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "DEV_DATABASE_URL"
+`
+	if err := os.WriteFile(name, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := Load(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireUnchanged(name, expected); err != nil {
+		t.Fatal(err)
+	}
+	second := strings.Replace(first, `schema_file = "schema.sql"`, `schema_file = "next.sql"`, 1)
+	if err := os.WriteFile(name, []byte(second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireUnchanged(name, expected); err == nil || !strings.Contains(err.Error(), "configuration changed") {
+		t.Fatalf("changed configuration was accepted: %v", err)
+	}
+}
+
 func TestLoadRejectsUnknownFieldsAndUnsafeValues(t *testing.T) {
 	tests := map[string]string{
 		"adapter-surface": `version = 1

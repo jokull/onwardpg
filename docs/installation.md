@@ -17,8 +17,9 @@ go build -trimpath -o ./bin/onwardpg ./cmd/onwardpg
 ./bin/onwardpg version
 ```
 
-A source build reports `{"version":"dev"}` unless the build supplies
-`-X main.buildVersion=...`.
+A source build reports
+`{"protocol_version":"onwardpg.version/v1","status":"ok","version":"dev"}`
+unless the build supplies `-X main.buildVersion=...`.
 
 ## Preview archives
 

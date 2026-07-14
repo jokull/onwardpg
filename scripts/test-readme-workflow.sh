@@ -51,6 +51,8 @@ grep -q '"status":"initialized"' init.json
 "$binary" history status --target primary >history.json
 grep -q '"status":"valid"' history.json
 grep -q '"head_bundle":"baseline"' history.json
+head_ref=$(jq -r .head_ref history.json)
+test -n "$head_ref"
 
 "$binary" dev plan --target primary --output text >dev-plan.sql
 grep -q 'EXPAND' dev-plan.sql
@@ -74,7 +76,7 @@ CREATE INDEX customer_profiles_kind_id_idx
 EOF
 
 set +e
-"$binary" draft --target primary --bundle customer-profile --after baseline >decisions.json
+"$binary" draft --target primary --bundle customer-profile --after "$head_ref" --create >decisions.json
 decision_exit=$?
 set -e
 test "$decision_exit" -eq 2
@@ -89,7 +91,7 @@ set +e
 "$binary" draft \
   --target primary \
   --bundle customer-profile \
-  --after baseline \
+  --after "$head_ref" \
   --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}' \
   --hint '{"kind":"type_change","name":["app","accounts","occurred_at"],"strategy":"manual_sql"}' \
   >sql-handoff.json

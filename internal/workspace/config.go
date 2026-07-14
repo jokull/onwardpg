@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -46,6 +47,20 @@ func Load(name string) (Config, error) {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+// RequireUnchanged reloads the complete strict repository configuration at a
+// lifecycle commit point. A caller must not write using paths or schema source
+// settings captured before a concurrent config edit.
+func RequireUnchanged(name string, expected Config) error {
+	current, err := Load(name)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(current, expected) {
+		return fmt.Errorf("repository configuration changed since the command started")
+	}
+	return nil
 }
 
 func (c Config) Validate() error {

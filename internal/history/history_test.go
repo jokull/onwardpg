@@ -106,6 +106,67 @@ func TestInspectExplainsSelectedBundleAgainstCurrentBase(t *testing.T) {
 	}
 }
 
+func TestInspectBlocksSelectedBundleThatIsNotValidChainHead(t *testing.T) {
+	root := t.TempDir()
+	baseline := writeBundle(t, root, "baseline", bundle.HistoryRootDigest(), "SELECT 1;", "expand")
+	feature := writeBundle(t, root, "feature", baseline, "SELECT 2;", "expand")
+	upstream := writeBundle(t, root, "upstream", feature, "SELECT 3;", "expand")
+
+	report, err := Inspect(root, "migrations/onward", "primary", "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "blocked" || report.HistoryHead != upstream || report.HeadBundle != "upstream" || len(report.Entries) != 3 {
+		t.Fatalf("status report = %#v", report)
+	}
+	if report.Selected == nil || report.Selected.BundleID != "feature" || report.Selected.Relationship != "not_head" || report.Selected.EntryDigest != feature {
+		t.Fatalf("selected status = %#v", report.Selected)
+	}
+	if len(report.Findings) != 1 || report.Findings[0].Code != "selected_bundle_not_head" {
+		t.Fatalf("status findings = %#v", report.Findings)
+	}
+}
+
+func TestInspectSelectedValidChainHeadStillReportsItsBase(t *testing.T) {
+	root := t.TempDir()
+	baseline := writeBundle(t, root, "baseline", bundle.HistoryRootDigest(), "SELECT 1;", "expand")
+	feature := writeBundle(t, root, "feature", baseline, "SELECT 2;", "expand")
+
+	report, err := Inspect(root, "migrations/onward", "primary", "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "valid" || report.HistoryHead != baseline || report.HeadBundle != "baseline" || len(report.Entries) != 1 {
+		t.Fatalf("status report = %#v", report)
+	}
+	if report.Selected == nil || report.Selected.Relationship != "current" || report.Selected.EntryDigest != feature {
+		t.Fatalf("selected status = %#v", report.Selected)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("status findings = %#v", report.Findings)
+	}
+}
+
+func TestHeadRefRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	digest := writeBundle(t, root, "baseline", bundle.HistoryRootDigest(), "SELECT 1;", "expand")
+	chain, err := Load(root, "migrations/onward", "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := HeadRef(chain)
+	name, parsed, err := ParseHeadRef(reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "baseline" || parsed != digest {
+		t.Fatalf("parsed head ref = %q, %q", name, parsed)
+	}
+	if _, _, err := ParseHeadRef("baseline"); err == nil {
+		t.Fatal("bare bundle name was accepted as an exact head reference")
+	}
+}
+
 func TestLoadExcludingStillRejectsUnselectedFork(t *testing.T) {
 	root := t.TempDir()
 	baseline := writeBundle(t, root, "baseline", bundle.HistoryRootDigest(), "SELECT 1;", "expand")

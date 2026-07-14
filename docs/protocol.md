@@ -7,15 +7,17 @@ document; incompatible changes receive a new identifier.
 
 ## Minimal draft decisions
 
-`onwardpg/draft/3` deliberately makes output and input asymmetric. onwardpg
+`onwardpg.draft/v4` deliberately makes output and input asymmetric. onwardpg
 emits the context needed to choose safely; the agent returns only semantic
 intent that cannot be inferred from schema state.
 
 ~~~json
 {
-  "protocol_version": "onwardpg/draft/3",
+  "protocol_version": "onwardpg.draft/v4",
   "status": "needs_decisions",
-  "next_action": "rerun_same_command_with_hints",
+  "next_action": "rerun_without_create_with_hints",
+  "path": "migrations/onward/primary/profile-name",
+  "written_receipts": ["manifest.json", "questions.json", "decisions/attempt-001.json"],
   "decisions": [
     {
       "choices": [
@@ -43,10 +45,12 @@ intent that cannot be inferred from schema state.
 
 The response omits the target, bundle, whole-schema fingerprints, internal
 question key, prose labels, and correlation IDs. The caller already knows the
-invocation, and onwardpg already knows the fingerprints. `next_action` is a
-stable enum rather than a shell command so agents can preserve their original
-arguments and quoting. Every remaining field is needed to parse the response
-or choose between different effects.
+invocation, and onwardpg already knows the fingerprints. `path` and
+`written_receipts` make the intentional checkout mutation explicit.
+`next_action` is a stable enum rather than a shell command. On first invocation
+it tells the caller to omit the one-shot `--create`; later decision attempts use
+`rerun_same_command_with_hints`. Every remaining field is needed to parse the
+response or choose between different effects.
 
 Each `hint` object is the exact accepted input shape. Pass one with repeatable
 `--hint '<json-object>'`, or pass an array with `--hints-file`. Hints use strict
@@ -82,7 +86,7 @@ a phase-local TODO:
 
 ~~~json
 {
-  "protocol_version": "onwardpg/draft/3",
+  "protocol_version": "onwardpg.draft/v4",
   "status": "needs_sql_edits",
   "next_action": "edit_files_then_verify",
   "path": "migrations/onward/primary/event-date",
@@ -99,8 +103,10 @@ does not change planning semantics or prompt on a TTY.
 
 ## Low-level plan protocol
 
-`onwardpg plan` writes JSON to standard output by default. Its current protocol
-is `onwardpg.plan/v1`.
+`onwardpg plan` writes JSON to standard output by default. Its public command
+protocol is `onwardpg.plan/v3` for planned, decision, and unsupported results.
+The receipted planner document embedded in bundles retains its separately
+versioned internal `onwardpg.plan/v1` schema.
 
 `--output text` is deliberately not JSON: it is a review-only rendering available only
 when a plan is ready. It emits SQL comments for phase boundaries and
@@ -114,7 +120,7 @@ Every normal planner result has this shape:
 
 ```json
 {
-  "protocol_version": "onwardpg.plan/v1",
+  "protocol_version": "onwardpg.plan/v3",
   "current_fingerprint": "sha256:...",
   "desired_fingerprint": "sha256:...",
   "status": "planned | needs_input | needs_sql_edits | unsupported",
@@ -201,7 +207,7 @@ the exact files after disposable clone convergence.
 
 | Exit code | Meaning | Standard output |
 | --- | --- | --- |
-| `0` | `planned`, `no_changes`, or `absorbed` | versioned result JSON, or SQL with `--output text` |
+| `0` | `planned`, `no_changes`, `absorbed`, `verified`, or `partial_verified` | versioned result JSON, or SQL with `--output text` |
 | `2` | `needs_input` or `needs_sql_edits` | versioned decision/handoff JSON |
 | `3` | `unsupported` | v1 result JSON |
 | `4` | policy blocked, stale, residual, or clone execution failed | command-specific versioned status JSON |
@@ -223,37 +229,52 @@ human-readable context and may become more specific without a protocol change.
 Current codes distinguish invocation, hints, answers, source, ignore, planning,
 configuration, bundle, and history-integrity failures.
 
-`draft` uses `onwardpg/draft/3` for minimal decision and SQL-edit handoffs.
+`draft` uses `onwardpg.draft/v4` for minimal decision and SQL-edit handoffs.
 Complete and blocked reports currently retain detailed replay, reconciliation,
 and verification receipts. Reconciliation reports exact preserved, refreshed,
 and conflicting phase paths; a conflict leaves the existing bundle untouched.
 Decision and SQL-edit handoffs exit `2`; unsupported state exits `3`; history
 or convergence blockers exit `4`.
 
-`dev plan` and low-level `plan` use the same decision envelope as
-`onwardpg/dev-plan/3` and `onwardpg/plan/3`. They do not write bundle state.
+`dev plan` and low-level `plan` consistently emit public command protocols
+`onwardpg.dev-plan/v3` and `onwardpg.plan/v3` across decision and planned
+results. A converged development diff uses `status: "no_changes"` and
+`changed: false` rather than requiring an agent to infer equality from
+fingerprints. They do not write bundle state.
 
 `init` emits `onwardpg.history-init/v2`. A successful document has
 `status: "initialized"`, target and bundle identity, installed path, history
 head, desired fingerprint, the complete empty-to-desired plan, and an embedded
-`onwardpg.verify/v2` clone receipt. `needs_input` and `unsupported` preserve the
+`onwardpg.verify/v3` clone receipt. `needs_input` and `unsupported` preserve the
 ordinary planner exits `2` and `3` without writing a bundle. A pre-existing
 history returns `status: "blocked"`, a stable finding and remediation, and
 exit `4`.
 
-`history status` emits `onwardpg.history-status/v1` with the ordered chain,
-head bundle/digest, and optional selected-bundle relationship. It never reads
-Git or connects to PostgreSQL.
+`history status` emits `onwardpg.history-status/v2` with the ordered chain,
+head bundle/digest, exact `head_ref`, and optional selected-bundle relationship.
+The `head_ref` is the only accepted `draft --after` value. It never reads Git
+or connects to PostgreSQL.
 
-`verify` emits `onwardpg.verify/v2` with the selected phase checkpoint,
-executed batch count, observed/full fingerprints, and residual plan or typed
-execution failure. It exits `4` for a residual or expected verification
-failure and has no caller-database application surface. A successful normal
+`verify` emits `onwardpg.verify/v3` with the selected phase checkpoint, total
+and selected-bundle batch counts, assertion IDs, observed/full fingerprints,
+and residual plan or typed execution failure. Full verification reports
+`verified_assertions`. Partial verification instead reports assertions run by
+the independent full execution as `full_continuation_assertions`; it does not
+claim those assertions passed on the selected prefix. It exits `4` for
+an unexpected residual or verification failure and has no caller-database
+application surface. A successful normal
 verification may set `receipts_updated: true` after atomically recording exact
 edited phase and assertion digests. This is evidence, not a finalized or locked
-bundle state; `--check` never writes it. Partial verification also reports
-`simulated_bundle_phases` and `remaining_bundle_phases`; neither field records
-real environment application.
+bundle state; `--check` never writes it. Partial verification returns
+`partial_verified` after proving both the selected prefix and full continuation
+on independent disposable clones. It reports `simulated_bundle_phases`,
+`remaining_bundle_phases`, and the expected residual; none records real
+environment application or installs edited-file receipts.
+
+`config check` emits `onwardpg.config-check/v3` with `status: "valid"`, the
+configuration version, and one materialized-DDL/database/history receipt per
+target. `version` emits `onwardpg.version/v1` with `status: "ok"` and the build
+version. These are normal versioned success documents, not protocol exceptions.
 
 Execution failures include a stable `failure.code`, the bundle, phase and batch
 or assertion identity, the execution mode when relevant, and an exact

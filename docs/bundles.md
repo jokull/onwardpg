@@ -12,10 +12,11 @@ Create the ground floor once:
 onwardpg init --target primary
 ~~~
 
-Create or refresh one feature entry:
+Create one feature entry after copying `head_ref` from `history status`:
 
 ~~~sh
-onwardpg draft --target primary --bundle customer-profile --after baseline
+BASE_HEAD=$(onwardpg history status --target primary | jq -r .head_ref)
+onwardpg draft --target primary --bundle customer-profile --after "$BASE_HEAD" --create
 ~~~
 
 Verify generated history:
@@ -26,10 +27,11 @@ onwardpg verify --target primary --bundle customer-profile
 
 The explicitly selected bundle is the only mutable entry for a draft command.
 Every other entry is immutable base history, and that base must end at the
-bundle asserted by `--after`. This is supplied by the coding agent from its Git
-context; onwardpg validates the chain without inspecting Git. A second
-unpublished bundle in the base causes an anchor mismatch instead of silently
-stacking migrations.
+exact name-and-digest reference asserted by `--after`. This is supplied by the
+coding agent from its Git context; onwardpg validates the chain without
+inspecting Git. `--create` is one-shot; later refreshes require the folder to
+remain present. A second unpublished bundle or same-named rewritten head causes
+an anchor mismatch instead of silently stacking migrations.
 
 Applying an earlier version to a developer database does not change this
 lifecycle. Keep selecting the same bundle while the feature evolves; `draft`
@@ -150,13 +152,13 @@ name the same parent. Ordinary history loading rejects that fork. After the
 agent rebases and identifies the accepted upstream tip, it runs:
 
 ~~~sh
-onwardpg draft --target primary --bundle customer-profile --after upstream-audit
+onwardpg draft --target primary --bundle customer-profile --after "$NEW_BASE_HEAD"
 ~~~
 
 By naming customer-profile, the developer tells onwardpg which one entry to
-exclude. By naming upstream-audit, it asserts where the remaining valid base
-chain must end. The selected draft is then regenerated from that head to the
-current desired DDL. No Git API is involved.
+exclude. By passing the new exact `head_ref`, it asserts where the remaining
+valid base chain must end. The selected draft is then regenerated from that
+head to the current desired DDL. No Git API is involved.
 
 A fork that remains after excluding the selected bundle is ambiguous and
 blocks. Selecting a historical entry with descendants also blocks because the
@@ -174,8 +176,11 @@ onwardpg verify --target primary --bundle customer-profile --through expand
 ~~~
 
 Verification executes only in onwardpg-created disposable databases. A partial
-checkpoint may intentionally report a residual; the complete contract
-checkpoint must converge. Transactional batches roll back on failure.
+checkpoint is `partial_verified` when both its prefix and the complete contract
+continuation converge on independent clones; its reported residual is expected.
+Assertions requiring the continuation are reported as
+`full_continuation_assertions`, never as assertions verified by the prefix.
+Transactional batches roll back on failure.
 Non-transactional batches are executed outside explicit transactions. Optional
 boolean assertions in `verify.sql` must all return true.
 

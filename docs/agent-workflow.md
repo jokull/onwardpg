@@ -2,7 +2,7 @@
 
 onwardpg has one small contract with a coding agent:
 
-1. The agent identifies the accepted base bundle from its Git context.
+1. The agent identifies the accepted base `head_ref` from its Git context.
 2. onwardpg derives everything PostgreSQL catalog state can prove.
 3. The agent supplies only product intent that the schemas cannot prove.
 4. Intricate product work is edited as SQL, not encoded as orchestration JSON.
@@ -16,10 +16,11 @@ graph diff.
 
 ## The loop
 
-Start or refresh one logical feature bundle:
+Start one logical feature bundle after reading `history status`:
 
 ```sh
-onwardpg draft --target primary --bundle profile-name --after baseline
+BASE_HEAD=$(onwardpg history status --target primary | jq -r .head_ref)
+onwardpg draft --target primary --bundle profile-name --after "$BASE_HEAD" --create
 ```
 
 Branch on the documented result:
@@ -34,7 +35,7 @@ Branch on the documented result:
 | error / `1` | Fix invocation, credentials, DDL, or environment. |
 
 Repeat `draft` with the same bundle ID whenever the declarative schema changes.
-When accepted base history moves, update `--after` to the new accepted tip.
+When accepted base history moves, update `--after` to its new exact `head_ref`.
 There is no finalize state. Applying SQL to a local developer database does
 not advance the durable history head.
 
@@ -47,7 +48,8 @@ already knows that from the feature request, it can start with:
 onwardpg draft \
   --target primary \
   --bundle profile-name \
-  --after baseline \
+  --after "$BASE_HEAD" \
+  --create \
   --hint '{"kind":"rename","object":"column","from":["app","users","name"],"to":["app","users","display_name"]}'
 ```
 
@@ -56,9 +58,9 @@ object as a choice alongside the destructive alternative:
 
 ```json
 {
-  "protocol_version": "onwardpg/draft/3",
+  "protocol_version": "onwardpg.draft/v4",
   "status": "needs_decisions",
-  "next_action": "rerun_same_command_with_hints",
+  "next_action": "rerun_without_create_with_hints",
   "decisions": [
     {
       "choices": [
@@ -117,7 +119,8 @@ offered manual strategy:
 onwardpg draft \
   --target primary \
   --bundle payment-settlement \
-  --after baseline \
+  --after "$BASE_HEAD" \
+  --create \
   --hint '{"kind":"type_change","name":["app","payments","settled_on"],"strategy":"manual_sql"}'
 ```
 
@@ -125,7 +128,7 @@ onwardpg creates the bundle and reports only the files needing ownership:
 
 ```json
 {
-  "protocol_version": "onwardpg/draft/3",
+  "protocol_version": "onwardpg.draft/v4",
   "status": "needs_sql_edits",
   "next_action": "edit_files_then_verify",
   "path": "migrations/onward/primary/payment-settlement",

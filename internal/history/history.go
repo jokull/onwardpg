@@ -4,6 +4,7 @@
 package history
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 
 const Version = "onwardpg.history/v1"
 
-const StatusVersion = "onwardpg.history-status/v1"
+const StatusVersion = "onwardpg.history-status/v2"
 
 var phaseOrder = []string{"expand", "migrate", "contract"}
 
@@ -65,28 +66,55 @@ type StatusReport struct {
 	Target          string          `json:"target"`
 	HistoryHead     string          `json:"history_head"`
 	HeadBundle      string          `json:"head_bundle,omitempty"`
+	HeadRef         string          `json:"head_ref,omitempty"`
 	Entries         []StatusEntry   `json:"entries,omitempty"`
 	Selected        *SelectedStatus `json:"selected,omitempty"`
 	Findings        []StatusFinding `json:"findings,omitempty"`
 }
 
 // Inspect returns the repository-local hash-chain state without consulting
-// Git or any database. When selectedBundle is supplied, that one mutable
-// bundle is excluded so the report describes the base it is actually stacked
-// on and whether its receipted parent is current.
+// Git or any database. When selectedBundle is the valid chain head, that one
+// mutable bundle is excluded so the report describes the base it is actually
+// stacked on and whether its receipted parent is current. Selecting an earlier
+// entry in a valid chain is blocked explicitly: it is immutable history, not a
+// mutable bundle whose successor may be ignored. Exclusion remains the
+// recovery path when the complete history is invalid because the selected
+// mutable bundle forms a stale fork.
 func Inspect(root, bundleRoot, target, selectedBundle string) (StatusReport, error) {
 	report := StatusReport{ProtocolVersion: StatusVersion, Status: "valid", Target: target}
 	var (
-		chain    Chain
-		selected *Entry
-		err      error
+		chain           Chain
+		selected        *Entry
+		selectedNotHead bool
+		err             error
 	)
 	if selectedBundle == "" {
 		chain, err = Load(root, bundleRoot, target)
 	} else {
-		chain, selected, err = LoadExcluding(root, bundleRoot, target, selectedBundle)
-		if err != nil {
-			chain, selected, err = LoadEditedDraft(root, bundleRoot, target, selectedBundle)
+		fullChain, fullErr := Load(root, bundleRoot, target)
+		if fullErr == nil {
+			selectedIndex := -1
+			for i := range fullChain.Entries {
+				if fullChain.Entries[i].Directory == selectedBundle {
+					selectedIndex = i
+					break
+				}
+			}
+			switch {
+			case selectedIndex == -1:
+				chain = fullChain
+			case selectedIndex < len(fullChain.Entries)-1:
+				chain = fullChain
+				selected = &chain.Entries[selectedIndex]
+				selectedNotHead = true
+			default:
+				chain, selected, err = LoadExcluding(root, bundleRoot, target, selectedBundle)
+			}
+		} else {
+			chain, selected, err = LoadExcluding(root, bundleRoot, target, selectedBundle)
+			if err != nil {
+				chain, selected, err = LoadEditedDraft(root, bundleRoot, target, selectedBundle)
+			}
 		}
 	}
 	if err != nil {
@@ -102,6 +130,7 @@ func Inspect(root, bundleRoot, target, selectedBundle string) (StatusReport, err
 	}
 	if len(chain.Entries) > 0 {
 		report.HeadBundle = chain.Entries[len(chain.Entries)-1].Directory
+		report.HeadRef = HeadRef(chain)
 	}
 	if selectedBundle == "" {
 		return report, nil
@@ -110,11 +139,25 @@ func Inspect(root, bundleRoot, target, selectedBundle string) (StatusReport, err
 		report.Status = "missing"
 		report.Findings = []StatusFinding{{
 			Code: "selected_bundle_missing", Message: fmt.Sprintf("selected bundle %s does not exist", selectedBundle),
-			Remediation: "draft the selected bundle only after identifying the accepted base head",
+			Remediation: "if this is a new feature, pass this report's head_ref to draft --after and use --create once; otherwise restore the missing bundle from Git",
 		}}
 		return report, nil
 	}
 	receipt := selected.Artifact.Manifest.History
+	if selectedNotHead {
+		report.Status = "blocked"
+		report.Findings = []StatusFinding{{
+			Code:        "selected_bundle_not_head",
+			Message:     fmt.Sprintf("selected bundle %s is not the target history head; current head is %s", selectedBundle, report.HeadBundle),
+			Remediation: fmt.Sprintf("do not rewrite accepted history; choose a new feature bundle ID and create it after this report's head_ref for %s", report.HeadBundle),
+		}}
+		report.Selected = &SelectedStatus{
+			BundleID: selectedBundle, State: selected.Artifact.Manifest.State,
+			Generation: selected.Artifact.Manifest.Generation, ParentDigest: receipt.ParentDigest,
+			EntryDigest: receipt.EntryDigest, Relationship: "not_head",
+		}
+		return report, nil
+	}
 	relationship := "current"
 	if receipt.ParentDigest != chain.HeadDigest {
 		relationship = "stale"
@@ -122,7 +165,7 @@ func Inspect(root, bundleRoot, target, selectedBundle string) (StatusReport, err
 		report.Findings = []StatusFinding{{
 			Code:        "stale_history_parent",
 			Message:     fmt.Sprintf("selected bundle parent %s is stale; current base head is %s", receipt.ParentDigest, chain.HeadDigest),
-			Remediation: "rerun draft with the same bundle id and an explicit --after assertion for the accepted base head",
+			Remediation: "rerun draft with the same bundle id and pass this report's exact head_ref to --after",
 		}}
 	}
 	report.Selected = &SelectedStatus{
@@ -131,6 +174,29 @@ func Inspect(root, bundleRoot, target, selectedBundle string) (StatusReport, err
 		EntryDigest: receipt.EntryDigest, Relationship: relationship,
 	}
 	return report, nil
+}
+
+// HeadRef binds the human-readable head bundle ID to its exact content
+// digest. Agents pass this value back through draft --after so a same-named
+// but rewritten base cannot be mistaken for the accepted history tip.
+func HeadRef(chain Chain) string {
+	if len(chain.Entries) == 0 || chain.HeadDigest == "" {
+		return ""
+	}
+	return chain.Entries[len(chain.Entries)-1].Directory + "@" + chain.HeadDigest
+}
+
+func ParseHeadRef(value string) (bundleID, digest string, err error) {
+	bundleID, digest, found := strings.Cut(value, "@")
+	if !found || !safeName(bundleID) || !strings.HasPrefix(digest, "sha256:") {
+		return "", "", fmt.Errorf("history head reference %q must be <bundle>@sha256:<64 lowercase hex characters>", value)
+	}
+	encoded := strings.TrimPrefix(digest, "sha256:")
+	decoded, decodeErr := hex.DecodeString(encoded)
+	if decodeErr != nil || len(decoded) != 32 || encoded != strings.ToLower(encoded) {
+		return "", "", fmt.Errorf("history head reference %q must be <bundle>@sha256:<64 lowercase hex characters>", value)
+	}
+	return bundleID, digest, nil
 }
 
 // Through returns the chain prefix ending at bundleID. It is used by

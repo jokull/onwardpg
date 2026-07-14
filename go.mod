@@ -7,6 +7,7 @@ toolchain go1.26.5
 require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/pelletier/go-toml/v2 v2.2.4
+	golang.org/x/sys v0.36.0
 )
 
 require (

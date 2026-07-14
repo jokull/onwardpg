@@ -5,9 +5,11 @@ package draftflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -17,12 +19,13 @@ import (
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/semantichint"
 	"github.com/jokull/onwardpg/internal/source"
+	"github.com/jokull/onwardpg/internal/targetlock"
 	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg/draft/3"
+const Version = "onwardpg.draft/v4"
 
 type Finding struct {
 	Code        string `json:"code"`
@@ -39,7 +42,8 @@ type Report struct {
 	Generation         int                        `json:"generation,omitempty"`
 	HistoryHead        string                     `json:"history_head,omitempty"`
 	BaseBundle         string                     `json:"base_bundle,omitempty"`
-	AssertedBaseBundle string                     `json:"asserted_base_bundle,omitempty"`
+	BaseRef            string                     `json:"base_ref,omitempty"`
+	AssertedBaseRef    string                     `json:"asserted_base_ref,omitempty"`
 	PreviousParent     string                     `json:"previous_parent,omitempty"`
 	ParentChanged      bool                       `json:"parent_changed,omitempty"`
 	CurrentFingerprint string                     `json:"current_fingerprint,omitempty"`
@@ -52,16 +56,20 @@ type Report struct {
 	Verification       *verify.Report             `json:"verification,omitempty"`
 	Findings           []Finding                  `json:"findings,omitempty"`
 	RemovedBundle      bool                       `json:"removed_bundle,omitempty"`
+	CreatedBundle      bool                       `json:"created_bundle,omitempty"`
+	WrittenReceipts    []string                   `json:"written_receipts,omitempty"`
 }
 
 type Input struct {
 	Root           string
+	ConfigPath     string
 	Config         workspace.Config
 	TargetName     string
 	Target         workspace.Target
 	AdminURL       string
 	BundleID       string
-	AfterBundle    string
+	AfterRef       string
+	Create         bool
 	BuildVersion   string
 	Purpose        string
 	Hints          []protocol.Hint
@@ -84,6 +92,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if input.Root == "" || !filepath.IsAbs(input.Root) {
 		return report, fmt.Errorf("draft root must be absolute")
 	}
+	if input.ConfigPath == "" || !filepath.IsAbs(input.ConfigPath) {
+		return report, fmt.Errorf("draft configuration path must be absolute")
+	}
 	if input.AdminURL == "" {
 		return report, fmt.Errorf("disposable database admin URL is required")
 	}
@@ -96,16 +107,44 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if input.Purpose == "" {
 		input.Purpose = "feature"
 	}
-	report.AssertedBaseBundle = input.AfterBundle
-	if input.AfterBundle == "" {
+	report.AssertedBaseRef = input.AfterRef
+	if input.AfterRef == "" {
+		statusCommand := "onwardpg history status --target " + input.TargetName
+		if !input.Create {
+			statusCommand += " --bundle " + input.BundleID
+		}
 		report.Outcome = "blocked"
 		report.Findings = []Finding{{
 			Code:        "base_anchor_required",
-			Message:     "draft requires the coding agent to identify the accepted base bundle explicitly",
-			Remediation: "run onwardpg history status --target " + input.TargetName + " in the intended base checkout, then rerun draft with --after <head_bundle>",
+			Message:     "draft requires the coding agent to identify the exact accepted history head",
+			Remediation: "run " + statusCommand + " in the intended base checkout, then pass its head_ref to --after",
 		}}
 		return report, nil
 	}
+	assertedBundle, assertedDigest, err := history.ParseHeadRef(input.AfterRef)
+	if err != nil {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "invalid_base_anchor",
+			Message:     err.Error(),
+			Remediation: "copy head_ref exactly from onwardpg history status --target " + input.TargetName,
+		}}
+		return report, nil
+	}
+	lock, err := targetlock.Acquire(input.ConfigPath, input.TargetName)
+	if err != nil {
+		if errors.Is(err, targetlock.ErrBusy) {
+			report.Outcome = "blocked"
+			report.Findings = []Finding{{
+				Code:        "history_update_in_progress",
+				Message:     err.Error(),
+				Remediation: "wait for the other command and retry; the operating system releases this lock automatically if its owner exits",
+			}}
+			return report, nil
+		}
+		return report, err
+	}
+	defer lock.Release()
 	postgresMajor, err := source.PostgresMajor(ctx, input.AdminURL)
 	if err != nil {
 		return report, err
@@ -114,6 +153,23 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	destination, err := input.Config.BundlePath(input.Root, input.TargetName, input.BundleID)
 	if err != nil {
 		return report, err
+	}
+	if full, fullErr := history.Load(input.Root, input.Config.BundleRoot, input.TargetName); fullErr == nil {
+		for index, entry := range full.Entries {
+			if entry.Directory != input.BundleID || index == len(full.Entries)-1 {
+				continue
+			}
+			report.Outcome = "blocked"
+			report.HistoryHead = full.HeadDigest
+			report.BaseBundle = full.Entries[len(full.Entries)-1].Directory
+			report.BaseRef = history.HeadRef(full)
+			report.Findings = []Finding{{
+				Code:        "selected_bundle_not_head",
+				Message:     fmt.Sprintf("selected bundle %s is accepted history with a successor; current head is %s", input.BundleID, report.BaseBundle),
+				Remediation: "do not rewrite historical entries; choose a new feature bundle ID and create it after the current exact head_ref",
+			}}
+			return report, nil
+		}
 	}
 	chain, selected, err := history.LoadExcluding(input.Root, input.Config.BundleRoot, input.TargetName, input.BundleID)
 	if err != nil {
@@ -138,6 +194,24 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}}
 		return report, nil
 	}
+	if input.Create && selected != nil {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "selected_bundle_already_exists",
+			Message:     fmt.Sprintf("bundle %s already exists; --create is only valid for its first draft invocation", input.BundleID),
+			Remediation: "rerun the same draft command without --create so onwardpg must preserve and refresh the existing bundle",
+		}}
+		return report, nil
+	}
+	if !input.Create && selected == nil {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "selected_bundle_missing",
+			Message:     fmt.Sprintf("bundle %s does not exist, but this invocation requested a refresh", input.BundleID),
+			Remediation: "if this is intentionally the first invocation for the feature, rerun once with --create; otherwise restore the missing bundle from Git before restacking",
+		}}
+		return report, nil
+	}
 	for _, entry := range chain.Entries {
 		recorded := entry.Artifact.Manifest.DesiredSource.PostgresMajor
 		if recorded != 0 && recorded != postgresMajor {
@@ -148,12 +222,13 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if len(chain.Entries) > 0 {
 		report.BaseBundle = chain.Entries[len(chain.Entries)-1].Directory
 	}
-	if report.BaseBundle != input.AfterBundle {
+	report.BaseRef = history.HeadRef(chain)
+	if report.BaseBundle != assertedBundle || chain.HeadDigest != assertedDigest {
 		report.Outcome = "blocked"
 		report.Findings = []Finding{{
 			Code:        "base_anchor_mismatch",
-			Message:     fmt.Sprintf("asserted base bundle %q does not match the replayable base head %q (%s)", input.AfterBundle, report.BaseBundle, chain.HeadDigest),
-			Remediation: "use Git to identify the accepted main-branch head, make the working tree contain that chain plus only this PR-owned bundle, then rerun draft with the accepted head in --after",
+			Message:     fmt.Sprintf("asserted base head %q does not match the replayable base head %q", input.AfterRef, report.BaseRef),
+			Remediation: "use Git to identify the accepted main-branch history, make the working tree contain that chain plus only this feature bundle, then pass the accepted checkout's exact head_ref to --after",
 		}}
 		return report, nil
 	}
@@ -201,6 +276,25 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		// Unsupported state is actionable output, not durable migration history.
 		// In particular, do not replace an existing selected draft with an
 		// incomplete artifact while the agent changes the schema or strategy.
+		// Answer carry-forward cannot be judged reliably until the structural
+		// blocker is removed, so do not mislabel valid answers as invalidated.
+		if report.AnswerRebind != nil {
+			report.AnswerRebind = nil
+			report.Findings = append(report.Findings, Finding{
+				Code:        "answer_rebind_deferred",
+				Message:     "existing decisions were not evaluated because structural planning stopped as unsupported",
+				Remediation: "resolve the unsupported schema shape and rerun draft; still-applicable decisions will then be carried forward",
+			})
+		}
+		for _, reason := range plan.Unsupported {
+			if strings.HasPrefix(reason, "column_physical_order:") {
+				report.Findings = append(report.Findings, Finding{
+					Code:        "column_physical_order",
+					Message:     reason,
+					Remediation: "move newly added columns after retained upstream columns in the declarative CREATE TABLE order, or author and review a replacement-table migration",
+				})
+			}
+		}
 		return report, nil
 	}
 	if plan.Status == protocol.Planned && len(plan.Statements) == 0 {
@@ -209,6 +303,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			return report, nil
 		}
 		if selected.Artifact.Manifest.PhaseSource != "edited" {
+			if err := ensureInputsUnchanged(ctx, input, lock, chain, selected, plan.DesiredFingerprint); err != nil {
+				return historyChangedReport(report, err), nil
+			}
 			if err := bundle.RemoveDraft(destination, selected.Artifact); err != nil {
 				return report, fmt.Errorf("remove upstream-absorbed draft: %w", err)
 			}
@@ -254,7 +351,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		},
 		HistoryParentDigest: chain.HeadDigest,
 	}
-	generation, attempt, err := bundle.NextCoordinates(destination, metadata, plan)
+	generation, attempt := 1, 1
+	if selected != nil {
+		generation, attempt, err = bundle.NextCoordinatesFromArtifact(selected.Artifact, metadata, plan)
+	}
 	if err != nil {
 		return report, err
 	}
@@ -299,7 +399,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			for _, conflict := range reconciliation.Conflicts {
 				preserve = append(preserve, conflict.Path)
 			}
-			if err := bundle.Write(destination, artifact, bundle.WriteOptions{ReplaceDraft: true, PreserveEdited: preserve}); err != nil {
+			if err := ensureInputsUnchanged(ctx, input, lock, chain, selected, plan.DesiredFingerprint); err != nil {
+				return historyChangedReport(report, err), nil
+			}
+			if err := bundle.Write(destination, artifact, bundle.WriteOptions{ReplaceDraft: true, PreserveEdited: preserve, ExpectedPrevious: &selected.Artifact}); err != nil {
 				return report, fmt.Errorf("write conflict handoff: %w", err)
 			}
 			relative, pathErr := filepath.Rel(input.Root, destination)
@@ -349,7 +452,14 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}
 	}
 
-	if err := bundle.Write(destination, artifact, bundle.WriteOptions{ReplaceDraft: selected != nil}); err != nil {
+	if err := ensureInputsUnchanged(ctx, input, lock, chain, selected, plan.DesiredFingerprint); err != nil {
+		return historyChangedReport(report, err), nil
+	}
+	writeOptions := bundle.WriteOptions{ReplaceDraft: selected != nil}
+	if selected != nil {
+		writeOptions.ExpectedPrevious = &selected.Artifact
+	}
+	if err := bundle.Write(destination, artifact, writeOptions); err != nil {
 		return report, fmt.Errorf("write draft bundle: %w", err)
 	}
 	relative, err := filepath.Rel(input.Root, destination)
@@ -358,7 +468,64 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	report.Path = filepath.ToSlash(relative)
 	report.Generation = generation
+	if selected == nil {
+		report.CreatedBundle = true
+	}
+	if report.Outcome == string(protocol.NeedsInput) {
+		report.WrittenReceipts = bundle.SortedFiles(artifact.Files)
+	}
 	return report, nil
+}
+
+func ensureInputsUnchanged(ctx context.Context, input Input, lock *targetlock.Lock, expected history.Chain, selected *history.Entry, desiredFingerprint string) error {
+	if err := lock.ValidatePath(); err != nil {
+		return err
+	}
+	if err := workspace.RequireUnchanged(input.ConfigPath, input.Config); err != nil {
+		return fmt.Errorf("reload configuration before lifecycle write: %w", err)
+	}
+	chain, current, err := history.LoadExcluding(input.Root, input.Config.BundleRoot, input.TargetName, input.BundleID)
+	if err != nil {
+		chain, current, err = history.LoadEditedDraft(input.Root, input.Config.BundleRoot, input.TargetName, input.BundleID)
+	}
+	if err != nil {
+		return fmt.Errorf("target history no longer has one replayable base: %w", err)
+	}
+	if chain.HeadDigest != expected.HeadDigest {
+		return fmt.Errorf("base head changed from %s to %s while the draft was being prepared", expected.HeadDigest, chain.HeadDigest)
+	}
+	if (selected == nil) != (current == nil) {
+		return fmt.Errorf("selected bundle presence changed while the draft was being prepared")
+	}
+	if selected != nil && !reflect.DeepEqual(selected.Artifact, current.Artifact) {
+		return fmt.Errorf("selected bundle changed while the draft was being prepared")
+	}
+	compiled, err := workspace.CompileDDL(ctx, input.Root, input.TargetName, input.Target)
+	if err != nil {
+		return fmt.Errorf("recompile desired schema before lifecycle write: %w", err)
+	}
+	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
+	if err != nil {
+		return fmt.Errorf("rematerialize desired schema before lifecycle write: %w", err)
+	}
+	currentFingerprint, err := desired.Fingerprint()
+	if err != nil {
+		return fmt.Errorf("fingerprint desired schema before lifecycle write: %w", err)
+	}
+	if currentFingerprint != desiredFingerprint {
+		return fmt.Errorf("desired schema changed from %s to %s while the draft was being prepared", desiredFingerprint, currentFingerprint)
+	}
+	return nil
+}
+
+func historyChangedReport(report Report, err error) Report {
+	report.Outcome = "blocked"
+	report.Findings = append(report.Findings, Finding{
+		Code:        "inputs_changed_during_draft",
+		Message:     err.Error(),
+		Remediation: "inspect history status and the current exported DDL, then rerun draft; no lifecycle write was performed",
+	})
+	return report
 }
 
 func buildPlan(current, desired *pgschema.Snapshot, input Input, selected *history.Entry) (protocol.Result, *protocol.RebindReport, *protocol.Answers, []protocol.Question, []protocol.Hint, error) {
@@ -460,6 +627,7 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 			if err := rejectUnusedSuppliedHints(allHints, used, len(previous)); err != nil {
 				return protocol.Result{}, nil, nil, nil, nil, err
 			}
+			refreshRebindAfterHints(rebind, answers, plan)
 			return plan, rebind, answersReceipt(answers), questions, usedHints(allHints, used), nil
 		}
 		matched, err := semantichint.MatchQuestions(plan.Questions, allHints, current, desired)
@@ -470,6 +638,7 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 			if err := rejectUnusedSuppliedHints(allHints, used, len(previous)); err != nil {
 				return protocol.Result{}, nil, nil, nil, nil, err
 			}
+			refreshRebindAfterHints(rebind, answers, plan)
 			return plan, rebind, answersReceipt(answers), questions, usedHints(allHints, used), nil
 		}
 		for index := range matched.Used {
@@ -483,6 +652,45 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 		questions = mergeQuestions(questions, plan.Questions)
 	}
 	return protocol.Result{}, nil, nil, nil, nil, fmt.Errorf("semantic hint planning did not converge")
+}
+
+func refreshRebindAfterHints(report *protocol.RebindReport, answers protocol.Answers, plan protocol.Result) {
+	if report == nil {
+		return
+	}
+	report.Answers = answers
+	answered := make(map[string]bool, len(answers.Answers))
+	for _, answer := range answers.Answers {
+		answered[answer.Kind+":"+answer.Key] = true
+	}
+	remainingDeferred := report.Deferred[:0]
+	for _, id := range report.Deferred {
+		if !answered[id] {
+			remainingDeferred = append(remainingDeferred, id)
+		}
+	}
+	report.Deferred = remainingDeferred
+	report.Unanswered = nil
+	if plan.Status == protocol.NeedsInput {
+		for _, question := range plan.Questions {
+			report.Unanswered = append(report.Unanswered, question.Kind+":"+question.Key)
+		}
+		sort.Strings(report.Unanswered)
+		return
+	}
+	invalidated := make(map[string]bool, len(report.Invalidated))
+	for _, finding := range report.Invalidated {
+		invalidated[finding.Decision] = true
+	}
+	for _, id := range report.Deferred {
+		if !invalidated[id] {
+			report.Invalidated = append(report.Invalidated, protocol.RebindFinding{Decision: id, Reason: "question_no_longer_present"})
+		}
+	}
+	report.Deferred = nil
+	sort.Slice(report.Invalidated, func(i, j int) bool {
+		return report.Invalidated[i].Decision < report.Invalidated[j].Decision
+	})
 }
 
 func rejectUnusedSuppliedHints(hints []protocol.Hint, used map[int]bool, suppliedAt int) error {
