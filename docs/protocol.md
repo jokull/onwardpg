@@ -61,6 +61,11 @@ fail. Identifier arrays preserve quoted names without inventing a delimiter.
 
 Current semantic kinds are:
 
+- `identity`: an explicit table `from`/`to` assertion applied before rename
+  candidacy. It is for a known relation identity that exporter naming or other
+  bounded catalog differences would otherwise hide; it never permits a guessed
+  rename. If onwardpg cannot derive the structural transition, it emits the
+  editable `rename_compatibility_bridge` handoff instead of a drop/create;
 - `rename`: object kind plus exact `from` and `to` identifiers;
 - `drop`: object kind plus exact current identifier;
 - `type_change`: column identifier and the `manual_sql` handoff strategy;
@@ -74,6 +79,14 @@ planner iterates through its dependency-ordered question stages and consumes
 any matching intent. One drop hint can therefore reject a rename and later
 confirm removal. A hint that never consumes a real decision is rejected rather
 than ignored.
+
+JSON plan results can include `analysis`: stable records for credible rename
+near-misses rejected before a normal question existed. Each record names the
+old and desired objects plus a reason such as `child_identity_mismatch:...`.
+An agent can inspect that evidence and, when product context proves the
+relation identity, provide a table `identity` hint. The assertion remains
+fingerprint-bound through the resulting question and can only lead to an
+automatic plan or an editable compatibility bridge.
 
 Consumed hints are stored automatically in generated `decisions.json` beside
 their internal scoped answer evidence. The agent never copies fingerprints and
@@ -160,8 +173,9 @@ be wrapped in an explicit transaction by an executor.
 `needs_sql_edits` contains phased SQL with at least one explicit TODO and is not
 a successful plan. `unsupported` contains catalog/planner conditions that
 onwardpg cannot faithfully plan and also contains no executable plan. `ignored`
-records catalog objects excluded by validated `--ignore` selectors; it is not
-an assertion that their definitions are safe to change.
+records exact catalog objects excluded by validated command-line or configured
+target ignore selectors; it is not an assertion that their definitions are
+safe to change.
 
 Question fields are stable v1 keys: `id`, `kind`, `message`, `key`, `choices`,
 `allows_freeform`, `current_fingerprint`, `desired_fingerprint`, and

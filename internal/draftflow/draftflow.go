@@ -88,23 +88,24 @@ type Report struct {
 }
 
 type Input struct {
-	Root           string
-	ConfigPath     string
-	Config         workspace.Config
-	TargetName     string
-	Target         workspace.Target
-	AdminURL       string
-	BundleID       string
-	PlanID         string
-	AfterRef       string
-	InferBase      bool
-	Create         bool
-	BuildVersion   string
-	Purpose        string
-	Hints          []protocol.Hint
-	HintsGiven     bool
-	Ignores        []string
-	PlannerOptions graphplan.Options
+	Root            string
+	ConfigPath      string
+	Config          workspace.Config
+	TargetName      string
+	Target          workspace.Target
+	AdminURL        string
+	BundleID        string
+	PlanID          string
+	AfterRef        string
+	InferBase       bool
+	Create          bool
+	BuildVersion    string
+	Purpose         string
+	Hints           []protocol.Hint
+	HintsGiven      bool
+	Ignores         []string
+	RequiredIgnores []string
+	PlannerOptions  graphplan.Options
 }
 
 // Run replaces one explicitly selected draft while treating every other entry
@@ -318,9 +319,14 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("materialize desired schema: %w", err)
 	}
-	if err := source.ValidateIgnoreSelectors(input.Ignores, current, desired); err != nil {
+	if err := source.ValidateIgnoreSelectors(input.RequiredIgnores, current, desired); err != nil {
 		return report, err
 	}
+	activeIgnores, err := source.ActiveIgnoreSelectors(input.Ignores, current, desired)
+	if err != nil {
+		return report, err
+	}
+	input.Ignores = activeIgnores
 
 	plan, rebind, answerReceipt, questions, hints, err := buildPlan(current, desired, input, selected)
 	if err != nil {
@@ -796,8 +802,24 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 		known[key] = true
 		allHints = append(allHints, hint)
 	}
+	identityUsed, err := semantichint.ApplyIdentityHints(current, desired, allHints, &options)
+	if err != nil {
+		return protocol.Result{}, nil, nil, nil, nil, err
+	}
+	if len(identityUsed) > 0 {
+		// Identity changes candidacy itself, so rebuild the initial question set
+		// before trying to bind ordinary semantic answers.
+		plan, err = graphplan.Build(current, desired, protocol.Answers{}, options)
+		if err != nil {
+			return protocol.Result{}, nil, nil, nil, nil, err
+		}
+		rebind, receipt, questions = nil, nil, append([]protocol.Question(nil), plan.Questions...)
+	}
 	used := make(map[int]bool, len(allHints))
 	for index := range previous {
+		used[index] = true
+	}
+	for index := range identityUsed {
 		used[index] = true
 	}
 	answers := protocol.Answers{

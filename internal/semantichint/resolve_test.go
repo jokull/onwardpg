@@ -80,6 +80,65 @@ func TestResolveWorkspaceRequiresExplicitRenameOrPreserveIntent(t *testing.T) {
 	}
 }
 
+func TestResolveTurnsConfirmedColumnRenameIntoEditableBridge(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "display_name", Position: 1, Type: "text"}
+	after := pgschema.Column{Table: table.ObjectID(), Name: "full_name", Position: 1, Type: "text"}
+	for _, object := range []pgschema.Object{table, before} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{table, after} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hints := []protocol.Hint{
+		{Kind: "rename", Object: "column", From: []string{"app", "accounts", "display_name"}, To: []string{"app", "accounts", "full_name"}},
+		{Kind: "manual_sql", Object: "column", Name: []string{"app", "accounts", "display_name"}, Action: "rename_compatibility_bridge"},
+	}
+	resolution, err := Resolve(current, desired, hints, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.Result.Status != protocol.NeedsSQLEdits || !strings.Contains(joinResolutionSQL(resolution), "ONWARDPG TODO") || !strings.Contains(joinResolutionSQL(resolution), "Planner analysis:") {
+		t.Fatalf("confirmed rename must hand off an editable bridge: %#v", resolution)
+	}
+}
+
+func TestResolveIdentityHintReachesTableCandidacyAndProducesManualBridge(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	from := pgschema.Table{Schema: "app", Name: "accounts"}
+	to := pgschema.Table{Schema: "app", Name: "customers"}
+	beforeID := pgschema.Column{Table: from.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	afterID := pgschema.Column{Table: to.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	beforeKey := pgschema.Constraint{Table: from.ObjectID(), Name: "billing_identity", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)"}
+	afterKey := pgschema.Constraint{Table: to.ObjectID(), Name: "customer_identity", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)"}
+	for _, object := range []pgschema.Object{from, beforeID, beforeKey} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{to, afterID, afterKey} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hints := []protocol.Hint{
+		{Kind: "identity", Object: "table", From: []string{"app", "accounts"}, To: []string{"app", "customers"}},
+		{Kind: "manual_sql", Object: "table", Name: []string{"app", "accounts"}, Action: "rename_compatibility_bridge"},
+	}
+	resolution, err := Resolve(current, desired, hints, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.Result.Status != protocol.NeedsSQLEdits || !strings.Contains(joinResolutionSQL(resolution), "ONWARDPG TODO") || !strings.Contains(joinResolutionSQL(resolution), "explicitly asserted") {
+		t.Fatalf("identity assertion must produce a bounded manual bridge: %#v", resolution)
+	}
+}
+
 func joinResolutionSQL(resolution Resolution) string {
 	statements := make([]string, len(resolution.Result.Statements))
 	for index, statement := range resolution.Result.Statements {

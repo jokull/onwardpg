@@ -55,10 +55,11 @@ Ordinary views are catalog-modeled, including PostgreSQL-deparsed definitions,
 reloptions, comments, and typed dependencies on referenced tables, columns,
 views, enums, and modeled user routines. The planner supports create, `CREATE
 OR REPLACE` definition/options changes, and approved drops. It recognizes and
-receipts semantic view-rename intent, but a rename now stops with
-`expand_contract_bridge_required` instead of emitting a direct cutover.
-Dependent-view rewrite analysis remains evidence for a future compatibility
-bridge; it is not currently executable as a successful rename plan.
+receipts semantic view-rename intent. After the rename choice, it asks for a
+fingerprint-bound `rename_compatibility_bridge` handoff rather than emitting a
+direct cutover. The generated `migrate` file contains an annotated
+`ONWARDPG TODO` with the bounded dependent-view analysis; the developer or
+agent supplies the compatibility wrapper and verifies convergence.
 For a materialized dependent, onwardpg permits PostgreSQL's native retained
 catalog rewrite only when a protected-token comparison proves its desired
 definition differs solely in deparsed relation references. This handles the
@@ -66,9 +67,9 @@ PG15–18 variation in target-list qualification without rewriting literals,
 comments, dollar strings, function calls, or arbitrary SQL. Any other
 materialized-dependent definition change remains conservative because its
 rebuild is destructive and needs a separately reviewed transition.
-Materialized-view rename intent and exact old→new index identity are modeled,
-but the rename is likewise blocked until an old-name compatibility strategy is
-implemented. Materialized views remain catalog-modeled and support
+Materialized-view rename intent and exact old→new index identity are modeled;
+the same explicit compatibility-bridge handoff is used rather than a guessed
+old-name strategy. Materialized views remain catalog-modeled and support
 create/drop. A definition/options change emits an explicit destructive
 rebuild question, then a reviewed drop/create `migrate` batch if approved.
 Indexes on materialized views are graph-modeled and recreated after an approved
@@ -98,8 +99,9 @@ the projected column, which is handled without parsing arbitrary SQL. Any
 expression, multi-column projection, alias, quoted identifier, or other
 dependent-view change is a structured unsupported result rather than an
 out-of-order `CREATE OR REPLACE` or guessed rebuild. Even the narrow recognized
-case is not emitted as a bare rename: it remains blocked until onwardpg can
-keep both column contracts usable through expand and migrate.
+case is not emitted as a bare rename: onwardpg produces the explicit editable
+compatibility-bridge handoff needed to keep both column contracts usable
+through expand and migrate.
 
 Functions, procedures, and triggers are graph-modeled. Their canonical
 PostgreSQL definitions support create, replace/recreate, enable-state changes,
@@ -107,16 +109,17 @@ and approved drops; a trigger depends on both its table and its invoked
 routine. Ordinary and materialized views also have typed catalog edges to
 invoked user routines, so routine creation precedes dependent views and
 approved drops remove views before their routine. A same-signature routine
-rename requires a validated semantic hint and is then blocked pending an
-expand/contract wrapper strategy; onwardpg does not rename it directly.
+rename requires a validated semantic hint and then an explicit editable
+expand/contract wrapper handoff; onwardpg does not guess or directly apply a
+routine cutover.
 When that rename is the only change to a dependent materialized view's
 protected, schema-qualified routine call, onwardpg retains the materialized
 view through PostgreSQL's native OID-preserving rewrite rather than requesting
 a destructive rebuild. Literals, bare calls, comments, and broader definition
 changes do not satisfy that proof.
 When typed trigger dependents all remain in place and point at the desired
-routine, onwardpg can prove the required rewrite set, but the routine rename
-still remains blocked until a compatibility wrapper strategy exists. A
+routine, onwardpg can prove the required rewrite set and includes that evidence
+in the editable compatibility handoff. A
 behaviorally identical trigger rename requires a validated semantic hint and
 is operational metadata rather than an application-callable identity.
 PostgreSQL does not record arbitrary
@@ -146,10 +149,12 @@ trigger’s table association and its catalog `ON relation` clause are the sole
 changes. onwardpg normalizes only that one deparsed clause, never text inside
 the trigger’s routine or `WHEN` expression. Any actual trigger-definition or
 routine change continues through its independent reviewed lifecycle.
-Constraint and index child identities must currently retain their names across
-the table rename. A declarative export that regenerates names such as
-`old_table_pkey` as `new_table_pkey` does not receive a rename choice; use
-stable explicit child names rather than approving destructive replacement.
+PostgreSQL-derived constraint and index names are normalized during table
+rename candidacy. A declarative export may regenerate `old_table_pkey`,
+`old_table_column_key`, or `old_table_column_idx` as names for the new table;
+onwardpg keeps the rename choice and emits the necessary explicit catalog
+renames in contract, because PostgreSQL itself retains those child names when
+the relation is renamed. User-selected names remain material changes.
 Direct ordinary and materialized view dependencies are retained by the same
 confirmed table rename when their catalog definitions differ only at protected
 relation references. PostgreSQL preserves their relation identity and stored
@@ -158,8 +163,8 @@ unsupported work, rather than a replacement ordered before the table rename.
 
 A confirmed column rename can still prove which typed triggers PostgreSQL
 would rewrite: onwardpg recognizes only `UPDATE OF` column lists and the
-trigger `WHEN` predicate. That analysis narrows the future bridge but does not
-authorize a direct rename. It never rewrites trigger identity, relation
+trigger `WHEN` predicate. That analysis is included in the editable bridge
+handoff but does not authorize a direct rename. It never rewrites trigger identity, relation
 targets, routines, or arbitrary expression text.
 
 Direct same-name column type changes and extension schema moves are also

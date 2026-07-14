@@ -47,6 +47,9 @@ type Options struct {
 	// planner still creates required appended columns and records the exact
 	// mismatch in Result.Compatibility; strict planning never enables this.
 	IgnoreColumnPhysicalOrder bool
+	// IdentityHints are explicit, validated assertions supplied by the caller
+	// before rename candidacy. They are never inferred from a schema diff.
+	IdentityHints []protocol.Hint
 }
 
 type decisions struct {
@@ -58,6 +61,7 @@ type decisions struct {
 	partitionManual map[pgschema.ID]protocol.ManualWork
 	identityDrop    map[pgschema.ID]bool
 	authorization   map[pgschema.ID]bool
+	renameBridge    map[pgschema.ID]protocol.ManualWork
 }
 
 type renameIndex struct {
@@ -70,6 +74,17 @@ type renameTable struct {
 	to                      pgschema.Table
 	compatibilityColumns    []pgschema.Column
 	compatibilityPrivileges []pgschema.TablePrivilege
+	derivedChildRenames     []tableChildRename
+	manualOnly              bool
+}
+
+// tableChildRename is a PostgreSQL-generated child name which needs an
+// explicit catalog rename after the physical table rename. PostgreSQL retains
+// constraint and index names when a relation is renamed; declarative exporters
+// commonly regenerate their conventional names instead.
+type tableChildRename struct {
+	from pgschema.Object
+	to   pgschema.Object
 }
 
 type renameColumn struct {
@@ -170,10 +185,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	if rejected := rejectedConstraintRenames(changes); len(rejected) > 0 {
 		return unsupportedResult(result, resolver, rejected)
 	}
-	changes, tableRenames, tableRenameQuestions, tableRenameUnsupported, err := resolveTableRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint, options.PreserveSurplus)
+	changes, tableRenames, tableRenameQuestions, tableRenameUnsupported, tableRenameAnalysis, err := resolveTableRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint, options.PreserveSurplus, options.IdentityHints)
 	if err != nil {
 		return protocol.Result{}, err
 	}
+	result.Analysis = append(result.Analysis, tableRenameAnalysis...)
 	if len(tableRenameUnsupported) > 0 {
 		return unsupportedResult(result, resolver, tableRenameUnsupported)
 	}
@@ -282,6 +298,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return protocol.Result{}, err
 	}
 	questions = append(questions, mutationQuestions...)
+	bridgeQuestions, err := resolveRenameBridges(tableRenames, columnRenames, viewRenames, routineRenames, resolver, currentFingerprint, desiredFingerprint, &choices)
+	if err != nil {
+		return protocol.Result{}, err
+	}
+	questions = append(questions, bridgeQuestions...)
 	if len(questions) > 0 {
 		if err := resolver.ValidateAllUsed(); err != nil {
 			return protocol.Result{}, err
@@ -294,6 +315,10 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	// routine identity. Trigger definitions are reapplied after a confirmed
 	// routine rename, never before the new routine name exists.
 	for _, rename := range routineRenames {
+		if work, manual := choices.renameBridge[rename.from.ObjectID()]; manual {
+			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
+			continue
+		}
 		for _, statement := range renderRoutineRename(rename) {
 			appendStatement(&result, statement)
 		}
@@ -407,6 +432,10 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 	}
 	for _, rename := range tableRenames {
+		if rename.manualOnly {
+			appendStatement(&result, manualWorkStatement(choices.renameBridge[rename.from.ObjectID()], "rename_compatibility_bridge", "application_contract"))
+			continue
+		}
 		statements, err := renderTableRename(rename)
 		if err != nil {
 			return protocol.Result{}, err
@@ -416,6 +445,10 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 	}
 	for _, rename := range viewRenames {
+		if work, manual := choices.renameBridge[rename.from.ObjectID()]; manual {
+			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
+			continue
+		}
 		for _, statement := range renderViewRename(rename) {
 			appendStatement(&result, statement)
 		}
@@ -437,6 +470,10 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		appendStatement(&result, renderExtensionMove(move))
 	}
 	for _, rename := range columnRenames {
+		if work, manual := choices.renameBridge[rename.from.ObjectID()]; manual {
+			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
+			continue
+		}
 		for _, statement := range renderColumnRename(rename) {
 			appendStatement(&result, statement)
 		}
@@ -1582,7 +1619,92 @@ func renderColumnRename(rename renameColumn) []protocol.Statement {
 	return statements
 }
 
-func resolveTableRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, preserveSurplus bool) ([]change.Change, []renameTable, []protocol.Question, []string, error) {
+func assertedTableIdentity(hints []protocol.Hint, from, to pgschema.Table) bool {
+	for _, hint := range hints {
+		if hint.Kind != "identity" || hint.Object != "table" {
+			continue
+		}
+		if reflect.DeepEqual(hint.From, []string{from.Schema, from.Name}) && reflect.DeepEqual(hint.To, []string{to.Schema, to.Name}) {
+			return true
+		}
+	}
+	return false
+}
+
+func consumeAssertedTableIdentityChanges(changes []change.Change, from, to pgschema.Table, consumed map[pgschema.ID]bool) {
+	for _, item := range changes {
+		if tableIdentityChangeBelongsTo(item.Before, from, to) || tableIdentityChangeBelongsTo(item.After, from, to) {
+			consumed[item.ID] = true
+		}
+	}
+}
+
+func tableIdentityChangeBelongsTo(value any, from, to pgschema.Table) bool {
+	object, ok := value.(pgschema.Object)
+	if !ok || object == nil {
+		return false
+	}
+	id := object.ObjectID()
+	if id == from.ObjectID() || id == to.ObjectID() || childTable(object) == from.ObjectID() || childTable(object) == to.ObjectID() {
+		return true
+	}
+	constraint, ok := object.(pgschema.Constraint)
+	return ok && constraint.Reference != nil && (*constraint.Reference == from.ObjectID() || *constraint.Reference == to.ObjectID())
+}
+
+// resolveRenameBridges turns a confirmed identity into an explicit handoff
+// when PostgreSQL has no generic, online-compatible rename sequence. The
+// planner has already bounded the old/new objects and any typed dependents;
+// only the product's compatibility window and rollout SQL remain unknown.
+func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []renameView, routines []renameRoutine, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, choices *decisions) ([]protocol.Question, error) {
+	type bridge struct {
+		id      pgschema.ID
+		kind    string
+		message string
+	}
+	bridges := make([]bridge, 0, len(tables)+len(columns)+len(views)+len(routines))
+	for _, rename := range tables {
+		if !rename.manualOnly {
+			continue
+		}
+		bridges = append(bridges, bridge{rename.from.ObjectID(), "table", "Table " + rename.from.ObjectID().String() + " is explicitly asserted to be " + rename.to.ObjectID().String() + ", but its child catalog state does not match an automatic table-rename strategy. Supply the complete reviewed expand/migrate/contract transition; onwardpg will verify the resulting desired catalog but will not guess child identity, data movement, or application timing."})
+	}
+	for _, rename := range columns {
+		bridges = append(bridges, bridge{rename.from.ObjectID(), "column", "Column " + rename.from.ObjectID().String() + " is confirmed as " + rename.to.ObjectID().String() + ". Supply an expand/migrate/contract compatibility bridge; onwardpg will not guess dual-write behavior, backfill, or cutover timing."})
+	}
+	for _, rename := range views {
+		kind := "view"
+		display := "View"
+		if rename.from.Materialized {
+			kind = "materialized view"
+			display = "Materialized view"
+		}
+		bridges = append(bridges, bridge{rename.from.ObjectID(), kind, display + " " + rename.from.ObjectID().String() + " is confirmed as " + rename.to.ObjectID().String() + ". Supply the reviewed compatibility wrapper and dependent cutover SQL; onwardpg will not guess callers, refresh behavior, or availability requirements."})
+	}
+	for _, rename := range routines {
+		bridges = append(bridges, bridge{rename.from.ObjectID(), "routine", "Routine " + rename.from.ObjectID().String() + " is confirmed as " + rename.to.ObjectID().String() + ". Supply the reviewed old-name wrapper, caller migration, and final removal SQL; onwardpg will not guess application call timing."})
+	}
+	sort.Slice(bridges, func(i, j int) bool { return bridges[i].id.String() < bridges[j].id.String() })
+	questions := make([]protocol.Question, 0, len(bridges))
+	for _, bridge := range bridges {
+		question := protocol.Question{
+			ID: "rename_compatibility_bridge:" + bridge.id.String(), Kind: "rename_compatibility_bridge", Key: bridge.id.String(),
+			Message: bridge.message, Choices: []string{"provided"}, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		}
+		work, found, err := resolver.ResolveManual(question)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			questions = append(questions, question)
+			continue
+		}
+		choices.renameBridge[bridge.id] = work
+	}
+	return questions, nil
+}
+
+func resolveTableRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, preserveSurplus bool, identityHints []protocol.Hint) ([]change.Change, []renameTable, []protocol.Question, []string, []protocol.DecisionAnalysis, error) {
 	var drops, creates []change.Change
 	for _, item := range changes {
 		if item.ID.Kind != pgschema.KindTable {
@@ -1599,13 +1721,18 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 	var renames []renameTable
 	var compoundColumnChanges []change.Change
 	var questions []protocol.Question
+	var analysis []protocol.DecisionAnalysis
 	for _, drop := range drops {
 		from := drop.Before.(pgschema.Table)
 		var candidates []change.Change
 		for _, create := range creates {
 			to := create.After.(pgschema.Table)
-			if equivalentTableForRename(current, desired, from, to) {
+			if equivalentTableForRename(current, desired, from, to) || assertedTableIdentity(identityHints, from, to) {
 				candidates = append(candidates, create)
+				continue
+			}
+			if reason, credible := tableRenameRejection(current, desired, from, to); credible {
+				analysis = append(analysis, protocol.DecisionAnalysis{Kind: "rename_table", From: drop.ID.String(), To: create.ID.String(), Outcome: "rejected", Reason: reason})
 			}
 		}
 		if len(candidates) == 0 {
@@ -1629,7 +1756,7 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 		}
 		answer, found, err := resolver.Resolve(question)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, analysis, err
 		}
 		if !found {
 			questions = append(questions, question)
@@ -1644,14 +1771,24 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 				}
 			}
 			if candidate.ID.Kind == "" {
-				return nil, nil, nil, nil, fmt.Errorf("resolved table rename candidate %q is unavailable", answer)
+				return nil, nil, nil, nil, analysis, fmt.Errorf("resolved table rename candidate %q is unavailable", answer)
 			}
 			if consumed[candidate.ID] {
-				return nil, nil, nil, nil, fmt.Errorf("desired table %s was selected as more than one rename target", candidate.ID)
+				return nil, nil, nil, nil, analysis, fmt.Errorf("desired table %s was selected as more than one rename target", candidate.ID)
 			}
 			to := candidate.After.(pgschema.Table)
 			consumed[drop.ID], consumed[candidate.ID] = true, true
+			if !equivalentTableForRename(current, desired, from, to) {
+				// An explicit identity assertion may reach this branch even though
+				// the automatic compatibility strategy cannot account for all table
+				// children. Consume the bounded transition and request ordinary
+				// editable SQL; never fall through to destructive drop/create.
+				consumeAssertedTableIdentityChanges(changes, from, to, consumed)
+				renames = append(renames, renameTable{from: from, to: to, manualOnly: true})
+				continue
+			}
 			fromChildren, toChildren := tableChildren(current, from.ObjectID()), tableChildren(desired, to.ObjectID())
+			var derivedChildRenames []tableChildRename
 			for key, before := range fromChildren {
 				after := toChildren[key]
 				consumed[before.ObjectID()] = true
@@ -1663,6 +1800,9 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 					compoundColumnChanges = append(compoundColumnChanges, change.Change{
 						Kind: change.Modify, ID: beforeColumn.ObjectID(), Before: beforeColumn, After: afterColumn,
 					})
+				}
+				if derivedTableChildNameChanged(before, after, from, to) {
+					derivedChildRenames = append(derivedChildRenames, tableChildRename{from: before, to: after})
 				}
 			}
 			for key, after := range toChildren {
@@ -1677,6 +1817,9 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 					}
 				}
 			}
+			sort.Slice(derivedChildRenames, func(i, j int) bool {
+				return derivedChildRenames[i].from.ObjectID().String() < derivedChildRenames[j].from.ObjectID().String()
+			})
 			retainedViews := retainedTableRenameViews(current, desired, from, to)
 			retainedViewSet := make(map[pgschema.ID]bool, len(retainedViews))
 			for _, id := range retainedViews {
@@ -1689,7 +1832,7 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 					continue
 				}
 				if _, exists := desired.Object(view.ObjectID()); exists {
-					return nil, nil, nil, []string{"table_rename_dependent_view:" + view.ObjectID().String()}, nil
+					return nil, nil, nil, []string{"table_rename_dependent_view:" + view.ObjectID().String()}, analysis, nil
 				}
 			}
 			// PostgreSQL updates foreign keys in other tables when their
@@ -1710,15 +1853,15 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 			}
 			columns, privileges, compatibilityUnsupported := tableRenameCompatibility(current, desired, from, to)
 			if len(compatibilityUnsupported) > 0 {
-				return nil, nil, nil, compatibilityUnsupported, nil
+				return nil, nil, nil, compatibilityUnsupported, analysis, nil
 			}
 			renames = append(renames, renameTable{
-				from: from, to: to, compatibilityColumns: columns, compatibilityPrivileges: privileges,
+				from: from, to: to, compatibilityColumns: columns, compatibilityPrivileges: privileges, derivedChildRenames: derivedChildRenames,
 			})
 		}
 	}
 	if len(consumed) == 0 {
-		return changes, renames, questions, nil, nil
+		return changes, renames, questions, nil, analysis, nil
 	}
 	filtered := make([]change.Change, 0, len(changes)-len(consumed))
 	for _, item := range changes {
@@ -1733,7 +1876,7 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 		}
 		return filtered[i].ID.String() < filtered[j].ID.String()
 	})
-	return filtered, renames, questions, nil, nil
+	return filtered, renames, questions, nil, analysis, nil
 }
 
 // retainedTableRenameViews captures PostgreSQL's native pg_rewrite update for
@@ -2543,6 +2686,39 @@ func equivalentTableForRename(current, desired *pgschema.Snapshot, from, to pgsc
 	return true
 }
 
+// tableRenameRejection reports only pairs whose relation-level shape matches:
+// those are credible near-misses an agent may reasonably inspect or assert.
+// It deliberately does not claim that arbitrary similarly named tables are
+// rename candidates.
+func tableRenameRejection(current, desired *pgschema.Snapshot, from, to pgschema.Table) (string, bool) {
+	fromTable, toTable := from, to
+	fromTable.Schema, toTable.Schema = "", ""
+	fromTable.Name, toTable.Name = "", ""
+	fromTable.Comment, toTable.Comment = nil, nil
+	if !reflect.DeepEqual(fromTable, toTable) {
+		return "table_shape_changed", false
+	}
+	fromChildren := tableChildren(current, from.ObjectID())
+	toChildren := tableChildren(desired, to.ObjectID())
+	for key, before := range fromChildren {
+		after, exists := toChildren[key]
+		if !exists {
+			return "child_identity_mismatch:" + before.ObjectID().String(), true
+		}
+		if !equivalentChildForTableRename(before, after, from, to) && !plannableColumnChangeDuringTableRename(before, after) {
+			return "child_semantics_changed:" + before.ObjectID().String(), true
+		}
+	}
+	for key, after := range toChildren {
+		if _, exists := fromChildren[key]; !exists {
+			if _, column := after.(pgschema.Column); !column {
+				return "new_noncolumn_child:" + after.ObjectID().String(), true
+			}
+		}
+	}
+	return "not_a_rename_candidate", true
+}
+
 func plannableColumnChangeDuringTableRename(before, after pgschema.Object) bool {
 	beforeColumn, beforeOK := before.(pgschema.Column)
 	afterColumn, afterOK := after.(pgschema.Column)
@@ -2553,11 +2729,155 @@ func tableChildren(snapshot *pgschema.Snapshot, table pgschema.ID) map[string]pg
 	children := make(map[string]pgschema.Object)
 	for _, object := range snapshot.Objects() {
 		if childTable(object) == table {
-			id := object.ObjectID()
-			children[string(id.Kind)+":"+id.Part+":"+id.Signature] = object
+			children[tableChildKey(object, table)] = object
 		}
 	}
 	return children
+}
+
+// tableChildKey makes a table rename candidate robust to the precise subset of
+// names PostgreSQL itself derives from the relation and its key columns. It is
+// intentionally narrower than "looks table-prefixed": a custom name remains a
+// material catalog change and cannot disappear inside a table rename.
+func tableChildKey(object pgschema.Object, table pgschema.ID) string {
+	normalized, derived := normalizeDerivedTableChildName(object, table.Name)
+	if !derived {
+		id := object.ObjectID()
+		return string(id.Kind) + ":" + id.Part + ":" + id.Signature
+	}
+	switch child := normalized.(type) {
+	case pgschema.Constraint:
+		child.Table = pgschema.ID{}
+		if child.Reference != nil && *child.Reference == table {
+			child.Reference = nil
+		}
+		return "derived_constraint:" + stableChildKey(child)
+	case pgschema.Index:
+		child.Table = pgschema.ID{}
+		child.Definition = ""
+		return "derived_index:" + stableChildKey(child)
+	default:
+		id := object.ObjectID()
+		return string(id.Kind) + ":" + id.Part + ":" + id.Signature
+	}
+}
+
+func stableChildKey(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("unencodable:%T:%v", value, err)
+	}
+	return string(encoded)
+}
+
+func derivedTableChildNameChanged(before, after pgschema.Object, from, to pgschema.Table) bool {
+	_, leftDerived := normalizeDerivedTableChildName(before, from.Name)
+	_, rightDerived := normalizeDerivedTableChildName(after, to.Name)
+	if !leftDerived || !rightDerived || before.ObjectID().Part == after.ObjectID().Part {
+		return false
+	}
+	switch before.(type) {
+	case pgschema.Constraint, pgschema.Index:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeDerivedTableChildName(object pgschema.Object, table string) (pgschema.Object, bool) {
+	switch child := object.(type) {
+	case pgschema.Constraint:
+		expected, ok := derivedConstraintName(child, table)
+		if !ok || child.Name != expected {
+			return object, false
+		}
+		child.Name = ""
+		if child.UsingIndex == expected {
+			child.UsingIndex = ""
+		}
+		return child, true
+	case pgschema.Index:
+		expected, ok := derivedIndexName(child, table)
+		if !ok || child.Name != expected {
+			return object, false
+		}
+		child.Name = ""
+		if child.Constraint == expected {
+			child.Constraint = ""
+		}
+		return child, true
+	default:
+		return object, false
+	}
+}
+
+func derivedConstraintName(constraint pgschema.Constraint, table string) (string, bool) {
+	if constraint.Type == pgschema.ConstraintPrimary {
+		return table + "_pkey", true
+	}
+	var suffix string
+	switch constraint.Type {
+	case pgschema.ConstraintUnique:
+		suffix = "_key"
+	case pgschema.ConstraintForeign:
+		suffix = "_fkey"
+	default:
+		return "", false
+	}
+	columns, ok := constraintKeyColumns(constraint.Definition)
+	if !ok {
+		return "", false
+	}
+	return table + "_" + strings.Join(columns, "_") + suffix, true
+}
+
+func derivedIndexName(index pgschema.Index, table string) (string, bool) {
+	if index.Primary {
+		return table + "_pkey", true
+	}
+	columns := make([]string, 0, len(index.Parts))
+	for _, part := range index.Parts {
+		if part.Column == "" || part.Expression != "" {
+			return "", false
+		}
+		columns = append(columns, part.Column)
+	}
+	if len(columns) == 0 {
+		return "", false
+	}
+	suffix := "_idx"
+	if index.Constraint != "" {
+		suffix = "_key"
+	}
+	return table + "_" + strings.Join(columns, "_") + suffix, true
+}
+
+// constraintKeyColumns recognizes the catalog-rendered leading key list used
+// by PRIMARY/UNIQUE/FOREIGN KEY constraints. Complex or truncated generated
+// names are deliberately not normalized: they continue to require an explicit
+// change rather than being guessed as conventional names.
+func constraintKeyColumns(definition string) ([]string, bool) {
+	start := strings.Index(definition, "(")
+	if start < 0 {
+		return nil, false
+	}
+	end := strings.Index(definition[start+1:], ")")
+	if end < 0 {
+		return nil, false
+	}
+	fields := strings.Split(definition[start+1:start+1+end], ",")
+	columns := make([]string, 0, len(fields))
+	for _, field := range fields {
+		name := strings.TrimSpace(field)
+		if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+			name = strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
+		}
+		if name == "" || strings.ContainsAny(name, " ()") {
+			return nil, false
+		}
+		columns = append(columns, name)
+	}
+	return columns, len(columns) > 0
 }
 
 func childTable(object pgschema.Object) pgschema.ID {
@@ -2601,6 +2921,13 @@ func equivalentChildForTableRename(before, after pgschema.Object, from, to pgsch
 		if !ok {
 			return false
 		}
+		beforeObject, beforeDerived := normalizeDerivedTableChildName(before, from.Name)
+		nextObject, nextDerived := normalizeDerivedTableChildName(next, to.Name)
+		if beforeDerived != nextDerived {
+			return false
+		}
+		before = beforeObject.(pgschema.Constraint)
+		next = nextObject.(pgschema.Constraint)
 		before.Table = to.ObjectID()
 		if before.Reference != nil && *before.Reference == from.ObjectID() {
 			reference := to.ObjectID()
@@ -2612,6 +2939,13 @@ func equivalentChildForTableRename(before, after pgschema.Object, from, to pgsch
 		if !ok {
 			return false
 		}
+		beforeObject, beforeDerived := normalizeDerivedTableChildName(before, from.Name)
+		nextObject, nextDerived := normalizeDerivedTableChildName(next, to.Name)
+		if beforeDerived != nextDerived {
+			return false
+		}
+		before = beforeObject.(pgschema.Index)
+		next = nextObject.(pgschema.Index)
 		before.Table = to.ObjectID()
 		before.Definition = normalizeTableReference(before.Definition, from, to)
 		return reflect.DeepEqual(before, next)
@@ -2755,6 +3089,13 @@ func renderTableRename(rename renameTable) ([]protocol.Statement, error) {
 	if rename.from.Name != rename.to.Name {
 		statements = append(statements, statement("ALTER TABLE "+current+" RENAME TO "+quote(rename.to.Name)+";", "contract", "review", true, "application_compatibility", "compatibility_removal", "brief_lock"))
 	}
+	for _, childRename := range rename.derivedChildRenames {
+		childStatements, err := renderDerivedTableChildRename(childRename, rename.to)
+		if err != nil {
+			return nil, err
+		}
+		statements = append(statements, childStatements...)
+	}
 	if !reflect.DeepEqual(rename.from.Comment, rename.to.Comment) {
 		value := "NULL"
 		if rename.to.Comment != nil {
@@ -2763,6 +3104,31 @@ func renderTableRename(rename renameTable) ([]protocol.Statement, error) {
 		statements = append(statements, statement("COMMENT ON TABLE "+to+" IS "+value+";", "contract", "safe", true))
 	}
 	return statements, nil
+}
+
+func renderDerivedTableChildRename(rename tableChildRename, table pgschema.Table) ([]protocol.Statement, error) {
+	switch before := rename.from.(type) {
+	case pgschema.Constraint:
+		after, ok := rename.to.(pgschema.Constraint)
+		if !ok {
+			return nil, fmt.Errorf("derived table child changed kind from constraint")
+		}
+		return []protocol.Statement{statement("ALTER TABLE "+qualified(table.Schema, table.Name)+" RENAME CONSTRAINT "+quote(before.Name)+" TO "+quote(after.Name)+";", "contract", "review", true, "derived_catalog_name", "brief_lock")}, nil
+	case pgschema.Index:
+		after, ok := rename.to.(pgschema.Index)
+		if !ok {
+			return nil, fmt.Errorf("derived table child changed kind from index")
+		}
+		// A constraint-backed index is renamed by ALTER TABLE .. RENAME
+		// CONSTRAINT above. Rendering it again would fail; the constraint is the
+		// source of the relation's public name in that case.
+		if before.Constraint != "" {
+			return nil, nil
+		}
+		return []protocol.Statement{statement("ALTER INDEX "+qualified(table.Schema, before.Name)+" RENAME TO "+quote(after.Name)+";", "contract", "review", true, "derived_catalog_name", "brief_lock")}, nil
+	default:
+		return nil, fmt.Errorf("unsupported derived table child kind %T", rename.from)
+	}
 }
 
 func resolveIndexRenames(changes []change.Change, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]change.Change, []renameIndex, []protocol.Question, error) {
@@ -2849,7 +3215,7 @@ func renderIndexRename(rename renameIndex) []protocol.Statement {
 func expandContractViolations(statements []protocol.Statement) []string {
 	var unsupported []string
 	for _, item := range statements {
-		if stringIn(item.Hazards, "application_contract") && !stringIn(item.Hazards, "compatibility_removal") {
+		if item.Manual == nil && stringIn(item.Hazards, "application_contract") && !stringIn(item.Hazards, "compatibility_removal") {
 			unsupported = append(unsupported, "expand_contract_bridge_required:"+item.ID)
 			continue
 		}
@@ -4510,7 +4876,7 @@ func addEnumValues(before, after pgschema.Enum) ([]protocol.Statement, error) {
 }
 
 func mutationQuestions(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, decisions, error) {
-	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool)}
+	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool), renameBridge: make(map[pgschema.ID]protocol.ManualWork)}
 	var questions []protocol.Question
 	refreshes := dependentMaterializedViewsNeedingRefresh(changes, current, desired)
 	for _, view := range refreshes {

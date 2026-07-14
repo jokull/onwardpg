@@ -31,6 +31,7 @@ type Target struct {
 	DevDatabaseEnv     string   `toml:"dev_database_env" json:"dev_database_env"`
 	ScratchDatabaseEnv string   `toml:"scratch_database_env" json:"scratch_database_env,omitempty"`
 	DevMode            string   `toml:"dev_mode" json:"dev_mode,omitempty"`
+	Ignore             []string `toml:"ignore" json:"ignore,omitempty"`
 }
 
 func Load(name string) (Config, error) {
@@ -122,6 +123,12 @@ func (t Target) Validate() error {
 	}
 	if t.DevMode != "" && t.DevMode != "workspace" && t.DevMode != "strict" {
 		return fmt.Errorf("dev_mode must be workspace or strict")
+	}
+	for _, selector := range t.Ignore {
+		kind, name, found := strings.Cut(selector, ":")
+		if !found || kind == "" || name == "" || strings.Contains(name, "*") && name != "*" || strings.TrimSpace(selector) != selector {
+			return fmt.Errorf("invalid ignore selector %q; expected kind:name or kind:*", selector)
+		}
 	}
 	return nil
 }

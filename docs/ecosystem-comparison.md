@@ -57,6 +57,79 @@ Python API can apply and neither project couples that boundary to phased PR
 handoff. onwardpg's disposable databases exist to materialize DDL and prove
 plans, not as an indirect application path.
 
+## Design thesis
+
+The workflow differences above are not neutral defaults; they follow from a
+small set of load-bearing bets. Each carries a cost, and each is a position
+other reasonable tools decline to take.
+
+**1. Expand/contract is eventually unavoidable, so it should be the default
+unit rather than something you remember to assemble.** An accurate final-state
+diff is still eventually an operationally wrong migration: the first rename,
+required column, or type cutover that must survive overlapping application
+versions turns a single-shot `ALTER` into a broken deploy. Every pure
+state-diff planner—Migra, pgmig, Stripe pg-schema-diff—hands over the endpoint
+and leaves phasing to the caller; the ORMs offer partial online helpers
+(Django's concurrent-index and `NOT VALID` operations) but no
+application-spanning expand/migrate/contract sequence. onwardpg makes the
+phased window the primary artifact. The cost is scope honesty: it automates
+only a subset of transitions today and blocks the rest instead of labeling a
+breaking cutover “safe.”
+
+**2. Branch conflicts are inevitable and must be handled, not wished away.** On
+any team two branches will fork the same base and each add schema. Django and
+Alembic treat this as first-class and *join* the heads with a merge
+revision—which asserts the branches are compatible without proving it,
+deferring discovery of a real conflict to apply time. Prisma and Drizzle Kit
+resolve by regenerating. Neither camp pretends history stays linear-clean, and
+a tool with no answer here is unfinished.
+
+**3. Regenerating from scratch is lossy, so regeneration must preserve human
+work.** The regenerate camp's failure mode is that “drop the migration and run
+generate again”—or Prisma's shadow-database reset—discards hand-authored data
+migrations and assertions along with the stale diff. onwardpg regenerates the
+*bundle* against the new base while preserving agent-owned `migrate.sql` and
+`verify.sql` and still-valid decisions, invalidating only what actually
+changed. Lossless restacking is the whole point; a regeneration that throws
+away the backfill someone wrote is a step behind even a merge node.
+
+**4. Automatic down migrations are not worth generating.** A synthesized
+`downgrade` is a plausible-looking artifact that cannot restore dropped data,
+cannot un-run a backfill, and was never proven against anything—so it invites
+trust it has not earned. Alembic and Django carry downgrade paths; onwardpg
+declines to fabricate one.
+
+**5. A rollback is just another stacked plan.** Before contract runs, the
+preserved old interface *is* the rollback path—nothing destructive has
+happened yet, so no reverse migration is required. After contract, recovery is
+a new forward plan, re-derived from the desired DDL and clone-proven like any
+other, authored by the operator who holds the traffic and data context. It is
+the same machinery pointed forward, not a special reverse mode.
+
+**6. A migration kit cannot—and should not—enforce linearly applied history,
+because reality will not cooperate and the resulting drift should be visible
+rather than assumed away.** onwardpg's *planning* chain is deliberately linear
+and blocks on ambiguity; that is a provable, in-repository baseline. The
+*environment* is a different object, and this is where the framework kits
+quietly overreach. Their applied-migration ledger assumes each environment
+advances cleanly, while in practice contracts get deferred across releases,
+cleanup gets skipped, a `DROP` gets postponed “for now,” and an environment
+sits half-migrated for weeks. The ledger then diverges from the catalog
+silently. onwardpg's answer is threefold: it does not own the environment
+ledger at all—that belongs to the operator; it keeps the desired schema
+re-derivable from real DDL so any environment can be re-anchored; and it makes
+divergence a *detectable audit*—`drift check`, comparing replayed accepted
+history against the live catalog—rather than a hidden assumption. It reports a
+mid-rollout partial state as drift on purpose, because the alternative, quietly
+maintaining phase exceptions, is precisely how subtle drift accrues in the
+first place.
+
+Taken together, these bets are why onwardpg is forward-only, never applies to a
+caller-owned database, keeps one evolving bundle per feature, and refuses to
+become a runner or environment journal. They are bets, not proofs; the
+honest-gaps section below keeps score of where they have not yet paid for
+themselves.
+
 ## PostgreSQL planner coverage
 
 This table compares the four PostgreSQL state-diff planners, where an

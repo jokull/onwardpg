@@ -71,7 +71,7 @@ func MatchQuestions(questions []protocol.Question, hints []protocol.Hint, curren
 }
 
 func choicesForQuestion(question protocol.Question, current, desired *pgschema.Snapshot) ([]protocol.DecisionChoice, error) {
-	if strings.HasPrefix(question.Kind, "rename_") {
+	if isIdentityRenameQuestion(question.Kind) {
 		from, ok := findID(current, question.Key)
 		if !ok {
 			return nil, fmt.Errorf("current rename object %q is missing", question.Key)
@@ -167,7 +167,7 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 		return protocol.Answer{}, false, err
 	}
 	answer := protocol.Answer{Kind: question.Kind, Key: question.Key, QuestionFingerprint: question.ScopeFingerprint}
-	if strings.HasPrefix(question.Kind, "rename_") {
+	if isIdentityRenameQuestion(question.Kind) {
 		from, ok := findID(current, question.Key)
 		if !ok {
 			return answer, false, nil
@@ -183,7 +183,7 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 		case hint.Kind == "drop" && hint.Object == object && equal(hint.Name, fromName):
 			answer.Value = "create"
 			return answer, true, nil
-		case hint.Kind == "rename" && hint.Object == object && equal(hint.From, fromName):
+		case (hint.Kind == "rename" || hint.Kind == "identity") && hint.Object == object && equal(hint.From, fromName):
 			for _, choice := range question.Choices {
 				to, ok := findID(desired, choice)
 				if !ok {
@@ -244,6 +244,7 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 				ExecutionMode: "transactional",
 				Statements: []string{
 					"-- ONWARDPG TODO: replace this comment with reviewed SQL for " + question.Kind + " on " + displayName + ".\n" +
+						"-- Planner analysis: " + question.Message + "\n" +
 						"-- Expected effect: complete the named operation and converge to the desired catalog state.\n" +
 						"-- Add boolean assertions to verify.sql for every data-dependent assumption.",
 				},
@@ -260,11 +261,15 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 
 func isManualQuestion(kind string) bool {
 	switch kind {
-	case "refresh_materialized_view", "partition_reconfiguration", "backfill_not_null":
+	case "refresh_materialized_view", "partition_reconfiguration", "backfill_not_null", "rename_compatibility_bridge":
 		return true
 	default:
 		return false
 	}
+}
+
+func isIdentityRenameQuestion(kind string) bool {
+	return strings.HasPrefix(kind, "rename_") && kind != "rename_compatibility_bridge"
 }
 
 func confirmationHazards(kind string) []string {

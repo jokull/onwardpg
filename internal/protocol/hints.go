@@ -51,6 +51,24 @@ func (h Hint) Validate() error {
 		return fmt.Errorf("hint kind is required")
 	}
 	switch h.Kind {
+	case "identity":
+		// Identity is deliberately narrower than a rename answer: it reaches
+		// rename candidacy before the planner has chosen which questions exist.
+		// The first vertical slice is table identity, where exporter-generated
+		// child names otherwise hide the relation pairing entirely.
+		if h.Object != "table" {
+			return fmt.Errorf("identity hint currently supports object table")
+		}
+		if err := validateIdentifier(h.Object, h.From, "from"); err != nil {
+			return err
+		}
+		if err := validateIdentifier(h.Object, h.To, "to"); err != nil {
+			return err
+		}
+		if sameStrings(h.From, h.To) {
+			return fmt.Errorf("identity hint from and to must differ")
+		}
+		return h.reject("name", h.Name, "action", h.Action, "strategy", h.Strategy)
 	case "rename":
 		if err := h.requireObject(); err != nil {
 			return err

@@ -302,11 +302,12 @@ func runDriftAt(arguments []string, start string) int {
 		return writeError("invalid_history", err)
 	}
 	ctx := context.Background()
-	expected, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, scratchURL, ignores)
+	selectors := targetIgnoreSelectors(target, ignores)
+	expected, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, scratchURL, selectors)
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
-	actual, err := source.LoadGraphForComparison(ctx, source.Parse(*databaseURL), "", ignores)
+	actual, err := source.LoadGraphForComparison(ctx, source.Parse(*databaseURL), "", selectors)
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("inspect live catalog: %w", err))
 	}
@@ -367,18 +368,19 @@ func runHistoryAt(arguments []string, start string) int {
 	if adminURL == "" {
 		return writeError("source_error", fmt.Errorf("environment variable %s is required", adminEnv))
 	}
-	selectors := sortedUniqueStrings(ignores)
+	selectors := targetIgnoreSelectors(target, ignores)
 	report, err := historyinit.Run(context.Background(), historyinit.Input{
-		Root:           filepath.Dir(configPath),
-		ConfigPath:     configPath,
-		Config:         config,
-		TargetName:     *targetName,
-		Target:         target,
-		AdminURL:       adminURL,
-		BundleID:       *bundleID,
-		BuildVersion:   buildVersion,
-		Ignores:        selectors,
-		PlannerOptions: graphplan.Options{ConcurrentIndexes: *concurrentIndexes},
+		Root:            filepath.Dir(configPath),
+		ConfigPath:      configPath,
+		Config:          config,
+		TargetName:      *targetName,
+		Target:          target,
+		AdminURL:        adminURL,
+		BundleID:        *bundleID,
+		BuildVersion:    buildVersion,
+		Ignores:         selectors,
+		RequiredIgnores: sortedUniqueStrings(ignores),
+		PlannerOptions:  graphplan.Options{ConcurrentIndexes: *concurrentIndexes},
 	})
 	if err != nil {
 		return writeError("history_init_error", err)
@@ -475,7 +477,7 @@ func runDevAt(arguments []string, start string) int {
 	}
 	report, err := devflow.Run(context.Background(), devflow.Input{
 		Root: filepath.Dir(configPath), TargetName: *targetName, Target: target, DevURL: devURL, AdminURL: scratchURL,
-		Hints: hints, Ignores: sortedUniqueStrings(ignores), PlannerOptions: options,
+		Hints: hints, Ignores: targetIgnoreSelectors(target, ignores), RequiredIgnores: sortedUniqueStrings(ignores), PlannerOptions: options,
 	})
 	if err != nil {
 		return writeError("planning_error", err)
@@ -486,7 +488,7 @@ func runDevAt(arguments []string, start string) int {
 		if *output == "text" {
 			outputErr = writeDecisionsText(os.Stdout, "dev plan", report.Decisions)
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, devflow.Version, report.Decisions)
+			outputErr = writeDecisionEnvelope(os.Stdout, devflow.Version, report.Decisions, result.Analysis)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -613,21 +615,22 @@ func runDraftAt(arguments []string, start string) int {
 		options.SchemaQualifier = &schemaQualifier.value
 	}
 	report, err := draftflow.Run(context.Background(), draftflow.Input{
-		Root:           filepath.Dir(configPath),
-		ConfigPath:     configPath,
-		Config:         config,
-		TargetName:     *targetName,
-		Target:         target,
-		AdminURL:       adminURL,
-		BundleID:       *bundleID,
-		AfterRef:       *afterRef,
-		Create:         *create,
-		BuildVersion:   buildVersion,
-		Purpose:        *purpose,
-		Hints:          hints,
-		HintsGiven:     len(inlineHints) > 0 || *hintsFile != "",
-		Ignores:        sortedUniqueStrings(ignores),
-		PlannerOptions: options,
+		Root:            filepath.Dir(configPath),
+		ConfigPath:      configPath,
+		Config:          config,
+		TargetName:      *targetName,
+		Target:          target,
+		AdminURL:        adminURL,
+		BundleID:        *bundleID,
+		AfterRef:        *afterRef,
+		Create:          *create,
+		BuildVersion:    buildVersion,
+		Purpose:         *purpose,
+		Hints:           hints,
+		HintsGiven:      len(inlineHints) > 0 || *hintsFile != "",
+		Ignores:         targetIgnoreSelectors(target, ignores),
+		RequiredIgnores: sortedUniqueStrings(ignores),
+		PlannerOptions:  options,
 	})
 	if err != nil {
 		return writeError("draft_error", err)
@@ -1087,7 +1090,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 		Root: root, ConfigPath: configPath, Config: config, TargetName: *targetName, Target: target,
 		AdminURL: adminURL, BundleID: *bundleID, PlanID: planID, InferBase: true,
 		Create: createBundle, BuildVersion: buildVersion, Purpose: *purpose,
-		Hints: hints, HintsGiven: len(inlineHints) > 0 || *hintsFile != "", Ignores: sortedUniqueStrings(ignores), PlannerOptions: options,
+		Hints: hints, HintsGiven: len(inlineHints) > 0 || *hintsFile != "", Ignores: targetIgnoreSelectors(target, ignores), RequiredIgnores: sortedUniqueStrings(ignores), PlannerOptions: options,
 	})
 	if err != nil {
 		return writeError("plan_error", err)
@@ -1110,7 +1113,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	// hint may be unused locally. Devflow reports its own scoped ambiguity.
 	development, err := devflow.Run(context.Background(), devflow.Input{
 		Root: root, TargetName: *targetName, Target: target, DevURL: devURL, AdminURL: adminURL,
-		Hints: devHints, Ignores: sortedUniqueStrings(ignores), PlannerOptions: options,
+		Hints: devHints, Ignores: targetIgnoreSelectors(target, ignores), RequiredIgnores: sortedUniqueStrings(ignores), PlannerOptions: options,
 		Postconditions: developmentPostconditions(report.DevelopmentPostconditions),
 	})
 	if err != nil {
@@ -1387,7 +1390,7 @@ func runLowLevelPlan(arguments []string) int {
 		if *output == "text" {
 			outputErr = writeDecisionsText(os.Stdout, "plan", decisions)
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v3", decisions)
+			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v3", decisions, result.Analysis)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -1456,12 +1459,13 @@ func runConfig(arguments []string) int {
 	}
 	sort.Strings(targets)
 	type checkedTarget struct {
-		Name                 string `json:"name"`
-		Provenance           string `json:"provenance"`
-		Fingerprint          string `json:"fingerprint"`
-		DevPostgresMajor     int    `json:"dev_postgres_major"`
-		ScratchPostgresMajor int    `json:"scratch_postgres_major"`
-		HistoryPostgresMajor int    `json:"history_postgres_major,omitempty"`
+		Name                 string   `json:"name"`
+		Provenance           string   `json:"provenance"`
+		Fingerprint          string   `json:"fingerprint"`
+		DevPostgresMajor     int      `json:"dev_postgres_major"`
+		ScratchPostgresMajor int      `json:"scratch_postgres_major"`
+		HistoryPostgresMajor int      `json:"history_postgres_major,omitempty"`
+		Ignored              []string `json:"ignored,omitempty"`
 	}
 	checked := make([]checkedTarget, 0, len(targets))
 	ctx := context.Background()
@@ -1481,9 +1485,21 @@ func runConfig(arguments []string) int {
 		if err != nil {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
 		}
-		graph, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, nil)
+		selectors := sortedUniqueStrings(target.Ignore)
+		graph, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, selectors)
 		if err != nil {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
+		}
+		var ignored []string
+		if len(selectors) > 0 {
+			development, loadErr := source.LoadGraphForComparison(ctx, source.Parse(devURL), "", selectors)
+			if loadErr != nil {
+				return writeError("source_error", fmt.Errorf("target %s development catalog: %w", targetName, loadErr))
+			}
+			if validateErr := source.ValidateIgnoreSelectors(selectors, graph, development); validateErr != nil {
+				return writeError("invalid_ignore", fmt.Errorf("target %s: %w", targetName, validateErr))
+			}
+			ignored = sortedUniqueStrings(append(append([]string(nil), graph.Ignored()...), development.Ignored()...))
 		}
 		fingerprint, err := graph.Fingerprint()
 		if err != nil {
@@ -1518,6 +1534,7 @@ func runConfig(arguments []string) int {
 		checked = append(checked, checkedTarget{
 			Name: targetName, Provenance: compiled.Provenance, Fingerprint: fingerprint,
 			DevPostgresMajor: devMajor, ScratchPostgresMajor: scratchMajor, HistoryPostgresMajor: historyMajor,
+			Ignored: ignored,
 		})
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(struct {
@@ -1620,15 +1637,17 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 			nextAction = "rerun_without_create_with_hints"
 		}
 		return json.NewEncoder(writer).Encode(struct {
-			ProtocolVersion string              `json:"protocol_version"`
-			Status          string              `json:"status"`
-			NextAction      string              `json:"next_action"`
-			Path            string              `json:"path,omitempty"`
-			WrittenReceipts []string            `json:"written_receipts,omitempty"`
-			Decisions       []protocol.Decision `json:"decisions"`
+			ProtocolVersion string                      `json:"protocol_version"`
+			Status          string                      `json:"status"`
+			NextAction      string                      `json:"next_action"`
+			Path            string                      `json:"path,omitempty"`
+			WrittenReceipts []string                    `json:"written_receipts,omitempty"`
+			Decisions       []protocol.Decision         `json:"decisions"`
+			Analysis        []protocol.DecisionAnalysis `json:"analysis,omitempty"`
 		}{
 			ProtocolVersion: draftflow.Version, Status: "needs_decisions", NextAction: nextAction,
 			Path: report.Path, WrittenReceipts: report.WrittenReceipts, Decisions: report.Decisions,
+			Analysis: analysisFromPlan(report.Plan),
 		})
 	}
 	if report.Outcome == string(protocol.NeedsSQLEdits) {
@@ -1641,6 +1660,13 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 		}{ProtocolVersion: draftflow.Version, Status: string(protocol.NeedsSQLEdits), NextAction: "edit_files_then_verify", Path: report.Path, Edit: report.EditFiles})
 	}
 	return json.NewEncoder(writer).Encode(report)
+}
+
+func analysisFromPlan(plan *protocol.Result) []protocol.DecisionAnalysis {
+	if plan == nil {
+		return nil
+	}
+	return plan.Analysis
 }
 
 func writeDecisionsText(writer io.Writer, subject string, decisions []protocol.Decision) error {
@@ -1681,13 +1707,14 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func writeDecisionEnvelope(writer io.Writer, version string, decisions []protocol.Decision) error {
+func writeDecisionEnvelope(writer io.Writer, version string, decisions []protocol.Decision, analysis []protocol.DecisionAnalysis) error {
 	return json.NewEncoder(writer).Encode(struct {
-		ProtocolVersion string              `json:"protocol_version"`
-		Status          string              `json:"status"`
-		NextAction      string              `json:"next_action"`
-		Decisions       []protocol.Decision `json:"decisions"`
-	}{ProtocolVersion: version, Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisions})
+		ProtocolVersion string                      `json:"protocol_version"`
+		Status          string                      `json:"status"`
+		NextAction      string                      `json:"next_action"`
+		Decisions       []protocol.Decision         `json:"decisions"`
+		Analysis        []protocol.DecisionAnalysis `json:"analysis,omitempty"`
+	}{ProtocolVersion: version, Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisions, Analysis: analysis})
 }
 
 func writeError(code string, err error) int {
@@ -1713,6 +1740,10 @@ func sortedUniqueStrings(values []string) []string {
 		write++
 	}
 	return result[:write]
+}
+
+func targetIgnoreSelectors(target workspace.Target, command []string) []string {
+	return sortedUniqueStrings(append(append([]string(nil), target.Ignore...), command...))
 }
 
 type stringsFlag []string

@@ -114,8 +114,15 @@ PostgreSQL integration suite includes a failure case that proves an earlier
 statement is rolled back when a later statement in the same batch fails.
 
 An ignore selector is acceptance of a blind spot, not a declaration that the
-ignored object is equivalent. It is validated against both compared snapshots
-and returned in the result's `ignored` field.
+ignored object is equivalent. A command-line `--ignore` must match at least one
+of the two compared snapshots and the exact excluded objects are returned in
+the result's `ignored` field. A target-level `.onwardpg.toml` `ignore` list is
+for reviewed, persistent provider-owned state. `config check` validates those
+selectors across authoritative DDL and the development catalog; a selector may
+then be dormant in a history-to-working comparison when the object exists only
+in development. Durable bundles receipt only configured selectors that
+actually affected that bundle's graphs. Ignoring a schema does not recursively
+ignore its contents.
 
 The planner cannot prove data validity, safe casts, backfills, lock duration,
 or application compatibility. Reviewers own those operational decisions. Test

@@ -152,7 +152,7 @@ func TestViewCreateAndReplaceConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 
 	// Keep the independent CREATE OR REPLACE coverage below. A direct rename is
 	// fixture setup here, not SQL onwardpg is allowed to emit as a successful
@@ -307,7 +307,7 @@ func TestDependentViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 }
 
 func TestPartitionAttachAndDetachConvergeOnPostgreSQL(t *testing.T) {
@@ -1768,7 +1768,7 @@ func TestRoutineRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 }
 
 func TestRoutineRenameWithMaterializedViewRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
@@ -1820,7 +1820,7 @@ func TestRoutineRenameWithMaterializedViewRequiresCompatibilityBridgeOnPostgreSQ
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 }
 
 func TestRoutineReplacementRequiresMaterializedViewRefreshContract(t *testing.T) {
@@ -1938,7 +1938,7 @@ func TestRoutineRenameWithDependentTriggerRequiresCompatibilityBridgeOnPostgreSQ
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 }
 
 func TestTriggerRenameConvergesOnPostgreSQL(t *testing.T) {
@@ -2087,7 +2087,7 @@ func TestMaterializedViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 }
 
 func TestMaterializedViewRenameWithDependentRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
@@ -2139,7 +2139,7 @@ func TestMaterializedViewRenameWithDependentRequiresCompatibilityBridgeOnPostgre
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 }
 
 func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) {
@@ -3916,6 +3916,83 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_names_cache AS SELECT name F
 	}
 }
 
+func TestTableRenameWithDeclarativeDerivedNamesConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_derived_rename_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (id bigint PRIMARY KEY, email text UNIQUE);
+CREATE INDEX accounts_email_idx ON "` + schemaName + `".accounts (email);`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".customers (id bigint PRIMARY KEY, email text UNIQUE);
+CREATE INDEX customers_email_idx ON "` + schemaName + `".customers (email);`
+	path := filepath.Join(t.TempDir(), "desired.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// PostgreSQL 18 can expose a generated NOT NULL constraint after the
+	// physical table rename. It is outside this table/index rename slice. The
+	// production planner still reports it unless configured; this test excludes
+	// it only from the final residual inspection.
+	var ignores []string
+	if strings.HasPrefix(conn.PgConn().ParameterStatus("server_version"), "18.") {
+		ignores = []string{"not_null_constraint:*"}
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
+		t.Fatalf("declarative export must offer table rename: %#v", pending)
+	}
+	from := (pgschema.Table{Schema: schemaName, Name: "accounts"}).ObjectID().String()
+	to := (pgschema.Table{Schema: schemaName, Name: "customers"}).ObjectID().String()
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: from, Value: to}}}
+	plan, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), `RENAME CONSTRAINT "accounts_pkey" TO "customers_pkey"`) || !strings.Contains(joinSQL(plan), `RENAME TO "customers_email_idx"`) {
+		t.Fatalf("expected explicit conventional child renames: %#v", plan)
+	}
+	applyPlan(t, ctx, conn, plan)
+	actual, err := source.LoadGraph(ctx, source.Parse(url), "", ignores)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selector := range actual.Ignored() {
+		if err := desired.AddIgnored(selector); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, _ := desired.Fingerprint()
+	got, _ := actual.Fingerprint()
+	if got != want {
+		t.Fatalf("derived-name rename left residual graph diff: got %s want %s", got, want)
+	}
+}
+
 func TestColumnRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -3977,7 +4054,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_cache AS SELECT new_name AS 
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 }
 
 func TestEnumCreateAndDropConvergeOnPostgreSQL(t *testing.T) {
@@ -4102,7 +4179,7 @@ CREATE TABLE "` + schemaName + `".orders (state "` + schemaName + `".new_state N
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+	assertRenameCompatibilityBridge(t, plan)
 }
 
 func TestCheckNoInheritNotValidConvergesOnPostgreSQL(t *testing.T) {
@@ -4887,6 +4964,13 @@ func assertUnsupportedPrefix(t *testing.T, result protocol.Result, prefix string
 		}
 	}
 	t.Fatalf("expected unsupported reason with %q, got %#v", prefix, result.Unsupported)
+}
+
+func assertRenameCompatibilityBridge(t *testing.T, result protocol.Result) {
+	t.Helper()
+	if result.Status != protocol.NeedsInput || len(result.Questions) != 1 || result.Questions[0].Kind != "rename_compatibility_bridge" {
+		t.Fatalf("expected editable rename compatibility bridge, got %#v", result)
+	}
 }
 
 func joinPlan(plan protocol.Result) string {

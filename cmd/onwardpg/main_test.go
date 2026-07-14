@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -74,6 +75,26 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	}
 	if bytes.Contains(output.Bytes(), []byte("fingerprint")) || bytes.Contains(output.Bytes(), []byte("customer-profile")) {
 		t.Fatalf("decision exchange leaked receipt-only fields: %s", output.String())
+	}
+}
+
+func TestWriteDecisionEnvelopeIncludesPlannerAnalysis(t *testing.T) {
+	var output bytes.Buffer
+	analysis := []protocol.DecisionAnalysis{{
+		Kind: "rename_table", From: "table:public.accounts", To: "table:public.customers",
+		Outcome: "rejected", Reason: "child_identity_mismatch:constraint:public.accounts_pkey",
+	}}
+	if err := writeDecisionEnvelope(&output, "onwardpg.plan/v3", nil, analysis); err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Analysis []protocol.DecisionAnalysis `json:"analysis"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(document.Analysis, analysis) {
+		t.Fatalf("analysis = %#v, want %#v", document.Analysis, analysis)
 	}
 }
 

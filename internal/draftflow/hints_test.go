@@ -42,10 +42,10 @@ func TestBuildPlanConsumesAheadOfTimeRenameHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Unsupported || len(plan.Unsupported) != 1 || !strings.HasPrefix(plan.Unsupported[0], "expand_contract_bridge_required:") {
+	if plan.Status != protocol.NeedsInput || len(plan.Questions) != 1 || plan.Questions[0].Kind != "rename_compatibility_bridge" {
 		t.Fatalf("plan = %#v", plan)
 	}
-	if answers == nil || len(answers.Answers) != 1 || len(questions) != 1 || len(hints) != 1 {
+	if answers == nil || len(answers.Answers) != 1 || len(questions) != 2 || len(hints) != 1 {
 		t.Fatalf("answers=%#v questions=%#v hints=%#v", answers, questions, hints)
 	}
 	if answers.Answers[0].QuestionFingerprint == "" {
@@ -129,7 +129,7 @@ func TestBuildPlanAcceptsResendingAnAlreadyReceiptedHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Unsupported || answers == nil || len(answers.Answers) != 1 || len(hints) != 1 {
+	if plan.Status != protocol.NeedsInput || len(plan.Questions) != 1 || plan.Questions[0].Kind != "rename_compatibility_bridge" || answers == nil || len(answers.Answers) != 1 || len(hints) != 1 {
 		t.Fatalf("plan=%#v answers=%#v hints=%#v", plan, answers, hints)
 	}
 }

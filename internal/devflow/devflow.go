@@ -17,15 +17,16 @@ import (
 )
 
 type Input struct {
-	Root           string
-	TargetName     string
-	Target         workspace.Target
-	DevURL         string
-	AdminURL       string
-	Hints          []protocol.Hint
-	Ignores        []string
-	PlannerOptions graphplan.Options
-	Postconditions []Postcondition
+	Root            string
+	TargetName      string
+	Target          workspace.Target
+	DevURL          string
+	AdminURL        string
+	Hints           []protocol.Hint
+	Ignores         []string
+	RequiredIgnores []string
+	PlannerOptions  graphplan.Options
+	Postconditions  []Postcondition
 }
 
 // Postcondition is a deliberately opted-in boolean assertion from accepted
@@ -76,7 +77,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("materialize desired schema: %w", err)
 	}
-	if err := source.ValidateIgnoreSelectors(input.Ignores, current, desired); err != nil {
+	if err := source.ValidateIgnoreSelectors(input.RequiredIgnores, current, desired); err != nil {
 		return Report{}, err
 	}
 	options := input.PlannerOptions

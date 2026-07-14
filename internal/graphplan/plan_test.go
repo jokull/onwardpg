@@ -1153,8 +1153,8 @@ func TestBuildRequiresFingerprintBoundViewRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
-		t.Fatalf("view rename must not become a direct cutover: %#v", planned)
+	if planned.Status != protocol.NeedsInput || len(planned.Questions) != 1 || planned.Questions[0].Kind != "rename_compatibility_bridge" {
+		t.Fatalf("view rename must request an editable compatibility bridge: %#v", planned)
 	}
 }
 
@@ -1192,8 +1192,8 @@ func TestBuildPlansFingerprintBoundViewRenameWithDependentRewrite(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
-		t.Fatalf("dependent view rename must wait for a compatibility bridge: %#v", planned)
+	if planned.Status != protocol.NeedsInput || len(planned.Questions) != 1 || planned.Questions[0].Kind != "rename_compatibility_bridge" {
+		t.Fatalf("dependent view rename must request an editable compatibility bridge: %#v", planned)
 	}
 }
 
@@ -1266,8 +1266,8 @@ func TestBuildRequiresFingerprintBoundRoutineRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
-		t.Fatalf("routine rename must not become a direct cutover: %#v", planned)
+	if planned.Status != protocol.NeedsInput || len(planned.Questions) != 1 || planned.Questions[0].Kind != "rename_compatibility_bridge" {
+		t.Fatalf("routine rename must request an editable compatibility bridge: %#v", planned)
 	}
 }
 
@@ -1298,8 +1298,8 @@ func TestBuildPlansRoutineRenameWithDependentTriggerRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
-		t.Fatalf("trigger-dependent routine rename must wait for a compatibility bridge: %#v", planned)
+	if planned.Status != protocol.NeedsInput || len(planned.Questions) != 1 || planned.Questions[0].Kind != "rename_compatibility_bridge" {
+		t.Fatalf("trigger-dependent routine rename must request an editable compatibility bridge: %#v", planned)
 	}
 }
 
@@ -1412,6 +1412,111 @@ func TestBuildRequiresFingerprintBoundTableRenameAnswer(t *testing.T) {
 	}
 	if len(planned.Batches) != 2 || planned.Batches[1].Phase != "contract" || !planned.Batches[1].Transactional || len(planned.Batches[1].Statements) != 2 {
 		t.Fatalf("view replacement and physical rename must be one atomic contract batch: %#v", planned.Batches)
+	}
+}
+
+func TestTableRenameOffersDeclarativeDerivedChildNames(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	from := pgschema.Table{Schema: "app", Name: "accounts"}
+	to := pgschema.Table{Schema: "app", Name: "customers"}
+	beforeID := pgschema.Column{Table: from.ObjectID(), Name: "id", Position: 1, Type: "bigint", NotNull: true}
+	afterID := pgschema.Column{Table: to.ObjectID(), Name: "id", Position: 1, Type: "bigint", NotNull: true}
+	beforeEmail := pgschema.Column{Table: from.ObjectID(), Name: "email", Position: 2, Type: "text"}
+	afterEmail := pgschema.Column{Table: to.ObjectID(), Name: "email", Position: 2, Type: "text"}
+	beforePrimary := pgschema.Constraint{Table: from.ObjectID(), Name: "accounts_pkey", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)", UsingIndex: "accounts_pkey", Validated: true}
+	afterPrimary := pgschema.Constraint{Table: to.ObjectID(), Name: "customers_pkey", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)", UsingIndex: "customers_pkey", Validated: true}
+	beforeUnique := pgschema.Constraint{Table: from.ObjectID(), Name: "accounts_email_key", Type: pgschema.ConstraintUnique, Definition: "UNIQUE (email)", UsingIndex: "accounts_email_key", Validated: true}
+	afterUnique := pgschema.Constraint{Table: to.ObjectID(), Name: "customers_email_key", Type: pgschema.ConstraintUnique, Definition: "UNIQUE (email)", UsingIndex: "customers_email_key", Validated: true}
+	users := pgschema.Table{Schema: "app", Name: "users"}
+	beforeFK := pgschema.Constraint{Table: from.ObjectID(), Name: "accounts_owner_id_fkey", Type: pgschema.ConstraintForeign, Definition: "FOREIGN KEY (owner_id) REFERENCES users(id)", Reference: ptrID(users.ObjectID()), Validated: true}
+	afterFK := pgschema.Constraint{Table: to.ObjectID(), Name: "customers_owner_id_fkey", Type: pgschema.ConstraintForeign, Definition: "FOREIGN KEY (owner_id) REFERENCES users(id)", Reference: ptrID(users.ObjectID()), Validated: true}
+	beforeIndex := pgschema.Index{Table: from.ObjectID(), Name: "accounts_email_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "email"}}}
+	afterIndex := pgschema.Index{Table: to.ObjectID(), Name: "customers_email_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "email"}}}
+	for _, object := range []pgschema.Object{schema, users, from, beforeID, beforeEmail, beforePrimary, beforeUnique, beforeFK, beforeIndex} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{schema, users, to, afterID, afterEmail, afterPrimary, afterUnique, afterFK, afterIndex} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{
+		{users.ObjectID(), schema.ObjectID()}, {from.ObjectID(), schema.ObjectID()}, {beforeID.ObjectID(), from.ObjectID()}, {beforeEmail.ObjectID(), from.ObjectID()}, {beforePrimary.ObjectID(), from.ObjectID()}, {beforeUnique.ObjectID(), from.ObjectID()}, {beforeFK.ObjectID(), from.ObjectID()}, {beforeIndex.ObjectID(), from.ObjectID()},
+	} {
+		if err := current.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{
+		{users.ObjectID(), schema.ObjectID()}, {to.ObjectID(), schema.ObjectID()}, {afterID.ObjectID(), to.ObjectID()}, {afterEmail.ObjectID(), to.ObjectID()}, {afterPrimary.ObjectID(), to.ObjectID()}, {afterUnique.ObjectID(), to.ObjectID()}, {afterFK.ObjectID(), to.ObjectID()}, {afterIndex.ObjectID(), to.ObjectID()},
+	} {
+		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
+		t.Fatalf("declarative derived names must retain table rename candidacy: %#v", pending)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: from.ObjectID().String(), Value: to.ObjectID().String()}}}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := joinSQL(planned)
+	for _, statement := range []string{
+		`ALTER TABLE "app"."accounts" RENAME TO "customers";`,
+		`ALTER TABLE "app"."customers" RENAME CONSTRAINT "accounts_pkey" TO "customers_pkey";`,
+		`ALTER TABLE "app"."customers" RENAME CONSTRAINT "accounts_email_key" TO "customers_email_key";`,
+		`ALTER TABLE "app"."customers" RENAME CONSTRAINT "accounts_owner_id_fkey" TO "customers_owner_id_fkey";`,
+		`ALTER INDEX "app"."accounts_email_idx" RENAME TO "customers_email_idx";`,
+	} {
+		if !strings.Contains(sql, statement) {
+			t.Fatalf("plan missing %q:\n%s", statement, sql)
+		}
+	}
+}
+
+func TestTableRenameDoesNotAbsorbUserNamedChildRename(t *testing.T) {
+	from := pgschema.Table{Schema: "app", Name: "accounts"}
+	to := pgschema.Table{Schema: "app", Name: "customers"}
+	before := pgschema.Constraint{Table: from.ObjectID(), Name: "billing_identity", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)"}
+	after := pgschema.Constraint{Table: to.ObjectID(), Name: "customer_identity", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)"}
+	if equivalentChildForTableRename(before, after, from, to) {
+		t.Fatal("user-selected child names must remain a material table-rename difference")
+	}
+}
+
+func TestBuildExplainsRejectedCredibleTableRename(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	from := pgschema.Table{Schema: "app", Name: "accounts"}
+	to := pgschema.Table{Schema: "app", Name: "customers"}
+	beforeID := pgschema.Column{Table: from.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	afterID := pgschema.Column{Table: to.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	beforeKey := pgschema.Constraint{Table: from.ObjectID(), Name: "billing_identity", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)"}
+	afterKey := pgschema.Constraint{Table: to.ObjectID(), Name: "customer_identity", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)"}
+	for _, object := range []pgschema.Object{from, beforeID, beforeKey} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{to, afterID, afterKey} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Analysis) != 1 || result.Analysis[0].Kind != "rename_table" || result.Analysis[0].Outcome != "rejected" || !strings.HasPrefix(result.Analysis[0].Reason, "child_identity_mismatch:") {
+		t.Fatalf("expected explained near-miss, got %#v", result.Analysis)
 	}
 }
 
@@ -1864,8 +1969,8 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
-		t.Fatalf("column rename must not become a direct cutover: %#v", planned)
+	if planned.Status != protocol.NeedsInput || len(planned.Questions) != 1 || planned.Questions[0].Kind != "rename_compatibility_bridge" {
+		t.Fatalf("column rename must request an editable compatibility bridge: %#v", planned)
 	}
 }
 
@@ -2754,8 +2859,8 @@ func TestColumnRenamePreservesAutomaticallyRewrittenConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Unsupported || !hasUnsupportedPrefix(plan, "expand_contract_bridge_required:") {
-		t.Fatalf("constraint-backed column rename must wait for a compatibility bridge: %#v", plan)
+	if plan.Status != protocol.NeedsInput || len(plan.Questions) != 1 || plan.Questions[0].Kind != "rename_compatibility_bridge" {
+		t.Fatalf("constraint-backed column rename must request an editable compatibility bridge: %#v", plan)
 	}
 }
 

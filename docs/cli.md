@@ -79,6 +79,11 @@ and scratch URLs, deterministically exports every target's DDL, materializes it
 in disposable PostgreSQL, validates existing history, and requires all three
 PostgreSQL-major receipts to agree.
 
+When a target has an `ignore` list, `config check` also inspects the development
+catalog read-only. Every selector must match the exported DDL or development
+catalog, and the JSON receipt lists the exact excluded objects. This lets a
+target acknowledge provider-owned state that may be absent from replay history.
+
 ## history status
 
 ~~~sh
@@ -139,6 +144,11 @@ Planner options include:
 | --ignore SELECTOR | Narrow validated catalog exclusion; repeatable |
 | --output text\|json | Render copyable decisions/phased SQL or the JSON protocol |
 
+Repeatable `--ignore` flags are strict for that invocation: an unused selector
+is an error. Long-lived provider exclusions belong in the target-level `ignore`
+list in `.onwardpg.toml`; those may be dormant in one H → W comparison because
+the object exists only in the development catalog.
+
 ## draft
 
 ~~~sh
@@ -175,8 +185,12 @@ stale, rerun the same command with the new exact head reference. Only exact
 participating-object scope matches are carried across that change.
 
 `--hint` is repeatable and accepts one strict semantic JSON object.
-`--hints-file` accepts an array of the same objects. Current kinds are rename,
-drop, type_change, rollout, confirm, and manual_sql. Hints may be supplied on
+`--hints-file` accepts an array of the same objects. Current kinds are identity,
+rename, drop, type_change, rollout, confirm, and manual_sql. `identity` is a
+table-only upstream assertion: it lets an agent state that two observed table
+names are the same relation before normal rename candidacy. It never guesses a
+transition; an unautomatable asserted identity becomes an editable compatibility
+bridge. Hints may be supplied on
 the first invocation; every hint must consume an actual graph decision.
 
 `manual_sql` never contains SQL. It writes a `needs_sql_edits` bundle with a

@@ -25,6 +25,10 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 	if err := protocol.ValidateHints(hints); err != nil {
 		return Resolution{}, err
 	}
+	identityUsed, err := ApplyIdentityHints(current, desired, hints, &options)
+	if err != nil {
+		return Resolution{}, err
+	}
 	result, err := graphplan.Build(current, desired, protocol.Answers{}, options)
 	if err != nil {
 		return Resolution{}, err
@@ -32,7 +36,7 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 	resolution := Resolution{Result: result, Answers: protocol.Answers{
 		ProtocolVersion: protocol.Version, CurrentFingerprint: result.CurrentFingerprint, DesiredFingerprint: result.DesiredFingerprint,
 	}}
-	used := make(map[int]bool, len(hints))
+	used := identityUsed
 	for iteration := 0; iteration <= len(hints)*2+1; iteration++ {
 		resolution.Questions = mergeQuestions(resolution.Questions, resolution.Result.Questions)
 		if resolution.Result.Status != protocol.NeedsInput {
@@ -63,6 +67,33 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 		}
 	}
 	return Resolution{}, fmt.Errorf("semantic hint planning did not converge")
+}
+
+// ApplyIdentityHints validates the source and desired endpoints of explicit
+// identity assertions before they influence graph rename candidacy. It returns
+// the consumed hint indices so every accepted assertion remains receipted and
+// unused assertions still fail planning.
+func ApplyIdentityHints(current, desired *pgschema.Snapshot, hints []protocol.Hint, options *graphplan.Options) (map[int]bool, error) {
+	used := make(map[int]bool)
+	for index, hint := range hints {
+		if hint.Kind != "identity" {
+			continue
+		}
+		if hint.Object != "table" {
+			return nil, fmt.Errorf("identity hint %d has unsupported object %q", index+1, hint.Object)
+		}
+		from := pgschema.Table{Schema: hint.From[0], Name: hint.From[1]}.ObjectID()
+		to := pgschema.Table{Schema: hint.To[0], Name: hint.To[1]}.ObjectID()
+		if _, ok := current.Object(from); !ok {
+			return nil, fmt.Errorf("identity hint %d source %s is absent from the current schema", index+1, from)
+		}
+		if _, ok := desired.Object(to); !ok {
+			return nil, fmt.Errorf("identity hint %d target %s is absent from the desired schema", index+1, to)
+		}
+		options.IdentityHints = append(options.IdentityHints, hint)
+		used[index] = true
+	}
+	return used, nil
 }
 
 func rejectUnused(hints []protocol.Hint, used map[int]bool) error {

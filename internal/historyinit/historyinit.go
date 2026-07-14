@@ -42,16 +42,17 @@ type Report struct {
 }
 
 type Input struct {
-	Root           string
-	ConfigPath     string
-	Config         workspace.Config
-	TargetName     string
-	Target         workspace.Target
-	AdminURL       string
-	BundleID       string
-	BuildVersion   string
-	Ignores        []string
-	PlannerOptions graphplan.Options
+	Root            string
+	ConfigPath      string
+	Config          workspace.Config
+	TargetName      string
+	Target          workspace.Target
+	AdminURL        string
+	BundleID        string
+	BuildVersion    string
+	Ignores         []string
+	RequiredIgnores []string
+	PlannerOptions  graphplan.Options
 }
 
 // Run creates one content-addressed baseline entry from an empty PostgreSQL
@@ -111,9 +112,14 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("inspect declarative schema: %w", err)
 	}
-	if err := source.ValidateIgnoreSelectors(input.Ignores, empty, desired); err != nil {
+	if err := source.ValidateIgnoreSelectors(input.RequiredIgnores, empty, desired); err != nil {
 		return report, err
 	}
+	activeIgnores, err := source.ActiveIgnoreSelectors(input.Ignores, empty, desired)
+	if err != nil {
+		return report, err
+	}
+	input.Ignores = activeIgnores
 	plan, err := graphplan.Build(empty, desired, protocol.Answers{}, input.PlannerOptions)
 	if err != nil {
 		return report, fmt.Errorf("plan baseline: %w", err)

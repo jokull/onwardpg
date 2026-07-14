@@ -2,15 +2,18 @@
 
 ## Build from source
 
-With the Go toolchain declared in `go.mod` installed, a tagged release can be
-installed with:
+With the Go toolchain declared in `go.mod` installed, clone the preview source
+and install the local command:
 
 ```sh
-go install github.com/jokull/onwardpg/cmd/onwardpg@latest
+git clone https://github.com/jokull/onwardpg.git
+cd onwardpg
+go install ./cmd/onwardpg
 onwardpg version
 ```
 
-Before the first public tag, build the checkout directly:
+Before the first public tag, this is the only supported installation path.
+To build an explicit local binary instead:
 
 ```sh
 go build -trimpath -o ./bin/onwardpg ./cmd/onwardpg
@@ -21,15 +24,15 @@ A source build reports
 `{"protocol_version":"onwardpg.version/v1","status":"ok","version":"dev"}`
 unless the build supplies `-X main.buildVersion=...`.
 
-## Preview archives
+## Preview archives (after the first tag)
 
-A preview tag publishes `.tar.gz` archives for:
+When a preview tag is published, it will publish `.tar.gz` archives for:
 
 - Darwin amd64 and arm64;
 - Linux amd64 and arm64; and
 - Windows amd64 and arm64.
 
-Download the archive and `checksums.txt` from the matching GitHub release,
+After that release exists, download the archive and `checksums.txt` from it,
 then verify before extracting:
 
 ```sh

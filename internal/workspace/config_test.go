@@ -17,6 +17,7 @@ bundle_root = "onward-bundles"
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
+ignore = ["extension:pg_stat_statements", "schema:auth"]
 `
 	if err := os.WriteFile(name, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
@@ -28,6 +29,9 @@ scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
 	target := config.Targets["primary-postgres"]
 	if len(target.SchemaCommand) == 0 || target.ScratchEnv() != "ONWARDPG_SCRATCH_DATABASE_URL" {
 		t.Fatalf("config = %#v", config)
+	}
+	if len(target.Ignore) != 2 || target.Ignore[0] != "extension:pg_stat_statements" {
+		t.Fatalf("target ignores = %#v", target.Ignore)
 	}
 	path, err := config.BundlePath("/repo", "primary-postgres", "customer-profile")
 	if err != nil {
@@ -113,6 +117,13 @@ bundle_root = "onward-bundles"
 [targets.db]
 schema_command = ["tool", "--database", "postgres://secret@localhost/db"]
 dev_database_env = "DEV_DATABASE_URL"
+`,
+		"invalid-ignore": `version = 1
+bundle_root = "onward-bundles"
+[targets.db]
+schema_file = "schema.sql"
+dev_database_env = "DEV_DATABASE_URL"
+ignore = ["extension:pg*"]
 `,
 	}
 	for label, data := range tests {

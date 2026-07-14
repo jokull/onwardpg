@@ -29,7 +29,11 @@ type Result struct {
 	Statements         []Statement `json:"statements,omitempty"`
 	Batches            []Batch     `json:"batches,omitempty"`
 	Questions          []Question  `json:"questions,omitempty"`
-	Ignored            []string    `json:"ignored,omitempty"`
+	// Analysis records planner reasoning that did not become a decision. It is
+	// machine-readable evidence for an agent deciding whether to add an
+	// explicit upstream identity assertion; it never changes plan semantics.
+	Analysis []DecisionAnalysis `json:"analysis,omitempty"`
+	Ignored  []string           `json:"ignored,omitempty"`
 	// Preserved names catalog objects intentionally left in place by a
 	// workspace-compatible plan. They are not ignored: they are observed
 	// surplus state and must remain visible to the caller.
@@ -40,6 +44,16 @@ type Result struct {
 	// shape. Strict history and clone planning leave this empty.
 	Compatibility []string `json:"workspace_compatibility,omitempty"`
 	Unsupported   []string `json:"unsupported,omitempty"`
+}
+
+// DecisionAnalysis explains a credible candidate that the planner rejected
+// before it could become a normal question.
+type DecisionAnalysis struct {
+	Kind    string `json:"kind"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason"`
 }
 
 type Statement struct {

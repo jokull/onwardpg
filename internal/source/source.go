@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -97,6 +98,47 @@ func ValidateIgnoreSelectors(selectors []string, snapshots ...*pgschema.Snapshot
 		}
 	}
 	return tracker.Validate()
+}
+
+// ActiveIgnoreSelectors returns the configured selectors that excluded at
+// least one object from these snapshots. Repository-level ignore policy may be
+// dormant in one comparison (for example, a provider builtin present only in
+// a long-lived development database), so durable receipts must retain only
+// the selectors that actually affected their source or desired graph.
+func ActiveIgnoreSelectors(selectors []string, snapshots ...*pgschema.Snapshot) ([]string, error) {
+	tracker, err := newIgnoreTracker(selectors)
+	if err != nil {
+		return nil, err
+	}
+	for _, snapshot := range snapshots {
+		for _, actual := range snapshot.Ignored() {
+			kind := strings.SplitN(actual, ":", 2)[0]
+			for _, requested := range tracker.requested {
+				if requested == actual || requested == kind+":*" {
+					tracker.used[requested] = true
+				}
+			}
+		}
+	}
+	active := make([]string, 0, len(tracker.used))
+	for _, selector := range tracker.requested {
+		if tracker.used[selector] {
+			active = append(active, selector)
+		}
+	}
+	sort.Strings(active)
+	if len(active) == 0 {
+		return nil, nil
+	}
+	write := 1
+	for _, selector := range active[1:] {
+		if selector == active[write-1] {
+			continue
+		}
+		active[write] = selector
+		write++
+	}
+	return active[:write], nil
 }
 
 func temporaryName() (string, error) {

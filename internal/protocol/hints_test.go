@@ -15,6 +15,16 @@ func TestDecodeHintAcceptsMinimalRename(t *testing.T) {
 	}
 }
 
+func TestDecodeHintAcceptsTableIdentityOnly(t *testing.T) {
+	hint, err := DecodeHint([]byte(`{"kind":"identity","object":"table","from":["app","accounts"],"to":["app","customers"]}`))
+	if err != nil || hint.Kind != "identity" {
+		t.Fatalf("table identity = %#v, %v", hint, err)
+	}
+	if _, err := DecodeHint([]byte(`{"kind":"identity","object":"column","from":["app","accounts","old"],"to":["app","accounts","new"]}`)); err == nil {
+		t.Fatal("column identity must be rejected until its candidacy slice exists")
+	}
+}
+
 func TestDecodeHintInfersColumnAndNotNullFromKinds(t *testing.T) {
 	typeChange, err := DecodeHint([]byte(`{"kind":"type_change","name":["public","events","occurred_on"],"strategy":"manual_sql"}`))
 	if err != nil {

@@ -28,7 +28,7 @@ desired schema
 
 An accurate final-state diff can still be an operationally wrong migration. A
 direct rename breaks stale application instances; a required column breaks old
-writers; a type cutover may need dual writes and a product-aware backfill.
+writers; a column replacement may need dual writes and a product-aware backfill.
 onwardpg stages a supported transition, asks for intent that schema state
 cannot contain, and blocks rather than disguise a breaking cutover with a safe
 phase label.
@@ -72,8 +72,9 @@ Today’s demonstrated compatibility strategies include ordinary additive DDL,
 staged required columns, concurrent index planning, and a shape-preserving
 table rename that keeps the old physical table available through expand. A
 column-type change is recognized but handed to editable phase SQL because its
-dual-write and conversion rules are product-specific. Column, enum, view, and
-routine renames and extension schema moves remain explicit blockers.
+dual-write and conversion rules are product-specific. Confirmed column, enum,
+view, and routine renames become editable compatibility handoffs; extension
+schema moves remain explicit blockers.
 
 The detailed, test-linked boundary lives in [supported
 features](docs/supported-features.md). Unsupported state is reported; it is not
@@ -106,11 +107,21 @@ schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
 dev_mode = "workspace"
+# Exact provider-owned objects that are deliberately outside this target.
+# ignore = ["extension:pg_stat_statements", "schema:auth"]
 ```
 
 Django, Prisma, SQLAlchemy, Drizzle, or handwritten schema code can supply DDL
 through this interface. onwardpg does not read their migration journals and
 has no framework adapters.
+
+Managed PostgreSQL often includes provider-owned objects—Supabase builtins are
+a common example—that should neither enter onwardpg history nor appear as
+feature work. Put reviewed catalog selectors in the target's `ignore` list.
+`onwardpg config check` requires every configured selector to match the
+authoritative DDL or development catalog and reports the exact excluded
+objects. An ignored schema does not implicitly ignore everything inside it;
+use exact selectors, and treat each one as an explicit blind spot.
 
 ```sh
 export ONWARDPG_DEV_DATABASE_URL='postgres://postgres:secret@localhost:5432/myapp_dev?sslmode=disable'
@@ -197,12 +208,15 @@ edit product-specific work, and run `verify`.
 Now let the same feature become difficult:
 
 - `app.accounts` should become `app.customers`;
-- events should move from `occurred_at timestamp` to a required
-  `occurred_on date`; and
+- events need a replacement `occurred_on date` column while the old
+  `occurred_at timestamp` remains available through a compatibility window; and
 - historical timestamps need a product-specific conversion.
 
 Two schemas cannot prove that the table change is a rename, that the old event
-column may be destroyed, or what “date” means to the product. `plan` returns
+column may be destroyed, or what “date” means to the product. This example is
+a column replacement—not a direct type conversion. A direct `ALTER COLUMN ...
+TYPE` change is separately handed to editable `manual_sql`, because its
+conversion and rollout rules are product-specific. `plan` returns
 bounded questions. The agent can supply known intent immediately or rerun with
 the offered hints:
 
