@@ -113,64 +113,92 @@ contain them. Use `strict` only for an intentionally disposable database.
 onwardpg config check
 ```
 
-## Five minutes from zero to a reviewed plan
+## Five minutes: from a diff to a migration rollout
 
-This is the smallest useful loop. It assumes two PostgreSQL URLs: a development
-database and a scratch server where onwardpg may create disposable databases.
-For a local trial they can point at the same PostgreSQL server, but they should
-normally use separate databases and credentials.
+This example starts with an easy change, then keeps evolving the same feature
+until an ordinary add/drop diff is no longer enough. It assumes a development
+database and a scratch PostgreSQL server where onwardpg may create disposable
+databases:
 
 ```sh
 export ONWARDPG_DEV_DATABASE_URL='postgres://postgres:secret@localhost:5432/myapp_dev?sslmode=disable'
 export ONWARDPG_SCRATCH_DATABASE_URL='postgres://postgres:secret@localhost:5432/postgres?sslmode=disable'
 ```
 
-Start with the schema the application has today:
+For a local trial both URLs may use one server. The scratch credentials must
+never point at production.
+
+### 1. Start with the obvious additive change
+
+Assume the accepted schema contains `app.accounts`, plus a lookup table:
 
 ```sql
--- schema.sql
 CREATE SCHEMA app;
-CREATE TABLE app.customers (
+CREATE TABLE app.accounts (
   id bigint PRIMARY KEY,
-  email text NOT NULL,
-  created_at timestamp NOT NULL
+  occurred_at timestamp NOT NULL
+);
+CREATE TABLE app.profile_kinds (
+  id bigint PRIMARY KEY
 );
 ```
 
-For this small example, set the target's `schema_file` to `schema.sql` (use
-`schema_command` when your application exports DDL instead), then establish
-the baseline once:
+Set `schema_file = "schema.sql"` for this example—or point `schema_command` at
+the authoritative feature-development DDL exporter, such as
+`drizzle-kit export`—then establish the baseline once:
 
 ```sh
 onwardpg config check
 onwardpg init --target primary
 ```
 
-Now edit `schema.sql` as part of a feature:
-
-```sql
-CREATE SCHEMA app;
-CREATE TABLE app.customers (
-  id bigint PRIMARY KEY,
-  email text NOT NULL,
-  created_at timestamp NOT NULL,
-  joined_on date
-);
-```
-
-Ask onwardpg for the feature plan:
+The feature first adds profiles and an index. After changing the complete DDL,
+start one feature plan:
 
 ```sh
-onwardpg plan customer-dates --target primary
+onwardpg plan customer-profile --target primary
 ```
 
-The result is one reviewable folder, for example:
+The generated `phases/expand.sql` contains the compatible additions:
+
+```sql
+-- EXPAND: run before application code starts using customer profiles.
+CREATE TABLE "app"."customer_profiles" (
+  "id" bigint NOT NULL,
+  "kind_id" bigint NOT NULL,
+  "biography" text,
+  CONSTRAINT "customer_profiles_pkey" PRIMARY KEY ("id"),
+  CONSTRAINT "customer_profiles_kind_id_fkey"
+    FOREIGN KEY ("kind_id") REFERENCES "app"."profile_kinds" ("id")
+);
+CREATE INDEX "customer_profiles_kind_id_idx"
+  ON "app"."customer_profiles" USING "btree" ("kind_id" NULLS LAST);
+```
+
+That is useful, but it is still table-stakes schema diffing.
+
+### 2. Let the feature become awkward
+
+The feature evolves: `accounts` should really be `customers`, and
+`occurred_at timestamp` should become `occurred_at date`. Two schemas cannot
+prove whether that is a rename or replacement, and they cannot know the
+product's timestamp-to-date rule. onwardpg stops and offers bounded choices.
+The agent already knows the feature intent, so it can answer both on the next
+call:
+
+```sh
+onwardpg plan --target primary \
+  --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}' \
+  --hint '{"kind":"type_change","name":["app","accounts","occurred_at"],"strategy":"manual_sql"}'
+```
+
+There is still one folder in the PR:
 
 ```text
-migrations/onward/primary/customer-dates/
+migrations/onward/primary/customer-profile/
 ├── manifest.json
 ├── plan.json
-├── decisions.json       # only when you answered a question
+├── decisions.json
 ├── verify.sql
 └── phases/
     ├── expand.sql
@@ -178,23 +206,99 @@ migrations/onward/primary/customer-dates/
     └── contract.sql
 ```
 
-Review the SQL, edit any marked product-specific TODO, and verify the exact
-bytes on a disposable clone:
+`expand.sql` keeps the compatible profile additions. onwardpg leaves the
+product-specific cast as an explicit TODO in `migrate.sql`; the agent replaces
+it with reviewed SQL:
+
+```sql
+-- MIGRATE: run while the application still uses app.accounts.
+-- Product decision: reporting dates use the stored timestamp's calendar date.
+ALTER TABLE "app"."accounts"
+  ALTER COLUMN "occurred_at" TYPE date
+  USING "occurred_at"::date;
+```
+
+The rename is isolated in `contract.sql` because it changes the application
+contract and must wait until compatible code is ready:
+
+```sql
+-- CONTRACT: run only when deployed code is ready for app.customers.
+ALTER TABLE "app"."accounts" RENAME TO "customers";
+```
+
+The agent can add a Boolean assertion to `verify.sql`:
+
+```sql
+-- onwardpg:assert occurred_at_is_date
+SELECT data_type = 'date'
+FROM information_schema.columns
+WHERE table_schema = 'app'
+  AND table_name = 'customers'
+  AND column_name = 'occurred_at';
+```
+
+Then onwardpg executes the exact edited phase files on a disposable clone and
+requires the final catalog to match the exported DDL:
 
 ```sh
 onwardpg verify --target primary
 ```
 
-If you deliberately want to bring your own development database forward, ask
-for its separate SQL stream and run it through your existing database tooling:
+### 3. Now let `main` move underneath the feature
+
+While the branch is open, a teammate merges a migration adding
+`app.audit_log`. The coding agent rebases using Git and runs the same command:
 
 ```sh
-onwardpg plan --target primary --output sql > /tmp/customer-dates.dev.sql
+onwardpg plan --target primary
 ```
 
-onwardpg does not execute that file. After the next schema edit, run
-`onwardpg plan --target primary` again; it replaces the same feature bundle and
-prints only the local work still missing from that particular database.
+onwardpg does not append a second speculative feature migration. It:
+
+- replays the newly accepted history;
+- moves the same logical `customer-profile` plan onto that new parent;
+- carries forward still-valid rename intent;
+- preserves the agent's exact `migrate.sql` and `verify.sql` edits;
+- reports any incoming data-only work the catalog cannot prove; and
+- clone-verifies the newly stacked result against current exported DDL.
+
+The JSON receipt makes that movement explicit:
+
+```json
+{
+  "durable": {
+    "bundle_id": "customer-profile",
+    "parent_changed": true,
+    "answer_rebind": { "carried": ["rename_table:table:app:accounts"] },
+    "edit_reconciliation": {
+      "outcome": "reconciled",
+      "preserved": ["phases/migrate.sql", "verify.sql"]
+    }
+  }
+}
+```
+
+Meanwhile, the developer database may already contain yesterday's version of
+the feature but not the teammate's change. The separate local output contains
+only what that particular database still needs:
+
+```sh
+onwardpg plan --target primary --output sql
+```
+
+```sql
+-- onwardpg development workspace reconciliation
+-- this is not the cumulative PR migration
+CREATE TABLE "app"."audit_log" ("id" bigint);
+```
+
+That combination is the point: one reviewed feature migration keeps evolving
+over a moving accepted history, agent-owned data SQL survives the restack, and
+local development receives a direct residual without becoming migration
+history. That is the “whoa” moment: the hard part is no longer generating one
+`ALTER TABLE`; it is preserving product intent and one merge-ready migration
+while the code, local database, and accepted history all move independently.
+onwardpg never applies any of it to a caller-owned database.
 
 ## The everyday workflow
 
@@ -326,46 +430,14 @@ lock the feature plan.
 ## What gets merged, and when it runs
 
 The PR contains **one logical feature migration**, not one giant SQL statement.
-That migration is split into ordinary files because a safe rollout usually
-crosses more than one application release:
+The quickstart showed why it is split into ordinary files: a safe rollout often
+crosses more than one application release.
 
 ```text
 expand.sql    make the new shape available while old code still works
 migrate.sql   move or validate data while both shapes are supported
 contract.sql  remove the old shape after old code is gone
 ```
-
-For a date migration, the generated and agent-edited files might look like:
-
-```sql
--- phases/expand.sql
--- Run before deploying code that writes joined_on.
--- Safe addition: existing rows can remain NULL for now.
-ALTER TABLE "app"."customers" ADD COLUMN "joined_on" date;
-```
-
-```sql
--- phases/migrate.sql
--- Run while old and new application versions can coexist.
--- Product rule and batching are supplied by the developer or agent.
-UPDATE "app"."customers"
-SET "joined_on" = created_at::date
-WHERE "joined_on" IS NULL;
-```
-
-```sql
--- phases/contract.sql
--- Run only after every application version has stopped using created_at.
--- This is intentionally separate: it may lock the table and loses the old column.
-ALTER TABLE "app"."customers" DROP COLUMN "created_at";
-```
-
-The exact SQL depends on the before/after schemas and any decisions you make.
-The important boundary is stable: onwardpg can draft structural SQL, while the
-agent or developer supplies product-specific data work and deployment timing.
-The deployment system runs the phases in order; onwardpg only verifies the
-complete bundle on a disposable clone. A phase may be empty when the change
-does not need that kind of work.
 
 In a squash-merge workflow, the feature PR still carries this one folder. The
 developer or deployment system may run `expand.sql` before the application
@@ -374,6 +446,10 @@ and wait to run `contract.sql` until the old code is gone. The exact cutover is
 an application and traffic decision, not something onwardpg guesses. The
 important review question is visible in the files: “what can run before the
 merge, what needs the compatibility window, and what must wait until after it?”
+
+A phase may be empty. onwardpg drafts the structural work and verifies the
+complete bundle on a disposable clone; the developer or agent owns
+product-specific SQL and the deployment system owns when each phase runs.
 
 ## A multi-day branch and incoming migrations
 
