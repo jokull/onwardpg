@@ -82,7 +82,7 @@ var policies = map[string]familyPolicy{
 	"data_packing":            outOfScope("planner.data_packing", "onwardpg preserves declarative column order and does not optimize table layout as a migration-planner side effect"),
 	"database_schema_source":  supported("inputs.database_and_ddl", []string{"internal/source#TestLoadGraphDDLEquivalentToLiveDatabase"}),
 	"enum":                    weaker("types.enum", []string{"internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL", "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"}),
-	"extensions":              weaker("extensions", []string{"internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL", "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"}),
+	"extensions":              weaker("extensions", []string{"internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL", "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"}),
 	"foreign_key_constraint":  weaker("constraints.foreign_key", []string{"internal/graphplan#TestForeignKeyActionsAndDeferrabilityConvergeOnPostgreSQL", "internal/graphplan#TestForeignKeyCycleCreateConvergesOnPostgreSQL"}),
 	"function":                weaker("routines.function", []string{"internal/graphplan#TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL", "internal/graphplan#TestRoutineViewDependencyOrderingConvergesOnPostgreSQL"}),
 	"index":                   weaker("indexes", []string{"internal/graphplan#TestExpressionIndexWithOpClassConvergesOnPostgreSQL", "internal/graphplan#TestConstraintAndIndexRebuildConvergeOnPostgreSQL"}),
@@ -275,6 +275,15 @@ func inspectFile(root, path string) ([]caseEntry, sourceFile, error) {
 
 func applyCaseOverrides(entry *caseEntry, family, name string) {
 	switch {
+	case family == "table" && name == "Add NOT NULL column without default":
+		entry.OnwardPGTests = []string{
+			"internal/graphplan#TestBuildStagesNewRequiredColumnWithoutDefault",
+			"internal/graphplan#TestRequiredColumnStagingConvergesOnPostgreSQL",
+		}
+		entry.Notes = "onwardpg intentionally stages this as nullable expand, editable dual-write/backfill work, and NOT NULL contract instead of attempting one direct statement."
+	case family == "table" && name == "Add NOT NULL column with constant default avoids backfill hazard":
+		entry.OnwardPGTests = []string{"internal/graphplan#TestBuildAddsRequiredColumnWithDefaultDirectly"}
+		entry.Notes = "A retained default supplies old writers and existing rows, so onwardpg emits the direct additive column DDL with explicit lock/rewrite hazards."
 	case family == "column" && name == "Add one column and change ordering":
 		entry.OnwardPGTests = []string{
 			"internal/graphplan#TestPlanRejectsUnreachablePhysicalColumnOrder",

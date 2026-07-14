@@ -65,7 +65,7 @@ func (h Hint) Validate() error {
 			return fmt.Errorf("rename hint from and to must differ")
 		}
 		return h.reject("name", h.Name, "action", h.Action, "strategy", h.Strategy)
-	case "drop":
+	case "drop", "preserve":
 		if err := h.requireObject(); err != nil {
 			return err
 		}
@@ -80,8 +80,8 @@ func (h Hint) Validate() error {
 		if err := validateIdentifier("column", h.Name, "name"); err != nil {
 			return err
 		}
-		if h.Strategy != "direct" && h.Strategy != "manual_sql" {
-			return fmt.Errorf("type_change hint strategy must be direct or manual_sql")
+		if h.Strategy != "manual_sql" {
+			return fmt.Errorf("type_change hint strategy must be manual_sql")
 		}
 		return h.reject("from", h.From, "to", h.To, "action", h.Action)
 	case "rollout":

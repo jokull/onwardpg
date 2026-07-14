@@ -43,7 +43,7 @@ developer-preview catalog inventory is not yet exhaustive.
 | Dependency-aware ordering | Atlas core | Implemented foundation; coverage incomplete |
 | Table persistence | onwardpg extension scope | Typed `UNLOGGED` create and logged/unlogged transitions |
 | Standalone sequences | extension scope | Typed snapshot, create/drop, and parameter updates |
-| Extensions | onwardpg extension scope | Typed create/drop/version update/schema move |
+| Extensions | onwardpg extension scope | Typed create/drop/version update; schema move recognized but blocked pending a compatibility path |
 | Views, routines, domains, composites | onwardpg extension scope | Views and basic routines are graph-modeled; domains/composites blocked |
 | Policies, triggers, rules, grants, text-search, foreign tables | Mixed | Triggers, RLS/policies, and ordinary/partitioned-table grants are typed; foreign tables, rules, default/column/non-table ACLs, and text-search objects explicitly block until their verticals exist |
 

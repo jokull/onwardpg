@@ -152,11 +152,14 @@ func TestViewCreateAndReplaceConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), "ALTER VIEW") {
-		t.Fatalf("expected view-rename plan, got %#v", plan)
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
+
+	// Keep the independent CREATE OR REPLACE coverage below. A direct rename is
+	// fixture setup here, not SQL onwardpg is allowed to emit as a successful
+	// expand/contract plan.
+	if _, err := conn.Exec(ctx, "ALTER VIEW "+quote(schemaName)+".order_amounts RENAME TO reporting_orders"); err != nil {
+		t.Fatal(err)
 	}
-	applyPlan(t, ctx, conn, plan)
-	assertGraphConverges(t, ctx, url, desired)
 
 	if _, err := conn.Exec(ctx, "CREATE OR REPLACE VIEW "+quote(schemaName)+".reporting_orders WITH (security_barrier=false) AS SELECT id, amount * 100 AS amount FROM "+quote(schemaName)+".orders;"); err != nil {
 		t.Fatal(err)
@@ -255,7 +258,7 @@ func TestChangedViewRequiresManualDependentMaterializedViewRefresh(t *testing.T)
 	assertGraphConverges(t, ctx, url, desired)
 }
 
-func TestDependentViewRenameConvergesOnPostgreSQL(t *testing.T) {
+func TestDependentViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -304,11 +307,7 @@ func TestDependentViewRenameConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), "ALTER VIEW") || !strings.Contains(joinSQL(plan), "CREATE OR REPLACE VIEW") {
-		t.Fatalf("expected dependent view transition, got %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	assertGraphConverges(t, ctx, url, desired)
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
 }
 
 func TestPartitionAttachAndDetachConvergeOnPostgreSQL(t *testing.T) {
@@ -1724,7 +1723,7 @@ func TestEnumViewDependencyDropOrderingConvergesOnPostgreSQL(t *testing.T) {
 	assertGraphConverges(t, ctx, url, desired)
 }
 
-func TestRoutineRenameConvergesOnPostgreSQL(t *testing.T) {
+func TestRoutineRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -1769,14 +1768,10 @@ func TestRoutineRenameConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), "ALTER FUNCTION") {
-		t.Fatalf("expected routine rename plan, got %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	assertGraphConverges(t, ctx, url, desired)
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
 }
 
-func TestRoutineRenameRetainsMaterializedViewDependentOnPostgreSQL(t *testing.T) {
+func TestRoutineRenameWithMaterializedViewRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -1825,18 +1820,7 @@ func TestRoutineRenameRetainsMaterializedViewDependentOnPostgreSQL(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), "ALTER FUNCTION") || strings.Contains(joinSQL(plan), "DROP MATERIALIZED VIEW") || strings.Contains(joinSQL(plan), "CREATE MATERIALIZED VIEW") {
-		t.Fatalf("expected native materialized dependent retention, got %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	var value int
-	if err := conn.QueryRow(ctx, "SELECT value FROM "+quote(schemaName)+".doubled_cache").Scan(&value); err != nil {
-		t.Fatal(err)
-	}
-	if value != 2 {
-		t.Fatalf("retained materialized view changed stored data: %d", value)
-	}
-	assertGraphConverges(t, ctx, url, desired)
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
 }
 
 func TestRoutineReplacementRequiresMaterializedViewRefreshContract(t *testing.T) {
@@ -1905,7 +1889,7 @@ func TestRoutineReplacementRequiresMaterializedViewRefreshContract(t *testing.T)
 	assertGraphConverges(t, ctx, url, desired)
 }
 
-func TestRoutineRenameWithDependentTriggerConvergesOnPostgreSQL(t *testing.T) {
+func TestRoutineRenameWithDependentTriggerRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -1954,11 +1938,7 @@ func TestRoutineRenameWithDependentTriggerConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), "ALTER FUNCTION") || !strings.Contains(joinSQL(plan), "CREATE OR REPLACE TRIGGER") {
-		t.Fatalf("expected routine/trigger transition, got %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	assertGraphConverges(t, ctx, url, desired)
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
 }
 
 func TestTriggerRenameConvergesOnPostgreSQL(t *testing.T) {
@@ -2056,7 +2036,7 @@ func TestTransactionalBatchFailureRollsBackOnPostgreSQL(t *testing.T) {
 	}
 }
 
-func TestMaterializedViewRenameConvergesOnPostgreSQL(t *testing.T) {
+func TestMaterializedViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -2107,14 +2087,10 @@ func TestMaterializedViewRenameConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), "ALTER MATERIALIZED VIEW") || !strings.Contains(joinSQL(plan), "COMMENT ON INDEX") || strings.Contains(joinSQL(plan), "DROP INDEX") || strings.Contains(joinSQL(plan), "CREATE INDEX") {
-		t.Fatalf("expected materialized-view rename plan, got %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	assertGraphConverges(t, ctx, url, desired)
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
 }
 
-func TestMaterializedViewRenameRetainsMaterializedDependentOnPostgreSQL(t *testing.T) {
+func TestMaterializedViewRenameWithDependentRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -2163,11 +2139,7 @@ func TestMaterializedViewRenameRetainsMaterializedDependentOnPostgreSQL(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || strings.Count(joinSQL(plan), "ALTER MATERIALIZED VIEW") != 1 || strings.Contains(joinSQL(plan), "DROP MATERIALIZED VIEW") || strings.Contains(joinSQL(plan), "CREATE MATERIALIZED VIEW") {
-		t.Fatalf("expected native retained-dependent materialized-view rename, got %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	assertGraphConverges(t, ctx, url, desired)
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
 }
 
 func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) {
@@ -2401,7 +2373,7 @@ func TestExtensionDropConvergesOnPostgreSQL(t *testing.T) {
 	}
 }
 
-func TestExtensionSchemaMoveConvergesOnPostgreSQL(t *testing.T) {
+func TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -2439,19 +2411,7 @@ func TestExtensionSchemaMoveConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned {
-		t.Fatalf("expected extension-move plan: %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	desiredFingerprint, _ := desired.Fingerprint()
-	actualFingerprint, _ := actual.Fingerprint()
-	if desiredFingerprint != actualFingerprint {
-		t.Fatalf("extension schema move did not converge: got %s want %s", actualFingerprint, desiredFingerprint)
-	}
+	assertUnsupportedPrefix(t, plan, "expand_contract_extension_move_required:")
 }
 
 func TestSequenceParameterUpdateConvergesOnPostgreSQL(t *testing.T) {
@@ -2626,7 +2586,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigint, age text, state "` + schema
 CREATE TYPE "` + schemaName + `".state AS ENUM ('open', 'pending', 'closed');
 CREATE TABLE "` + schemaName + `".orders (
   id bigint NOT NULL,
-  age integer,
+  age text,
   state "` + schemaName + `".state NOT NULL DEFAULT 'open',
   note text DEFAULT 'new'
 );
@@ -2648,16 +2608,14 @@ CREATE INDEX orders_age_idx ON "` + schemaName + `".orders (age);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
-		t.Fatalf("expected two mutation questions: %#v", pending)
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
+		t.Fatalf("expected staged NOT NULL question: %#v", pending)
 	}
-	ageID := (pgschema.Column{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "age"}).ObjectID().String()
 	idID := (pgschema.Column{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "id"}).ObjectID().String()
 	answers := protocol.Answers{
 		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
-			{Kind: "type_change", Key: ageID, Value: "age::integer"},
 			{Kind: "set_not_null", Key: idID, Value: "staged"},
 		},
 	}
@@ -2666,26 +2624,16 @@ CREATE INDEX orders_age_idx ON "` + schemaName + `".orders (age);`
 		t.Fatal(err)
 	}
 	if plan.Status != protocol.Planned {
-		t.Fatalf("expected planned result: %#v", plan)
+		t.Fatalf("expected mutation plan: %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
-	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	desiredFingerprint, _ := desired.Fingerprint()
-	actualFingerprint, _ := actual.Fingerprint()
-	if desiredFingerprint != actualFingerprint {
-		desiredJSON, _ := desired.CanonicalJSON()
-		actualJSON, _ := actual.CanonicalJSON()
-		t.Fatalf("residual graph diff after mutation plan\ndesired: %s\nactual:  %s", desiredJSON, actualJSON)
-	}
+	assertGraphConverges(t, ctx, url, desired)
 
 	dropNotNullDDL := `CREATE SCHEMA "` + schemaName + `";
 CREATE TYPE "` + schemaName + `".state AS ENUM ('open', 'pending', 'closed');
 CREATE TABLE "` + schemaName + `".orders (
   id bigint,
-  age integer,
+  age text,
   state "` + schemaName + `".state NOT NULL DEFAULT 'open',
   note text DEFAULT 'new'
 );
@@ -2711,15 +2659,105 @@ CREATE INDEX orders_age_idx ON "` + schemaName + `".orders (age);`
 		t.Fatalf("expected DROP NOT NULL plan: %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
-	actual, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestTypeMutationProducesEditableExpandContractHandoffOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
 	if err != nil {
 		t.Fatal(err)
 	}
-	desiredFingerprint, _ = desired.Fingerprint()
-	actualFingerprint, _ = actual.Fingerprint()
-	if desiredFingerprint != actualFingerprint {
-		t.Fatalf("residual graph diff after DROP NOT NULL: got %s want %s", actualFingerprint, desiredFingerprint)
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_type_bridge_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
+	if _, err := conn.Exec(ctx, `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".orders (age text);`); err != nil {
+		t.Fatal(err)
 	}
+	path := filepath.Join(t.TempDir(), "desired.sql")
+	if err := os.WriteFile(path, []byte(`CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".orders (age integer);`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
+		t.Fatalf("expected type-change decision: %#v", pending)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql"}},
+	}
+	plan, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.NeedsSQLEdits || !strings.Contains(joinSQL(plan), "ONWARDPG TODO") || strings.Contains(joinSQL(plan), `ALTER COLUMN "age" TYPE`) {
+		t.Fatalf("type change must be handed to editable SQL: %#v", plan)
+	}
+}
+
+func TestRequiredColumnStagingConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_required_column_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
+	baseDDL := `CREATE SCHEMA "` + schemaName + `"; CREATE TABLE "` + schemaName + `".customers (id bigint);`
+	if _, err := conn.Exec(ctx, baseDDL+` INSERT INTO "`+schemaName+`".customers (id) VALUES (1);`); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "desired.sql")
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `"; CREATE TABLE "` + schemaName + `".customers (id bigint, email text NOT NULL);`
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.NeedsSQLEdits {
+		t.Fatalf("required column must wait for agent-owned data work: %#v", plan)
+	}
+	applyPlanPhase(t, ctx, conn, plan, "expand")
+	if _, err := conn.Exec(ctx, `INSERT INTO "`+schemaName+`".customers (id) VALUES (2)`); err != nil {
+		t.Fatalf("old writer broke during expand: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `UPDATE "`+schemaName+`".customers SET email = 'customer-' || id::text || '@example.test' WHERE email IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	applyPlanPhase(t, ctx, conn, plan, "contract")
+	assertGraphConverges(t, ctx, url, desired)
 }
 
 func TestIdentityGenerationStartAndIncrementConvergeOnPostgreSQL(t *testing.T) {
@@ -2793,7 +2831,7 @@ func TestSerialTypeTransitionsConvergeOnPostgreSQL(t *testing.T) {
 	schemaName := "onwardpg_serial_" + time.Now().UTC().Format("20060102150405")
 	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
 	integerDDL := `CREATE SCHEMA "` + schemaName + `";
-CREATE TABLE "` + schemaName + `".orders (id integer);
+CREATE TABLE "` + schemaName + `".orders (id bigint);
 COMMENT ON COLUMN "` + schemaName + `".orders.id IS 'external identifier';`
 	if _, err := conn.Exec(ctx, integerDDL); err != nil {
 		t.Fatal(err)
@@ -3788,7 +3826,7 @@ func TestTableRenameConvergesOnPostgreSQL(t *testing.T) {
 	schemaName := "onwardpg_table_rename_" + time.Now().UTC().Format("20060102150405")
 	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
 	currentDDL := `CREATE SCHEMA "` + schemaName + `";
-CREATE TABLE "` + schemaName + `".orders_old (id bigint, name text);
+CREATE TABLE "` + schemaName + `".orders_old (id bigint, name text, CONSTRAINT stable_orders_id_key UNIQUE (id));
 CREATE INDEX stable_orders_idx ON "` + schemaName + `".orders_old (name);
 CREATE FUNCTION "` + schemaName + `".audit_orders() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
 CREATE TRIGGER audit_orders BEFORE INSERT ON "` + schemaName + `".orders_old FOR EACH ROW EXECUTE FUNCTION "` + schemaName + `".audit_orders();
@@ -3798,7 +3836,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_names_cache AS SELECT name F
 		t.Fatal(err)
 	}
 	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
-CREATE TABLE "` + schemaName + `".orders_new (id bigint, name text);
+CREATE TABLE "` + schemaName + `".orders_new (id bigint, name text, CONSTRAINT stable_orders_id_key UNIQUE (id));
 CREATE INDEX stable_orders_idx ON "` + schemaName + `".orders_new (name);
 CREATE FUNCTION "` + schemaName + `".audit_orders() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
 CREATE TRIGGER audit_orders BEFORE INSERT ON "` + schemaName + `".orders_new FOR EACH ROW EXECUTE FUNCTION "` + schemaName + `".audit_orders();
@@ -3834,10 +3872,37 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_names_cache AS SELECT name F
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 1 || !strings.Contains(joinSQL(plan), "ALTER TABLE") {
+	if plan.Status != protocol.Planned || len(plan.Statements) != 3 ||
+		!strings.Contains(joinSQL(plan), "ALTER TABLE") ||
+		!strings.Contains(joinSQL(plan), "CREATE VIEW") ||
+		!strings.Contains(joinSQL(plan), "DROP VIEW") {
 		t.Fatalf("expected rename plan: %#v", plan)
 	}
-	applyPlan(t, ctx, conn, plan)
+	applyPlanPhase(t, ctx, conn, plan, "expand")
+	var oldKind, newKind string
+	if err := conn.QueryRow(ctx, `SELECT c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'orders_old'`, schemaName).Scan(&oldKind); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'orders_new'`, schemaName).Scan(&newKind); err != nil {
+		t.Fatal(err)
+	}
+	if oldKind != "r" || newKind != "v" {
+		t.Fatalf("expand must preserve old physical table and expose new compatibility view: old=%q new=%q", oldKind, newKind)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO "`+schemaName+`".orders_old (id, name) VALUES (1, 'old-client') ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`); err != nil {
+		t.Fatalf("old application contract is not writable after expand: %v", err)
+	}
+	var value string
+	if err := conn.QueryRow(ctx, `SELECT name FROM "`+schemaName+`".orders_new WHERE id = 1`).Scan(&value); err != nil || value != "old-client" {
+		t.Fatalf("new application contract cannot observe old-client write: value=%q err=%v", value, err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO "`+schemaName+`".orders_new (id, name) VALUES (2, 'new-client')`); err != nil {
+		t.Fatalf("new application contract is not writable after expand: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT name FROM "`+schemaName+`".orders_old WHERE id = 2`).Scan(&value); err != nil || value != "new-client" {
+		t.Fatalf("old application contract cannot observe new-client write: value=%q err=%v", value, err)
+	}
+	applyPlanPhase(t, ctx, conn, plan, "contract")
 	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -3851,7 +3916,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_names_cache AS SELECT name F
 	}
 }
 
-func TestColumnRenameConvergesOnPostgreSQL(t *testing.T) {
+func TestColumnRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -3912,28 +3977,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_cache AS SELECT new_name AS 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 1 || !strings.Contains(joinSQL(plan), "RENAME COLUMN") {
-		t.Fatalf("expected native column/trigger rename plan: %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	var retained string
-	if err := conn.QueryRow(ctx, `SELECT new_name FROM "`+schemaName+`".orders`).Scan(&retained); err != nil {
-		t.Fatal(err)
-	}
-	if retained != "kept" {
-		t.Fatalf("renamed column lost data: %q", retained)
-	}
-	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	desiredFingerprint, _ := desired.Fingerprint()
-	actualFingerprint, _ := actual.Fingerprint()
-	if desiredFingerprint != actualFingerprint {
-		desiredJSON, _ := desired.CanonicalJSON()
-		actualJSON, _ := actual.CanonicalJSON()
-		t.Fatalf("residual graph diff after column rename\ndesired: %s\nactual:  %s", desiredJSON, actualJSON)
-	}
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
 }
 
 func TestEnumCreateAndDropConvergeOnPostgreSQL(t *testing.T) {
@@ -4005,7 +4049,7 @@ CREATE TYPE "` + schemaName + `".state AS ENUM ('open', 'closed');`
 	}
 }
 
-func TestEnumRenameConvergesOnPostgreSQL(t *testing.T) {
+func TestEnumRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -4058,21 +4102,7 @@ CREATE TABLE "` + schemaName + `".orders (state "` + schemaName + `".new_state N
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned {
-		t.Fatalf("expected rename plan: %#v", plan)
-	}
-	applyPlan(t, ctx, conn, plan)
-	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	desiredFingerprint, _ := desired.Fingerprint()
-	actualFingerprint, _ := actual.Fingerprint()
-	if desiredFingerprint != actualFingerprint {
-		desiredJSON, _ := desired.CanonicalJSON()
-		actualJSON, _ := actual.CanonicalJSON()
-		t.Fatalf("residual graph diff after enum rename\ndesired: %s\nactual:  %s", desiredJSON, actualJSON)
-	}
+	assertUnsupportedPrefix(t, plan, "expand_contract_bridge_required:")
 }
 
 func TestCheckNoInheritNotValidConvergesOnPostgreSQL(t *testing.T) {
@@ -4813,6 +4843,18 @@ func applyPlan(t *testing.T, ctx context.Context, conn *pgx.Conn, plan protocol.
 	}
 }
 
+func applyPlanPhase(t *testing.T, ctx context.Context, conn *pgx.Conn, plan protocol.Result, phase string) {
+	t.Helper()
+	filtered := plan
+	filtered.Batches = nil
+	for _, batch := range plan.Batches {
+		if batch.Phase == phase {
+			filtered.Batches = append(filtered.Batches, batch)
+		}
+	}
+	applyPlan(t, ctx, conn, filtered)
+}
+
 func assertGraphConverges(t *testing.T, ctx context.Context, url string, desired *pgschema.Snapshot) {
 	t.Helper()
 	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
@@ -4832,6 +4874,19 @@ func assertGraphConverges(t *testing.T, ctx context.Context, url string, desired
 		actualJSON, _ := actual.CanonicalJSON()
 		t.Fatalf("residual graph diff after applying plan\ndesired: %s\nactual:  %s", desiredJSON, actualJSON)
 	}
+}
+
+func assertUnsupportedPrefix(t *testing.T, result protocol.Result, prefix string) {
+	t.Helper()
+	if result.Status != protocol.Unsupported {
+		t.Fatalf("expected unsupported result with %q, got %#v", prefix, result)
+	}
+	for _, reason := range result.Unsupported {
+		if strings.HasPrefix(reason, prefix) {
+			return
+		}
+	}
+	t.Fatalf("expected unsupported reason with %q, got %#v", prefix, result.Unsupported)
 }
 
 func joinPlan(plan protocol.Result) string {

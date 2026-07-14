@@ -365,7 +365,7 @@ func TestBuildRendersExtensionVersionUpdate(t *testing.T) {
 	}
 }
 
-func TestBuildRendersExtensionSchemaMove(t *testing.T) {
+func TestBuildBlocksExtensionSchemaMoveWithoutCompatibilityBridge(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	before := pgschema.Extension{Schema: "old_schema", Name: "pgcrypto", Version: "1.3"}
 	after := before
@@ -380,8 +380,8 @@ func TestBuildRendersExtensionSchemaMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER EXTENSION "pgcrypto" SET SCHEMA "new_schema";` {
-		t.Fatalf("extension schema move was not rendered: %#v", planned)
+	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_extension_move_required:") {
+		t.Fatalf("extension schema move must not become a direct cutover: %#v", planned)
 	}
 }
 
@@ -451,7 +451,7 @@ func TestBuildRendersPartitionAttachDetachAndRejectsReconfiguration(t *testing.T
 		t.Fatalf("partition attach = %#v, unsupported=%#v, err=%v", attach, unsupported, err)
 	}
 	detach, _, unsupported, err := renderModify(attached, base, decisions{}, Options{}, nil, nil)
-	if err != nil || len(unsupported) != 0 || len(detach) != 1 || detach[0].SQL != `ALTER TABLE "app"."events" DETACH PARTITION "app"."events_2026";` || detach[0].Phase != "migrate" {
+	if err != nil || len(unsupported) != 0 || len(detach) != 1 || detach[0].SQL != `ALTER TABLE "app"."events" DETACH PARTITION "app"."events_2026";` || detach[0].Phase != "contract" {
 		t.Fatalf("partition detach = %#v, unsupported=%#v, err=%v", detach, unsupported, err)
 	}
 	moved := attached
@@ -852,14 +852,17 @@ func TestBuildOrdersChangedDefaultAfterColumnType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: after.ObjectID().String(), Value: "direct"}}}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || !reflect.DeepEqual(pending.Questions[0].Choices, []string{"manual_sql"}) || pending.Questions[0].AllowsFreeform {
+		t.Fatalf("type change must expose only the editable SQL handoff: %#v", pending)
+	}
+	answer := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: after.ObjectID().String(), Value: "manual_sql"}}}
 	plan, err := Build(current, desired, answer, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := joinSQL(plan)
-	if strings.Index(joined, " TYPE text") > strings.Index(joined, "SET DEFAULT 'abc'") {
-		t.Fatalf("type must precede new default: %s", joined)
+	if plan.Status != protocol.NeedsSQLEdits || strings.Index(joined, "ONWARDPG TODO") > strings.Index(joined, "SET DEFAULT 'abc'") {
+		t.Fatalf("editable type handoff must precede the new default: %#v\n%s", plan, joined)
 	}
 }
 
@@ -928,11 +931,14 @@ func TestBuildRequiresAndRendersColumnMutationChoices(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
 		t.Fatalf("expected type and NOT NULL questions, got %#v", pending)
 	}
+	if !reflect.DeepEqual(pending.Questions[0].Choices, []string{"manual_sql"}) || pending.Questions[0].AllowsFreeform {
+		t.Fatalf("type-change choices contain an unusable shortcut: %#v", pending.Questions[0])
+	}
 	answers := protocol.Answers{
 		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
-			{Kind: "type_change", Key: after.ObjectID().String(), Value: "age::integer"},
+			{Kind: "type_change", Key: after.ObjectID().String(), Value: "manual_sql"},
 			{Kind: "set_not_null", Key: after.ObjectID().String(), Value: "staged"},
 		},
 	}
@@ -940,20 +946,81 @@ func TestBuildRequiresAndRendersColumnMutationChoices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := joinSQL(planned)
-	for _, fragment := range []string{
-		`ADD CONSTRAINT "onwardpg_nn_`,
-		`CHECK ("age" IS NOT NULL) NOT VALID;`,
-		`ALTER COLUMN "age" TYPE integer USING age::integer;`,
-		`VALIDATE CONSTRAINT`,
-		`ALTER COLUMN "age" SET NOT NULL;`,
-	} {
-		if !strings.Contains(joined, fragment) {
-			t.Fatalf("missing %q from:\n%s", fragment, joined)
+	if planned.Status != protocol.NeedsSQLEdits || !strings.Contains(joinSQL(planned), "ONWARDPG TODO") || strings.Contains(joinSQL(planned), "ALTER COLUMN \"age\" TYPE") {
+		t.Fatalf("same-name type change must become an editable handoff, not direct SQL: %#v", planned)
+	}
+}
+
+func TestBuildStagesNewRequiredColumnWithoutDefault(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "customers"}
+	id := pgschema.Column{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	email := pgschema.Column{Table: table.ObjectID(), Name: "email", Position: 2, Type: "text", NotNull: true}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Add(id); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.AddDependency(id.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if len(planned.Batches) != 3 || planned.Batches[0].Phase != "expand" || planned.Batches[1].Phase != "migrate" || planned.Batches[2].Phase != "contract" {
-		t.Fatalf("unexpected phase batches: %#v", planned.Batches)
+	if err := desired.Add(email); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddDependency(email.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.NeedsSQLEdits || len(plan.Statements) != 3 {
+		t.Fatalf("required new column must create an editable staged plan: %#v", plan)
+	}
+	if plan.Statements[0].Phase != "expand" || plan.Statements[0].SQL != `ALTER TABLE "app"."customers" ADD COLUMN "email" text;` ||
+		plan.Statements[1].Phase != "migrate" || !strings.Contains(plan.Statements[1].SQL, "ONWARDPG TODO") ||
+		plan.Statements[2].Phase != "contract" || plan.Statements[2].SQL != `ALTER TABLE "app"."customers" ALTER COLUMN "email" SET NOT NULL;` {
+		t.Fatalf("required column phases = %#v", plan.Statements)
+	}
+	if strings.Contains(plan.Statements[0].SQL, "NOT NULL") {
+		t.Fatalf("expand broke old writers: %s", plan.Statements[0].SQL)
+	}
+}
+
+func TestBuildAddsRequiredColumnWithDefaultDirectly(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "customers"}
+	id := pgschema.Column{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	defaultValue := "'pending'::text"
+	status := pgschema.Column{Table: table.ObjectID(), Name: "status", Position: 2, Type: "text", NotNull: true, Default: &defaultValue}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Add(id); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.AddDependency(id.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := desired.Add(status); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddDependency(status.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned || len(plan.Statements) != 1 || !strings.Contains(plan.Statements[0].SQL, `ADD COLUMN "status" text DEFAULT 'pending'::text NOT NULL`) {
+		t.Fatalf("required column with retained default should be directly addable: %#v", plan)
 	}
 }
 
@@ -1009,10 +1076,10 @@ func TestBuildStagesApplicationBackfillBeforeNotNullContract(t *testing.T) {
 	if planned.Status != protocol.Planned || len(planned.Batches) != 3 {
 		t.Fatalf("planned = %#v", planned)
 	}
-	if planned.Batches[0].Phase != "expand" || planned.Batches[1].Phase != "migrate" || planned.Batches[2].Phase != "contract" {
+	if planned.Batches[0].Phase != "migrate" || planned.Batches[1].Phase != "migrate" || planned.Batches[2].Phase != "contract" {
 		t.Fatalf("phase order = %#v", planned.Batches)
 	}
-	if planned.Batches[1].Statements[0].Manual == nil || !strings.Contains(planned.Batches[2].Statements[0].SQL, "VALIDATE CONSTRAINT") {
+	if !strings.Contains(planned.Batches[0].Statements[0].SQL, "NOT VALID") || planned.Batches[1].Statements[0].Manual == nil || !strings.Contains(planned.Batches[2].Statements[0].SQL, "VALIDATE CONSTRAINT") {
 		t.Fatalf("backfill/contract = %#v", planned.Batches)
 	}
 }
@@ -1086,8 +1153,8 @@ func TestBuildRequiresFingerprintBoundViewRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER VIEW "app"."orders_view" RENAME TO "reporting_orders";` {
-		t.Fatalf("unexpected view rename plan %#v", planned)
+	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
+		t.Fatalf("view rename must not become a direct cutover: %#v", planned)
 	}
 }
 
@@ -1125,8 +1192,8 @@ func TestBuildPlansFingerprintBoundViewRenameWithDependentRewrite(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 2 || planned.Statements[0].SQL != `ALTER VIEW "app"."orders_view" RENAME TO "reporting_orders";` || !strings.Contains(planned.Statements[1].SQL, "CREATE OR REPLACE VIEW") || planned.Statements[1].Phase != "contract" {
-		t.Fatalf("dependent view rename plan = %#v", planned)
+	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
+		t.Fatalf("dependent view rename must wait for a compatibility bridge: %#v", planned)
 	}
 }
 
@@ -1199,8 +1266,8 @@ func TestBuildRequiresFingerprintBoundRoutineRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || !strings.Contains(joinSQL(planned), `ALTER FUNCTION "app"."old_total"(integer) RENAME TO "total";`) || !strings.Contains(joinSQL(planned), `CREATE OR REPLACE FUNCTION app.total(integer)`) {
-		t.Fatalf("unexpected routine rename plan %#v", planned)
+	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
+		t.Fatalf("routine rename must not become a direct cutover: %#v", planned)
 	}
 }
 
@@ -1231,8 +1298,8 @@ func TestBuildPlansRoutineRenameWithDependentTriggerRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || !strings.Contains(joinSQL(planned), `ALTER FUNCTION "app"."old_audit"() RENAME TO "audit";`) || !strings.Contains(joinSQL(planned), "CREATE OR REPLACE TRIGGER audit") {
-		t.Fatalf("trigger-dependent routine rename plan = %#v", planned)
+	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
+		t.Fatalf("trigger-dependent routine rename must wait for a compatibility bridge: %#v", planned)
 	}
 }
 
@@ -1337,8 +1404,87 @@ func TestBuildRequiresFingerprintBoundTableRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER TABLE "public"."orders_old" RENAME TO "orders_new";` {
+	if planned.Status != protocol.Planned || len(planned.Statements) != 3 ||
+		planned.Statements[0].Phase != "expand" || !strings.Contains(planned.Statements[0].SQL, `CREATE VIEW "public"."orders_new" WITH (security_invoker = true)`) ||
+		planned.Statements[1].Phase != "contract" || planned.Statements[1].SQL != `DROP VIEW "public"."orders_new";` ||
+		planned.Statements[2].Phase != "contract" || planned.Statements[2].SQL != `ALTER TABLE "public"."orders_old" RENAME TO "orders_new";` {
 		t.Fatalf("unexpected rename plan %#v", planned)
+	}
+	if len(planned.Batches) != 2 || planned.Batches[1].Phase != "contract" || !planned.Batches[1].Transactional || len(planned.Batches[1].Statements) != 2 {
+		t.Fatalf("view replacement and physical rename must be one atomic contract batch: %#v", planned.Batches)
+	}
+}
+
+func TestTableRenameCompatibilityViewCarriesRuntimePrivileges(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	from := pgschema.Table{Schema: "app", Name: "accounts"}
+	to := pgschema.Table{Schema: "app", Name: "customers"}
+	beforeColumn := pgschema.Column{Table: from.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	afterColumn := pgschema.Column{Table: to.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	beforePrivilege := pgschema.TablePrivilege{Table: from.ObjectID(), Grantee: "app_runtime", Grantor: "@owner", Privilege: "SELECT"}
+	afterPrivilege := beforePrivilege
+	afterPrivilege.Table = to.ObjectID()
+	for _, object := range []pgschema.Object{from, beforeColumn, beforePrivilege} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{to, afterColumn, afterPrivilege} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "rename_table", Key: from.ObjectID().String(), Value: to.ObjectID().String()}},
+	}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned || !strings.Contains(joinSQL(planned), `GRANT SELECT ON TABLE "app"."customers" TO "app_runtime";`) {
+		t.Fatalf("compatibility view did not retain runtime privilege: %#v", planned)
+	}
+}
+
+func TestTableRenameRejectsTableOnlyPrivilegeThatAViewCannotPreserve(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	from := pgschema.Table{Schema: "app", Name: "accounts"}
+	to := pgschema.Table{Schema: "app", Name: "customers"}
+	beforeColumn := pgschema.Column{Table: from.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	afterColumn := pgschema.Column{Table: to.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	beforePrivilege := pgschema.TablePrivilege{Table: from.ObjectID(), Grantee: "app_runtime", Grantor: "@owner", Privilege: "TRUNCATE"}
+	afterPrivilege := beforePrivilege
+	afterPrivilege.Table = to.ObjectID()
+	for _, object := range []pgschema.Object{from, beforeColumn, beforePrivilege} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{to, afterColumn, afterPrivilege} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "rename_table", Key: from.ObjectID().String(), Value: to.ObjectID().String()}},
+	}
+	result, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "table_rename_compatibility_table_only_privilege:" + beforePrivilege.ObjectID().String()
+	if result.Status != protocol.Unsupported || !containsString(result.Unsupported, want) {
+		t.Fatalf("table-only privilege must block view bridge: %#v", result)
 	}
 }
 
@@ -1466,7 +1612,7 @@ func TestBuildKeepsTableRenameIntentStableWhileAddingColumn(t *testing.T) {
 	}
 }
 
-func TestBuildComposesConfirmedTableRenameWithColumnTypeChange(t *testing.T) {
+func TestBuildRejectsTableRenameWhenOldColumnShapeCannotRemainCompatible(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	schema := pgschema.Schema{Name: "public"}
 	oldTable := pgschema.Table{Schema: "public", Name: "accounts"}
@@ -1508,24 +1654,13 @@ func TestBuildComposesConfirmedTableRenameWithColumnTypeChange(t *testing.T) {
 			QuestionFingerprint: renamePending.Questions[0].ScopeFingerprint,
 		}},
 	}
-	typePending, err := Build(current, desired, answers, Options{})
+	result, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if typePending.Status != protocol.NeedsInput || len(typePending.Questions) != 1 || typePending.Questions[0].Kind != "type_change" || typePending.Questions[0].Key != before.ObjectID().String() {
-		t.Fatalf("type stage = %#v", typePending)
-	}
-	answers.Answers = append(answers.Answers, protocol.Answer{
-		Kind: "type_change", Key: before.ObjectID().String(), Value: "direct",
-		QuestionFingerprint: typePending.Questions[0].ScopeFingerprint,
-	})
-	planned, err := Build(current, desired, answers, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sql := joinSQL(planned)
-	if planned.Status != protocol.Planned || !strings.Contains(sql, `ALTER TABLE "public"."accounts" ALTER COLUMN "occurred_at" TYPE date;`) || !strings.Contains(sql, `ALTER TABLE "public"."accounts" RENAME TO "customers";`) {
-		t.Fatalf("compound rename/type plan = %#v\n%s", planned, sql)
+	want := "table_rename_compatibility_column_change:" + before.ObjectID().String()
+	if result.Status != protocol.Unsupported || !containsString(result.Unsupported, want) {
+		t.Fatalf("compound rename/type compatibility result = %#v", result)
 	}
 }
 
@@ -1563,7 +1698,10 @@ func TestBuildAllowsConfirmedTableRenameReferencedByForeignKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER TABLE "public"."users" RENAME TO "accounts";` {
+	if planned.Status != protocol.Planned || len(planned.Statements) != 3 ||
+		planned.Statements[0].SQL != "CREATE VIEW \"public\".\"accounts\" WITH (security_invoker = true) AS\nSELECT \"id\" FROM \"public\".\"users\";" ||
+		planned.Statements[1].SQL != `DROP VIEW "public"."accounts";` ||
+		planned.Statements[2].SQL != `ALTER TABLE "public"."users" RENAME TO "accounts";` {
 		t.Fatalf("unexpected FK-safe rename plan %#v", planned)
 	}
 }
@@ -1573,27 +1711,29 @@ func TestBuildAllowsConfirmedTableRenameWithRetainedTrigger(t *testing.T) {
 	schema := pgschema.Schema{Name: "public"}
 	oldTable := pgschema.Table{Schema: "public", Name: "orders_old"}
 	newTable := pgschema.Table{Schema: "public", Name: "orders_new"}
+	oldID := pgschema.Column{Table: oldTable.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
+	newID := pgschema.Column{Table: newTable.ObjectID(), Name: "id", Position: 1, Type: "bigint"}
 	routine := pgschema.Routine{Schema: "public", Name: "audit", Kind: "function", Signature: "", Definition: "CREATE FUNCTION public.audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;"}
 	oldTrigger := pgschema.Trigger{Table: oldTable.ObjectID(), Name: "audit", Routine: routine.ObjectID(), Enabled: "O", Definition: "CREATE TRIGGER audit BEFORE INSERT ON public.orders_old FOR EACH ROW EXECUTE FUNCTION public.audit()"}
 	newTrigger := oldTrigger
 	newTrigger.Table = newTable.ObjectID()
 	newTrigger.Definition = "CREATE TRIGGER audit BEFORE INSERT ON public.orders_new FOR EACH ROW EXECUTE FUNCTION public.audit()"
-	for _, object := range []pgschema.Object{schema, oldTable, routine, oldTrigger} {
+	for _, object := range []pgschema.Object{schema, oldTable, oldID, routine, oldTrigger} {
 		if err := current.Add(object); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, object := range []pgschema.Object{schema, newTable, routine, newTrigger} {
+	for _, object := range []pgschema.Object{schema, newTable, newID, routine, newTrigger} {
 		if err := desired.Add(object); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, edge := range [][2]pgschema.ID{{oldTable.ObjectID(), schema.ObjectID()}, {routine.ObjectID(), schema.ObjectID()}, {oldTrigger.ObjectID(), oldTable.ObjectID()}, {oldTrigger.ObjectID(), routine.ObjectID()}} {
+	for _, edge := range [][2]pgschema.ID{{oldTable.ObjectID(), schema.ObjectID()}, {oldID.ObjectID(), oldTable.ObjectID()}, {routine.ObjectID(), schema.ObjectID()}, {oldTrigger.ObjectID(), oldTable.ObjectID()}, {oldTrigger.ObjectID(), routine.ObjectID()}} {
 		if err := current.AddDependency(edge[0], edge[1]); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, edge := range [][2]pgschema.ID{{newTable.ObjectID(), schema.ObjectID()}, {routine.ObjectID(), schema.ObjectID()}, {newTrigger.ObjectID(), newTable.ObjectID()}, {newTrigger.ObjectID(), routine.ObjectID()}} {
+	for _, edge := range [][2]pgschema.ID{{newTable.ObjectID(), schema.ObjectID()}, {newID.ObjectID(), newTable.ObjectID()}, {routine.ObjectID(), schema.ObjectID()}, {newTrigger.ObjectID(), newTable.ObjectID()}, {newTrigger.ObjectID(), routine.ObjectID()}} {
 		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
 			t.Fatal(err)
 		}
@@ -1610,7 +1750,10 @@ func TestBuildAllowsConfirmedTableRenameWithRetainedTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER TABLE "public"."orders_old" RENAME TO "orders_new";` {
+	if planned.Status != protocol.Planned || len(planned.Statements) != 3 ||
+		planned.Statements[0].SQL != "CREATE VIEW \"public\".\"orders_new\" WITH (security_invoker = true) AS\nSELECT \"id\" FROM \"public\".\"orders_old\";" ||
+		planned.Statements[1].SQL != `DROP VIEW "public"."orders_new";` ||
+		planned.Statements[2].SQL != `ALTER TABLE "public"."orders_old" RENAME TO "orders_new";` {
 		t.Fatalf("expected retained-trigger table rename plan, got %#v", planned)
 	}
 }
@@ -1657,12 +1800,20 @@ func ptrID(id pgschema.ID) *pgschema.ID { return &id }
 func TestRenderTableRenameAcrossSchemasUsesValidPostgreSQLMove(t *testing.T) {
 	from := pgschema.Table{Schema: "s1", Name: "orders"}
 	to := pgschema.Table{Schema: "s2", Name: "orders_v2"}
-	statements := renderTableRename(renameTable{from: from, to: to})
+	statements, err := renderTableRename(renameTable{
+		from: from, to: to,
+		compatibilityColumns: []pgschema.Column{{Table: from.ObjectID(), Name: "id", Position: 1, Type: "bigint"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := make([]string, len(statements))
 	for i, statement := range statements {
 		got[i] = statement.SQL
 	}
 	want := []string{
+		"CREATE VIEW \"s2\".\"orders_v2\" WITH (security_invoker = true) AS\nSELECT \"id\" FROM \"s1\".\"orders\";",
+		`DROP VIEW "s2"."orders_v2";`,
 		`ALTER TABLE "s1"."orders" SET SCHEMA "s2";`,
 		`ALTER TABLE "s2"."orders" RENAME TO "orders_v2";`,
 	}
@@ -1713,8 +1864,8 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER TABLE "public"."orders" RENAME COLUMN "old_name" TO "new_name";` {
-		t.Fatalf("unexpected rename plan %#v", planned)
+	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
+		t.Fatalf("column rename must not become a direct cutover: %#v", planned)
 	}
 }
 
@@ -1755,8 +1906,8 @@ func TestBuildRequiresFingerprintBoundEnumRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER TYPE "public"."old_state" RENAME TO "new_state";` {
-		t.Fatalf("unexpected rename plan %#v", planned)
+	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_bridge_required:") {
+		t.Fatalf("enum rename must not become a direct cutover: %#v", planned)
 	}
 }
 
@@ -2603,8 +2754,8 @@ func TestColumnRenamePreservesAutomaticallyRewrittenConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 1 || plan.Statements[0].SQL != `ALTER TABLE "app"."orders" RENAME COLUMN "old_name" TO "new_name";` {
-		t.Fatalf("expected rename only, got %#v", plan)
+	if plan.Status != protocol.Unsupported || !hasUnsupportedPrefix(plan, "expand_contract_bridge_required:") {
+		t.Fatalf("constraint-backed column rename must wait for a compatibility bridge: %#v", plan)
 	}
 }
 
@@ -2704,6 +2855,15 @@ func TestNormalizeRoutineCallReferencesSkipsLiteralsAndBareNames(t *testing.T) {
 func containsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasUnsupportedPrefix(result protocol.Result, prefix string) bool {
+	for _, value := range result.Unsupported {
+		if strings.HasPrefix(value, prefix) {
 			return true
 		}
 	}

@@ -82,6 +82,12 @@ func choicesForQuestion(question protocol.Question, current, desired *pgschema.S
 		}
 		var result []protocol.DecisionChoice
 		for _, value := range question.Choices {
+			if value == "preserve" {
+				result = append(result, protocol.DecisionChoice{
+					Hint: protocol.Hint{Kind: "preserve", Object: object, Name: fromName},
+				})
+				continue
+			}
 			if value == "create" {
 				result = append(result, protocol.DecisionChoice{
 					Hint:    protocol.Hint{Kind: "drop", Object: object, Name: fromName},
@@ -124,10 +130,9 @@ func choicesForQuestion(question protocol.Question, current, desired *pgschema.S
 			Hint: protocol.Hint{Kind: "drop", Object: object, Name: name}, Hazards: []string{"data_loss"},
 		}}, nil
 	case "type_change":
-		return []protocol.DecisionChoice{
-			{Hint: protocol.Hint{Kind: "type_change", Name: name, Strategy: "direct"}, Hazards: []string{"table_rewrite_possible", "access_exclusive_lock"}},
-			{Hint: protocol.Hint{Kind: "type_change", Name: name, Strategy: "manual_sql"}, Hazards: []string{"manual_sql"}},
-		}, nil
+		return []protocol.DecisionChoice{{
+			Hint: protocol.Hint{Kind: "type_change", Name: name, Strategy: "manual_sql"}, Hazards: []string{"manual_sql"},
+		}}, nil
 	case "set_not_null":
 		result := make([]protocol.DecisionChoice, 0, len(question.Choices))
 		for _, strategy := range question.Choices {
@@ -172,6 +177,9 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 			return answer, false, err
 		}
 		switch {
+		case hint.Kind == "preserve" && hint.Object == object && equal(hint.Name, fromName) && contains(question.Choices, "preserve"):
+			answer.Value = "preserve"
+			return answer, true, nil
 		case hint.Kind == "drop" && hint.Object == object && equal(hint.Name, fromName):
 			answer.Value = "create"
 			return answer, true, nil

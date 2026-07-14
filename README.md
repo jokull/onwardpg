@@ -1,28 +1,49 @@
 # onwardpg
 
-onwardpg is a forward-only PostgreSQL schema-diff planner built for coding
-agents.
+**The PostgreSQL schema-diff planner that generates the compatibility window,
+not just the final `ALTER` statements.**
 
-It is built for the way features actually evolve: declarative schema code
-changes several times, developers apply partial work to imperfect local
-databases, other migrations merge underneath the branch, and the PR should
-still contain one reviewable migration from the latest accepted ground to the
-schema that would exist after merge.
+Most diff tools answer “what SQL makes these schemas equal?” onwardpg also
+asks “how can old and new application versions safely overlap while we get
+there?” It turns accepted migration history and current exported CREATE DDL
+into one forward-only rollout for the feature:
 
 ```text
-one evolving feature migration
-      +
-replayable PostgreSQL history
-      +
-agent-owned SQL for product-specific work
-      +
-disposable clone verification
+accepted history
+      │
+      ▼
+EXPAND       add the new interface without removing the old one
+      │      old and new application versions may overlap here
+      ▼
+MIGRATE      run generated validation and agent-owned data work
+      │
+      ▼
+CONTRACT     remove the old interface after stale code is gone
+      │
+      ▼
+desired schema
 ```
 
+That compatibility path is the product, not an optional “safe mode.” A direct
+table rename, required-column addition, or type cutover can make a perfectly
+accurate diff operationally wrong. onwardpg stages the transition when it can
+prove a supported path, asks the coding agent for product intent when schema
+state is insufficient, and blocks when it cannot preserve the application
+contract.
+
+It is also built for the way feature branches actually evolve: declarative
+schema code changes several times, developers exercise partial work on
+imperfect local databases, and other migrations merge underneath the branch.
+Repeated `plan` calls keep replacing one reviewable feature migration from the
+latest accepted history to the schema that would exist after merge. Agent-owned
+backfills survive that restacking, and the exact resulting SQL is proven on a
+disposable PostgreSQL clone.
+
 **onwardpg never applies SQL to development, staging, or production.** It
-generates plans and verifies them only in databases it creates. The developer
-or coding agent owns real execution because it has the application,
-deployment, traffic, and operational context.
+generates plans, editable SQL, and receipts. It executes SQL only inside
+disposable databases it creates for verification. The developer or coding
+agent owns real execution because it has the application, deployment, traffic,
+and operational context.
 
 The approach comes from [Use a diff tool for SQL
 migrations](https://www.solberg.is/sql-diff-migrations): derive migrations
@@ -130,11 +151,15 @@ never point at production.
 
 ### 1. Start with the obvious additive change
 
-Assume the accepted schema contains `app.accounts`, plus a lookup table:
+Assume the accepted schema contains `app.accounts`, an event table, and a
+lookup table:
 
 ```sql
 CREATE SCHEMA app;
 CREATE TABLE app.accounts (
+  id bigint PRIMARY KEY
+);
+CREATE TABLE app.customer_events (
   id bigint PRIMARY KEY,
   occurred_at timestamp NOT NULL
 );
@@ -166,11 +191,13 @@ The generated `phases/expand.sql` contains the compatible additions:
 CREATE TABLE "app"."customer_profiles" (
   "id" bigint NOT NULL,
   "kind_id" bigint NOT NULL,
-  "biography" text,
-  CONSTRAINT "customer_profiles_pkey" PRIMARY KEY ("id"),
-  CONSTRAINT "customer_profiles_kind_id_fkey"
-    FOREIGN KEY ("kind_id") REFERENCES "app"."profile_kinds" ("id")
+  "biography" text
 );
+ALTER TABLE "app"."customer_profiles"
+  ADD CONSTRAINT "customer_profiles_pkey" PRIMARY KEY ("id");
+ALTER TABLE "app"."customer_profiles"
+  ADD CONSTRAINT "customer_profiles_kind_id_fkey"
+  FOREIGN KEY ("kind_id") REFERENCES "app"."profile_kinds" ("id");
 CREATE INDEX "customer_profiles_kind_id_idx"
   ON "app"."customer_profiles" USING "btree" ("kind_id" NULLS LAST);
 ```
@@ -179,17 +206,18 @@ That is useful, but it is still table-stakes schema diffing.
 
 ### 2. Let the feature become awkward
 
-The feature evolves: `accounts` should really be `customers`, and
-`occurred_at timestamp` should become `occurred_at date`. Two schemas cannot
-prove whether that is a rename or replacement, and they cannot know the
-product's timestamp-to-date rule. onwardpg stops and offers bounded choices.
-The agent already knows the feature intent, so it can answer both on the next
-call:
+The feature evolves: `accounts` should really be `customers`, and events
+should move from `occurred_at timestamp` to a new required `occurred_on date`
+contract. Two schemas cannot prove whether the table is a rename or
+replacement. They also cannot know whether the old timestamp column may be
+removed or how historical values should become product dates. onwardpg stops
+and offers bounded choices.
+The agent already knows the feature intent, so it can answer on the next call:
 
 ```sh
 onwardpg plan --target primary \
   --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}' \
-  --hint '{"kind":"type_change","name":["app","accounts","occurred_at"],"strategy":"manual_sql"}'
+  --hint '{"kind":"drop","object":"column","name":["app","customer_events","occurred_at"]}'
 ```
 
 There is still one folder in the PR:
@@ -206,35 +234,71 @@ migrations/onward/primary/customer-profile/
     └── contract.sql
 ```
 
-`expand.sql` keeps the compatible profile additions. onwardpg leaves the
-product-specific cast as an explicit TODO in `migrate.sql`; the agent replaces
-it with reviewed SQL:
+onwardpg does not hide a direct rename in `expand.sql`. For a
+shape-preserving table rename, generated `expand.sql` leaves the old physical
+table untouched and introduces the new name as a compatibility surface:
 
 ```sql
--- MIGRATE: run while the application still uses app.accounts.
--- Product decision: reporting dates use the stored timestamp's calendar date.
-ALTER TABLE "app"."accounts"
-  ALTER COLUMN "occurred_at" TYPE date
-  USING "occurred_at"::date;
+-- Introduce the replacement representation without removing the old one.
+ALTER TABLE "app"."customer_events"
+  ADD COLUMN "occurred_on" date;
+
+-- Introduce the new name while leaving stale instances on the physical table.
+CREATE VIEW "app"."customers" WITH (security_invoker = true) AS
+SELECT "id" FROM "app"."accounts";
 ```
 
-The rename is isolated in `contract.sql` because it changes the application
-contract and must wait until compatible code is ready:
+Both old and new application instances now have a usable name for the same
+rows. Crucially, stale code still sees the original physical table, so its
+table-only behavior does not change during expand. New code is written with
+knowledge of the temporary view. onwardpg copies view-capable runtime grants
+and refuses this automatic strategy if an existing column changes shape or a
+table-only privilege cannot survive the bridge. Simple PostgreSQL views are
+automatically updatable, but they are not universal table aliases: new code
+that needs `ON CONFLICT`, named constraints or triggers, or table-shaped
+catalog introspection must wait for contract or use an agent-designed bridge.
+Those cases never fall back to a bare early rename.
+
+The application can now deploy a dual-write version that maintains both event
+columns. The agent adds the product-specific historical conversion to
+`migrate.sql`:
 
 ```sql
--- CONTRACT: run only when deployed code is ready for app.customers.
+-- MIGRATE: run after dual-write code is deployed.
+-- Product decision: reporting dates use the stored timestamp's calendar date.
+UPDATE "app"."customer_events"
+SET "occurred_on" = "occurred_at"::date
+WHERE "occurred_on" IS NULL;
+```
+
+After stale instances and the rollback window are gone, generated
+`contract.sql` removes the compatibility name:
+
+```sql
+-- CONTRACT: run only when no application instance uses app.accounts or occurred_at.
+ALTER TABLE "app"."customer_events"
+  ALTER COLUMN "occurred_on" SET NOT NULL;
+ALTER TABLE "app"."customer_events" DROP COLUMN "occurred_at";
+DROP VIEW "app"."customers";
 ALTER TABLE "app"."accounts" RENAME TO "customers";
 ```
+
+The view drop and physical rename are one transactional contract batch. New
+code keeps the same `app.customers` name across the commit; only the backing
+relation changes after the old name is no longer needed.
+
+The desired DDL declares `occurred_on NOT NULL`, but expand deliberately added
+it as nullable. A required column without a default cannot be compatible with
+old writers or historical rows in one statement, so onwardpg makes the
+backfill pocket explicit and postpones enforcement to contract.
 
 The agent can add a Boolean assertion to `verify.sql`:
 
 ```sql
--- onwardpg:assert occurred_at_is_date
-SELECT data_type = 'date'
-FROM information_schema.columns
-WHERE table_schema = 'app'
-  AND table_name = 'customers'
-  AND column_name = 'occurred_at';
+-- onwardpg:assert event_dates_backfilled
+SELECT count(*) = 0
+FROM "app"."customer_events"
+WHERE "occurred_on" IS NULL;
 ```
 
 Then onwardpg executes the exact edited phase files on a disposable clone and
@@ -294,7 +358,7 @@ CREATE TABLE "app"."audit_log" ("id" bigint);
 
 That combination is the point: one reviewed feature migration keeps evolving
 over a moving accepted history, agent-owned data SQL survives the restack, and
-local development receives a direct residual without becoming migration
+local development receives a phase-aware residual without becoming migration
 history. That is the “whoa” moment: the hard part is no longer generating one
 `ALTER TABLE`; it is preserving product intent and one merge-ready migration
 while the code, local database, and accepted history all move independently.
@@ -308,9 +372,10 @@ onwardpg never applies any of it to a caller-owned database.
 onwardpg init --target primary
 ```
 
-This creates a verified baseline from empty PostgreSQL to the current
-W. For an existing application, it declares the ground beneath future onwardpg
-migrations; it is not a command to run against production.
+This creates a verified baseline from empty PostgreSQL to the current exported
+working schema (W). For an existing application, it declares the accepted
+history beneath future onwardpg migrations; it is not a command to run against
+production.
 
 History is content-addressed. Parent and entry digests—not timestamps,
 filenames, Git commits, or an ORM journal—determine ordering.
@@ -348,16 +413,16 @@ are different facts, not one blended status.
 
 ### Let onwardpg ask only what it cannot know
 
-If `occurred_at` disappeared and `occurred_on` appeared, schema state cannot
-prove whether that is a rename or a deliberate replacement. onwardpg returns
-bounded semantic choices such as:
+If `accounts` disappeared and `customers` appeared, schema state cannot prove
+whether that is a rename or a deliberate replacement. onwardpg returns bounded
+semantic choices such as:
 
 ```json
 {
   "kind": "rename",
-  "object": "column",
-  "from": ["public", "booking", "occurred_at"],
-  "to": ["public", "booking", "occurred_on"]
+  "object": "table",
+  "from": ["app", "accounts"],
+  "to": ["app", "customers"]
 }
 ```
 
@@ -365,14 +430,19 @@ The agent can provide known intent on the first call or rerun with it:
 
 ```sh
 onwardpg plan --target primary \
-  --hint '{"kind":"rename","object":"column","from":["public","booking","occurred_at"],"to":["public","booking","occurred_on"]}'
+  --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}'
 ```
 
 Hints state only product intent unavailable from catalog state: rename,
-destructive intent, a supported type strategy, or a deliberate manual SQL
+destructive intent, a type-change handoff, or a deliberate manual SQL
 handoff. They are validated against the live graph diff, fingerprint-bound to
 the relevant objects, and receipted in the bundle. Stale, contradictory,
 impossible, and unused hints are rejected.
+
+An answer establishes intent; it does not waive the rollout invariant. The
+supported table shape proceeds through the view bridge shown above. Confirming
+a column, enum, view, or routine rename currently returns an explicit
+`expand_contract_*_required` blocker rather than direct rename SQL.
 
 The nested `development` report can independently need a decision because D
 is not H. This is most common for a deliberately disposable `strict` database
@@ -387,13 +457,35 @@ onwardpg plan --target primary \
 
 `--hint` only answers the durable H → W migration. `--dev-hint` only answers
 the local D → W reconciliation. Neither is silently reused for the other.
-In the default `workspace` mode, an `accounts` table absent from W is preserved
-as possible work from another branch; onwardpg will not ask to rename or drop
-it merely to make D exact.
+In the default `workspace` mode, unrelated surplus objects are preserved. If a
+surplus object is a credible rename candidate, onwardpg does not guess why it
+is there: the development report asks whether to exercise the same rename
+bridge or keep the object as work from another branch. The latter is explicit
+too:
 
-### Apply local SQL deliberately
+```sh
+onwardpg plan --target primary \
+  --dev-hint '{"kind":"preserve","object":"table","name":["app","accounts"]}'
+```
 
-When both comparisons are ready, ask for a pure SQL stream:
+Neither choice authorizes a drop from the caller-owned development database.
+
+### Exercise the rollout in development
+
+The first development exercise is the actual bundle, in the same order it is
+intended to run after merge. The developer or agent reviews and deliberately
+runs `phases/expand.sql`, deploys or exercises code that can use both shapes,
+runs the edited `phases/migrate.sql`, and finally runs `phases/contract.sql`
+when it is testing the post-compatibility state. onwardpg does not execute any
+of these files against D.
+
+That matters: the old and new contracts are tested during feature work, not
+merely inferred because the final schema converges. Clone verification later
+replays the exact cumulative files from H and supplies the clean-room proof.
+
+After an earlier draft has already been exercised, D may contain yesterday's
+feature shape, unrelated branch state, or newly accepted ground. Ask for the
+remaining phase-aware D → W residual:
 
 ```sh
 onwardpg plan --target primary --output sql > /tmp/booking-dates.dev.sql
@@ -407,12 +499,15 @@ stdout contains only the D → W workspace reconciliation. It begins with:
 ```
 
 The developer or agent reviews and applies that SQL through its existing
-database tooling. onwardpg has not run it.
+database tooling. It carries the same expand/migrate/contract rules and cannot
+turn a blocked cutover into a direct local shortcut. onwardpg has not run it.
 
-If D already contains an older version of the feature and main has advanced,
-the local SQL is planned directly from D to W. It is not a concatenation of
-incoming migration files and feature increments. That distinction matters when
-old and incoming changes overlap.
+If D already contains an older fully exercised version of the feature and main
+has advanced, the local SQL is planned directly from D to W. It is not a
+concatenation of incoming migration files and feature increments. That
+distinction matters when old and incoming changes overlap. The active bundle
+remains the cumulative H → W rollout; the residual is only what this developer
+database still needs.
 
 ### Keep iterating
 
@@ -424,14 +519,14 @@ onwardpg plan --target primary
 
 The same logical bundle is replaced with the cumulative H → new-W transition.
 The local reconciliation is only whatever this particular D database still
-needs. Applying an earlier draft to D does not advance history and does not
-lock the feature plan.
+needs. Exercising all phases of an earlier draft against D does not advance
+history and does not lock the feature plan.
 
 ## What gets merged, and when it runs
 
-The PR contains **one logical feature migration**, not one giant SQL statement.
-The quickstart showed why it is split into ordinary files: a safe rollout often
-crosses more than one application release.
+The PR contains **one logical feature migration**, split into ordinary SQL
+files because a compatibility-safe rollout often crosses more than one
+application release.
 
 ```text
 expand.sql    make the new shape available while old code still works
@@ -684,6 +779,14 @@ indexes, sequences, enums, extensions, routines, triggers, views,
 materialized views, common partitions/index relationships, RLS/policies, and
 ordinary table privileges within the documented boundaries.
 
+The first automatic compatibility bridge is a shape-preserving table rename:
+expand exposes the new name over the untouched old table, and contract
+atomically replaces that view with the renamed physical table. Direct column
+type changes, column/enum/view/routine renames, and extension schema moves are
+currently explicit blockers unless an existing manual-SQL handoff applies.
+Their catalog state and intent may be recognized, but recognition alone is no
+longer reported as a deployable migration.
+
 The authoritative detailed matrix is [supported features](docs/supported-features.md)
 and the machine-readable inventories under [`parity/`](parity). A feature is
 always described as modeled, manually completable, explicitly blocked, or
@@ -711,9 +814,9 @@ one safe path to W.
 
 | Tool | Strength | Difference from onwardpg |
 | --- | --- | --- |
-| [Migra](https://github.com/djrobstep/migra) | Direct PostgreSQL schema diff | Python, no durable intent protocol, phased SQL ownership, clone receipts, or feature-plan restacking |
-| [Atlas](https://atlasgo.io) | Broad multi-dialect declarative diff and migration tooling | Much broader ecosystem; onwardpg concentrates on PostgreSQL, forward-only handoff, explicit ambiguity, and one evolving feature bundle |
-| [Stripe pg-schema-diff](https://github.com/stripe/pg-schema-diff) | Excellent Go/PostgreSQL online DDL reference | Broader in several native planner families; onwardpg keeps a typed graph plus rename intent, editable phased bundles, no-apply boundary, and branch-lifecycle workflow |
+| [Migra](https://github.com/djrobstep/migra) | Direct PostgreSQL schema diff | Python, no durable intent protocol, generated compatibility window, clone receipts, or feature-plan restacking |
+| [Atlas](https://atlasgo.io) | Broad multi-dialect declarative diff and migration tooling | Much broader ecosystem; onwardpg concentrates on PostgreSQL, overlap-safe forward-only handoff, explicit ambiguity, and one evolving feature bundle |
+| [Stripe pg-schema-diff](https://github.com/stripe/pg-schema-diff) | Excellent Go/PostgreSQL online DDL reference | Broader in several native planner families; onwardpg keeps a typed graph plus rename intent, editable expand/migrate/contract bundles, a no-apply boundary, and the feature-branch lifecycle |
 | Drizzle Kit | TypeScript schema declaration, export, and migration snapshots | Drizzle is a DDL compiler for onwardpg; `generate` compares schema snapshots, while onwardpg replays real PostgreSQL bundles and sees live catalog drift |
 | Alembic / Django migrations | Mature ORM state and migration runners | Own application framework state and execution; onwardpg accepts exported DDL and leaves execution with the developer or agent |
 

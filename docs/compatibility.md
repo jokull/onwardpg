@@ -42,15 +42,15 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | Schema create/drop | Yes | **Plannable** | Drops are destructive and require approval. |
 | Schema comments | No verified diff family | **Plannable** | Migra's final fixtures do not establish general object-comment diffing. |
 | Extensions create/drop | Yes | **Plannable** | Drop is destructive and approved. |
-| Extension version / schema changes | Version changes; no verified schema-move family | **Plannable** | Extension-owned objects remain a boundary risk. |
+| Extension version / schema changes | Version changes; no verified schema-move family | Version **Plannable**; schema move **Blocked** | A direct schema move is not an expand/contract rollout. Extension-owned objects remain a boundary risk. |
 | Tables create/drop | Yes | **Plannable** | Drops require approval. |
 | Table comments | No verified diff family | **Plannable** | |
-| Table rename | Drop/create-oriented diff | **Decision required** | Preserves proven retained FKs, triggers, and direct view dependencies. Retained child constraint/index names must currently remain stable; regenerated table-derived names suppress rename candidacy. |
+| Table rename | Drop/create-oriented diff | **Decision required**, then **Plannable** for the supported shape | Expand keeps the old physical table and creates a new-name security-invoker view; contract atomically replaces the view with the renamed table. Retained child names must remain stable, and new code must tolerate the temporary view. |
 | Table persistence | Partial | **Plannable** | Includes logged/unlogged transitions; ownership is separate. |
-| Columns add/drop/null/default | Yes | **Plannable** | Drops require approval. New columns must be physically appendable; unreachable declarative reordering is explicitly unsupported. |
+| Columns add/drop/null/default | Yes | **Plannable** or **SQL handoff** | Drops require approval. A new required column without a default is added nullable, handed off for dual-write/backfill, then enforced in contract. New columns must be physically appendable; unreachable declarative reordering is explicitly unsupported. |
 | Column comments | No verified diff family | **Plannable** | |
-| Column rename | Drop/create-oriented diff | **Decision required** | Proven PostgreSQL catalog rewrites are retained; broader dependent rewrites are blocked. |
-| Column type change | Yes | **Decision required** when not directly safe | onwardpg never invents a `USING` expression or data conversion. Product-specific conversion is handed to edited SQL. |
+| Column rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Intent and catalog rewrites are recognized, but no bare rename is emitted until both column contracts can overlap. |
+| Column type change | Yes | **Blocked** or **SQL handoff** | onwardpg never invents a `USING` expression or lets a direct `ALTER COLUMN TYPE` masquerade as expand/contract. Product-specific shadow-column work can be handed to edited SQL. |
 | Identity / generated / serial / collation | Yes | **Plannable** for supported forms | Some add/change combinations remain explicit unsupported work. |
 
 ## Constraints, indexes, and sequences
@@ -72,17 +72,17 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | Capability | Migra | onwardpg preview | Notes |
 | --- | --- | --- | --- |
 | Enum create/drop/add labels | Yes | **Plannable** | Drops require approval. |
-| Enum rename | Drop/create-oriented diff | **Decision required** | |
+| Enum rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Both old and new type contracts cannot yet overlap automatically. |
 | Enum label reorder/removal | Limited / unsafe | **Blocked** or explicit rejection | Never silently treated as safe. |
 | Domain, composite, range types | No verified Migra diff family | **Blocked** | Explicitly outside the onwardpg preview boundary. |
 | Ordinary view create/replace/drop | Yes | **Plannable** | Typed dependencies on relations, columns, enums, views, and modeled routines. |
-| Ordinary view rename | Drop/create-oriented diff | **Decision required** | |
+| Ordinary view rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | A direct rename would cut over callers. |
 | Materialized view create/drop | Yes | **Plannable** | Drop is destructive. |
-| Materialized view rename | Drop/create-oriented diff | **Decision required** | Preserves exact unchanged indexes through PostgreSQL's native rewrite. |
+| Materialized view rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Native PostgreSQL rewrite behavior is modeled, but not emitted without a compatibility path. |
 | Materialized view definition rebuild | Yes, via rebuild-style SQL | **Decision required** | Reviewed destructive rebuild; dependent data freshness can require a SQL handoff. |
 | Refresh materialized view after semantic dependency change | No rollout model | **SQL handoff** | Developer supplies normal/concurrent refresh and optional verification in the phase files. |
 | Functions create, replace, drop | Yes | **Plannable** | Migra's historical fixtures should not be read as broad modern procedure coverage; onwardpg typed dependencies are limited to catalog-visible references. |
-| Routine rename | Drop/create-oriented diff | **Decision required** | Same-signature semantic hint, bound internally to the exact schemas. |
+| Routine rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Same-signature intent is fingerprint-bound, but a direct rename would cut over callers. |
 | Procedural-body dependency rewrite | No safe general guarantee | **Blocked** | PostgreSQL does not catalog arbitrary body references. |
 | Triggers create/drop/recreate | Yes | **Plannable** | Includes typed table/routine dependency ordering. |
 | Trigger rename | Drop/create-oriented diff | **Decision required** | |

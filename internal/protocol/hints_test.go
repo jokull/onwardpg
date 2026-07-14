@@ -37,6 +37,7 @@ func TestDecodeHintRejectsInferableAndUnknownFields(t *testing.T) {
 		`{"kind":"rename","object":"column","from":["public","users"],"to":["public","users","display_name"]}`,
 		`{"kind":"rename","object":"column","from":["public","users","name"],"to":["public","users","name"]}`,
 		`{"kind":"type_change","object":"column","name":["public","events","occurred_on"],"strategy":"manual_sql"}`,
+		`{"kind":"type_change","name":["public","events","occurred_on"],"strategy":"direct"}`,
 		`{"kind":"rollout","object":"column","name":["public","events","occurred_on"],"strategy":"staged"}`,
 		`{"kind":"rollout","name":["public","events","occurred_on"],"change":"not_null","strategy":"staged"}`,
 	} {

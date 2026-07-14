@@ -63,7 +63,7 @@ Current semantic kinds are:
 
 - `rename`: object kind plus exact `from` and `to` identifiers;
 - `drop`: object kind plus exact current identifier;
-- `type_change`: column identifier and `direct` or `manual_sql` strategy;
+- `type_change`: column identifier and the `manual_sql` handoff strategy;
 - `rollout`: column identifier and offered strategy (`not_null` is implied);
 - `confirm`: exact object and authorization/rebuild/destructive action; and
 - `manual_sql`: exact object and action handed to editable phase SQL.

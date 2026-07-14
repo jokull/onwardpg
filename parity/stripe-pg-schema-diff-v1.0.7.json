@@ -2130,7 +2130,7 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL",
-        "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"
+        "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2150,7 +2150,7 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL",
-        "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"
+        "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2170,7 +2170,7 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL",
-        "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"
+        "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2190,7 +2190,7 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL",
-        "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"
+        "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -7681,10 +7681,10 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestCreatePlanConvergesOnPostgreSQL",
-        "internal/graphplan#TestApprovedDestructiveDropsConvergeOnPostgreSQL"
+        "internal/graphplan#TestBuildStagesNewRequiredColumnWithoutDefault",
+        "internal/graphplan#TestRequiredColumnStagingConvergesOnPostgreSQL"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "notes": "onwardpg intentionally stages this as nullable expand, editable dual-write/backfill work, and NOT NULL contract instead of attempting one direct statement."
     },
     {
       "id": "table.add_not_null_column_with_constant_default_avoids_backfill_hazard",
@@ -7701,10 +7701,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestCreatePlanConvergesOnPostgreSQL",
-        "internal/graphplan#TestApprovedDestructiveDropsConvergeOnPostgreSQL"
+        "internal/graphplan#TestBuildAddsRequiredColumnWithDefaultDirectly"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "notes": "A retained default supplies old writers and existing rows, so onwardpg emits the direct additive column DDL with explicit lock/rewrite hazards."
     },
     {
       "id": "trigger.no_op",
