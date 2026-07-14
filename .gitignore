@@ -6,3 +6,5 @@
 /.stripe-pg-schema-diff/
 /dist/
 /.onwardpg/
+/PLAN.md
+/REVIEW.md

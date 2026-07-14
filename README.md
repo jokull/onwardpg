@@ -495,4 +495,3 @@ one safe path to W.
 - [CLI and JSON protocol](docs/protocol.md)
 - [Supported PostgreSQL features](docs/supported-features.md)
 - [Atlas parity inventory](docs/atlas-postgres-parity.md)
-- [Long-horizon implementation plan](PLAN.md)
