@@ -70,3 +70,8 @@ done
     shasum -a 256 --check checksums.txt
   fi
 )
+
+go run ./scripts/homebrewformula \
+  -version "$version" \
+  -checksums "$output/checksums.txt" \
+  -output "$output/onwardpg.rb"

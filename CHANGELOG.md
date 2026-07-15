@@ -3,7 +3,9 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
-## Unreleased — developer preview
+## Unreleased
+
+## v0.1.0-preview.1 — 2026-07-15
 
 This is the first developer-preview line. onwardpg generates forward-only,
 reviewable PostgreSQL migration bundles. It never applies SQL to a caller-owned
@@ -48,9 +50,9 @@ development, staging, or production database.
   batches.
 - Pinned, test-only Atlas and Stripe pg-schema-diff references with
   machine-readable capability matrices and MIT attribution where applicable.
-- Release automation for future tag-driven deterministic archives on Darwin,
-  Linux, and Windows on amd64 and arm64, with embedded version metadata and
-  SHA-256 checksums. No preview artifacts have been published yet.
+- Tag-driven deterministic archives on Darwin, Linux, and Windows on amd64 and
+  arm64, with embedded version metadata, SHA-256 checksums, GitHub provenance
+  attestations, and a generated Formula for `jokull/homebrew-tap`.
 - A large-schema planner benchmark and documented preview performance envelope;
   typed-ID ordering avoids allocation-heavy string formatting in graph sorts.
 
@@ -133,12 +135,11 @@ development, staging, or production database.
   transactional rollback, non-transactional failure, false assertions,
   cancellation, cleanup, and major-version receipts have been exercised on
   real PostgreSQL 15, 16, 17, and 18.
-- CI can build release archives twice and compare their checksums before a
-  preview tag is published.
+- CI builds release archives twice and compares their checksums and generated
+  Homebrew Formula before a preview tag is published.
 
 ### Known limitations
 
-- No preview tag has been published yet.
 - PostgreSQL families marked unsupported in
   [docs/supported-features.md](docs/supported-features.md) remain explicit
   blockers unless narrowly ignored.

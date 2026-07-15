@@ -1,9 +1,35 @@
 # Installation and releases
 
+## Homebrew
+
+Homebrew is the recommended installation path on macOS and Linux. The public
+tap consumes the same checksummed archives published on GitHub:
+
+```sh
+brew install jokull/tap/onwardpg
+onwardpg version
+```
+
+Upgrade with `brew upgrade onwardpg`.
+
+## Go install
+
+With the Go toolchain declared in `go.mod` available, install a tagged version
+without cloning the repository:
+
+```sh
+go install github.com/jokull/onwardpg/cmd/onwardpg@v0.1.0-preview.1
+onwardpg version
+```
+
+Tagged module builds discover their module version through Go build metadata,
+so `onwardpg version` reports the release tag even without release-workflow
+linker flags.
+
 ## Build from source
 
-With the Go toolchain declared in `go.mod` installed, clone the preview source
-and install the local command:
+To work from an unpublished checkout, clone the source and install the local
+command:
 
 ```sh
 git clone https://github.com/jokull/onwardpg.git
@@ -12,7 +38,6 @@ go install ./cmd/onwardpg
 onwardpg version
 ```
 
-Before the first public tag, this is the only supported installation path.
 To build an explicit local binary instead:
 
 ```sh
@@ -24,16 +49,17 @@ A source build reports
 `{"protocol_version":"onwardpg.version/v1","status":"ok","version":"dev"}`
 unless the build supplies `-X main.buildVersion=...`.
 
-## Preview archives (after the first tag)
+## Preview archives
 
-When a preview tag is published, it will publish `.tar.gz` archives for:
+Each preview tag publishes `.tar.gz` archives for:
 
 - Darwin amd64 and arm64;
 - Linux amd64 and arm64; and
 - Windows amd64 and arm64.
 
-After that release exists, download the archive and `checksums.txt` from it,
-then verify before extracting:
+Download the archive and `checksums.txt` from the [GitHub
+release](https://github.com/jokull/onwardpg/releases), then verify before
+extracting:
 
 ```sh
 sha256sum --check checksums.txt
@@ -42,6 +68,14 @@ tar -xzf onwardpg_VERSION_OS_ARCH.tar.gz
 ```
 
 On macOS, use `shasum -a 256 --check checksums.txt`.
+
+GitHub also records build-provenance attestations for the release assets. With
+the GitHub CLI installed, verify an archive with:
+
+```sh
+gh attestation verify onwardpg_0.1.0-preview.1_darwin_arm64.tar.gz \
+  --repo jokull/onwardpg
+```
 
 The archives include README, changelog, third-party notices, and the project
 license required by the release workflow. The embedded version must equal the
@@ -57,7 +91,7 @@ scripts/build-release.sh v0.1.0-preview.1 ./dist
 
 The builder uses `CGO_ENABLED=0`, `-trimpath`, stable archive metadata, and
 `gzip -n`. Running it twice from the same source and Go toolchain must produce
-the same `checksums.txt`. GNU tar or BSD tar is supported.
+the same `checksums.txt` and Homebrew Formula. GNU tar or BSD tar is supported.
 
 ## PostgreSQL requirements
 
@@ -73,10 +107,12 @@ See [PostgreSQL version policy](postgresql-version-policy.md) and
 
 Pushing a SemVer-shaped `v*` tag triggers
 [the release workflow](../.github/workflows/release.yml). It runs quality
-checks, builds deterministic archives, verifies checksums and embedded version
-metadata, then creates the GitHub release. Release application or database
-deployment is not part of this workflow.
+checks, builds deterministic archives and a tap Formula, verifies checksums and
+embedded version metadata, records provenance attestations, then creates the
+GitHub release. The generated `onwardpg.rb` is published to
+[`jokull/homebrew-tap`](https://github.com/jokull/homebrew-tap) after the
+release assets exist. Release application or database deployment is not part
+of this workflow.
 
-No preview tag has been published yet. The source is available under the
-[MIT License](../LICENSE); until a tag exists, installation from a clean
-checkout is the preview evaluation path.
+The source and release artifacts are available under the [MIT
+License](../LICENSE).

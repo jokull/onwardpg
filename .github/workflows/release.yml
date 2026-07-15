@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -33,6 +35,10 @@ jobs:
           tar -xzf "dist/onwardpg_${GITHUB_REF_NAME#v}_linux_amd64.tar.gz" -C /tmp/onwardpg-release-check
           binary=$(find /tmp/onwardpg-release-check -type f -name onwardpg -print -quit)
           test "$("$binary" version)" = "{\"protocol_version\":\"onwardpg.version/v1\",\"status\":\"ok\",\"version\":\"$GITHUB_REF_NAME\"}"
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

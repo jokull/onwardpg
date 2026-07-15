@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -30,7 +32,33 @@ import (
 	"github.com/jokull/onwardpg/internal/workspace"
 )
 
+// buildVersion must remain a plain string initializer so release builds can
+// set it with the Go linker's -X flag.
 var buildVersion = "dev"
+
+var pseudoVersionPattern = regexp.MustCompile(`[.-][0-9]{14}-[0-9a-f]{7,}(?:\+.*)?$`)
+
+func currentBuildVersion() string {
+	return selectBuildVersion(buildVersion, moduleBuildVersion())
+}
+
+func moduleBuildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	return info.Main.Version
+}
+
+func selectBuildVersion(linkerVersion, moduleVersion string) string {
+	if linkerVersion != "" && linkerVersion != "dev" {
+		return linkerVersion
+	}
+	if moduleVersion != "" && moduleVersion != "(devel)" && !strings.Contains(moduleVersion, "+") && !pseudoVersionPattern.MatchString(moduleVersion) {
+		return moduleVersion
+	}
+	return "dev"
+}
 
 const rootUsage = `Usage: onwardpg <command> [options]
 
@@ -66,7 +94,7 @@ func run() int {
 			ProtocolVersion string `json:"protocol_version"`
 			Status          string `json:"status"`
 			Version         string `json:"version"`
-		}{ProtocolVersion: "onwardpg.version/v1", Status: "ok", Version: buildVersion})
+		}{ProtocolVersion: "onwardpg.version/v1", Status: "ok", Version: currentBuildVersion()})
 		return 0
 	case "init":
 		return runInit(os.Args[2:])
@@ -368,7 +396,7 @@ func runHistoryAt(arguments []string, start string) int {
 		Target:          target,
 		AdminURL:        adminURL,
 		BundleID:        *bundleID,
-		BuildVersion:    buildVersion,
+		BuildVersion:    currentBuildVersion(),
 		Ignores:         selectors,
 		RequiredIgnores: sortedUniqueStrings(ignores),
 		PlannerOptions:  graphplan.Options{ConcurrentIndexes: *concurrentIndexes},
@@ -612,7 +640,7 @@ func runDraftAt(arguments []string, start string) int {
 		BundleID:        *bundleID,
 		AfterRef:        *afterRef,
 		Create:          *create,
-		BuildVersion:    buildVersion,
+		BuildVersion:    currentBuildVersion(),
 		Purpose:         *purpose,
 		Hints:           hints,
 		HintsGiven:      len(inlineHints) > 0 || *hintsFile != "",
@@ -1071,7 +1099,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	report, err := draftflow.Run(context.Background(), draftflow.Input{
 		Root: root, ConfigPath: configPath, Config: config, TargetName: *targetName, Target: target,
 		AdminURL: adminURL, BundleID: *bundleID, PlanID: planID, InferBase: true,
-		Create: createBundle, BuildVersion: buildVersion, Purpose: *purpose,
+		Create: createBundle, BuildVersion: currentBuildVersion(), Purpose: *purpose,
 		Hints: hints, HintsGiven: len(inlineHints) > 0 || *hintsFile != "", Ignores: targetIgnoreSelectors(target, ignores), RequiredIgnores: sortedUniqueStrings(ignores), PlannerOptions: options,
 	})
 	if err != nil {

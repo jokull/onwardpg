@@ -41,6 +41,25 @@ from real schema state, review the SQL, expose drift, and test difficult work on
 a clone. There are no generated down migrations. A rollback is another forward
 plan.
 
+## Install
+
+Homebrew is the recommended installation path on macOS and Linux:
+
+```sh
+brew install jokull/tap/onwardpg
+onwardpg version
+```
+
+Go developers can install the same tagged preview directly:
+
+```sh
+go install github.com/jokull/onwardpg/cmd/onwardpg@v0.1.0-preview.1
+```
+
+Checksummed binaries for macOS, Linux, and Windows are available from [GitHub
+Releases](https://github.com/jokull/onwardpg/releases). See [installation and
+release verification](docs/installation.md) for details.
+
 ## Why exported SQL is the boundary
 
 Django, Drizzle, Prisma, SQLAlchemy, and other tools already turn declarative
@@ -64,7 +83,7 @@ bundle_root = "migrations/onward"
 
 [targets.app]
 schema_file = "schema.sql"
-# Or: schema_command = ["pnpm", "--filter", "db", "schema:export"]
+# Or: schema_command = ["pnpm", "--silent", "--filter", "db", "schema:export"]
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
 dev_mode = "workspace"

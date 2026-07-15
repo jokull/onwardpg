@@ -338,6 +338,28 @@ func TestVersionCommandReportsEmbeddedBuildVersion(t *testing.T) {
 	}
 }
 
+func TestSelectBuildVersionUsesTaggedModuleForGoInstall(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		linkerVersion string
+		moduleVersion string
+		want          string
+	}{
+		{name: "release archive linker version wins", linkerVersion: "v0.2.0", moduleVersion: "v0.1.0", want: "v0.2.0"},
+		{name: "tagged module", linkerVersion: "dev", moduleVersion: "v0.1.0-preview.1", want: "v0.1.0-preview.1"},
+		{name: "clean local pseudo version", linkerVersion: "dev", moduleVersion: "v0.0.0-20260715113614-b59714b741dd", want: "dev"},
+		{name: "dirty local pseudo version", linkerVersion: "dev", moduleVersion: "v0.0.0-20260715113614-b59714b741dd+dirty", want: "dev"},
+		{name: "local build", linkerVersion: "dev", moduleVersion: "(devel)", want: "dev"},
+		{name: "missing build info", linkerVersion: "dev", moduleVersion: "", want: "dev"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := selectBuildVersion(test.linkerVersion, test.moduleVersion); got != test.want {
+				t.Fatalf("selectBuildVersion(%q, %q) = %q, want %q", test.linkerVersion, test.moduleVersion, got, test.want)
+			}
+		})
+	}
+}
+
 func writeTestFile(t *testing.T, root, name, contents string) {
 	t.Helper()
 	full := filepath.Join(root, filepath.FromSlash(name))

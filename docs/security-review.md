@@ -1,6 +1,6 @@
 # Developer-preview security review
 
-Reviewed 2026-07-13 against the developer-preview CLI boundary. No unresolved
+Reviewed 2026-07-15 against the developer-preview CLI boundary. No unresolved
 critical security finding was identified. This is a scoped engineering review,
 not a third-party audit.
 
@@ -49,8 +49,10 @@ not a third-party audit.
   only repository-controlled export commands, ideally in an isolated CI job.
 - Clone verification cannot model table size, lock queues, concurrent traffic,
   role membership outside the clone, or application rollout correctness.
-- Release archives currently have checksums but no signatures or provenance
-  attestations.
+- Release archives have SHA-256 checksums and GitHub build-provenance
+  attestations. Homebrew verifies the selected archive checksum; consumers who
+  require provenance verification must additionally use `gh attestation
+  verify`.
 - PostgreSQL's catalog surface is larger than the modeled preview boundary.
   The catalog blocker inventory reduces silent equivalence risk, but the
   attribute-level audit remains ongoing and is documented as a preview limit.
