@@ -5,27 +5,6 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ## Unreleased
 
-### Changed
-
-- Ground-floor `init` preserves and clone-verifies the complete authoritative
-  exported DDL after typed catalog inventory, including session scaffolding
-  such as `SET search_path` that cannot be reconstructed from graph nodes.
-- Declarative physical column position remains typed compatibility evidence but
-  no longer blocks semantic planning or convergence.
-- Replanning after an unaccepted column was applied locally now collapses the
-  durable bundle to the final name while offering an explicit dev-scoped
-  rename. A confirmed development rename emits one direct `ALTER TABLE`; the
-  rolling-safe trigger bridge remains the only durable rename strategy.
-
-### Fixed
-
-- Capture `schema_command` output through a regular temporary file so exporters
-  such as `drizzle-kit export` cannot truncate large DDL streams at pipe-buffer
-  boundaries.
-- Exclude VCS internals and installed `node_modules` trees from schema-command
-  mutation checks, avoiding minute-long monorepo scans without ignoring
-  generated project files.
-
 ## v0.1.0-preview.1 — 2026-07-15
 
 This is the first developer-preview line. onwardpg generates forward-only,
@@ -79,6 +58,16 @@ development, staging, or production database.
 
 ### Changed
 
+- Ground-floor `init` preserves and clone-verifies the complete authoritative
+  exported DDL after typed catalog inventory, including session scaffolding
+  such as `SET search_path` that cannot be reconstructed from graph nodes.
+- Declarative physical column position remains typed compatibility evidence but
+  no longer blocks semantic planning or convergence.
+- Replanning after an unaccepted column was applied locally now collapses the
+  durable bundle to the final name while offering an explicit dev-scoped
+  rename. A confirmed development rename emits a direct column rename and, on
+  PostgreSQL 18, the companion generated `NOT NULL` constraint rename. The
+  rolling-safe trigger bridge remains the only durable rename strategy.
 - The ordinary developer-preview loop is now `init`, one evolving `plan`,
   `status`, and `verify`. It keeps durable H → W planning separate from
   workspace-safe D → W SQL; strict local decisions use scoped `--dev-hint`
@@ -132,6 +121,17 @@ development, staging, or production database.
 - Hint-resolved restacks clear historical pending answer-rebind fields, and a
   nullable `ADD COLUMN` without a default no longer claims a possible table
   rewrite.
+
+### Fixed
+
+- Capture `schema_command` output through a regular temporary file so exporters
+  such as `drizzle-kit export` cannot truncate large DDL streams at pipe-buffer
+  boundaries.
+- Exclude VCS internals and installed `node_modules` trees from schema-command
+  mutation checks, avoiding minute-long monorepo scans without ignoring
+  generated project files.
+- Preserve PostgreSQL 18's generated `NOT NULL` constraint identity when a
+  confirmed direct or rolling-safe column rename changes its canonical name.
 
 ### Removed
 

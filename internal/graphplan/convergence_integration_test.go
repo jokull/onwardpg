@@ -3997,14 +3997,6 @@ CREATE INDEX customers_email_idx ON "` + schemaName + `".customers (email);`
 	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// PostgreSQL 18 can expose a generated NOT NULL constraint after the
-	// physical table rename. It is outside this table/index rename slice. The
-	// production planner still reports it unless configured; this test excludes
-	// it only from the final residual inspection.
-	var ignores []string
-	if strings.HasPrefix(conn.PgConn().ParameterStatus("server_version"), "18.") {
-		ignores = []string{"not_null_constraint:*"}
-	}
 	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -4030,15 +4022,13 @@ CREATE INDEX customers_email_idx ON "` + schemaName + `".customers (email);`
 	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), `RENAME CONSTRAINT "accounts_pkey" TO "customers_pkey"`) || !strings.Contains(joinSQL(plan), `RENAME TO "customers_email_idx"`) {
 		t.Fatalf("expected explicit conventional child renames: %#v", plan)
 	}
+	if strings.HasPrefix(conn.PgConn().ParameterStatus("server_version"), "18.") && !strings.Contains(joinSQL(plan), `RENAME CONSTRAINT "accounts_id_not_null" TO "customers_id_not_null"`) {
+		t.Fatalf("expected PostgreSQL 18 generated NOT NULL constraint rename: %#v", plan)
+	}
 	applyPlan(t, ctx, conn, plan)
-	actual, err := source.LoadGraph(ctx, source.Parse(url), "", ignores)
+	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
 	if err != nil {
 		t.Fatal(err)
-	}
-	for _, selector := range actual.Ignored() {
-		if err := desired.AddIgnored(selector); err != nil {
-			t.Fatal(err)
-		}
 	}
 	want, _ := desired.Fingerprint()
 	got, _ := actual.Fingerprint()

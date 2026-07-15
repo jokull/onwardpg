@@ -26,6 +26,12 @@ func TestCatalogVersionPredicates(t *testing.T) {
 	if got, want := generatedColumnSelector(120000), "a.attgenerated::text"; got != want {
 		t.Fatalf("PostgreSQL 12 generated selector = %q, want %q", got, want)
 	}
+	if got := notNullConstraintNameSelector(170000); got != "NULL::text" {
+		t.Fatalf("PostgreSQL 17 NOT NULL name selector = %q", got)
+	}
+	if got := notNullConstraintNameSelector(180000); !strings.Contains(got, "con.contype = 'n'") || !strings.Contains(got, "con.conkey[1] = a.attnum") {
+		t.Fatalf("PostgreSQL 18 NOT NULL name selector = %q", got)
+	}
 	if got, want := indexIncludeSelector(100000), "false"; got != want {
 		t.Fatalf("PostgreSQL 10 INCLUDE selector = %q, want %q", got, want)
 	}

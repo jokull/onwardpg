@@ -154,17 +154,23 @@ func (o Table) ObjectID() ID { return ID{Kind: KindTable, Schema: o.Schema, Name
 func (Table) object()        {}
 
 type Column struct {
-	Table     ID
-	Name      string
-	Position  int
-	Type      string
-	NotNull   bool
-	Default   *string
-	Identity  *Identity
-	Serial    *Serial
-	Generated *Generated
-	Collation string
-	Comment   *string
+	Table    ID
+	Name     string
+	Position int
+	Type     string
+	NotNull  bool
+	// NotNullConstraintName retains PostgreSQL 18's physical constraint name
+	// so a confirmed column rename can preserve the catalog identity PostgreSQL
+	// itself leaves behind. The name is operational evidence, not semantic
+	// column identity; exceptional named-constraint semantics remain explicit
+	// unsupported selectors until they are modeled completely.
+	NotNullConstraintName string `json:"-"`
+	Default               *string
+	Identity              *Identity
+	Serial                *Serial
+	Generated             *Generated
+	Collation             string
+	Comment               *string
 }
 
 func (o Column) ObjectID() ID {

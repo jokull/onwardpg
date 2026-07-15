@@ -77,6 +77,7 @@ func objectsEqual(before, after pgschema.Object) bool {
 		// typed snapshots for ordering and diagnostics without treating it as a
 		// structural mutation.
 		beforeColumn.Position, afterColumn.Position = 0, 0
+		beforeColumn.NotNullConstraintName, afterColumn.NotNullConstraintName = "", ""
 		return reflect.DeepEqual(beforeColumn, afterColumn)
 	}
 	beforeIndex, beforeIsIndex := before.(pgschema.Index)

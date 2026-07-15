@@ -790,6 +790,10 @@ func TestWorkflowPlanCollapsesUnacceptedRenameAndReconcilesDevelopmentDirectlyOn
 	}
 	devURL, cleanupDev := createTestDatabase(t, adminURL)
 	defer cleanupDev()
+	postgresMajor, err := source.PostgresMajor(context.Background(), devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("ONWARDPG_RENAME_DEV_DATABASE_URL", devURL)
 	repository := t.TempDir()
 	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
@@ -887,15 +891,27 @@ dev_mode = "workspace"
 	if err := json.Unmarshal([]byte(confirmed.stdout), &confirmedReport); err != nil {
 		t.Fatal(err)
 	}
-	if confirmedReport.Durable.PlanID != initial.Durable.PlanID || len(confirmedReport.Development.Result.Statements) != 1 {
+	wantDevelopmentStatements := 1
+	if postgresMajor >= 18 {
+		wantDevelopmentStatements = 2
+	}
+	if confirmedReport.Durable.PlanID != initial.Durable.PlanID || len(confirmedReport.Development.Result.Statements) != wantDevelopmentStatements {
 		t.Fatalf("confirmed development rename report = %#v", confirmedReport)
 	}
 	direct := confirmedReport.Development.Result.Statements[0].SQL
 	if direct != `ALTER TABLE "app"."accounts" RENAME COLUMN "quote_mode" TO "pricing_mode";` {
 		t.Fatalf("development direct rename = %q", direct)
 	}
-	if _, err := connection.Exec(context.Background(), direct); err != nil {
-		t.Fatalf("apply direct development rename: %v", err)
+	if postgresMajor >= 18 {
+		constraintRename := confirmedReport.Development.Result.Statements[1].SQL
+		if constraintRename != `ALTER TABLE "app"."accounts" RENAME CONSTRAINT "accounts_quote_mode_not_null" TO "accounts_pricing_mode_not_null";` {
+			t.Fatalf("development NOT NULL constraint rename = %q", constraintRename)
+		}
+	}
+	for _, item := range confirmedReport.Development.Result.Statements {
+		if _, err := connection.Exec(context.Background(), item.SQL); err != nil {
+			t.Fatalf("apply direct development rename statement %q: %v", item.SQL, err)
+		}
 	}
 	destination := filepath.Join(repository, "onward-bundles", "primary", "account-mode")
 	before, err := bundle.Read(destination)

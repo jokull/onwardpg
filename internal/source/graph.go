@@ -355,6 +355,7 @@ ORDER BY n.nspname, c.relname`)
 
 func inspectGraphColumns(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker, version int) error {
 	generated := generatedColumnSelector(version)
+	notNullConstraintName := notNullConstraintNameSelector(version)
 	query := fmt.Sprintf(`
 SELECT n.nspname, c.relname, a.attname, a.attnum, format_type(a.atttypid, a.atttypmod), a.attnotnull,
        pg_get_expr(ad.adbin, ad.adrelid), a.attidentity::text, %s,
@@ -362,7 +363,8 @@ SELECT n.nspname, c.relname, a.attname, a.attnum, format_type(a.atttypid, a.attt
             THEN quote_ident(cn.nspname) || '.' || quote_ident(coll.collname) END,
        col_description(a.attrelid, a.attnum),
        seq.seqstart, seq.seqincrement, seq.seqmin, seq.seqmax, seq.seqcache, seq.seqcycle,
-       dtn.nspname, dt.typname, defaultseq.schema_name, defaultseq.sequence_name, serialseq.relname
+       dtn.nspname, dt.typname, defaultseq.schema_name, defaultseq.sequence_name, serialseq.relname,
+       %s
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -395,7 +397,7 @@ LEFT JOIN LATERAL (
 ) serialseq ON true
 WHERE c.relkind IN ('r', 'p') AND n.nspname NOT LIKE 'pg_%%' AND n.nspname <> 'information_schema'
   AND a.attnum > 0 AND NOT a.attisdropped
-ORDER BY n.nspname, c.relname, a.attnum`, generated)
+ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 	rows, err := tx.Query(ctx, query)
 	if err != nil {
 		return err
@@ -404,7 +406,7 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated)
 	positions := make(map[pgschema.ID]int)
 	for rows.Next() {
 		var namespace, tableName, identity, generated string
-		var defaultOrGenerated, collation, typeSchema, typeName, defaultSequenceSchema, defaultSequenceName, serialSequenceName *string
+		var defaultOrGenerated, collation, typeSchema, typeName, defaultSequenceSchema, defaultSequenceName, serialSequenceName, notNullName *string
 		var seqStart, seqIncrement, seqMin, seqMax, seqCache *int64
 		var seqCycle *bool
 		object := pgschema.Column{}
@@ -412,7 +414,7 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated)
 			&namespace, &tableName, &object.Name, &object.Position, &object.Type, &object.NotNull,
 			&defaultOrGenerated, &identity, &generated, &collation, &object.Comment,
 			&seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle,
-			&typeSchema, &typeName, &defaultSequenceSchema, &defaultSequenceName, &serialSequenceName,
+			&typeSchema, &typeName, &defaultSequenceSchema, &defaultSequenceName, &serialSequenceName, &notNullName,
 		); err != nil {
 			return err
 		}
@@ -425,6 +427,9 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated)
 		object.Position = positions[object.Table]
 		if collation != nil {
 			object.Collation = *collation
+		}
+		if notNullName != nil {
+			object.NotNullConstraintName = *notNullName
 		}
 		if _, exists := snapshot.Object(object.Table); !exists {
 			continue
@@ -1734,6 +1739,18 @@ WHERE a.attgenerated = 'v' AND c.relkind IN ('r', 'p')
 		return ""
 	}
 	return strings.Join(queries, "\nUNION ALL\n") + "\nORDER BY 1"
+}
+
+func notNullConstraintNameSelector(version int) string {
+	if version < 180000 {
+		return "NULL::text"
+	}
+	return `(SELECT con.conname
+FROM pg_constraint con
+WHERE con.conrelid = a.attrelid AND con.contype = 'n'
+  AND array_length(con.conkey, 1) = 1 AND con.conkey[1] = a.attnum
+ORDER BY con.oid
+LIMIT 1)`
 }
 
 // inspectGraphBlockerSelectors is deliberately selector-only: graph blockers

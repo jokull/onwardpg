@@ -2050,6 +2050,49 @@ func TestBuildDevelopmentColumnRenameIgnoresPositionAndRendersDirectDDL(t *testi
 	}
 }
 
+func TestBuildDevelopmentColumnRenamePreservesPostgres18NotNullConstraintName(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "quote_mode", Type: "text", NotNull: true, NotNullConstraintName: "accounts_quote_mode_not_null"}
+	after := before
+	after.Name, after.NotNullConstraintName = "pricing_mode", "accounts_pricing_mode_not_null"
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.Add(after); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.AddDependency(before.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddDependency(after.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{DirectColumnRenames: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
+	}
+	planned, err := Build(current, desired, answers, Options{DirectColumnRenames: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned || len(planned.Statements) != 2 {
+		t.Fatalf("PostgreSQL 18 direct rename = %#v", planned)
+	}
+	if got, want := planned.Statements[1].SQL, `ALTER TABLE "app"."accounts" RENAME CONSTRAINT "accounts_quote_mode_not_null" TO "accounts_pricing_mode_not_null";`; got != want {
+		t.Fatalf("PostgreSQL 18 constraint rename = %q, want %q", got, want)
+	}
+}
+
 func TestColumnRenameRejectsUnmodeledPostgres18NotNullConstraintIdentity(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "app", Name: "accounts"}

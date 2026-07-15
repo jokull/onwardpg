@@ -69,12 +69,13 @@ type renameIndex struct {
 }
 
 type renameTable struct {
-	from                    pgschema.Table
-	to                      pgschema.Table
-	compatibilityColumns    []pgschema.Column
-	compatibilityPrivileges []pgschema.TablePrivilege
-	derivedChildRenames     []tableChildRename
-	manualOnly              bool
+	from                     pgschema.Table
+	to                       pgschema.Table
+	compatibilityColumns     []pgschema.Column
+	compatibilityPrivileges  []pgschema.TablePrivilege
+	derivedChildRenames      []tableChildRename
+	notNullConstraintRenames []notNullConstraintRename
+	manualOnly               bool
 }
 
 // tableChildRename is a PostgreSQL-generated child name which needs an
@@ -84,6 +85,11 @@ type renameTable struct {
 type tableChildRename struct {
 	from pgschema.Object
 	to   pgschema.Object
+}
+
+type notNullConstraintRename struct {
+	from string
+	to   string
 }
 
 type renameColumn struct {
@@ -1379,6 +1385,7 @@ func equivalentColumnForRename(from, to pgschema.Column) bool {
 	// feature may have a different catalog ordinal from its final declarative
 	// placement. Position is evidence, not column identity.
 	from.Position, to.Position = 0, 0
+	from.NotNullConstraintName, to.NotNullConstraintName = "", ""
 	from.Comment, to.Comment = nil, nil
 	return reflect.DeepEqual(from, to)
 }
@@ -1731,6 +1738,7 @@ func renderColumnRename(rename renameColumn) []protocol.Statement {
 		statement("ALTER TABLE "+table+" DROP COLUMN "+newColumn+";", "contract", "dangerous", true, "compatibility_removal", "data_loss", "access_exclusive_lock"),
 		statement("ALTER TABLE "+table+" RENAME COLUMN "+oldColumn+" TO "+newColumn+";", "contract", "review", true, "compatibility_removal", "access_exclusive_lock"),
 	}
+	statements = appendNotNullConstraintRename(statements, table, rename, "contract")
 	if !reflect.DeepEqual(rename.from.Comment, rename.to.Comment) {
 		value := "NULL"
 		if rename.to.Comment != nil {
@@ -1746,6 +1754,7 @@ func renderDirectColumnRename(rename renameColumn) []protocol.Statement {
 	statements := []protocol.Statement{
 		statement("ALTER TABLE "+table+" RENAME COLUMN "+quote(rename.from.Name)+" TO "+quote(rename.to.Name)+";", "expand", "review", true, "access_exclusive_lock"),
 	}
+	statements = appendNotNullConstraintRename(statements, table, rename, "expand")
 	if !reflect.DeepEqual(rename.from.Comment, rename.to.Comment) {
 		value := "NULL"
 		if rename.to.Comment != nil {
@@ -1754,6 +1763,17 @@ func renderDirectColumnRename(rename renameColumn) []protocol.Statement {
 		statements = append(statements, statement("COMMENT ON COLUMN "+table+"."+quote(rename.to.Name)+" IS "+value+";", "expand", "safe", true))
 	}
 	return statements
+}
+
+func appendNotNullConstraintRename(statements []protocol.Statement, table string, rename renameColumn, phase string) []protocol.Statement {
+	from, to := rename.from.NotNullConstraintName, rename.to.NotNullConstraintName
+	if from == "" || to == "" || from == to {
+		return statements
+	}
+	return append(statements, statement(
+		"ALTER TABLE "+table+" RENAME CONSTRAINT "+quote(from)+" TO "+quote(to)+";",
+		phase, "review", true, "access_exclusive_lock", "not_null_constraint_identity",
+	))
 }
 
 func assertedTableIdentity(hints []protocol.Hint, from, to pgschema.Table) bool {
@@ -1923,10 +1943,20 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 			}
 			fromChildren, toChildren := tableChildren(current, from.ObjectID()), tableChildren(desired, to.ObjectID())
 			var derivedChildRenames []tableChildRename
+			var notNullConstraintRenames []notNullConstraintRename
 			for key, before := range fromChildren {
 				after := toChildren[key]
 				consumed[before.ObjectID()] = true
 				consumed[after.ObjectID()] = true
+				if beforeColumn, ok := before.(pgschema.Column); ok {
+					afterColumn := after.(pgschema.Column)
+					if beforeColumn.NotNullConstraintName != "" && afterColumn.NotNullConstraintName != "" && beforeColumn.NotNullConstraintName != afterColumn.NotNullConstraintName {
+						notNullConstraintRenames = append(notNullConstraintRenames, notNullConstraintRename{
+							from: beforeColumn.NotNullConstraintName,
+							to:   afterColumn.NotNullConstraintName,
+						})
+					}
+				}
 				if !equivalentChildForTableRename(before, after, from, to) {
 					beforeColumn := before.(pgschema.Column)
 					afterColumn := after.(pgschema.Column)
@@ -1953,6 +1983,9 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 			}
 			sort.Slice(derivedChildRenames, func(i, j int) bool {
 				return derivedChildRenames[i].from.ObjectID().String() < derivedChildRenames[j].from.ObjectID().String()
+			})
+			sort.Slice(notNullConstraintRenames, func(i, j int) bool {
+				return notNullConstraintRenames[i].from < notNullConstraintRenames[j].from
 			})
 			retainedViews := retainedTableRenameViews(current, desired, from, to)
 			retainedViewSet := make(map[pgschema.ID]bool, len(retainedViews))
@@ -1991,6 +2024,7 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 			}
 			renames = append(renames, renameTable{
 				from: from, to: to, compatibilityColumns: columns, compatibilityPrivileges: privileges, derivedChildRenames: derivedChildRenames,
+				notNullConstraintRenames: notNullConstraintRenames,
 			})
 		}
 	}
@@ -3049,6 +3083,7 @@ func equivalentChildForTableRename(before, after pgschema.Object, from, to pgsch
 			return false
 		}
 		before.Table = to.ObjectID()
+		before.NotNullConstraintName, next.NotNullConstraintName = "", ""
 		return reflect.DeepEqual(before, next)
 	case pgschema.Constraint:
 		next, ok := after.(pgschema.Constraint)
@@ -3222,6 +3257,12 @@ func renderTableRename(rename renameTable) ([]protocol.Statement, error) {
 	}
 	if rename.from.Name != rename.to.Name {
 		statements = append(statements, statement("ALTER TABLE "+current+" RENAME TO "+quote(rename.to.Name)+";", "contract", "review", true, "application_compatibility", "compatibility_removal", "brief_lock"))
+	}
+	for _, constraintRename := range rename.notNullConstraintRenames {
+		statements = append(statements, statement(
+			"ALTER TABLE "+to+" RENAME CONSTRAINT "+quote(constraintRename.from)+" TO "+quote(constraintRename.to)+";",
+			"contract", "review", true, "derived_catalog_name", "brief_lock",
+		))
 	}
 	for _, childRename := range rename.derivedChildRenames {
 		childStatements, err := renderDerivedTableChildRename(childRename, rename.to)
