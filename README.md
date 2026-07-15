@@ -490,6 +490,11 @@ not mean every mutation has an overlap-safe automatic plan. The authoritative
 matrix is [supported features](docs/supported-features.md), with
 machine-readable evidence under [`parity/`](parity).
 
+Explicit index-key collations such as `COLLATE "C"` are part of an index's
+typed identity. Changing one follows the same concurrent replacement path as
+another index-definition change; onwardpg does not treat a database server's
+default collation as a migration it can safely apply.
+
 ## Philosophy and boundaries
 
 onwardpg is intentionally narrow:

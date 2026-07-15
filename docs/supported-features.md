@@ -36,6 +36,12 @@ replacement is also continuous for standalone nested trees: onwardpg retains
 the valid old hierarchy, recursively creates `ON ONLY` shells, builds each
 leaf concurrently, attaches bottom-up, and removes the old hierarchy only
 after the new root becomes valid. Empty parents use the same shell swap.
+Explicit per-key index collations (for example `COLLATE "C"`) are typed,
+rendered, and included in that index identity. A collation change therefore
+uses the same replacement path rather than being hidden as ambient database
+state. The database or server default collation is not a schema operation:
+onwardpg reports only explicit object semantics and never proposes changing an
+environment default.
 A prebuilt, structurally matching standalone child index can be attached to an
 incomplete standalone partitioned parent with explicit lock/timeout metadata;
 new local primary/unique constraints may also claim same-named matching unique

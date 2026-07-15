@@ -259,6 +259,10 @@ func (Index) object() {}
 type IndexPart struct {
 	Column     string
 	Expression string
+	// Collation is a catalog-quoted non-default collation for this index key.
+	// PostgreSQL stores it independently from the column definition, so it is
+	// part of index identity and a change requires index replacement.
+	Collation  string
 	Descending bool
 	NullsFirst bool
 	NullsLast  bool

@@ -2095,6 +2095,50 @@ func TestBuildContinuouslyReplacesSameNameIndex(t *testing.T) {
 	}
 }
 
+func TestBuildContinuouslyReplacesIndexForCollationChange(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "orders"}
+	before := pgschema.Index{Table: table.ObjectID(), Name: "orders_name_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "name"}}}
+	after := before
+	after.Parts = []pgschema.IndexPart{{Column: "name", Collation: `pg_catalog."C"`}}
+	for _, pair := range []struct {
+		snapshot *pgschema.Snapshot
+		index    pgschema.Index
+	}{{current, before}, {desired, after}} {
+		if err := pair.snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := pair.snapshot.Add(pair.index); err != nil {
+			t.Fatal(err)
+		}
+		if err := pair.snapshot.AddDependency(pair.index.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary, err := replacementIndexName(before, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`ALTER INDEX "public"."orders_name_idx" RENAME TO "` + temporary + `";`,
+		`CREATE INDEX CONCURRENTLY "orders_name_idx" ON "public"."orders" USING "btree" ("name" COLLATE pg_catalog."C");`,
+		`DROP INDEX CONCURRENTLY "public"."` + temporary + `";`,
+	}
+	if result.Status != protocol.Planned || len(result.Statements) != len(want) {
+		t.Fatalf("unexpected collation replacement plan: %#v", result)
+	}
+	for index, sql := range want {
+		if result.Statements[index].SQL != sql {
+			t.Fatalf("statement %d = %q, want %q", index, result.Statements[index].SQL, sql)
+		}
+	}
+}
+
 func TestBuildContinuouslyReplacesEmptyPartitionedParentIndex(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "public", Name: "events", Partition: &pgschema.Partition{Strategy: "RANGE", Raw: "RANGE (created_at)"}}

@@ -3575,6 +3575,9 @@ func renderIndex(index pgschema.Index) (string, string) {
 		default:
 			return "", "index_part_missing:" + index.ObjectID().String()
 		}
+		if part.Collation != "" {
+			rendered += " COLLATE " + part.Collation
+		}
 		if part.OpClass != nil && (!part.OpClass.IsDefault || len(part.OpClass.Parameters) > 0) {
 			if part.OpClass.Name == "" {
 				return "", "index_opclass_missing:" + index.ObjectID().String()

@@ -3172,6 +3172,60 @@ CREATE INDEX orders_name_pattern_idx ON "` + schemaName + `".orders USING btree 
 	}
 }
 
+func TestIndexCollationReplacementConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_index_collation_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".orders (name text);
+CREATE INDEX orders_name_idx ON "` + schemaName + `".orders USING btree (name);`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".orders (name text);
+CREATE INDEX orders_name_idx ON "` + schemaName + `".orders USING btree (name COLLATE "C");`
+	path := filepath.Join(t.TempDir(), "desired.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned || len(plan.Statements) != 3 || !strings.Contains(joinPlan(plan), `COLLATE pg_catalog."C"`) {
+		t.Fatalf("expected continuous collation replacement plan, got %#v", plan)
+	}
+	applyPlan(t, ctx, conn, plan)
+	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := desired.Fingerprint()
+	got, _ := actual.Fingerprint()
+	if got != want {
+		t.Fatalf("collation replacement left residual graph diff: got %s want %s", got, want)
+	}
+}
+
 func TestBRINIndexStorageConvergesOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {

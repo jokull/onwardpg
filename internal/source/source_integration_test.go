@@ -175,6 +175,16 @@ func TestLoadGraphBlocksPreviouslyBlindCatalogFamilies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	objects := pgschema.Table{Schema: schemaName, Name: "objects"}.ObjectID()
+	indexID := pgschema.Index{Table: objects, Name: "objects_label_c_idx"}.ObjectID()
+	object, ok := snapshot.Object(indexID)
+	if !ok {
+		t.Fatalf("collated index %s missing from graph", indexID)
+	}
+	index, ok := object.(pgschema.Index)
+	if !ok || len(index.Parts) != 1 || index.Parts[0].Collation != `pg_catalog."C"` {
+		t.Fatalf("collated index = %#v", object)
+	}
 	unsupported := snapshot.Unsupported()
 	for _, prefix := range []string{
 		"ownership:relation:", "acl:default:", "rule:",
@@ -182,7 +192,7 @@ func TestLoadGraphBlocksPreviouslyBlindCatalogFamilies(t *testing.T) {
 		"text_search_configuration:", "text_search_dictionary:", "event_trigger:",
 		"publication:", "extended_statistics:", "foreign_data_wrapper:",
 		"foreign_server:", "user_mapping:", "table_inheritance:",
-		"column_storage:", "column_statistics:", "index_collation:",
+		"column_storage:", "column_statistics:",
 		"access_method:", "operator:", "operator_family:", "cast:",
 		"conversion:", "procedural_language:", "subscription:",
 		"comment:enum:", "comment:trigger:", "comment:policy:", "comment:view_column:",

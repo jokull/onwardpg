@@ -853,6 +853,8 @@ ORDER BY n.nspname, t.relname, i.relname`, nullsNotDistinct)
 	partsQuery := fmt.Sprintf(`
 SELECT n.nspname, t.relname, t.relkind::text, i.relname, idx.ord, %s,
        a.attname, CASE WHEN idx.key = 0 THEN pg_get_indexdef(idx.indexrelid, idx.ord, false) END,
+       CASE WHEN idx.indcollation[idx.ord-1] <> 0 AND coll.collname <> 'default'
+            THEN quote_ident(cn.nspname) || '.' || quote_ident(coll.collname) END,
        pg_index_column_has_property(idx.indexrelid, idx.ord, 'desc'),
        pg_index_column_has_property(idx.indexrelid, idx.ord, 'nulls_first'),
        pg_index_column_has_property(idx.indexrelid, idx.ord, 'nulls_last'),
@@ -865,6 +867,8 @@ JOIN pg_class i ON i.oid = idx.indexrelid
 JOIN pg_class t ON t.oid = idx.indrelid
 JOIN pg_namespace n ON n.oid = t.relnamespace
 LEFT JOIN pg_attribute a ON (a.attrelid, a.attnum) = (idx.indrelid, idx.key)
+LEFT JOIN pg_collation coll ON coll.oid = idx.indcollation[idx.ord-1]
+LEFT JOIN pg_namespace cn ON cn.oid = coll.collnamespace
 LEFT JOIN pg_opclass op ON op.oid = idx.indclass[idx.ord-1]
 LEFT JOIN pg_namespace opn ON opn.oid = op.opcnamespace
 LEFT JOIN pg_attribute ia ON (ia.attrelid, ia.attnum) = (idx.indexrelid, idx.ord)
@@ -879,12 +883,12 @@ ORDER BY n.nspname, t.relname, i.relname, idx.ord`, included)
 		var namespace, tableName, relationKind, indexName string
 		var ordinal int
 		var included bool
-		var column, expression, opclassName, opclassSchema *string
+		var column, expression, collation, opclassName, opclassSchema *string
 		var descending, nullsFirst, nullsLast, opclassDefault *bool
 		var parameters []string
 		if err := rows.Scan(
 			&namespace, &tableName, &relationKind, &indexName, &ordinal, &included,
-			&column, &expression, &descending, &nullsFirst, &nullsLast,
+			&column, &expression, &collation, &descending, &nullsFirst, &nullsLast,
 			&opclassName, &opclassSchema, &opclassDefault, &parameters,
 		); err != nil {
 			return err
@@ -907,6 +911,9 @@ ORDER BY n.nspname, t.relname, i.relname, idx.ord`, included)
 		}
 		if expression != nil {
 			part.Expression = *expression
+		}
+		if collation != nil {
+			part.Collation = *collation
 		}
 		if descending != nil {
 			part.Descending = *descending
@@ -2021,15 +2028,6 @@ SELECT 'column_options:' || quote_ident(n.nspname) || '.' || quote_ident(c.relna
 FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped AND a.attoptions IS NOT NULL
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-UNION ALL
-SELECT 'index_collation:' || quote_ident(n.nspname) || '.' || quote_ident(i.relname)
-FROM pg_index x
-JOIN pg_class i ON i.oid = x.indexrelid
-JOIN pg_class c ON c.oid = x.indrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE position(' COLLATE ' IN upper(pg_get_indexdef(x.indexrelid))) > 0
-  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = i.oid AND d.deptype = 'e')
 UNION ALL
 SELECT 'access_method:' || quote_ident(a.amname)
 FROM pg_am a
