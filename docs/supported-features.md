@@ -57,6 +57,16 @@ constraints, and other dependent constraint-backed
 variants remain explicit unsupported transitions until their complete
 vertical slices can preserve PostgreSQL's attachment and ownership semantics.
 
+Constraint names are identity-bearing planner input. A deterministic exporter
+rename (for example a newer compact Drizzle foreign-key name replacing an old
+PostgreSQL-truncated one) is reported as `constraint_rename`; onwardpg does not
+silently ignore, rename, or rebuild a caller-owned constraint to reconcile it.
+The logical baseline remains valid because it is replayed from exported DDL.
+An operator may investigate the physical mismatch with read-only drift audit;
+a later change to the legacy constraint requires an explicit reviewed
+physical-to-declarative transition that accounts for both clone and real
+environment names.
+
 Ordinary views are catalog-modeled, including PostgreSQL-deparsed definitions,
 reloptions, comments, and typed dependencies on referenced tables, columns,
 views, enums, and modeled user routines. The planner supports create, `CREATE

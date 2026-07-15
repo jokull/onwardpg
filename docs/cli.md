@@ -263,6 +263,11 @@ unexpected, and changed objects. Exit zero means drift_free; drift exits 4.
 The audit never generates repair SQL, changes history, or participates in
 ordinary draft generation.
 
+It also does not normalize historical physical object names to a newer DDL
+exporter's naming convention. Such a difference is drift evidence. If a later
+feature must touch the object, the developer or agent owns an explicit,
+reviewed physical-to-declarative transition in the migration bundle.
+
 ## diff (and compatibility `plan --from --to`)
 
 ~~~sh

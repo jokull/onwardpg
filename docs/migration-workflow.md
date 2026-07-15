@@ -115,6 +115,14 @@ It compares observed P with W and reports drift. A finding is evidence to
 investigate, not permission for onwardpg to make production changes. Resolve it
 through a reviewed forward bundle or a deliberate declared-schema correction.
 
+`init` establishes a logical replay baseline from exported DDL; it does not
+adopt physical object-name aliases from a caller-owned environment. A legacy
+foreign-key name that differs only because an exporter changed its deterministic
+naming algorithm is therefore visible to `drift check`, never silently
+normalized. If a future feature must change that legacy constraint, make the
+physical-to-declarative transition explicit in reviewed bundle SQL, including
+the names necessary for clone verification and the real environment.
+
 ## Lower-level compatibility commands
 
 `onwardpg draft`, `onwardpg dev plan`, and `onwardpg history status` retain the

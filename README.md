@@ -357,6 +357,17 @@ executed that chain. During an intentional partial rollout it will report the
 partial state as a difference; onwardpg does not maintain hidden phase
 exceptions.
 
+The ground floor is a **logical** baseline derived from exported DDL, not an
+adoption record for every physical name in an older production catalog. For
+example, an older Drizzle migration may have a PostgreSQL-truncated foreign-key
+name where a newer export uses a compact hash suffix. `init` still establishes
+H = W because onwardpg plans from declarative history; `drift check` reports
+the physical-name difference. It is deliberately not hidden or auto-renamed.
+If a later migration must alter that legacy constraint, the developer or agent
+must review and supply an explicit physical-to-declarative transition in the
+bundle (which can safely account for both names during clone verification),
+rather than asking onwardpg to infer a production alias.
+
 There are no down migrations. Before contract, the preserved old interface is
 the application rollback path. After contract, recovery is a new forward plan
 owned by the operator and application team.
