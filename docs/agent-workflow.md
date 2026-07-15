@@ -46,9 +46,17 @@ That output is never confused with the PR bundle: in workspace mode it avoids
 proposing drops for surplus objects so changing branches cannot turn a local
 database into a destructive branch mirror.
 
-Workspace mode also records an unreachable PostgreSQL physical column order as
-a compatibility difference while adding required columns at the reachable end.
-It never relaxes strict H → W clone convergence.
+onwardpg records an unreachable PostgreSQL physical column order as a
+compatibility difference while adding required columns at the reachable end.
+Semantic H → W clone convergence ignores ordinal-only differences; the typed
+catalog snapshot still retains them for review.
+
+An unaccepted name change is also comparison-specific. H → W forgets an
+intermediate column name that existed only in an earlier draft and emits the
+final additive shape. If that draft was already applied to D, D → W returns a
+dev-scoped rename choice. A confirmed choice renders one direct local rename;
+`preserve` keeps the old development object. The production bundle never
+inherits a development-only rename.
 
 Production is deliberately outside the per-PR critical path. Run
 `onwardpg drift check --database "$PROD_URL"` periodically or

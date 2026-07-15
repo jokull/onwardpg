@@ -33,9 +33,10 @@ production ───────────────────────
   repository-scoped OS advisory lock serializes lifecycle commands; their
   commit points reload configuration and revalidate DDL, history, and exact
   artifacts before writing.
-- PostgreSQL physical column positions are preserved catalog state. A desired
-  order that `ALTER TABLE` cannot reach is an explicit unsupported result, not
-  silent equivalence or a late fingerprint-only failure.
+- PostgreSQL physical column positions are preserved catalog state and reported
+  when `ALTER TABLE` cannot reach declarative source order. They are not part of
+  semantic fingerprints: ordinary additive migrations must not require a
+  replacement table merely to reproduce visual code layout.
 
 ## Product boundaries
 

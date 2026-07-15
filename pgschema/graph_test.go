@@ -173,6 +173,27 @@ func TestFingerprintIsIndependentOfInsertionOrder(t *testing.T) {
 	}
 }
 
+func TestFingerprintIgnoresPhysicalColumnPosition(t *testing.T) {
+	table := Table{Schema: "public", Name: "orders"}
+	left, right := New(), New()
+	for _, snapshot := range []*Snapshot{left, right} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := left.Add(Column{Table: table.ObjectID(), Name: "email", Position: 2, Type: "text"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Add(Column{Table: table.ObjectID(), Name: "email", Position: 7, Type: "text"}); err != nil {
+		t.Fatal(err)
+	}
+	leftFingerprint, _ := left.Fingerprint()
+	rightFingerprint, _ := right.Fingerprint()
+	if leftFingerprint != rightFingerprint {
+		t.Fatalf("physical column position changed semantic fingerprint: %s != %s", leftFingerprint, rightFingerprint)
+	}
+}
+
 func TestUnsupportedAndIgnoredAreCanonical(t *testing.T) {
 	left, right := New(), New()
 	for _, selector := range []string{"policy:public.orders.p", "trigger:public.orders.t"} {

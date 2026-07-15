@@ -732,7 +732,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	}
 }
 
-func TestDraftReportsUnreachableColumnOrderBeforeWritingBundleOnPostgreSQL(t *testing.T) {
+func TestDraftReportsUnreachableColumnOrderAsCompatibilityOnPostgreSQL(t *testing.T) {
 	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if adminURL == "" {
 		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
@@ -753,37 +753,176 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	drafted := captureStdout(t, func() int {
 		return runTestDraftAt(t, []string{"--target", "primary", "--bundle", "account-timezone", "--after", "baseline"}, repository)
 	})
-	if drafted.code != 3 || !strings.Contains(drafted.stdout, "column_physical_order:app.accounts") {
-		t.Fatalf("unreachable order = %d, %s", drafted.code, drafted.stdout)
-	}
-	if _, err := os.Stat(filepath.Join(repository, "onward-bundles", "primary", "account-timezone")); !os.IsNotExist(err) {
-		t.Fatalf("unsupported draft wrote a bundle: %v", err)
-	}
-
-	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, email text, zeta text, alpha text);\n")
-	if appended := captureStdout(t, func() int {
-		return runTestDraftAt(t, []string{"--target", "primary", "--bundle", "account-timezone", "--after", "baseline"}, repository)
-	}); appended.code != 0 {
-		t.Fatalf("appendable order = %d, %s", appended.code, appended.stdout)
+	if drafted.code != 0 || !strings.Contains(drafted.stdout, "column_physical_order:app.accounts") {
+		t.Fatalf("compatible order = %d, %s", drafted.code, drafted.stdout)
 	}
 	destination := filepath.Join(repository, "onward-bundles", "primary", "account-timezone")
 	before, err := bundle.Read(destination)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text, email text, zeta text, alpha text);\n")
-	rejected := captureStdout(t, func() int {
+	var plan protocol.Result
+	if err := json.Unmarshal(before.Files["plan.json"], &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Statements) != 1 || !strings.Contains(plan.Statements[0].SQL, `ADD COLUMN "timezone"`) {
+		t.Fatalf("compatible draft plan = %#v", plan)
+	}
+	repeated := captureStdout(t, func() int {
 		return runTestDraftAt(t, []string{"--target", "primary", "--bundle", "account-timezone", "--after", "baseline"}, repository)
 	})
-	if rejected.code != 3 || !strings.Contains(rejected.stdout, "column_physical_order:app.accounts") {
-		t.Fatalf("unreachable replacement = %d, %s", rejected.code, rejected.stdout)
+	if repeated.code != 0 || !strings.Contains(repeated.stdout, "column_physical_order:app.accounts") {
+		t.Fatalf("repeated compatible order = %d, %s", repeated.code, repeated.stdout)
 	}
 	after, err := bundle.Read(destination)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(before, after) {
-		t.Fatal("unsupported redraft replaced the last complete selected bundle")
+		t.Fatal("unchanged compatible redraft churned the selected bundle")
+	}
+}
+
+func TestWorkflowPlanCollapsesUnacceptedRenameAndReconcilesDevelopmentDirectlyOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	devURL, cleanupDev := createTestDatabase(t, adminURL)
+	defer cleanupDev()
+	t.Setenv("ONWARDPG_RENAME_DEV_DATABASE_URL", devURL)
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_RENAME_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+dev_mode = "workspace"
+`)
+	baseline := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, email text);\n"
+	writeTestFile(t, repository, "schema.sql", baseline)
+	connection, err := pgx.Connect(context.Background(), devURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close(context.Background())
+	if _, err := connection.Exec(context.Background(), baseline); err != nil {
+		t.Fatal(err)
+	}
+	if initialized := captureStdout(t, func() int { return runInitAt(nil, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, email text, quote_mode text DEFAULT 'fx' NOT NULL);\n")
+	first := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"account-mode"}, repository) })
+	if first.code != 0 {
+		t.Fatalf("initial plan = %d, %s", first.code, first.stdout)
+	}
+	var initial workflowPlanReport
+	if err := json.Unmarshal([]byte(first.stdout), &initial); err != nil {
+		t.Fatal(err)
+	}
+	if initial.Durable.PlanID == "" || initial.Development.Status != protocol.Planned || len(initial.Development.Result.Statements) != 1 {
+		t.Fatalf("initial plan report = %#v", initial)
+	}
+	for _, statement := range initial.Development.Result.Statements {
+		if _, err := connection.Exec(context.Background(), statement.SQL); err != nil {
+			t.Fatalf("apply intermediate development SQL: %v", err)
+		}
+	}
+
+	// The intermediate column has already been applied locally, but it was never
+	// accepted history. Put its final name earlier in the declarative table to
+	// prove physical position does not hide the rename candidate.
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, pricing_mode text DEFAULT 'fx' NOT NULL, email text);\n")
+	pending := captureStdout(t, func() int { return runWorkflowPlanAt(nil, repository) })
+	if pending.code != 2 {
+		t.Fatalf("rename decision = %d, %s", pending.code, pending.stdout)
+	}
+	var pendingReport workflowPlanReport
+	if err := json.Unmarshal([]byte(pending.stdout), &pendingReport); err != nil {
+		t.Fatal(err)
+	}
+	if pendingReport.Durable.Outcome != string(protocol.Planned) || pendingReport.Durable.PlanID != initial.Durable.PlanID || pendingReport.Development.Status != protocol.NeedsInput {
+		t.Fatalf("rename decision report = %#v", pendingReport)
+	}
+	if pendingReport.Durable.Plan == nil || len(pendingReport.Durable.Plan.Statements) != 1 {
+		t.Fatalf("collapsed durable plan = %#v", pendingReport.Durable.Plan)
+	}
+	durableSQL := pendingReport.Durable.Plan.Statements[0].SQL
+	if !strings.Contains(durableSQL, `ADD COLUMN "pricing_mode"`) || strings.Contains(durableSQL, "quote_mode") || strings.Contains(durableSQL, "RENAME COLUMN") {
+		t.Fatalf("durable plan did not collapse intermediate name: %s", durableSQL)
+	}
+	if len(pendingReport.Development.Result.Questions) != 1 || pendingReport.Development.Result.Questions[0].Kind != "rename_column" {
+		t.Fatalf("development rename question = %#v", pendingReport.Development.Result.Questions)
+	}
+	var renameHint *protocol.Hint
+	var preserveChoice bool
+	for _, decision := range pendingReport.Development.Decisions {
+		for _, choice := range decision.Choices {
+			switch choice.Hint.Kind {
+			case "rename":
+				hint := choice.Hint
+				renameHint = &hint
+			case "preserve":
+				preserveChoice = len(choice.Hazards) == 0
+			}
+		}
+	}
+	if renameHint == nil || !preserveChoice {
+		t.Fatalf("development choices = %#v", pendingReport.Development.Decisions)
+	}
+	hintJSON, err := json.Marshal(renameHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"--dev-hint", string(hintJSON)}, repository)
+	})
+	if confirmed.code != 0 {
+		t.Fatalf("confirmed development rename = %d, %s", confirmed.code, confirmed.stdout)
+	}
+	var confirmedReport workflowPlanReport
+	if err := json.Unmarshal([]byte(confirmed.stdout), &confirmedReport); err != nil {
+		t.Fatal(err)
+	}
+	if confirmedReport.Durable.PlanID != initial.Durable.PlanID || len(confirmedReport.Development.Result.Statements) != 1 {
+		t.Fatalf("confirmed development rename report = %#v", confirmedReport)
+	}
+	direct := confirmedReport.Development.Result.Statements[0].SQL
+	if direct != `ALTER TABLE "app"."accounts" RENAME COLUMN "quote_mode" TO "pricing_mode";` {
+		t.Fatalf("development direct rename = %q", direct)
+	}
+	if _, err := connection.Exec(context.Background(), direct); err != nil {
+		t.Fatalf("apply direct development rename: %v", err)
+	}
+	destination := filepath.Join(repository, "onward-bundles", "primary", "account-mode")
+	before, err := bundle.Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	converged := captureStdout(t, func() int { return runWorkflowPlanAt(nil, repository) })
+	if converged.code != 0 {
+		t.Fatalf("converged replan = %d, %s", converged.code, converged.stdout)
+	}
+	var convergedReport workflowPlanReport
+	if err := json.Unmarshal([]byte(converged.stdout), &convergedReport); err != nil {
+		t.Fatal(err)
+	}
+	if len(convergedReport.Development.Result.Statements) != 0 || len(convergedReport.Development.Result.Preserved) != 0 {
+		t.Fatalf("development residual = %#v", convergedReport.Development.Result)
+	}
+	after, err := bundle.Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("development convergence churned the durable bundle")
+	}
+	verified := captureStdout(t, func() int { return runVerifyAt(nil, repository) })
+	if verified.code != 0 || !strings.Contains(verified.stdout, `"status":"verified"`) {
+		t.Fatalf("verify collapsed durable plan = %d, %s", verified.code, verified.stdout)
 	}
 }
 
@@ -1374,7 +1513,7 @@ bundle_root = "onward-bundles"
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 `)
-	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".users (id bigint PRIMARY KEY);`)
+	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; SET search_path = "`+schemaName+`", pg_catalog; CREATE TABLE users (id bigint PRIMARY KEY);`)
 
 	connection, err := pgx.Connect(context.Background(), adminURL)
 	if err != nil {
@@ -1413,7 +1552,7 @@ dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if manifest.BundleID != "ground-floor" || manifest.Purpose != "baseline" || manifest.History == nil || manifest.History.ParentDigest != bundle.HistoryRootDigest() {
 		t.Fatalf("baseline manifest = %#v", manifest)
 	}
-	if !strings.Contains(string(chain.Entries[0].Artifact.Files["phases/expand.sql"]), `CREATE TABLE "`+schemaName+`"."users"`) {
+	if !strings.Contains(string(chain.Entries[0].Artifact.Files["phases/expand.sql"]), `SET search_path = "`+schemaName+`", pg_catalog; CREATE TABLE users`) {
 		t.Fatalf("baseline expand SQL = %s", chain.Entries[0].Artifact.Files["phases/expand.sql"])
 	}
 	var existsAfter bool
@@ -1438,7 +1577,7 @@ dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		t.Fatalf("second history init report = %#v", blocked)
 	}
 
-	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; CREATE TABLE "`+schemaName+`".users (id bigint PRIMARY KEY); CREATE TABLE "`+schemaName+`".projects (id bigint PRIMARY KEY);`)
+	writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA "`+schemaName+`"; SET search_path = "`+schemaName+`", pg_catalog; CREATE TABLE users (id bigint PRIMARY KEY); CREATE TABLE projects (id bigint PRIMARY KEY);`)
 	feature := captureStdout(t, func() int {
 		return runTestDraftAt(t, []string{"--target", "primary", "--bundle", "projects", "--after", "ground-floor"}, repository)
 	})

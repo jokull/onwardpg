@@ -716,19 +716,19 @@
       "scenario": "Add one column and change ordering",
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add one column and change ordering",
       "source_line": 126,
-      "classification": "weaker",
+      "classification": "supported",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "weaker",
+        "mutation": "supported",
         "online_strategy": "weaker",
-        "rejection": "intentionally_different",
+        "rejection": "supported",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestPlanRejectsUnreachablePhysicalColumnOrder",
-        "cmd/onwardpg#TestDraftReportsUnreachableColumnOrderBeforeWritingBundleOnPostgreSQL"
+        "internal/graphplan#TestPlanReportsUnreachablePhysicalColumnOrderWithoutBlocking",
+        "cmd/onwardpg#TestDraftReportsUnreachableColumnOrderAsCompatibilityOnPostgreSQL"
       ],
-      "notes": "PostgreSQL can append a column but cannot insert it before retained physical columns. onwardpg blocks that declarative transition with a typed column_physical_order finding before writing or replacing a bundle instead of accepting a plan that leaves a residual diff."
+      "notes": "PostgreSQL appends a new column and cannot reproduce a source file's visual insertion point without replacing the table. onwardpg emits the additive migration, records typed column_physical_order compatibility evidence, and treats the ordinal as non-semantic for convergence."
     },
     {
       "id": "column.add_identity_column_always_no_cycle",

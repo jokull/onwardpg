@@ -69,6 +69,16 @@ func Between(current, desired *pgschema.Snapshot) []Change {
 }
 
 func objectsEqual(before, after pgschema.Object) bool {
+	beforeColumn, beforeIsColumn := before.(pgschema.Column)
+	afterColumn, afterIsColumn := after.(pgschema.Column)
+	if beforeIsColumn && afterIsColumn {
+		// PostgreSQL preserves attnum, but ADD COLUMN cannot reproduce a
+		// declarative source file's visual insertion point. Keep Position in the
+		// typed snapshots for ordering and diagnostics without treating it as a
+		// structural mutation.
+		beforeColumn.Position, afterColumn.Position = 0, 0
+		return reflect.DeepEqual(beforeColumn, afterColumn)
+	}
 	beforeIndex, beforeIsIndex := before.(pgschema.Index)
 	afterIndex, afterIsIndex := after.(pgschema.Index)
 	if beforeIsIndex && afterIsIndex {

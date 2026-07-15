@@ -124,12 +124,14 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("plan baseline: %w", err)
 	}
-	report.Plan = &plan
 	report.DesiredFingerprint = plan.DesiredFingerprint
 	if plan.Status != protocol.Planned {
+		report.Plan = &plan
 		report.Outcome = string(plan.Status)
 		return report, nil
 	}
+	plan = authoritativeBaselinePlan(plan, compiled.DDL)
+	report.Plan = &plan
 
 	metadata := bundle.Metadata{
 		BundleID:   input.BundleID,
@@ -220,7 +222,13 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	report.Verification = &verification
 	if verification.Outcome != "verified" {
-		return report, fmt.Errorf("baseline bundle did not converge in disposable PostgreSQL")
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code:        "baseline_non_convergent",
+			Message:     fmt.Sprintf("generated baseline clone verification finished with status %s", verification.Outcome),
+			Remediation: "inspect verification.residual and correct the declarative DDL, ignore boundary, or planner before retrying init",
+		}}
+		return report, nil
 	}
 
 	chain, err = history.Load(input.Root, input.Config.BundleRoot, input.TargetName)
@@ -290,5 +298,32 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	report.Outcome = "initialized"
 	report.Path = filepath.ToSlash(relative)
 	report.HistoryHead = artifact.Manifest.History.EntryDigest
+	// The complete authoritative DDL is receipted in the installed bundle.
+	// Repeating it inside a successful init response makes large-schema JSON
+	// needlessly enormous; unsuccessful inventory and verification reports keep
+	// their plan details for diagnosis.
+	report.Plan = nil
 	return report, nil
+}
+
+// authoritativeBaselinePlan keeps init a ground-floor operation rather than
+// pretending the catalog graph can reconstruct session scaffolding from the
+// exported DDL. The graph-derived plan above is still the safety inventory: it
+// must be fully supported (or narrowly ignored) before this replay plan is
+// accepted. Feature migrations continue to be rendered from the typed graph.
+func authoritativeBaselinePlan(inventory protocol.Result, ddl []byte) protocol.Result {
+	if len(inventory.Statements) == 0 {
+		return inventory
+	}
+	item := protocol.Statement{
+		SQL: string(ddl), Safety: "review", Hazards: []string{"baseline_replay"},
+		Phase: protocol.PhaseExpand, NonTransactional: true,
+	}
+	item.ID = protocol.StableStatementID(item)
+	inventory.Statements = []protocol.Statement{item}
+	inventory.Batches = []protocol.Batch{{
+		ID: "batch-expand-001", Phase: protocol.PhaseExpand,
+		Transactional: false, Statements: []protocol.Statement{item},
+	}}
+	return inventory
 }

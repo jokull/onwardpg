@@ -61,13 +61,20 @@ func compileDDLOnce(ctx context.Context, root, targetName string, target Target)
 	if err != nil {
 		return CompiledDDL{}, fmt.Errorf("fingerprint DDL export tree before command: %w", err)
 	}
+	stdout, err := os.CreateTemp("", "onwardpg-schema-export-*.sql")
+	if err != nil {
+		return CompiledDDL{}, fmt.Errorf("create DDL export capture: %w", err)
+	}
+	stdoutName := stdout.Name()
+	defer os.Remove(stdoutName)
+	defer stdout.Close()
 	command := exec.CommandContext(ctx, target.SchemaCommand[0], target.SchemaCommand[1:]...)
 	command.Dir = root
 	command.Env = os.Environ()
-	stdout := &limitedBuffer{limit: maxCompilerOutput}
 	stderr := &limitedBuffer{limit: 1 << 20}
 	command.Stdout, command.Stderr = stdout, stderr
 	commandErr := command.Run()
+	closeErr := stdout.Close()
 	after, digestErr := digestTree(root)
 	if digestErr != nil {
 		return CompiledDDL{}, fmt.Errorf("fingerprint DDL export tree after command: %w", digestErr)
@@ -82,10 +89,21 @@ func compileDDLOnce(ctx context.Context, root, targetName string, target Target)
 		}
 		return CompiledDDL{}, fmt.Errorf("DDL export command failed: %s", message)
 	}
-	if stdout.exceeded {
+	if closeErr != nil {
+		return CompiledDDL{}, fmt.Errorf("close DDL export capture: %w", closeErr)
+	}
+	info, err := os.Stat(stdoutName)
+	if err != nil {
+		return CompiledDDL{}, fmt.Errorf("inspect DDL export capture: %w", err)
+	}
+	if info.Size() > maxCompilerOutput {
 		return CompiledDDL{}, fmt.Errorf("DDL export output exceeds %d bytes", maxCompilerOutput)
 	}
-	return CompiledDDL{DDL: stdout.Bytes(), Provenance: "schema_command"}, nil
+	ddl, err := os.ReadFile(stdoutName)
+	if err != nil {
+		return CompiledDDL{}, fmt.Errorf("read DDL export capture: %w", err)
+	}
+	return CompiledDDL{DDL: ddl, Provenance: "schema_command"}, nil
 }
 
 type limitedBuffer struct {
@@ -109,7 +127,6 @@ func (b *limitedBuffer) Write(data []byte) (int, error) {
 	return original, nil
 }
 
-func (b *limitedBuffer) Bytes() []byte  { return append([]byte(nil), b.buffer.Bytes()...) }
 func (b *limitedBuffer) String() string { return b.buffer.String() }
 
 func digestTree(root string) (string, error) {
@@ -124,6 +141,12 @@ func digestTree(root string) (string, error) {
 		relative, err := filepath.Rel(root, name)
 		if err != nil {
 			return err
+		}
+		if ignoredCompilerTreeEntry(entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		names = append(names, filepath.ToSlash(relative))
 		return nil
@@ -162,4 +185,13 @@ func digestTree(root string) (string, error) {
 		writeDigestFrame(hash, data)
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// Dependency installations and VCS internals are not repository inputs to a
+// schema export. Walking either can turn a seconds-long export into minutes in
+// a monorepo, and package managers legitimately maintain their own caches.
+// Generated project files remain in scope: a schema command that builds or
+// rewrites the checkout is still rejected.
+func ignoredCompilerTreeEntry(entry os.DirEntry) bool {
+	return entry.Name() == ".git" || entry.Name() == "node_modules"
 }

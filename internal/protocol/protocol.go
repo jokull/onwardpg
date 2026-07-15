@@ -48,9 +48,10 @@ type Result struct {
 	// surplus state and must remain visible to the caller.
 	Preserved []string `json:"preserved,omitempty"`
 	// Compatibility records known catalog differences deliberately tolerated by
-	// a workspace plan. They are neither ignored nor converged: a caller-owned
-	// development database may retain them while still gaining the required W
-	// shape. Strict history and clone planning leave this empty.
+	// semantic planning. They are neither ignored nor hidden: for example, a
+	// caller-owned development database may retain surplus state, and PostgreSQL
+	// may append a new column at a different physical ordinal than declarative
+	// source layout.
 	Compatibility []string `json:"workspace_compatibility,omitempty"`
 	Unsupported   []string `json:"unsupported,omitempty"`
 }

@@ -82,7 +82,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	options := input.PlannerOptions
 	options.PreserveSurplus = input.Target.WorkspaceMode()
-	options.IgnoreColumnPhysicalOrder = input.Target.WorkspaceMode()
+	options.DirectColumnRenames = true
 	resolution, err := semantichint.Resolve(current, desired, input.Hints, options)
 	if err != nil {
 		return Report{}, fmt.Errorf("plan development reconciliation: %w", err)

@@ -101,3 +101,25 @@ func TestBetweenIgnoresLegacyIndexDefinition(t *testing.T) {
 		t.Fatalf("legacy index definition must not create a semantic diff: %#v", changes)
 	}
 }
+
+func TestBetweenIgnoresPhysicalColumnPosition(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "orders"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "email", Position: 2, Type: "text"}
+	after := before
+	after.Position = 7
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.Add(after); err != nil {
+		t.Fatal(err)
+	}
+	if changes := Between(current, desired); len(changes) != 0 {
+		t.Fatalf("physical position must not create a semantic diff: %#v", changes)
+	}
+}

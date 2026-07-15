@@ -285,11 +285,14 @@ func applyCaseOverrides(entry *caseEntry, family, name string) {
 		entry.OnwardPGTests = []string{"internal/graphplan#TestBuildAddsRequiredColumnWithDefaultDirectly"}
 		entry.Notes = "A retained default supplies old writers and existing rows, so onwardpg emits the direct additive column DDL with explicit lock/rewrite hazards."
 	case family == "column" && name == "Add one column and change ordering":
+		entry.Classification = "supported"
+		entry.Dimensions.Mutation = "supported"
+		entry.Dimensions.Rejection = "supported"
 		entry.OnwardPGTests = []string{
-			"internal/graphplan#TestPlanRejectsUnreachablePhysicalColumnOrder",
-			"cmd/onwardpg#TestDraftReportsUnreachableColumnOrderBeforeWritingBundleOnPostgreSQL",
+			"internal/graphplan#TestPlanReportsUnreachablePhysicalColumnOrderWithoutBlocking",
+			"cmd/onwardpg#TestDraftReportsUnreachableColumnOrderAsCompatibilityOnPostgreSQL",
 		}
-		entry.Notes = "PostgreSQL can append a column but cannot insert it before retained physical columns. onwardpg blocks that declarative transition with a typed column_physical_order finding before writing or replacing a bundle instead of accepting a plan that leaves a residual diff."
+		entry.Notes = "PostgreSQL appends a new column and cannot reproduce a source file's visual insertion point without replacing the table. onwardpg emits the additive migration, records typed column_physical_order compatibility evidence, and treats the ordinal as non-semantic for convergence."
 	case family == "index" && name == "Alter index columns (index replacement and prioritized builds)":
 		entry.Classification = "supported"
 		entry.Dimensions.Mutation = "supported"

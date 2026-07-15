@@ -47,9 +47,11 @@ resulting catalogs. PostgreSQL—not a partial SQL parser—therefore resolves
 names, expressions, dependencies, and version-specific semantics. Equivalent
 DDL sources converge on equivalent catalog graphs.
 
-The export command runs in an isolated prepared tree. PR regeneration runs it
-twice and rejects nondeterministic output, command failure, or
-undeclared changes to that tree. Commands should write the schema only to
+The export command runs from the repository root. PR regeneration runs it
+twice and rejects nondeterministic output, command failure, or changes to
+repository inputs. Version-control internals and dependency-installation trees
+(`.git` and `node_modules` at any depth) are excluded from that mutation check;
+generated project files are not. Commands should write the schema only to
 stdout. Put credentials in the configured environment variable; URL-bearing
 command arguments are rejected, and receipts never record environment values.
 

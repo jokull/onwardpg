@@ -606,7 +606,16 @@ type canonicalSnapshot struct {
 func (s *Snapshot) CanonicalJSON() ([]byte, error) {
 	nodes := make([]canonicalNode, 0, len(s.objects))
 	for _, id := range s.IDs() {
-		nodes = append(nodes, canonicalNode{ID: id, Object: s.objects[id], Dependencies: s.Dependencies(id)})
+		object := s.objects[id]
+		if column, ok := object.(Column); ok {
+			// Physical attnum remains available on the typed snapshot for
+			// declaration order and diagnostics. It is not semantic schema
+			// identity: ALTER TABLE ADD COLUMN cannot reproduce a declarative
+			// source file's visual insertion point.
+			column.Position = 0
+			object = column
+		}
+		nodes = append(nodes, canonicalNode{ID: id, Object: object, Dependencies: s.Dependencies(id)})
 	}
 	return json.Marshal(canonicalSnapshot{Nodes: nodes, Unsupported: s.Unsupported(), Ignored: s.Ignored()})
 }

@@ -1999,6 +1999,57 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 	}
 }
 
+func TestBuildDevelopmentColumnRenameIgnoresPositionAndRendersDirectDDL(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "checkout_quote"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defaultValue := "'fx'::text"
+	before := pgschema.Column{Table: table.ObjectID(), Name: "quote_mode", Position: 33, Type: "text", NotNull: true, Default: &defaultValue}
+	after := before
+	after.Name, after.Position = "pricing_mode", 9
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.Add(after); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.AddDependency(before.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddDependency(after.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{PreserveSurplus: true, DirectColumnRenames: true}
+	pending, err := Build(current, desired, protocol.Answers{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_column" {
+		t.Fatalf("development rename question = %#v", pending)
+	}
+	if !containsString(pending.Questions[0].Choices, "preserve") || containsString(pending.Questions[0].Choices, "create") {
+		t.Fatalf("workspace rename fallback = %#v", pending.Questions[0].Choices)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
+	}
+	planned, err := Build(current, desired, answers, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || len(planned.Preserved) != 0 {
+		t.Fatalf("development direct rename = %#v", planned)
+	}
+	if got, want := planned.Statements[0].SQL, `ALTER TABLE "public"."checkout_quote" RENAME COLUMN "quote_mode" TO "pricing_mode";`; got != want {
+		t.Fatalf("development direct rename SQL = %q, want %q", got, want)
+	}
+}
+
 func TestColumnRenameRejectsUnmodeledPostgres18NotNullConstraintIdentity(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "app", Name: "accounts"}
@@ -3076,7 +3127,7 @@ func joinSQL(result protocol.Result) string {
 
 func stringPointer(value string) *string { return &value }
 
-func TestPlanRejectsUnreachablePhysicalColumnOrder(t *testing.T) {
+func TestPlanReportsUnreachablePhysicalColumnOrderWithoutBlocking(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	schema := pgschema.Schema{Name: "app"}
 	table := pgschema.Table{Schema: "app", Name: "accounts"}
@@ -3119,12 +3170,15 @@ func TestPlanRejectsUnreachablePhysicalColumnOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != protocol.Unsupported || len(result.Unsupported) != 1 {
+	if result.Status != protocol.Planned || len(result.Compatibility) != 1 || len(result.Statements) != 1 {
 		t.Fatalf("unreachable column order result = %#v", result)
 	}
-	joined := strings.Join(result.Unsupported, "\n")
+	joined := strings.Join(result.Compatibility, "\n")
 	if !strings.Contains(joined, "inserted_column:timezone:desired=2:last_retained=3") {
 		t.Fatalf("unreachable column order diagnostics = %q", joined)
+	}
+	if !strings.Contains(result.Statements[0].SQL, `ADD COLUMN "timezone" text`) {
+		t.Fatalf("unreachable column order plan = %#v", result.Statements)
 	}
 }
 

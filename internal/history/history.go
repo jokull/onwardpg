@@ -165,7 +165,7 @@ func Inspect(root, bundleRoot, target, selectedBundle string) (StatusReport, err
 		report.Findings = []StatusFinding{{
 			Code:        "stale_history_parent",
 			Message:     fmt.Sprintf("selected bundle parent %s is stale; current base head is %s", receipt.ParentDigest, chain.HeadDigest),
-			Remediation: "rerun draft with the same bundle id and pass this report's exact head_ref to --after",
+			Remediation: "rerun onwardpg plan to restack the selected bundle; explicit draft callers can pass this report's exact head_ref to --after",
 		}}
 	}
 	report.Selected = &SelectedStatus{

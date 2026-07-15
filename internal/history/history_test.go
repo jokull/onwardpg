@@ -104,6 +104,9 @@ func TestInspectExplainsSelectedBundleAgainstCurrentBase(t *testing.T) {
 	if len(report.Findings) != 1 || report.Findings[0].Code != "stale_history_parent" {
 		t.Fatalf("status findings = %#v", report.Findings)
 	}
+	if !strings.Contains(report.Findings[0].Remediation, "onwardpg plan") {
+		t.Fatalf("status remediation = %q", report.Findings[0].Remediation)
+	}
 }
 
 func TestInspectBlocksSelectedBundleThatIsNotValidChainHead(t *testing.T) {

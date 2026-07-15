@@ -70,16 +70,27 @@ drop. That makes branch switching and long-lived test data safe enough to be
 useful. The SQL is D → W, not the PR bundle; it does not prove that local state
 followed accepted migration order.
 
-If a deliberately disposable `strict` development database has its own
-rename, cast, or destructive ambiguity, rerun the same command with
-`--dev-hint`. Those answers are scoped to D → W and never authorize the
-durable H → W bundle. Workspace mode intentionally preserves absence-only
-objects instead.
+A common feature-iteration case is different from a production rename. Suppose
+an unmerged plan added `quote_mode` and the developer applied it to D, then the
+code schema changed the name to `pricing_mode`. H never contained either name,
+so regenerating the durable bundle collapses directly to `ADD pricing_mode`.
+D does contain `quote_mode`, so development reconciliation asks a dev-scoped
+rename question. Confirming it emits one direct local `ALTER TABLE ... RENAME
+COLUMN`; choosing `preserve` adds the new column and keeps the old local object.
+The durable bundle still uses the rolling-safe strategy whenever an accepted
+production column is genuinely being renamed.
+
+When development reconciliation has a rename, cast, or destructive ambiguity,
+rerun the same command with `--dev-hint`. Those answers are scoped to D → W and
+never authorize the durable H → W bundle. Workspace mode intentionally
+preserves absence-only objects instead; a deliberately disposable `strict`
+development database may plan their confirmed removal.
 
 If incoming history puts a new declarative column before columns already
 appended in D, PostgreSQL cannot reproduce that physical order with `ALTER
-TABLE`. Workspace output adds the required column at the reachable end and
-reports `workspace_compatibility`; clone verification remains exact.
+TABLE`. onwardpg adds the required column at the reachable end and reports the
+physical-order difference as compatibility evidence. Column order remains in
+the typed catalog inventory, but does not block semantic convergence.
 
 ## Restacking without Git coupling
 

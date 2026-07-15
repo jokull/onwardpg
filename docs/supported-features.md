@@ -182,8 +182,16 @@ unsupported work, rather than a replacement ordered before the table rename.
 A confirmed column rename can still prove which typed triggers PostgreSQL
 would rewrite: onwardpg recognizes only `UPDATE OF` column lists and the
 trigger `WHEN` predicate. That analysis is included in the editable bridge
-handoff but does not authorize a direct rename. It never rewrites trigger identity, relation
-targets, routines, or arbitrary expression text.
+handoff but does not authorize a direct production rename. It never rewrites
+trigger identity, relation targets, routines, or arbitrary expression text.
+
+Development reconciliation is intentionally narrower and immediate. When an
+unaccepted column was already applied locally and the declarative schema gives
+it a new name, physical ordinal differences do not hide rename candidacy. A
+dev-scoped confirmation emits one direct `ALTER TABLE ... RENAME COLUMN`;
+choosing `preserve` retains the old local column. Durable H → W planning remains
+trigger-backed expand/contract whenever accepted history actually contains the
+old name.
 
 Direct same-name column type changes and extension schema moves are also
 blocked with `expand_contract_*_required` results. A type change may still use
@@ -194,10 +202,10 @@ bare `ALTER COLUMN TYPE` to masquerade as an online rollout.
 
 Column physical order is catalog state but PostgreSQL has no ordinary
 `ALTER TABLE` operation that moves retained columns or inserts a new column in
-the middle. Such a desired snapshot returns stable
-`column_physical_order:...` unsupported reasons before a bundle is written.
-Append new declarative columns after retained columns, or deliberately design a
-replacement-table migration outside the current structural planner boundary.
+the middle. onwardpg preserves the observed positions and reports stable
+`column_physical_order:...` compatibility evidence, but does not treat visual
+source-file order as semantic schema inequality. New columns are appended; a
+developer who genuinely depends on positional rows must review that evidence.
 
 Partition children are graph-modeled. The planner supports an explicit attach
 or detach of an existing range/list/hash/default child and marks the

@@ -24,8 +24,8 @@ The planner's core safety rules are:
   preferred `plan` command excludes it and requires the remaining accepted
   history to form one valid chain before planning begins. The lower-level
   `draft --after` interface retains an exact predecessor assertion;
-- reject declarative physical column reordering that PostgreSQL cannot perform
-  with `ALTER TABLE`, with a stable `column_physical_order` unsupported reason;
+- retain declarative physical column-order differences as stable compatibility
+  evidence without forcing dangerous replacement-table migrations;
 - preserve execution constraints through explicit transactional batches; and
 - surface destructive, lock, rewrite, validation, and availability concerns as
   statement safety/hazard metadata for review.

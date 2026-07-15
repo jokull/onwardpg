@@ -42,11 +42,10 @@ type Options struct {
 	// as permission to contract the caller-owned database. Exact clone
 	// verification and durable history planning keep this false.
 	PreserveSurplus bool
-	// IgnoreColumnPhysicalOrder permits a development workspace to retain a
-	// PostgreSQL column order that cannot be reached with ALTER TABLE. The
-	// planner still creates required appended columns and records the exact
-	// mismatch in Result.Compatibility; strict planning never enables this.
-	IgnoreColumnPhysicalOrder bool
+	// DirectColumnRenames is set only for caller-owned development-catalog
+	// reconciliation. A confirmed rename becomes one immediate ALTER TABLE
+	// instead of the rolling-deployment bridge required by durable bundles.
+	DirectColumnRenames bool
 	// IdentityHints are explicit, validated assertions supplied by the caller
 	// before rename candidacy. They are never inferred from a schema diff.
 	IdentityHints []protocol.Hint
@@ -250,7 +249,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return result, nil
 	}
 	changes, extensionMoves := resolveExtensionMoves(changes)
-	changes, columnRenames, columnRenameQuestions, columnRenameUnsupported, err := resolveColumnRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint)
+	changes, columnRenames, columnRenameQuestions, columnRenameUnsupported, err := resolveColumnRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint, options.DirectColumnRenames, options.PreserveSurplus)
 	if err != nil {
 		return protocol.Result{}, err
 	}
@@ -281,12 +280,8 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		changes, result.Preserved = preserveSurplus(changes)
 	}
 	if unreachable := unreachableColumnPhysicalOrder(current, desired, tableRenames, columnRenames); len(unreachable) > 0 {
-		if options.IgnoreColumnPhysicalOrder {
-			result.Compatibility = append(result.Compatibility, unreachable...)
-			sort.Strings(result.Compatibility)
-		} else {
-			return unsupportedResult(result, resolver, unreachable)
-		}
+		result.Compatibility = append(result.Compatibility, unreachable...)
+		sort.Strings(result.Compatibility)
 	}
 	droppingSchemas, droppingTables := droppingParents(changes)
 	questions, approvedDrops, err := destructiveQuestions(changes, droppingSchemas, droppingTables, resolver, currentFingerprint, desiredFingerprint)
@@ -474,6 +469,12 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
 			continue
 		}
+		if options.DirectColumnRenames {
+			for _, statement := range renderDirectColumnRename(rename) {
+				appendStatement(&result, statement)
+			}
+			continue
+		}
 		for _, statement := range renderColumnRename(rename) {
 			appendStatement(&result, statement)
 		}
@@ -525,12 +526,10 @@ func preserveSurplus(changes []change.Change) ([]change.Change, []string) {
 }
 
 // unreachableColumnPhysicalOrder identifies declarative column positions that
-// PostgreSQL cannot reach with ALTER TABLE. Dropped attributes disappear from
-// onwardpg's dense live-column ordinal, but retained columns cannot change
-// relative order and new columns append after them. Treating those snapshots
-// as equivalent would silently discard observable catalog state; allowing the
-// plan to proceed would fail only after clone execution with an opaque
-// fingerprint mismatch.
+// PostgreSQL cannot reach with ALTER TABLE. The planner keeps these as visible
+// compatibility evidence, while semantic equality and convergence ignore the
+// ordinal: replacing a table merely to match source-file layout would be a
+// disproportionate and dangerous migration.
 func unreachableColumnPhysicalOrder(current, desired *pgschema.Snapshot, tableRenames []renameTable, columnRenames []renameColumn) []string {
 	tableTargets := make(map[pgschema.ID]pgschema.ID)
 	for _, object := range current.Objects() {
@@ -1261,7 +1260,7 @@ func renderExtensionMove(move moveExtension) protocol.Statement {
 	return statement(sql, "contract", "review", true, "extension_schema_move")
 }
 
-func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]change.Change, []renameColumn, []protocol.Question, []string, error) {
+func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, direct, preserveSurplus bool) ([]change.Change, []renameColumn, []protocol.Question, []string, error) {
 	var drops, creates []change.Change
 	for _, item := range changes {
 		if item.ID.Kind != pgschema.KindColumn {
@@ -1294,7 +1293,11 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 		for _, candidate := range candidates {
 			choices = append(choices, candidate.ID.String())
 		}
-		choices = append(choices, "create")
+		fallback := "create"
+		if preserveSurplus {
+			fallback = "preserve"
+		}
+		choices = append(choices, fallback)
 		question := protocol.Question{
 			ID: "rename_column:" + drop.ID.String(), Kind: "rename_column", Key: drop.ID.String(),
 			Message:            "Which desired column, if any, is the new identity of " + drop.ID.String() + "?",
@@ -1309,7 +1312,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 			questions = append(questions, question)
 			continue
 		}
-		if answer != "create" {
+		if answer != "create" && answer != "preserve" {
 			var candidate change.Change
 			for _, possible := range candidates {
 				if possible.ID.String() == answer {
@@ -1324,7 +1327,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 				return nil, nil, nil, nil, fmt.Errorf("desired column %s was selected as more than one rename target", candidate.ID)
 			}
 			to := candidate.After.(pgschema.Column)
-			if reason := columnTriggerBridgeUnsupported(current, desired, from, to); reason != "" {
+			if reason := columnTriggerBridgeUnsupported(current, desired, from, to); !direct && reason != "" {
 				return nil, nil, nil, []string{"single_deployment_column_bridge_required:" + drop.ID.String() + ":" + reason}, nil
 			}
 			consumed[drop.ID], consumed[candidate.ID] = true, true
@@ -1372,6 +1375,10 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 
 func equivalentColumnForRename(from, to pgschema.Column) bool {
 	from.Name, to.Name = "", ""
+	// ADD COLUMN appends physically, so a column first introduced earlier in a
+	// feature may have a different catalog ordinal from its final declarative
+	// placement. Position is evidence, not column identity.
+	from.Position, to.Position = 0, 0
 	from.Comment, to.Comment = nil, nil
 	return reflect.DeepEqual(from, to)
 }
@@ -1730,6 +1737,21 @@ func renderColumnRename(rename renameColumn) []protocol.Statement {
 			value = literal(*rename.to.Comment)
 		}
 		statements = append(statements, statement("COMMENT ON COLUMN "+table+"."+quote(rename.to.Name)+" IS "+value+";", "contract", "safe", true))
+	}
+	return statements
+}
+
+func renderDirectColumnRename(rename renameColumn) []protocol.Statement {
+	table := qualified(rename.from.Table.Schema, rename.from.Table.Name)
+	statements := []protocol.Statement{
+		statement("ALTER TABLE "+table+" RENAME COLUMN "+quote(rename.from.Name)+" TO "+quote(rename.to.Name)+";", "expand", "review", true, "access_exclusive_lock"),
+	}
+	if !reflect.DeepEqual(rename.from.Comment, rename.to.Comment) {
+		value := "NULL"
+		if rename.to.Comment != nil {
+			value = literal(*rename.to.Comment)
+		}
+		statements = append(statements, statement("COMMENT ON COLUMN "+table+"."+quote(rename.to.Name)+" IS "+value+";", "expand", "safe", true))
 	}
 	return statements
 }

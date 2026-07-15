@@ -329,6 +329,14 @@ reconciliation. Workspace mode preserves surplus development objects so merely
 switching branches does not suggest drops. The developer or agent decides what
 is appropriate to apply locally; onwardpg never does it automatically.
 
+If you already applied an unmerged column and then rename it in code, the two
+comparisons deliberately diverge. The durable H → W bundle collapses the
+abandoned name and adds only the final column. D → W asks whether the applied
+development column was renamed; after an explicit `--dev-hint`, its local SQL
+is one direct `ALTER TABLE … RENAME COLUMN`. Choosing `preserve` instead keeps
+the old development column. No intermediate name leaks into the production
+plan, and no local column is renamed by guesswork.
+
 Production is not consulted for every PR. An occasional read-only audit can
 surface drift that accumulated outside the accepted chain:
 
