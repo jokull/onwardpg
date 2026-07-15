@@ -14,24 +14,20 @@ that no database catalog contains.
 onwardpg plans one forward-only migration bundle around exactly one application
 deployment:
 
-```text
-accepted migration history + authoritative exported CREATE DDL
-                              │
-                              ▼
-                         expand.sql
-                              │
-                              ▼
-                   deploy one app version
-                              │
-              old and new instances overlap while
-              requests, workers, pools, and queues drain
-                              │
-                              ▼
-                        contract.sql
-                              │
-                              ▼
-                         desired schema
-```
+1. **Compare** accepted migration history with the authoritative exported
+   `CREATE`-statement DDL.
+
+2. **Expand** by running `expand.sql` while the old application is still live.
+
+3. **Deploy** one application version against the compatible expanded schema.
+
+4. **Drain** old instances, requests, workers, connection pools, queues, and
+   stale write paths.
+
+5. **Contract** by running `contract.sql` only after the old application is
+   gone.
+
+6. **Converge** on the desired schema with no residual diff.
 
 `expand.sql` must be safe while the old application is live. `contract.sql`
 runs after old instances and write paths are gone. The newly deployed version
