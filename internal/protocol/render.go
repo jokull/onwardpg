@@ -123,12 +123,13 @@ func phaseComment(phase string) []string {
 			"-- ============================================================================",
 			"-- EXPAND — run before deploying application code that relies on the new shape.",
 			"-- Keep this compatible with the application version currently in production.",
+			"-- Transactional and non-transactional batches are marked below; this phase is not split by transaction.",
 			"-- ============================================================================",
 		}
 	case "migrate":
 		return []string{
 			"-- ============================================================================",
-			"-- MIGRATE — run after compatible code is deployed; review data and lock hazards.",
+			"-- MIGRATE — a deployment boundary after compatible code is deployed, not an EXPAND transaction split.",
 			"-- Add any application-specific backfill here or run it separately and observe it.",
 			"-- onwardpg never invents a cast or data transform that schema state cannot prove.",
 			"-- ============================================================================",

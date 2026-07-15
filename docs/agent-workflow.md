@@ -87,6 +87,11 @@ onwardpg writes generated SQL in separate `expand.sql`, `migrate.sql`, and
 comments. The generated structural SQL closes the catalog diff. Product-aware
 work belongs in the ordinary editable phase files.
 
+The filenames describe deployment timing, not SQL transaction scopes.
+`expand.sql` itself declares transactional and non-transactional batches.
+`migrate.sql` appears only when work must be reviewed and run after compatible
+code is deployed, before the eventual contract.
+
 For example, after choosing a manual type conversion, the agent edits the
 generated TODO rather than encoding an orchestration language in JSON:
 

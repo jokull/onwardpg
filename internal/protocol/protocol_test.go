@@ -214,13 +214,14 @@ func TestRenderSQLIncludesPhaseAndBatchGuidance(t *testing.T) {
   -- ============================================================================
   -- EXPAND — run before deploying application code that relies on the new shape.
   -- Keep this compatible with the application version currently in production.
+  -- Transactional and non-transactional batches are marked below; this phase is not split by transaction.
   -- ============================================================================
   -- onwardpg:batch transactional
   -- Batch batch-001: transactional.
   CREATE TABLE x ();
 
   -- ============================================================================
-  -- MIGRATE — run after compatible code is deployed; review data and lock hazards.
+  -- MIGRATE — a deployment boundary after compatible code is deployed, not an EXPAND transaction split.
   -- Add any application-specific backfill here or run it separately and observe it.
   -- onwardpg never invents a cast or data transform that schema state cannot prove.
   -- ============================================================================
@@ -272,7 +273,7 @@ func TestRenderSQLIncludesProductSpecificNonTransactionalBoundary(t *testing.T) 
 		Statements: []Statement{{SQL: "-- PRODUCT-SPECIFIC SQL: build concurrently\nCREATE INDEX CONCURRENTLY idx ON items (id);", Phase: "migrate", Safety: "manual"}},
 	}}}
 	rendered := RenderSQL(result, "")
-	if !strings.Contains(rendered, "-- MIGRATE — run after compatible code is deployed") || !strings.Contains(rendered, "-- Batch batch-004: non-transactional; execute outside BEGIN/COMMIT.") || !strings.Contains(rendered, "CREATE INDEX CONCURRENTLY") {
+	if !strings.Contains(rendered, "-- MIGRATE — a deployment boundary after compatible code is deployed") || !strings.Contains(rendered, "-- Batch batch-004: non-transactional; execute outside BEGIN/COMMIT.") || !strings.Contains(rendered, "CREATE INDEX CONCURRENTLY") {
 		t.Fatalf("manual SQL rendering lost execution guidance: %q", rendered)
 	}
 }

@@ -17,7 +17,7 @@ accepted history
 EXPAND       add the new interface without removing the old one
       │      old and new application versions can overlap here
       ▼
-MIGRATE      validate and run product-specific data work
+MIGRATE      a deployment boundary for product-specific data work
       │
       ▼
 CONTRACT     remove the old interface after stale code is gone
@@ -61,6 +61,12 @@ coding agent carrying the product and feature context.
 The extension point is ordinary SQL, not an orchestration DSL. onwardpg may
 leave a clearly marked backfill pocket in `migrate.sql`; the agent edits that
 file and adds Boolean assertions to `verify.sql`.
+
+`migrate.sql` is not a way to split `expand.sql` around a `BEGIN` block. Each
+file already carries explicit transactional and non-transactional batch
+markers. `migrate` exists because data work normally belongs after compatible
+code (often dual writes) is deployed and before destructive cleanup. It is
+only written when that boundary has work.
 
 ## Developer-preview boundary
 
@@ -195,9 +201,9 @@ migrations/onward/primary/customer-profile/
 ├── plan.json           # generated operations, batches, and hazards
 ├── verify.sql          # agent-owned Boolean assertions
 └── phases/
-    ├── expand.sql
-    ├── migrate.sql
-    └── contract.sql
+    ├── expand.sql         # present when the plan has expand work
+    ├── migrate.sql        # present only for migrate/data-work batches
+    └── contract.sql       # present when the plan has delayed cleanup
 ```
 
 That is the entire basic loop: export DDL, run `plan`, review ordinary SQL,
@@ -305,7 +311,9 @@ timing.
 ## How the three phases live in a deployment
 
 onwardpg produces a rollout artifact. It deliberately does not become the
-deployment runner or environment journal.
+deployment runner or environment journal. The three files are deployment
+boundaries, while the batch comments *inside* each file describe whether a
+statement can run in a transaction.
 
 A typical handoff is:
 

@@ -39,13 +39,19 @@ Generated operations are classified and rendered into readable phase files:
 | Phase | Typical work | Deployment meaning |
 | --- | --- | --- |
 | Expand | additive columns, compatible tables/indexes, `NOT VALID` constraints | run before code that needs the new shape |
-| Migrate | data movement, backfills, validation, agent-edited product SQL | run while old and new application paths coexist |
+| Migrate | data movement, backfills, validation, agent-edited product SQL | a post-deploy boundary while old and new application paths coexist; not a transaction split |
 | Contract | destructive cleanup and final restrictions | delay until compatibility window is complete |
 
 Comments identify transactional boundaries, required non-transactional batches,
 locking/rewrite hazards, and sequencing. Review the files as deployment SQL;
 their application remains the responsibility of the person or system with
 deployment visibility.
+
+`migrate.sql` is a deployment-time hand-off, not a way to put a transaction
+boundary inside `expand.sql`. An expand file may contain one or more explicit
+transactional and non-transactional batches. A migrate file exists only when
+the plan has work that belongs after compatible application code is deployed:
+for example an agent-reviewed backfill, validation, or an online operation.
 
 ## Development without pretending it is history
 
