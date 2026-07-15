@@ -24,7 +24,6 @@ func TestAcceptedStepsSinceInventoriesStructuralAndUnprovableWork(t *testing.T) 
 					Phases: map[string]bundle.PhaseArtifact{
 						"contract": {Path: "phases/contract.sql"},
 						"expand":   {Path: "phases/expand.sql"},
-						"migrate":  {Path: "phases/migrate.sql"},
 					},
 				}},
 			},
@@ -34,8 +33,8 @@ func TestAcceptedStepsSinceInventoriesStructuralAndUnprovableWork(t *testing.T) 
 					PhaseSource:        "edited",
 					VerificationDigest: "sha256:assertions",
 					Phases: map[string]bundle.PhaseArtifact{
-						"expand":  {Path: "phases/expand.sql"},
-						"migrate": {Path: "phases/migrate.sql"},
+						"expand":   {Path: "phases/expand.sql"},
+						"contract": {Path: "phases/contract.sql"},
 					},
 				}},
 			},
@@ -43,7 +42,7 @@ func TestAcceptedStepsSinceInventoriesStructuralAndUnprovableWork(t *testing.T) 
 	}
 
 	steps := acceptedStepsSince(chain, parent)
-	if len(steps) != 6 {
+	if len(steps) != 5 {
 		t.Fatalf("steps = %#v", steps)
 	}
 	want := map[string]struct {
@@ -51,10 +50,9 @@ func TestAcceptedStepsSinceInventoriesStructuralAndUnprovableWork(t *testing.T) 
 		review bool
 	}{
 		"generated-upstream/phases/expand.sql":   {"generated_structural_phase", false},
-		"generated-upstream/phases/migrate.sql":  {"generated_migrate_or_manual_phase", true},
-		"generated-upstream/phases/contract.sql": {"generated_structural_phase", false},
+		"generated-upstream/phases/contract.sql": {"generated_contract_phase", true},
 		"edited-upstream/phases/expand.sql":      {"agent_authored_phase", true},
-		"edited-upstream/phases/migrate.sql":     {"agent_authored_phase", true},
+		"edited-upstream/phases/contract.sql":    {"agent_authored_phase", true},
 		"edited-upstream/verify.sql":             {"verification_assertions", true},
 	}
 	for _, step := range steps {

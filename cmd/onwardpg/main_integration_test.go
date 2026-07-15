@@ -229,7 +229,7 @@ CREATE INDEX customer_profiles_account_id_idx ON app.customer_profiles (account_
 		t.Fatal(err)
 	}
 	joined := ""
-	for _, phase := range []string{"expand", "migrate", "contract"} {
+	for _, phase := range []string{protocol.PhaseExpand, protocol.PhaseContract} {
 		if receipt, exists := first.Manifest.Phases[phase]; exists {
 			joined += string(first.Files[receipt.Path])
 		}
@@ -994,7 +994,16 @@ WHERE table_schema = 'app'
   AND table_name = 'customer_events'
   AND column_name = 'occurred_at';
 `
-	writeTestFile(t, featurePath, "phases/migrate.sql", conversionSQL)
+	generatedExpand, err := os.ReadFile(filepath.Join(featurePath, "phases", "expand.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, featurePath, "phases/expand.sql", replaceFirstEditPocket(t, string(generatedExpand), "-- The deployed application accepts timestamp and date values until contract completes."))
+	generatedContract, err := os.ReadFile(filepath.Join(featurePath, "phases", "contract.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, featurePath, "phases/contract.sql", replaceFirstEditPocket(t, string(generatedContract), conversionSQL))
 	writeTestFile(t, featurePath, "verify.sql", conversionVerification)
 	unreceiptedBeforeRestack := captureStdout(t, func() int {
 		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename", "--check"}, repository)
@@ -1081,16 +1090,16 @@ WHERE table_schema = 'app'
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseMigrate := string(secondRestackedArtifact.Files["phases/migrate.sql"])
-	if !strings.Contains(baseMigrate, `"occurred_at"::date`) {
-		t.Fatalf("restack lost product conversion SQL: %s", baseMigrate)
+	baseContract := string(secondRestackedArtifact.Files["phases/contract.sql"])
+	if !strings.Contains(baseContract, `"occurred_at"::date`) {
+		t.Fatalf("restack lost product conversion SQL: %s", baseContract)
 	}
-	migrateSQL := baseMigrate + `
+	contractSQL := baseContract + `
 -- Product-aware work owned by the feature agent.
 CREATE TEMP TABLE onwardpg_agent_receipt (value text NOT NULL);
 INSERT INTO onwardpg_agent_receipt (value) VALUES ('customer-rename');
 `
-	writeTestFile(t, featurePath, "phases/migrate.sql", migrateSQL)
+	writeTestFile(t, featurePath, "phases/contract.sql", contractSQL)
 	writeTestFile(t, featurePath, "verify.sql", conversionVerification+`-- onwardpg:assert agent_sql_ran
 SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 `)
@@ -1120,7 +1129,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receiptedArtifact.Manifest.PhaseSource != "edited" || receiptedArtifact.Manifest.VerificationDigest == "" || string(receiptedArtifact.Files["phases/migrate.sql"]) != migrateSQL {
+	if receiptedArtifact.Manifest.PhaseSource != "edited" || receiptedArtifact.Manifest.VerificationDigest == "" || string(receiptedArtifact.Files["phases/contract.sql"]) != contractSQL {
 		t.Fatalf("receipted edited artifact = %#v", receiptedArtifact.Manifest)
 	}
 	checked := captureStdout(t, func() int {
@@ -1162,7 +1171,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	}
 	defer devConnection.Close(context.Background())
 	for _, entry := range chain.Entries {
-		for _, phase := range []string{"expand", "migrate", "contract"} {
+		for _, phase := range []string{protocol.PhaseExpand, protocol.PhaseContract} {
 			receipt, exists := entry.Artifact.Manifest.Phases[phase]
 			if !exists {
 				continue
@@ -1205,7 +1214,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(refreshedArtifact.Files["phases/migrate.sql"]) != migrateSQL || string(refreshedArtifact.Files["verify.sql"]) != string(receiptedArtifact.Files["verify.sql"]) {
+	if string(refreshedArtifact.Files["phases/contract.sql"]) != contractSQL || string(refreshedArtifact.Files["verify.sql"]) != string(receiptedArtifact.Files["verify.sql"]) {
 		t.Fatalf("same-bundle redraft lost agent-owned SQL: %#v", refreshedArtifact.Manifest)
 	}
 	foundNote := false
@@ -1265,7 +1274,7 @@ SELECT count(*) = 1 FROM onwardpg_agent_receipt WHERE value = 'customer-rename';
 	if !strings.Contains(string(preservedExpand), "Agent-owned rollout note") || strings.Contains(string(preservedExpand), "timezone") {
 		t.Fatalf("conflict handoff overwrote current SQL: %s", preservedExpand)
 	}
-	mergedExpand := *conflict.NewGeneratedSQL + "\n-- Agent-owned rollout note retained across regeneration.\n"
+	mergedExpand := replaceFirstEditPocket(t, *conflict.NewGeneratedSQL, "-- The deployed application accepts timestamp and date values until contract completes.") + "\n-- Agent-owned rollout note retained across regeneration.\n"
 	writeTestFile(t, featurePath, conflict.Path, mergedExpand)
 	resolvedOutput := captureStdout(t, func() int {
 		return runVerifyAt([]string{"--target", "primary", "--bundle", "customer-rename"}, repository)
@@ -1318,7 +1327,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := json.Unmarshal([]byte(drafted.stdout), &handoff); err != nil {
 		t.Fatal(err)
 	}
-	if handoff.ProtocolVersion != draftflow.Version || handoff.Status != string(protocol.NeedsSQLEdits) || len(handoff.Edit) != 1 || handoff.Edit[0] != "phases/migrate.sql" {
+	if handoff.ProtocolVersion != draftflow.Version || handoff.Status != string(protocol.NeedsSQLEdits) || !reflect.DeepEqual(handoff.Edit, []string{"phases/contract.sql", "phases/expand.sql"}) {
 		t.Fatalf("handoff = %#v", handoff)
 	}
 	bundlePath := filepath.Join(repository, filepath.FromSlash(handoff.Path))
@@ -1326,16 +1335,17 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if artifact.Manifest.State != string(protocol.NeedsSQLEdits) || !strings.Contains(string(artifact.Files["phases/migrate.sql"]), "ONWARDPG TODO") {
+	if artifact.Manifest.State != string(protocol.NeedsSQLEdits) || !strings.Contains(string(artifact.Files["phases/expand.sql"]), "ONWARDPG TODO") || !strings.Contains(string(artifact.Files["phases/contract.sql"]), "ONWARDPG TODO") {
 		t.Fatalf("incomplete bundle = %#v", artifact.Manifest)
 	}
 	todoCheck := captureStdout(t, func() int {
 		return runVerifyAt([]string{"--target", "primary", "--bundle", "event-date", "--check"}, repository)
 	})
-	if todoCheck.code != 4 || !strings.Contains(todoCheck.stdout, `"code":"unresolved_sql_todo"`) || !strings.Contains(todoCheck.stdout, "phases/migrate.sql") {
+	if todoCheck.code != 4 || !strings.Contains(todoCheck.stdout, `"code":"unresolved_sql_todo"`) {
 		t.Fatalf("TODO check = %d, %s", todoCheck.code, todoCheck.stdout)
 	}
-	writeTestFile(t, bundlePath, "phases/migrate.sql", "ALTER TABLE app.events ALTER COLUMN occurred_on TYPE date USING occurred_on::date;\n")
+	writeTestFile(t, bundlePath, "phases/expand.sql", replaceFirstEditPocket(t, string(artifact.Files["phases/expand.sql"]), "-- The deployed application accepts both text and date until contract completes."))
+	writeTestFile(t, bundlePath, "phases/contract.sql", replaceFirstEditPocket(t, string(artifact.Files["phases/contract.sql"]), "ALTER TABLE app.events ALTER COLUMN occurred_on TYPE date USING occurred_on::date;"))
 	verified := captureStdout(t, func() int {
 		return runVerifyAt([]string{"--target", "primary", "--bundle", "event-date"}, repository)
 	})
@@ -1583,7 +1593,7 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending.ProtocolVersion != "onwardpg.dev-plan/v4" || pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
+	if pending.ProtocolVersion != "onwardpg.dev-plan/v5" || pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
 		t.Fatalf("pending = %#v", pending)
 	}
 	var renameHint *protocol.Hint
@@ -1610,7 +1620,7 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 	if err := json.Unmarshal([]byte(plannedOutput.stdout), &planned); err != nil {
 		t.Fatal(err)
 	}
-	if planned.ProtocolVersion != "onwardpg.dev-plan/v4" || planned.Status != protocol.Planned || len(planned.Statements) == 0 || planned.Statements[0].Phase != "contract" {
+	if planned.ProtocolVersion != "onwardpg.dev-plan/v5" || planned.Status != protocol.Planned || len(planned.Statements) != 3 || planned.Statements[0].Phase != protocol.PhaseExpand || planned.Statements[1].Phase != protocol.PhaseContract {
 		t.Fatalf("planned = %#v", planned)
 	}
 	var oldExists, newExists bool
@@ -1641,7 +1651,7 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 	if err := json.Unmarshal([]byte(residualOutput.stdout), &residual); err != nil {
 		t.Fatal(err)
 	}
-	if residual.ProtocolVersion != "onwardpg.dev-plan/v4" || residual.Status != "no_changes" || residual.Changed || residual.CurrentFingerprint != residual.DesiredFingerprint {
+	if residual.ProtocolVersion != "onwardpg.dev-plan/v5" || residual.Status != "no_changes" || residual.Changed || residual.CurrentFingerprint != residual.DesiredFingerprint {
 		t.Fatalf("residual = %#v", residual)
 	}
 }
@@ -1962,6 +1972,25 @@ func writeHistoryContractDropFixture(t *testing.T, root, devURL, id string) {
 	if err := bundle.Write(filepath.Join(root, "onward-bundles", "primary", id), artifact, bundle.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func replaceFirstEditPocket(t *testing.T, body, replacement string) string {
+	t.Helper()
+	begin := strings.Index(body, "-- onwardpg:edit begin ")
+	if begin < 0 {
+		t.Fatalf("generated phase has no editable pocket:\n%s", body)
+	}
+	content := strings.Index(body[begin:], "\n")
+	if content < 0 {
+		t.Fatalf("editable pocket begin marker has no content:\n%s", body)
+	}
+	content += begin + 1
+	end := strings.Index(body[content:], "-- onwardpg:edit end ")
+	if end < 0 {
+		t.Fatalf("editable pocket has no end marker:\n%s", body)
+	}
+	end += content
+	return body[:content] + strings.TrimSpace(replacement) + "\n" + body[end:]
 }
 
 func disposableDatabaseCount(t *testing.T, url string) int {

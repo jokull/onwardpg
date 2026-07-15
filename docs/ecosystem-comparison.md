@@ -71,7 +71,7 @@ versions turns a single-shot `ALTER` into a broken deploy. Every pure
 state-diff planner—Migra, pgmig, Stripe pg-schema-diff—hands over the endpoint
 and leaves phasing to the caller; the ORMs offer partial online helpers
 (Django's concurrent-index and `NOT VALID` operations) but no
-application-spanning expand/migrate/contract sequence. onwardpg makes the
+one-deployment expand/contract sequence. onwardpg makes the
 phased window the primary artifact. The cost is scope honesty: it automates
 only a subset of transitions today and blocks the rest instead of labeling a
 breaking cutover “safe.”
@@ -88,7 +88,7 @@ a tool with no answer here is unfinished.
 work.** The regenerate camp's failure mode is that “drop the migration and run
 generate again”—or Prisma's shadow-database reset—discards hand-authored data
 migrations and assertions along with the stale diff. onwardpg regenerates the
-*bundle* against the new base while preserving agent-owned `migrate.sql` and
+*bundle* against the new base while preserving agent-owned edit pockets and
 `verify.sql` and still-valid decisions, invalidating only what actually
 changed. Lossless restacking is the whole point; a regeneration that throws
 away the backfill someone wrote is a step behind even a merge node.
@@ -293,7 +293,7 @@ Its workflow makes different choices:
 
 - names are object identity, so a rename becomes drop/add;
 - a plan is a flat statement list, not an application-spanning
-  expand/migrate/contract sequence;
+  one-deployment expand/contract sequence;
 - hazards warn or gate execution but do not capture missing developer intent;
 - its catalog fetch is explicitly non-atomic;
 - unknown object families are generally outside its model; onwardpg explicitly

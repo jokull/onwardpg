@@ -10,7 +10,16 @@ import (
 	"strings"
 )
 
-const Version = "onwardpg.plan/v1"
+const Version = "onwardpg.plan/v2"
+
+const (
+	PhaseExpand   = "expand"
+	PhaseContract = "contract"
+)
+
+func ValidPhase(phase string) bool {
+	return phase == PhaseExpand || phase == PhaseContract
+}
 
 type Status string
 
@@ -64,9 +73,9 @@ type Statement struct {
 	SQL     string   `json:"sql"`
 	Safety  string   `json:"safety"`
 	Hazards []string `json:"hazards,omitempty"`
-	// Phase allows a caller to split a forward migration across compatible
-	// application releases. "expand" is additive/compatible work; "contract"
-	// needs an explicit review after old application code is gone.
+	// Phase places work on one side of exactly one application deployment.
+	// "expand" must be safe for the currently running code; "contract" runs
+	// only after pre-deployment instances and write paths have drained.
 	Phase string `json:"phase"`
 	// Timeouts are review guidance for the eventual executor. onwardpg never
 	// applies them or any migration SQL to a caller database.

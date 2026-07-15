@@ -9,18 +9,18 @@ The normal loop is intentionally small:
 
 ```sh
 # Once per target.
-onwardpg init --target primary
+onwardpg init
 
 # Start a feature migration, then repeat after every schema edit or rebase.
-onwardpg plan profile-name --target primary
-onwardpg plan --target primary
+onwardpg plan profile-name
+onwardpg plan
 
 # Copy only the direct local reconciliation when it is useful for development.
-onwardpg plan --target primary --output sql
+onwardpg plan --output sql
 
 # Before review or CI.
-onwardpg verify --target primary
-onwardpg status --target primary
+onwardpg verify
+onwardpg status
 ```
 
 `init` establishes accepted history. The first `plan NAME` creates a
@@ -51,7 +51,7 @@ a compatibility difference while adding required columns at the reachable end.
 It never relaxes strict H → W clone convergence.
 
 Production is deliberately outside the per-PR critical path. Run
-`onwardpg drift check --target primary --database "$PROD_URL"` periodically or
+`onwardpg drift check --database "$PROD_URL"` periodically or
 after an incident; resolve a finding with a reviewed forward migration.
 
 ## Decision loop
@@ -62,7 +62,7 @@ onwardpg exits `2` with the smallest typed decision it needs. The agent may
 supply a known decision on the first call or copy a proposed choice:
 
 ```sh
-onwardpg plan profile-name --target primary \
+onwardpg plan profile-name \
   --hint '{"kind":"rename","object":"column","from":["app","users","name"],"to":["app","users","display_name"]}'
 ```
 
@@ -82,15 +82,16 @@ drop candidates.
 
 ## SQL handoff: take the last mile in the bundle
 
-onwardpg writes generated SQL in separate `expand.sql`, `migrate.sql`, and
-`contract.sql` phase files, with batch, lock, rewrite, validation, and timing
+onwardpg writes generated SQL in `expand.sql` and `contract.sql`, with batch,
+lock, rewrite, validation, and timing
 comments. The generated structural SQL closes the catalog diff. Product-aware
 work belongs in the ordinary editable phase files.
 
-The filenames describe deployment timing, not SQL transaction scopes.
-`expand.sql` itself declares transactional and non-transactional batches.
-`migrate.sql` appears only when work must be reviewed and run after compatible
-code is deployed, before the eventual contract.
+The filenames surround exactly one application deployment; they do not describe
+SQL transaction scopes. Each file declares its own transactional and
+non-transactional batches. Product-aware initial synchronization belongs in
+expand when it is safe with old code live; final catch-up and enforcement
+belong in contract after old writers drain.
 
 For example, after choosing a manual type conversion, the agent edits the
 generated TODO rather than encoding an orchestration language in JSON:
@@ -105,7 +106,7 @@ WHERE settled_on IS NULL;
 Add boolean assertions in `verify.sql` when useful. Then run:
 
 ```sh
-onwardpg verify --target primary
+onwardpg verify
 ```
 
 Verification executes exact bundle bytes only in onwardpg-created disposable
@@ -119,15 +120,14 @@ The agent uses Git to learn that new migrations arrived; onwardpg does not need
 Git to prove a migration chain. After rebase, run the same command:
 
 ```sh
-onwardpg plan --target primary
+onwardpg plan
 ```
 
 onwardpg validates the content-addressed accepted history, replays its current
 head, and rebuilds the existing PlanID as H(new) → W. It preserves only
-still-valid answers and inventories every incoming phase: generated structural
-work is distinct from `migrate`/`manual`, agent-authored, and assertion work
-that cannot prove its data or operational effects from catalogs. It never
-silently replays or declares that work safe.
+still-valid answers. Edits inside stable pockets are transplanted into refreshed
+generated SQL; generator-owned conflicts stop with all three phase versions.
+It never silently replays or declares application data work safe.
 
 If a new base migration needs manual data work, review its receipt and use the
 team’s normal process to apply it to the development database before relying on
@@ -149,7 +149,7 @@ replay a phase or infer a product-data repair. Unmarked verification assertions
 remain disposable-clone-only.
 
 If a normal branch switch removes the active bundle from the checkout, invoke
-`onwardpg plan OTHER-NAME --target primary`. onwardpg parks the absent local
+`onwardpg plan OTHER-NAME`. onwardpg parks the absent local
 PlanID and restores a parked identity if that named bundle returns later. It
 blocks rather than creating a second mutable plan when the current bundle is
 still present. This is filesystem-local ergonomics, not Git-derived proof.

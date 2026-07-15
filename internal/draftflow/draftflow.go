@@ -25,7 +25,7 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg.draft/v4"
+const Version = "onwardpg.draft/v5"
 
 type Finding struct {
 	Code        string `json:"code"`
@@ -599,7 +599,7 @@ func orderedPhaseNames(phases map[string]bundle.PhaseArtifact) []string {
 	for phase := range phases {
 		names = append(names, phase)
 	}
-	rank := map[string]int{"expand": 0, "migrate": 1, "manual": 2, "contract": 3}
+	rank := map[string]int{protocol.PhaseExpand: 0, protocol.PhaseContract: 1}
 	sort.Slice(names, func(i, j int) bool {
 		left, leftKnown := rank[names[i]]
 		right, rightKnown := rank[names[j]]
@@ -621,9 +621,9 @@ func classifyAcceptedPhase(bundleID, phase, path, phaseSource string) AcceptedSt
 		step.Kind = "agent_authored_phase"
 		step.Reason = "agent_authored_sql_may_include_data_or_operational_work_not_provable_from_catalog"
 		step.RequiresReview = true
-	case phase == "migrate" || phase == "manual":
-		step.Kind = "generated_migrate_or_manual_phase"
-		step.Reason = "phase_may_include_validation_or_other_effects_not_provable_from_catalog"
+	case phase == protocol.PhaseContract:
+		step.Kind = "generated_contract_phase"
+		step.Reason = "contract_may_include_post_drain_validation_cleanup_or_data_effects_not_provable_from_catalog"
 		step.RequiresReview = true
 	default:
 		step.Kind = "generated_structural_phase"

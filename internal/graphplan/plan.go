@@ -1258,7 +1258,7 @@ func resolveExtensionMoves(changes []change.Change) ([]change.Change, []moveExte
 
 func renderExtensionMove(move moveExtension) protocol.Statement {
 	sql := "ALTER EXTENSION " + quote(move.from.Name) + " SET SCHEMA " + quote(move.to.Schema) + ";"
-	return statement(sql, "migrate", "review", true, "extension_schema_move")
+	return statement(sql, "contract", "review", true, "extension_schema_move")
 }
 
 func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]change.Change, []renameColumn, []protocol.Question, []string, error) {
@@ -1324,6 +1324,9 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 				return nil, nil, nil, nil, fmt.Errorf("desired column %s was selected as more than one rename target", candidate.ID)
 			}
 			to := candidate.After.(pgschema.Column)
+			if reason := columnTriggerBridgeUnsupported(current, desired, from, to); reason != "" {
+				return nil, nil, nil, []string{"single_deployment_column_bridge_required:" + drop.ID.String() + ":" + reason}, nil
+			}
 			consumed[drop.ID], consumed[candidate.ID] = true, true
 			// PostgreSQL rewrites catalog references to a renamed column.  Keep
 			// only modifications which are exactly that automatic rewrite out of
@@ -1371,6 +1374,82 @@ func equivalentColumnForRename(from, to pgschema.Column) bool {
 	from.Name, to.Name = "", ""
 	from.Comment, to.Comment = nil, nil
 	return reflect.DeepEqual(from, to)
+}
+
+// columnTriggerBridgeUnsupported bounds the automatic one-deployment column
+// rename strategy. Expand temporarily exposes both names and a BEFORE trigger
+// keeps their values identical. Contract drops the shadow and performs the
+// native rename on the original column, preserving its position and all
+// OID-backed dependencies. Anything that could change trigger ordering,
+// privilege semantics, or value generation stays explicit unsupported state.
+func columnTriggerBridgeUnsupported(current, desired *pgschema.Snapshot, from, to pgschema.Column) string {
+	if from.Table != to.Table || from.Type != to.Type || from.Collation != to.Collation {
+		return "column_shape_changed"
+	}
+	if from.Default != nil || to.Default != nil {
+		return "column_default_requires_write_precedence"
+	}
+	if from.Identity != nil || to.Identity != nil || from.Serial != nil || to.Serial != nil || from.Generated != nil || to.Generated != nil {
+		return "generated_value_semantics"
+	}
+	if from.NotNull && !reflect.DeepEqual(notNullConstraintBlockers(current), notNullConstraintBlockers(desired)) {
+		// PostgreSQL 18 represents NOT NULL as a named catalog constraint. A
+		// native column rename retains that physical constraint name, while a
+		// freshly materialized desired schema derives a new name. Until those
+		// constraints are typed graph nodes, do not report a convergent bridge.
+		return "not_null_constraint_identity"
+	}
+	tableObject, exists := current.Object(from.Table)
+	table, ok := tableObject.(pgschema.Table)
+	if !exists || !ok {
+		return "missing_table"
+	}
+	if table.Partition != nil || table.PartitionOf != nil {
+		return "partition_trigger_propagation"
+	}
+	functionName, triggerName := columnBridgeNames(from, to)
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		for _, object := range snapshot.Objects() {
+			switch object := object.(type) {
+			case pgschema.Trigger:
+				if object.Table == from.Table {
+					if object.Name == triggerName {
+						return "generated_trigger_name_collision"
+					}
+					return "existing_trigger_order"
+				}
+			case pgschema.Policy:
+				if object.Table == from.Table {
+					return "row_security_policy"
+				}
+			case pgschema.RowSecurity:
+				if object.Table == from.Table && (object.Enabled || object.Forced) {
+					return "row_security_state"
+				}
+			case pgschema.Routine:
+				if object.Schema == from.Table.Schema && object.Name == functionName && object.Signature == "" {
+					return "generated_function_name_collision"
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func notNullConstraintBlockers(snapshot *pgschema.Snapshot) []string {
+	var blockers []string
+	for _, selector := range snapshot.Unsupported() {
+		if strings.HasPrefix(selector, "not_null_constraint:") {
+			blockers = append(blockers, selector)
+		}
+	}
+	return blockers
+}
+
+func columnBridgeNames(from, to pgschema.Column) (function, trigger string) {
+	digest := sha256.Sum256([]byte(from.ObjectID().String() + "->" + to.ObjectID().String()))
+	suffix := hex.EncodeToString(digest[:8])
+	return "onwardpg_sync_column_" + suffix, "onwardpg_sync_column_" + suffix
 }
 
 func dependsOn(snapshot *pgschema.Snapshot, object, dependency pgschema.ID) bool {
@@ -1607,8 +1686,44 @@ func isIdentifierPart(value byte) bool {
 
 func renderColumnRename(rename renameColumn) []protocol.Statement {
 	table := qualified(rename.from.Table.Schema, rename.from.Table.Name)
-	sql := "ALTER TABLE " + table + " RENAME COLUMN " + quote(rename.from.Name) + " TO " + quote(rename.to.Name) + ";"
-	statements := []protocol.Statement{statement(sql, "contract", "review", true, "application_contract")}
+	oldColumn, newColumn := quote(rename.from.Name), quote(rename.to.Name)
+	functionName, triggerName := columnBridgeNames(rename.from, rename.to)
+	function := qualified(rename.from.Table.Schema, functionName)
+	conflict := literal("onwardpg column bridge conflict on " + rename.from.Table.Schema + "." + rename.from.Table.Name + ": " + rename.from.Name + " and " + rename.to.Name + " differ")
+	shadow := rename.to
+	shadow.NotNull = false
+	shadow.Default, shadow.Identity, shadow.Serial, shadow.Generated, shadow.Comment = nil, nil, nil, nil, nil
+	functionSQL := "CREATE FUNCTION " + function + "() RETURNS trigger LANGUAGE plpgsql AS $onwardpg$\n" +
+		"BEGIN\n" +
+		"  IF TG_OP = 'INSERT' THEN\n" +
+		"    IF NEW." + oldColumn + " IS NULL THEN\n" +
+		"      NEW." + oldColumn + " := NEW." + newColumn + ";\n" +
+		"    ELSIF NEW." + newColumn + " IS NULL THEN\n" +
+		"      NEW." + newColumn + " := NEW." + oldColumn + ";\n" +
+		"    ELSIF NEW." + oldColumn + " IS DISTINCT FROM NEW." + newColumn + " THEN\n" +
+		"      RAISE EXCEPTION " + conflict + " USING ERRCODE = '23514';\n" +
+		"    END IF;\n" +
+		"  ELSIF NEW." + oldColumn + " IS DISTINCT FROM OLD." + oldColumn + " AND NEW." + newColumn + " IS NOT DISTINCT FROM OLD." + newColumn + " THEN\n" +
+		"    NEW." + newColumn + " := NEW." + oldColumn + ";\n" +
+		"  ELSIF NEW." + newColumn + " IS DISTINCT FROM OLD." + newColumn + " AND NEW." + oldColumn + " IS NOT DISTINCT FROM OLD." + oldColumn + " THEN\n" +
+		"    NEW." + oldColumn + " := NEW." + newColumn + ";\n" +
+		"  ELSIF NEW." + oldColumn + " IS DISTINCT FROM OLD." + oldColumn + " AND NEW." + newColumn + " IS DISTINCT FROM OLD." + newColumn + " AND NEW." + oldColumn + " IS DISTINCT FROM NEW." + newColumn + " THEN\n" +
+		"    RAISE EXCEPTION " + conflict + " USING ERRCODE = '23514';\n" +
+		"  END IF;\n" +
+		"  RETURN NEW;\n" +
+		"END\n" +
+		"$onwardpg$;"
+	statements := []protocol.Statement{
+		statement("ALTER TABLE "+table+" ADD COLUMN "+renderColumn(shadow)+";", "expand", "review", true, "table_lock", "column_overlap_bridge"),
+		statement(functionSQL, "expand", "review", true, "column_overlap_bridge", "trigger_function"),
+		statement("CREATE TRIGGER "+quote(triggerName)+" BEFORE INSERT OR UPDATE OF "+oldColumn+", "+newColumn+" ON "+table+" FOR EACH ROW EXECUTE FUNCTION "+function+"();", "expand", "review", true, "column_overlap_bridge", "trigger_behavior_change", "table_lock"),
+		statement("UPDATE "+table+" SET "+newColumn+" = "+oldColumn+" WHERE "+newColumn+" IS DISTINCT FROM "+oldColumn+";", "expand", "review", true, "column_overlap_bridge", "data_movement", "table_scan"),
+		statement("UPDATE "+table+" SET "+newColumn+" = "+oldColumn+" WHERE "+newColumn+" IS DISTINCT FROM "+oldColumn+";", "contract", "review", true, "final_overlap_catchup", "data_movement", "table_scan"),
+		statement("DROP TRIGGER "+quote(triggerName)+" ON "+table+";", "contract", "review", true, "compatibility_removal", "table_lock"),
+		statement("DROP FUNCTION "+function+"();", "contract", "review", true, "compatibility_removal"),
+		statement("ALTER TABLE "+table+" DROP COLUMN "+newColumn+";", "contract", "dangerous", true, "compatibility_removal", "data_loss", "access_exclusive_lock"),
+		statement("ALTER TABLE "+table+" RENAME COLUMN "+oldColumn+" TO "+newColumn+";", "contract", "review", true, "compatibility_removal", "access_exclusive_lock"),
+	}
 	if !reflect.DeepEqual(rename.from.Comment, rename.to.Comment) {
 		value := "NULL"
 		if rename.to.Comment != nil {
@@ -1656,21 +1771,18 @@ func tableIdentityChangeBelongsTo(value any, from, to pgschema.Table) bool {
 // when PostgreSQL has no generic, online-compatible rename sequence. The
 // planner has already bounded the old/new objects and any typed dependents;
 // only the product's compatibility window and rollout SQL remain unknown.
-func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []renameView, routines []renameRoutine, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, choices *decisions) ([]protocol.Question, error) {
+func resolveRenameBridges(tables []renameTable, _ []renameColumn, views []renameView, routines []renameRoutine, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, choices *decisions) ([]protocol.Question, error) {
 	type bridge struct {
 		id      pgschema.ID
 		kind    string
 		message string
 	}
-	bridges := make([]bridge, 0, len(tables)+len(columns)+len(views)+len(routines))
+	bridges := make([]bridge, 0, len(tables)+len(views)+len(routines))
 	for _, rename := range tables {
 		if !rename.manualOnly {
 			continue
 		}
-		bridges = append(bridges, bridge{rename.from.ObjectID(), "table", "Table " + rename.from.ObjectID().String() + " is explicitly asserted to be " + rename.to.ObjectID().String() + ", but its child catalog state does not match an automatic table-rename strategy. Supply the complete reviewed expand/migrate/contract transition; onwardpg will verify the resulting desired catalog but will not guess child identity, data movement, or application timing."})
-	}
-	for _, rename := range columns {
-		bridges = append(bridges, bridge{rename.from.ObjectID(), "column", "Column " + rename.from.ObjectID().String() + " is confirmed as " + rename.to.ObjectID().String() + ". Supply an expand/migrate/contract compatibility bridge; onwardpg will not guess dual-write behavior, backfill, or cutover timing."})
+		bridges = append(bridges, bridge{rename.from.ObjectID(), "table", "Table " + rename.from.ObjectID().String() + " is explicitly asserted to be " + rename.to.ObjectID().String() + ", but its child catalog state does not match an automatic table-rename strategy. Supply the complete reviewed expand/contract transition around one application deployment; onwardpg will verify the resulting desired catalog but will not guess child identity, data movement, or application timing."})
 	}
 	for _, rename := range views {
 		kind := "view"
@@ -2512,24 +2624,24 @@ func renderRoutineRename(rename renameRoutine) []protocol.Statement {
 	current := from
 	statements := make([]protocol.Statement, 0, 3)
 	if rename.from.Schema != rename.to.Schema {
-		statements = append(statements, statement("ALTER "+kind+" "+from+" SET SCHEMA "+quote(rename.to.Schema)+";", "migrate", "review", true, "application_contract"))
+		statements = append(statements, statement("ALTER "+kind+" "+from+" SET SCHEMA "+quote(rename.to.Schema)+";", "contract", "review", true, "application_contract"))
 		current = qualified(rename.to.Schema, rename.from.Name) + "(" + rename.from.Signature + ")"
 	}
 	if rename.from.Name != rename.to.Name {
-		statements = append(statements, statement("ALTER "+kind+" "+current+" RENAME TO "+quote(rename.to.Name)+";", "migrate", "review", true, "application_contract"))
+		statements = append(statements, statement("ALTER "+kind+" "+current+" RENAME TO "+quote(rename.to.Name)+";", "contract", "review", true, "application_contract"))
 	}
 	// pg_get_functiondef remains the desired authoritative definition after an
 	// ALTER rename, including a body that may intentionally mention the new
 	// name. Reapply it rather than attempting a source rewrite.
 	if definition, unsupported := renderRoutineDefinition(rename.to); unsupported == "" {
-		statements = append(statements, statement(definition, "migrate", "review", true, "routine_replace", "application_contract"))
+		statements = append(statements, statement(definition, "contract", "review", true, "routine_replace", "application_contract"))
 	}
 	if !reflect.DeepEqual(rename.from.Comment, rename.to.Comment) {
 		value := "NULL"
 		if rename.to.Comment != nil {
 			value = literal(*rename.to.Comment)
 		}
-		statements = append(statements, statement("COMMENT ON "+strings.ToUpper(rename.to.Kind)+" "+qualified(rename.to.Schema, rename.to.Name)+"("+rename.to.Signature+") IS "+value+";", "migrate", "safe", true))
+		statements = append(statements, statement("COMMENT ON "+strings.ToUpper(rename.to.Kind)+" "+qualified(rename.to.Schema, rename.to.Name)+"("+rename.to.Signature+") IS "+value+";", "contract", "safe", true))
 	}
 	return statements
 }
@@ -2542,13 +2654,13 @@ func renderDependentTriggerRewrite(rewrite triggerRewrite) []protocol.Statement 
 	// PostgreSQL 14+ supports CREATE OR REPLACE TRIGGER. Reapply the desired
 	// definition after the routine rename without a destructive trigger gap.
 	sql = strings.Replace(sql, "CREATE TRIGGER", "CREATE OR REPLACE TRIGGER", 1)
-	statements := []protocol.Statement{statement(sql, "migrate", "review", true, "dependent_trigger_rewrite", "routine_behavior_change", "table_lock")}
+	statements := []protocol.Statement{statement(sql, "contract", "review", true, "dependent_trigger_rewrite", "routine_behavior_change", "table_lock")}
 	if rewrite.after.Enabled != rewrite.before.Enabled {
 		enabled, unsupported := renderTriggerEnabled(rewrite.after)
 		if unsupported != "" {
 			return nil
 		}
-		statements = append(statements, statement(enabled, "migrate", "review", true, "trigger_enable_state", "routine_behavior_change", "table_lock"))
+		statements = append(statements, statement(enabled, "contract", "review", true, "trigger_enable_state", "routine_behavior_change", "table_lock"))
 	}
 	return statements
 }
@@ -2653,7 +2765,7 @@ func triggerDefinitionTail(definition string) string {
 
 func renderTriggerRename(rename renameTrigger) protocol.Statement {
 	sql := "ALTER TRIGGER " + quote(rename.from.Name) + " ON " + qualified(rename.from.Table.Schema, rename.from.Table.Name) + " RENAME TO " + quote(rename.to.Name) + ";"
-	return statement(sql, "migrate", "review", true, "trigger_identity", "brief_lock")
+	return statement(sql, "contract", "review", true, "trigger_identity", "brief_lock")
 }
 
 func equivalentTableForRename(current, desired *pgschema.Snapshot, from, to pgschema.Table) bool {
@@ -3201,7 +3313,7 @@ func equivalentIndexForRename(from, to pgschema.Index) bool {
 
 func renderIndexRename(rename renameIndex) []protocol.Statement {
 	sql := "ALTER INDEX " + qualified(rename.from.Table.Schema, rename.from.Name) + " RENAME TO " + quote(rename.to.Name) + ";"
-	statements := []protocol.Statement{statement(sql, "migrate", "review", true, "index_identity", "brief_lock")}
+	statements := []protocol.Statement{statement(sql, "contract", "review", true, "index_identity", "brief_lock")}
 	if !reflect.DeepEqual(rename.from.Comment, rename.to.Comment) {
 		value := "NULL"
 		if rename.to.Comment != nil {
@@ -3245,7 +3357,11 @@ func renderChange(item change.Change, current, desired *pgschema.Snapshot, creat
 	switch item.Kind {
 	case change.Create:
 		if constraint, ok := item.After.(pgschema.Constraint); ok {
-			return renderConstraintCreateUsingExistingIndex(constraint, current, desired)
+			statements, consumed, unsupported, err := renderConstraintCreateUsingExistingIndex(constraint, current, desired)
+			if !createdTables[constraint.Table] {
+				statements = withPhase(statements, protocol.PhaseContract, "review", "compatible_writers_required")
+			}
+			return statements, consumed, unsupported, err
 		}
 		return renderCreate(item.After, desired, createdTables, options)
 	case change.Drop:
@@ -3366,7 +3482,7 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 					"-- ONWARDPG TODO: deploy code that writes "+object.ObjectID().String()+", then replace this comment with a reviewed backfill for existing rows.\n"+
 						"-- Expected effect: every row has a product-correct value before the NOT NULL contract runs.\n"+
 						"-- Add a boolean assertion to verify.sql proving no NULL values remain.",
-					"migrate", "manual", true, "manual_sql", "data_movement", "dual_write_required",
+					"contract", "manual", true, "manual_sql", "data_movement", "post_drain_backfill_required",
 				),
 				statement(
 					"ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;",
@@ -3398,7 +3514,7 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			return nil, nil, []string{"foreign_key_match_partial:" + object.ObjectID().String()}, nil
 		}
 		sql := "ALTER TABLE " + qualified(object.Table.Schema, object.Table.Name) + " ADD CONSTRAINT " + quote(object.Name) + " " + object.Definition + ";"
-		phase := "migrate"
+		phase := "contract"
 		hazards := []string{"table_lock", "validation_scan_possible", "compatible_writers_required"}
 		if createdTables[object.Table] {
 			phase = "expand"
@@ -3427,7 +3543,7 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		phase := "expand"
 		hazards := []string{"index_build", "table_lock_possible"}
 		if object.Unique && !createdTables[object.Table] {
-			phase = "migrate"
+			phase = "contract"
 			hazards = append(hazards, "compatible_writers_required")
 		}
 		statements := []protocol.Statement{statement(strings.TrimSuffix(sql, ";")+";", phase, "review", transactional, hazards...)}
@@ -4105,7 +4221,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 					return nil, nil, []string{"partition_attach_invalid:" + next.ObjectID().String()}, nil
 				}
 				sql := "ALTER TABLE " + qualified(next.PartitionOf.Parent.Schema, next.PartitionOf.Parent.Name) + " ATTACH PARTITION " + qualified(next.Schema, next.Name) + " " + next.PartitionOf.Bound + ";"
-				statements = append(statements, statement(sql, "migrate", "review", true, "partition_attach", "table_scan_possible", "access_exclusive_lock"))
+				statements = append(statements, statement(sql, "contract", "review", true, "partition_attach", "table_scan_possible", "access_exclusive_lock"))
 			case before.PartitionOf != nil && next.PartitionOf == nil:
 				if before.PartitionOf.Parent.Kind != pgschema.KindTable || before.PartitionOf.Parent.Schema == "" || before.PartitionOf.Parent.Name == "" {
 					return nil, nil, []string{"partition_detach_invalid:" + next.ObjectID().String()}, nil
@@ -4129,7 +4245,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 			if next.Unlogged {
 				mode = "SET UNLOGGED"
 			}
-			statements = append(statements, statement("ALTER TABLE "+qualified(next.Schema, next.Name)+" "+mode+";", "migrate", "review", true, "table_rewrite_possible", "access_exclusive_lock"))
+			statements = append(statements, statement("ALTER TABLE "+qualified(next.Schema, next.Name)+" "+mode+";", "contract", "review", true, "table_rewrite_possible", "access_exclusive_lock"))
 		}
 		statements = append(statements, commentModification("TABLE", qualified(next.Schema, next.Name), before.Comment, next.Comment)...)
 		return statements, nil, nil, nil
@@ -4209,12 +4325,12 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 				statements = append(statements, withTimeoutGuidance(statement("DROP INDEX CONCURRENTLY "+qualified(before.Table.Schema, temporaryName)+";", "contract", "review", false, "continuous_index_replacement", "index_cleanup"), 1200000, 3000))
 				return statements, nil, nil, nil
 			}
-			statements := withPhase(renderDropWithOptions(before, options), "migrate", "review", "index_rebuild")
+			statements := withPhase(renderDropWithOptions(before, options), "contract", "review", "index_rebuild")
 			created, _, unsupported, err := renderCreate(next, pgschema.New(), nil, options)
 			if err != nil {
 				return nil, nil, nil, err
 			}
-			return append(statements, withPhase(created, "migrate", "review", "index_rebuild")...), nil, unsupported, nil
+			return append(statements, withPhase(created, "contract", "review", "index_rebuild")...), nil, unsupported, nil
 		}
 		return commentModification("INDEX", qualified(next.Table.Schema, next.Name), before.Comment, next.Comment), nil, nil, nil
 	case pgschema.Enum:
@@ -4228,7 +4344,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		next := after.(pgschema.Extension)
 		if before.Name == next.Name && before.Schema == next.Schema && before.Version != next.Version && next.Version != "" {
 			sql := "ALTER EXTENSION " + quote(next.Name) + " UPDATE TO " + literal(next.Version) + ";"
-			return []protocol.Statement{statement(sql, "migrate", "review", true, "extension_update")}, nil, nil, nil
+			return []protocol.Statement{statement(sql, "contract", "review", true, "extension_update")}, nil, nil, nil
 		}
 		return nil, nil, []string{"extension_change:" + after.ObjectID().String()}, nil
 	case pgschema.Sequence:
@@ -4270,7 +4386,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		if !reflect.DeepEqual(before.OwnedBy, next.OwnedBy) {
 			hazards = append(hazards, "sequence_ownership_change", "drop_cascade_behavior")
 		}
-		statements := []protocol.Statement{statement(sql, "migrate", "review", true, hazards...)}
+		statements := []protocol.Statement{statement(sql, "contract", "review", true, hazards...)}
 		statements = append(statements, commentModification("SEQUENCE", qualified(next.Schema, next.Name), before.Comment, next.Comment)...)
 		return statements, nil, nil, nil
 	case pgschema.View:
@@ -4285,7 +4401,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 			if !choices.matViewRebuild[next.ObjectID()] {
 				return nil, nil, []string{"materialized_view_rebuild:" + next.ObjectID().String()}, nil
 			}
-			drop := withPhase(renderDrop(before), "migrate", "dangerous", "materialized_view_rebuild", "data_loss", "blocking_lock")
+			drop := withPhase(renderDrop(before), "contract", "dangerous", "materialized_view_rebuild", "data_loss", "blocking_lock")
 			created, _, unsupported, err := renderCreate(next, pgschema.New(), nil, options)
 			if err != nil {
 				return nil, nil, nil, err
@@ -4293,7 +4409,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 			if len(unsupported) > 0 {
 				return nil, nil, unsupported, nil
 			}
-			statements := append(drop, withPhase(created, "migrate", "review", "materialized_view_rebuild", "data_loss", "blocking_lock")...)
+			statements := append(drop, withPhase(created, "contract", "review", "materialized_view_rebuild", "data_loss", "blocking_lock")...)
 			if desired != nil {
 				for _, index := range indexesForRelation(desired, next.ObjectID()) {
 					indexes, _, indexUnsupported, err := renderCreate(index, desired, nil, options)
@@ -4303,7 +4419,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 					if len(indexUnsupported) > 0 {
 						return nil, nil, indexUnsupported, nil
 					}
-					statements = append(statements, withPhase(indexes, "migrate", "review", "materialized_view_index_rebuild", "index_build", "table_lock_possible")...)
+					statements = append(statements, withPhase(indexes, "contract", "review", "materialized_view_index_rebuild", "index_build", "table_lock_possible")...)
 				}
 			}
 			return statements, nil, nil, nil
@@ -4312,7 +4428,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		if unsupported != "" {
 			return nil, nil, []string{unsupported}, nil
 		}
-		statements := []protocol.Statement{statement(sql, "migrate", "review", true, "view_replace")}
+		statements := []protocol.Statement{statement(sql, "contract", "review", true, "view_replace")}
 		statements = append(statements, commentModification("VIEW", qualified(next.Schema, next.Name), before.Comment, next.Comment)...)
 		return statements, nil, nil, nil
 	case pgschema.Routine:
@@ -4329,7 +4445,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		if unsupported != "" {
 			return nil, nil, []string{unsupported}, nil
 		}
-		statements := []protocol.Statement{statement(sql, "migrate", "review", true, "routine_replace", "routine_behavior_change")}
+		statements := []protocol.Statement{statement(sql, "contract", "review", true, "routine_replace", "routine_behavior_change")}
 		statements = append(statements, commentModification(strings.ToUpper(next.Kind), qualified(next.Schema, next.Name)+"("+next.Signature+")", before.Comment, next.Comment)...)
 		return statements, nil, nil, nil
 	case pgschema.Trigger:
@@ -4342,8 +4458,8 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 				return nil, nil, []string{unsupported}, nil
 			}
 			statements = append(statements,
-				statement("DROP TRIGGER "+quote(before.Name)+" ON "+qualified(before.Table.Schema, before.Table.Name)+";", "migrate", "review", true, "trigger_recreate", "table_lock", "trigger_behavior_change"),
-				statement(created, "migrate", "review", true, "trigger_recreate", "table_lock", "trigger_behavior_change"),
+				statement("DROP TRIGGER "+quote(before.Name)+" ON "+qualified(before.Table.Schema, before.Table.Name)+";", "contract", "review", true, "trigger_recreate", "table_lock", "trigger_behavior_change"),
+				statement(created, "contract", "review", true, "trigger_recreate", "table_lock", "trigger_behavior_change"),
 			)
 		}
 		if before.Enabled != next.Enabled {
@@ -4351,7 +4467,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 			if unsupported != "" {
 				return nil, nil, []string{unsupported}, nil
 			}
-			statements = append(statements, statement(enabled, "migrate", "review", true, "trigger_enable_state", "table_lock", "trigger_behavior_change"))
+			statements = append(statements, statement(enabled, "contract", "review", true, "trigger_enable_state", "table_lock", "trigger_behavior_change"))
 		}
 		return statements, nil, nil, nil
 	case pgschema.Policy:
@@ -4365,8 +4481,8 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 				return nil, nil, []string{unsupported}, nil
 			}
 			statements := []protocol.Statement{
-				authorizationStatement("DROP POLICY "+quote(before.Name)+" ON "+qualified(before.Table.Schema, before.Table.Name)+";", "migrate", "dangerous", "policy_replacement", "authorization_change", "availability_risk"),
-				authorizationStatement(created, "migrate", "review", "policy_replacement", "authorization_change", "availability_risk"),
+				authorizationStatement("DROP POLICY "+quote(before.Name)+" ON "+qualified(before.Table.Schema, before.Table.Name)+";", "contract", "dangerous", "policy_replacement", "authorization_change", "availability_risk"),
+				authorizationStatement(created, "contract", "review", "policy_replacement", "authorization_change", "availability_risk"),
 			}
 			return statements, nil, nil, nil
 		}
@@ -4377,7 +4493,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		if sql == "" {
 			return nil, nil, nil, nil
 		}
-		return []protocol.Statement{authorizationStatement(sql, "migrate", "review", "policy_altered", "authorization_change", "availability_risk")}, nil, nil, nil
+		return []protocol.Statement{authorizationStatement(sql, "contract", "review", "policy_altered", "authorization_change", "availability_risk")}, nil, nil, nil
 	case pgschema.RowSecurity:
 		next := after.(pgschema.RowSecurity)
 		if (before.Enabled && !next.Enabled || before.Forced && !next.Forced) && !choices.authorization[next.ObjectID()] {
@@ -4446,7 +4562,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 				return nil, nil, []string{"constraint_unvalidate:" + next.ObjectID().String()}, nil
 			}
 			sql := "ALTER TABLE " + qualified(next.Table.Schema, next.Table.Name) + " VALIDATE CONSTRAINT " + quote(next.Name) + ";"
-			return []protocol.Statement{statement(sql, "migrate", "review", true, "table_scan", "share_update_exclusive_lock")}, nil, nil, nil
+			return []protocol.Statement{statement(sql, "expand", "review", true, "table_scan", "share_update_exclusive_lock")}, nil, nil, nil
 		}
 		if !reflect.DeepEqual(beforeNoComment, nextNoComment) {
 			if options.ConcurrentIndexes && (before.Type == pgschema.ConstraintPrimary || before.Type == pgschema.ConstraintUnique) && (next.Type == pgschema.ConstraintPrimary || next.Type == pgschema.ConstraintUnique) {
@@ -4459,8 +4575,8 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 				}
 				return nil, nil, unsupported, nil
 			}
-			drop := withPhase(renderDrop(before), "migrate", "review", "constraint_rebuild", "blocking_lock")
-			add := withPhase(renderConstraintCreate(next), "migrate", "review", "constraint_rebuild")
+			drop := withPhase(renderDrop(before), "contract", "review", "constraint_rebuild", "blocking_lock")
+			add := withPhase(renderConstraintCreate(next), "contract", "review", "constraint_rebuild")
 			return append(drop, add...), nil, nil, nil
 		}
 		return renderConstraintComment(next, before.Comment, next.Comment), nil, nil, nil
@@ -5031,8 +5147,8 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 		if before.Serial == nil && after.Serial == nil && before.Type != after.Type {
 			question := protocol.Question{
 				ID: "type_change:" + item.ID.String(), Kind: "type_change", Key: item.ID.String(),
-				Message:            "Column " + item.ID.String() + " changes from " + before.Type + " to " + after.Type + ". The overlapping shadow-column/backfill/cutover path depends on product behavior; hand it to editable phase SQL.",
-				Choices:            []string{"manual_sql"},
+				Message:            "Column " + item.ID.String() + " changes from " + before.Type + " to " + after.Type + ". Choose reviewed expand/contract SQL that preserves both application contracts around one deployment, or split the feature because it needs two deployments.",
+				Choices:            []string{"manual_sql", "split_plan"},
 				CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 			}
 			answer, found, err := resolver.Resolve(question)
@@ -5205,7 +5321,7 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 		switch {
 		case before.Identity == nil && after.Identity != nil:
 			if before.Default != nil {
-				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP DEFAULT;", "migrate", "review", true, "identity_replaces_default"))
+				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP DEFAULT;", "contract", "review", true, "identity_replaces_default"))
 				identityHandledDefault = true
 			}
 			options, unsupported := renderIdentityOptions(*after.Identity, false)
@@ -5213,7 +5329,7 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 				return nil, nil, []string{unsupported + ":" + after.ObjectID().String()}, nil
 			}
 			sql := "ALTER TABLE " + table + " ALTER COLUMN " + column + " ADD GENERATED " + after.Identity.Generation + " AS IDENTITY (" + options + ");"
-			statements = append(statements, statement(sql, "migrate", "review", true, "identity_sequence_create", "table_lock"))
+			statements = append(statements, statement(sql, "contract", "review", true, "identity_sequence_create", "table_lock"))
 		case before.Identity != nil && after.Identity == nil:
 			if !choices.identityDrop[after.ObjectID()] {
 				return nil, nil, []string{"identity_drop_unconfirmed:" + after.ObjectID().String()}, nil
@@ -5225,14 +5341,14 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 			identityHandledDefault = true
 		case before.Identity != nil && after.Identity != nil:
 			if before.Identity.Generation != after.Identity.Generation {
-				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET GENERATED "+after.Identity.Generation+";", "migrate", "review", true, "table_lock"))
+				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET GENERATED "+after.Identity.Generation+";", "contract", "review", true, "table_lock"))
 			}
 			if before.Identity.Start != after.Identity.Start || before.Identity.Increment != after.Identity.Increment || !reflect.DeepEqual(before.Identity.Min, after.Identity.Min) || !reflect.DeepEqual(before.Identity.Max, after.Identity.Max) || before.Identity.Cache != after.Identity.Cache || before.Identity.Cycle != after.Identity.Cycle {
 				options, unsupported := renderIdentityOptions(*after.Identity, true)
 				if unsupported != "" {
 					return nil, nil, []string{unsupported + ":" + after.ObjectID().String()}, nil
 				}
-				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" "+options+";", "migrate", "review", true, "sequence_state"))
+				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" "+options+";", "contract", "review", true, "sequence_state"))
 			}
 		}
 	}
@@ -5242,22 +5358,32 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 			return nil, nil, nil, fmt.Errorf("missing type-change decision for %s", after.ObjectID())
 		}
 		if using == "manual_sql" {
-			statements = append(statements, statement(
-				"-- ONWARDPG TODO: replace this comment with reviewed SQL that changes "+after.ObjectID().String()+" from "+before.Type+" to "+after.Type+".\n"+
-					"-- Expected effect: the column has PostgreSQL type "+after.Type+" and preserves the product meaning intended by the feature.\n"+
-					"-- Add boolean assertions to verify.sql for data-dependent conversion assumptions.",
-				"migrate", "manual", true, "manual_sql", "table_rewrite_possible", "access_exclusive_lock",
-			))
+			statements = append(statements,
+				statement(
+					"-- ONWARDPG TODO: replace this comment with reviewed EXPAND SQL for "+after.ObjectID().String()+" ("+before.Type+" -> "+after.Type+").\n"+
+						"-- Establish both old and new interfaces, synchronization/conflict behavior, and any initial backfill while old code is live.\n"+
+						"-- Do not use a direct ALTER TYPE here: this plan surrounds one rolling application deployment.",
+					protocol.PhaseExpand, "manual", true, "manual_sql", "single_deployment_bridge_required", "product_semantics_required",
+				),
+				statement(
+					"-- ONWARDPG TODO: replace this comment with reviewed CONTRACT SQL for "+after.ObjectID().String()+" ("+before.Type+" -> "+after.Type+").\n"+
+						"-- After pre-deployment writers drain, perform final catch-up/assertions, remove compatibility objects, and converge to PostgreSQL type "+after.Type+".\n"+
+						"-- Add boolean assertions to verify.sql for every data-dependent conversion assumption.",
+					protocol.PhaseContract, "manual", true, "manual_sql", "table_rewrite_possible", "access_exclusive_lock", "single_deployment_bridge_required",
+				),
+			)
+		} else if using == "split_plan" {
+			return nil, nil, []string{"two_application_deployments_required:" + after.ObjectID().String()}, nil
 		} else {
 			sql := "ALTER TABLE " + table + " ALTER COLUMN " + column + " TYPE " + after.Type
 			if using != "direct" {
 				sql += " USING " + using
 			}
-			statements = append(statements, statement(sql+";", "migrate", "review", true, "table_rewrite_possible", "access_exclusive_lock"))
+			statements = append(statements, statement(sql+";", "contract", "review", true, "table_rewrite_possible", "access_exclusive_lock"))
 		}
 	}
 	if !identityHandledDefault && reflect.DeepEqual(before.Serial, after.Serial) && !reflect.DeepEqual(before.Default, after.Default) {
-		phase := "migrate"
+		phase := "contract"
 		// PostgreSQL validates/coerces a default against the column's current
 		// type. Keep it in the same ordered migration phase after TYPE so a
 		// combined type/default change is executable in one plan.
@@ -5282,7 +5408,7 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 			case "staged":
 				check := notNullCheckName(after.ObjectID())
 				statements = append(statements,
-					statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "migrate", "review", true, "share_row_exclusive_lock", "compatible_writers_required"),
+					statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
 					statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
 					statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
 					statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
@@ -5294,7 +5420,7 @@ func renderColumnModify(before, after pgschema.Column, choices decisions) ([]pro
 				}
 				check := notNullCheckName(after.ObjectID())
 				statements = append(statements,
-					statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "migrate", "review", true, "share_row_exclusive_lock", "compatible_writers_required"),
+					statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
 					manualWorkStatement(work, "application_backfill", "data_movement"),
 					statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
 					statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
@@ -5797,7 +5923,7 @@ func manualWorkStatement(work protocol.ManualWork, hazards ...string) protocol.S
 	}
 	lines = append(lines, work.Statements...)
 	return protocol.Statement{
-		SQL: strings.Join(lines, "\n"), Phase: "migrate", Safety: "manual",
+		SQL: strings.Join(lines, "\n"), Phase: protocol.PhaseContract, Safety: "manual",
 		Hazards: hazards, Manual: &work, NonTransactional: work.ExecutionMode == "non_transactional",
 	}
 }
@@ -5807,10 +5933,10 @@ func appendStatement(result *protocol.Result, item protocol.Statement) {
 }
 
 func rebuildBatches(result *protocol.Result) error {
-	orderedPhases := []string{"expand", "migrate", "contract"}
+	orderedPhases := []string{protocol.PhaseExpand, protocol.PhaseContract}
 	byPhase := make(map[string][]protocol.Statement, len(orderedPhases))
 	for _, item := range result.Statements {
-		if item.Phase != "expand" && item.Phase != "migrate" && item.Phase != "contract" {
+		if !protocol.ValidPhase(item.Phase) {
 			return fmt.Errorf("unknown statement phase %q", item.Phase)
 		}
 		byPhase[item.Phase] = append(byPhase[item.Phase], item)

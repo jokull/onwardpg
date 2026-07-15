@@ -111,7 +111,7 @@ func runHistoryStatus(arguments []string) int { return runHistoryStatusAt(argume
 
 func runStatusAt(arguments []string, start string) int {
 	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg status --target NAME")
+		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg status [--target NAME]")
 		return 0
 	}
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
@@ -125,9 +125,6 @@ func runStatusAt(arguments []string, start string) int {
 	if code := rejectPositionals(flags, "status"); code != 0 {
 		return code
 	}
-	if *targetName == "" {
-		return writeError("invalid_invocation", errors.New("status requires --target"))
-	}
 	configPath := *configName
 	if !filepath.IsAbs(configPath) {
 		configPath = filepath.Join(start, configPath)
@@ -140,7 +137,7 @@ func runStatusAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	if _, err := config.Target(*targetName); err != nil {
+	if _, err := resolveConfiguredTarget(config, targetName); err != nil {
 		return writeError("invalid_config", err)
 	}
 	root := filepath.Dir(configPath)
@@ -187,11 +184,11 @@ func runStatusAt(arguments []string, start string) int {
 
 func runHistoryStatusAt(arguments []string, start string) int {
 	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg history status --target NAME [--bundle ID]")
+		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg history status [--target NAME] [--bundle ID]")
 		return 0
 	}
 	if len(arguments) == 0 || arguments[0] != "status" {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg history status --target NAME [--bundle ID]"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg history status [--target NAME] [--bundle ID]"))
 	}
 	flags := flag.NewFlagSet("history status", flag.ContinueOnError)
 	targetName := flags.String("target", "", "configured database target name")
@@ -205,9 +202,6 @@ func runHistoryStatusAt(arguments []string, start string) int {
 	if code := rejectPositionals(flags, "history status"); code != 0 {
 		return code
 	}
-	if *targetName == "" {
-		return writeError("invalid_invocation", errors.New("history status requires --target"))
-	}
 	configPath := *configName
 	if !filepath.IsAbs(configPath) {
 		configPath = filepath.Join(start, configPath)
@@ -220,7 +214,7 @@ func runHistoryStatusAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	if _, err := config.Target(*targetName); err != nil {
+	if _, err := resolveConfiguredTarget(config, targetName); err != nil {
 		return writeError("invalid_config", err)
 	}
 	report, err := history.Inspect(filepath.Dir(configPath), config.BundleRoot, *targetName, *bundleID)
@@ -245,11 +239,11 @@ func runDrift(arguments []string) int { return runDriftAt(arguments, ".") }
 
 func runDriftAt(arguments []string, start string) int {
 	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg drift check --target NAME --database URL")
+		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg drift check --database URL [--target NAME]")
 		return 0
 	}
 	if len(arguments) == 0 || arguments[0] != "check" {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg drift check --target NAME --database URL"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg drift check --database URL [--target NAME]"))
 	}
 	flags := flag.NewFlagSet("drift check", flag.ContinueOnError)
 	targetName := flags.String("target", "", "configured database target name")
@@ -265,8 +259,8 @@ func runDriftAt(arguments []string, start string) int {
 	if code := rejectPositionals(flags, "drift check"); code != 0 {
 		return code
 	}
-	if *targetName == "" || *databaseURL == "" {
-		return writeError("invalid_invocation", errors.New("drift check requires --target and --database"))
+	if *databaseURL == "" {
+		return writeError("invalid_invocation", errors.New("drift check requires --database"))
 	}
 	configPath := *configName
 	if !filepath.IsAbs(configPath) {
@@ -280,7 +274,7 @@ func runDriftAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	target, err := config.Target(*targetName)
+	target, err := resolveConfiguredTarget(config, targetName)
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
@@ -327,7 +321,7 @@ func runDriftAt(arguments []string, start string) int {
 
 func runHistoryAt(arguments []string, start string) int {
 	if len(arguments) == 0 || arguments[0] != "init" {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg init --target NAME [--bundle baseline]"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg init [--target NAME] [--bundle baseline]"))
 	}
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
 	targetName := flags.String("target", "", "configured database target name")
@@ -344,9 +338,6 @@ func runHistoryAt(arguments []string, start string) int {
 	if code := rejectPositionals(flags, "init"); code != 0 {
 		return code
 	}
-	if *targetName == "" {
-		return writeError("invalid_invocation", errors.New("init requires --target"))
-	}
 	configPath := *configName
 	if !filepath.IsAbs(configPath) {
 		configPath = filepath.Join(start, configPath)
@@ -359,7 +350,7 @@ func runHistoryAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	target, err := config.Target(*targetName)
+	target, err := resolveConfiguredTarget(config, targetName)
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
@@ -404,11 +395,11 @@ func runDev(arguments []string) int { return runDevAt(arguments, ".") }
 
 func runDevAt(arguments []string, start string) int {
 	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg dev plan --target NAME [--hint JSON] [--hints-file FILE] [--output text|json]")
+		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg dev plan [--target NAME] [--hint JSON] [--hints-file FILE] [--output text|json]")
 		return 0
 	}
 	if len(arguments) == 0 || arguments[0] != "plan" {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg dev plan --target NAME [--hint JSON] [--hints-file FILE] [--output text|json]"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg dev plan [--target NAME] [--hint JSON] [--hints-file FILE] [--output text|json]"))
 	}
 	flags := flag.NewFlagSet("dev plan", flag.ContinueOnError)
 	targetName := flags.String("target", "", "configured database target name")
@@ -433,9 +424,6 @@ func runDevAt(arguments []string, start string) int {
 	if code := rejectPositionals(flags, "dev plan"); code != 0 {
 		return code
 	}
-	if *targetName == "" {
-		return writeError("invalid_invocation", errors.New("dev plan requires --target"))
-	}
 	if *output != "json" && *output != "text" {
 		return writeError("invalid_invocation", errors.New("dev plan --output must be text or json"))
 	}
@@ -451,7 +439,7 @@ func runDevAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	target, err := config.Target(*targetName)
+	target, err := resolveConfiguredTarget(config, targetName)
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
@@ -571,8 +559,8 @@ func runDraftAt(arguments []string, start string) int {
 	} else if err != nil {
 		return writeError("invalid_invocation", err)
 	}
-	if *targetName == "" || *bundleID == "" {
-		return writeError("invalid_invocation", errors.New("draft requires --target and --bundle"))
+	if *bundleID == "" {
+		return writeError("invalid_invocation", errors.New("draft requires --bundle"))
 	}
 	if code := rejectPositionals(flags, "draft"); code != 0 {
 		return code
@@ -592,7 +580,7 @@ func runDraftAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	target, err := config.Target(*targetName)
+	target, err := resolveConfiguredTarget(config, targetName)
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
@@ -656,12 +644,12 @@ func runDraftAt(arguments []string, start string) int {
 
 func runBundleAt(arguments []string, start string) int {
 	if len(arguments) == 0 || arguments[0] != "verify" {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg verify --target NAME [--bundle ID] [--through PHASE]"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg verify [--target NAME] [--bundle ID] [--through PHASE]"))
 	}
 	flags := flag.NewFlagSet("verify", flag.ContinueOnError)
 	targetName := flags.String("target", "", "configured database target name")
 	bundleID := flags.String("bundle", "", "bundle to verify")
-	through := flags.String("through", "contract", "last phase to execute: expand, migrate, or contract")
+	through := flags.String("through", "contract", "last phase to execute: expand or contract")
 	check := flags.Bool("check", false, "read-only verification; reject unreceipted edits")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
 	if help, err := parseFlagSet(flags, arguments[1:]); help {
@@ -671,9 +659,6 @@ func runBundleAt(arguments []string, start string) int {
 	}
 	if code := rejectPositionals(flags, "verify"); code != 0 {
 		return code
-	}
-	if *targetName == "" {
-		return writeError("invalid_invocation", errors.New("verify requires --target"))
 	}
 	configPath := *configName
 	if !filepath.IsAbs(configPath) {
@@ -687,7 +672,7 @@ func runBundleAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	target, err := config.Target(*targetName)
+	target, err := resolveConfiguredTarget(config, targetName)
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
@@ -922,7 +907,7 @@ func runPlan(arguments []string) int {
 
 func runWorkflowPlanAt(arguments []string, start string) int {
 	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg plan [NAME] --target NAME [--bundle ID] [--hint JSON] [--dev-hint JSON] [--output sql|text|json]")
+		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg plan [NAME] [--target NAME] [--bundle ID] [--hint JSON] [--dev-hint JSON] [--output sql|text|json]")
 		return 0
 	}
 	name := ""
@@ -958,9 +943,6 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	if code := rejectPositionals(flags, "plan"); code != 0 {
 		return code
 	}
-	if *targetName == "" {
-		return writeError("invalid_invocation", errors.New("plan requires --target"))
-	}
 	if name != "" && *bundleID != "" {
 		return writeError("invalid_invocation", errors.New("plan accepts either NAME or --bundle, not both"))
 	}
@@ -979,7 +961,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	target, err := config.Target(*targetName)
+	target, err := resolveConfiguredTarget(config, targetName)
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
@@ -1179,7 +1161,7 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 		}
 		// Never mix an incomplete executable stream with human or JSON data.
 		return json.NewEncoder(os.Stderr).Encode(workflowPlanReport{
-			ProtocolVersion: "onwardpg.plan/v4", Status: workflowPlanStatus(durable.Outcome, development), Durable: durable, Development: development,
+			ProtocolVersion: "onwardpg.plan/v5", Status: workflowPlanStatus(durable.Outcome, development), Durable: durable, Development: development,
 		})
 	}
 	if output == "text" {
@@ -1211,7 +1193,7 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 		return nil
 	}
 	return json.NewEncoder(writer).Encode(workflowPlanReport{
-		ProtocolVersion: "onwardpg.plan/v4", Status: workflowPlanStatus(durable.Outcome, development), Durable: durable, Development: development,
+		ProtocolVersion: "onwardpg.plan/v5", Status: workflowPlanStatus(durable.Outcome, development), Durable: durable, Development: development,
 	})
 }
 
@@ -1290,7 +1272,7 @@ func writeWorkflowPlanFinding(target, bundleID, outcome, code, message, remediat
 		BundleID        string              `json:"bundle_id,omitempty"`
 		Findings        []draftflow.Finding `json:"findings"`
 	}{
-		ProtocolVersion: "onwardpg.plan/v4", Status: outcome, Target: target, BundleID: bundleID,
+		ProtocolVersion: "onwardpg.plan/v5", Status: outcome, Target: target, BundleID: bundleID,
 		Findings: []draftflow.Finding{{Code: code, Message: message, Remediation: remediation}},
 	})
 	return 4
@@ -1390,7 +1372,7 @@ func runLowLevelPlan(arguments []string) int {
 		if *output == "text" {
 			outputErr = writeDecisionsText(os.Stdout, "plan", decisions)
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v3", decisions, result.Analysis)
+			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v4", decisions, result.Analysis)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -1406,7 +1388,7 @@ func runLowLevelPlan(arguments []string) int {
 		}
 	} else {
 		publicResult := result
-		publicResult.ProtocolVersion = "onwardpg.plan/v3"
+		publicResult.ProtocolVersion = "onwardpg.plan/v4"
 		if err := json.NewEncoder(os.Stdout).Encode(publicResult); err != nil {
 			return writeError("output_error", err)
 		}
@@ -1740,6 +1722,25 @@ func sortedUniqueStrings(values []string) []string {
 		write++
 	}
 	return result[:write]
+}
+
+// resolveConfiguredTarget keeps the common one-database workflow free of a
+// meaningless target flag while retaining explicit selection for monorepos.
+// It runs only after strict configuration validation, so at least one target
+// is always present.
+func resolveConfiguredTarget(config workspace.Config, selected *string) (workspace.Target, error) {
+	if *selected == "" {
+		names := make([]string, 0, len(config.Targets))
+		for name := range config.Targets {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		if len(names) != 1 {
+			return workspace.Target{}, fmt.Errorf("--target is required because this repository configures multiple targets: %s", strings.Join(names, ", "))
+		}
+		*selected = names[0]
+	}
+	return config.Target(*selected)
 }
 
 func targetIgnoreSelectors(target workspace.Target, command []string) []string {

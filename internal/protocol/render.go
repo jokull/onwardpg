@@ -30,6 +30,8 @@ func RenderSQL(result Result, indent string) string {
 			}
 			lines = append(lines, phaseComment(batch.Phase)...)
 			lastPhase = batch.Phase
+		} else {
+			lines = append(lines, "")
 		}
 		lines = append(lines, batchDirective(batch), batchComment(batch))
 		for _, statement := range batch.Statements {
@@ -38,6 +40,16 @@ func RenderSQL(result Result, indent string) string {
 			}
 			if statement.StatementTimeoutMS > 0 || statement.LockTimeoutMS > 0 {
 				lines = append(lines, timeoutComment(statement))
+			}
+			if strings.Contains(statement.SQL, "ONWARDPG TODO") {
+				id := statement.ID
+				if id == "" {
+					id = StableStatementID(statement)
+				}
+				lines = append(lines, "-- onwardpg:edit begin "+id)
+				lines = append(lines, strings.Split(statement.SQL, "\n")...)
+				lines = append(lines, "-- onwardpg:edit end "+id)
+				continue
 			}
 			lines = append(lines, strings.Split(statement.SQL, "\n")...)
 		}
@@ -121,24 +133,17 @@ func phaseComment(phase string) []string {
 	case "expand":
 		return []string{
 			"-- ============================================================================",
-			"-- EXPAND — run before deploying application code that relies on the new shape.",
-			"-- Keep this compatible with the application version currently in production.",
+			"-- EXPAND — run before the one application deployment anchored to this plan.",
+			"-- Old code must remain usable while new code begins using the expanded shape.",
 			"-- Transactional and non-transactional batches are marked below; this phase is not split by transaction.",
-			"-- ============================================================================",
-		}
-	case "migrate":
-		return []string{
-			"-- ============================================================================",
-			"-- MIGRATE — a deployment boundary after compatible code is deployed, not an EXPAND transaction split.",
-			"-- Add any application-specific backfill here or run it separately and observe it.",
-			"-- onwardpg never invents a cast or data transform that schema state cannot prove.",
 			"-- ============================================================================",
 		}
 	case "contract":
 		return []string{
 			"-- ============================================================================",
-			"-- CONTRACT — run only after old application code no longer uses the prior shape.",
-			"-- This section can remove compatibility paths or enforce the final contract.",
+			"-- CONTRACT — run after pre-deployment instances, workers, pools, and queues have drained.",
+			"-- The one newly deployed application version must work before and after every batch below.",
+			"-- Catch-up, validation, enforcement, and compatibility cleanup belong here.",
 			"-- ============================================================================",
 		}
 	default:

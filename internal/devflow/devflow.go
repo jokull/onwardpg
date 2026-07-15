@@ -56,7 +56,7 @@ type Report struct {
 	Postconditions  []PostconditionResult `json:"accepted_postconditions,omitempty"`
 }
 
-const Version = "onwardpg.dev-plan/v4"
+const Version = "onwardpg.dev-plan/v5"
 
 func Run(ctx context.Context, input Input) (Report, error) {
 	if input.Root == "" {

@@ -8,13 +8,13 @@ incompatible changes receive a new identifier.
 
 ## Minimal draft decisions
 
-`onwardpg.draft/v4` deliberately makes output and input asymmetric. onwardpg
+`onwardpg.draft/v5` deliberately makes output and input asymmetric. onwardpg
 emits the context needed to choose safely; the agent returns only semantic
 intent that cannot be inferred from schema state.
 
 ~~~json
 {
-  "protocol_version": "onwardpg.draft/v4",
+  "protocol_version": "onwardpg.draft/v5",
   "status": "needs_decisions",
   "next_action": "rerun_without_create_with_hints",
   "path": "migrations/onward/primary/profile-name",
@@ -100,15 +100,17 @@ a phase-local TODO:
 
 ~~~json
 {
-  "protocol_version": "onwardpg.draft/v4",
+  "protocol_version": "onwardpg.draft/v5",
   "status": "needs_sql_edits",
   "next_action": "edit_files_then_verify",
-  "path": "migrations/onward/primary/event-date",
-  "edit": ["phases/migrate.sql"]
+  "path": "migrations/onward/app/event-date",
+  "edit": ["phases/contract.sql", "phases/expand.sql"]
 }
 ~~~
 
-The agent edits those files directly. `ONWARDPG TODO` prevents receipt refresh,
+The agent edits only the generated pockets bounded by stable
+`-- onwardpg:edit begin/end` markers unless it deliberately takes ownership of
+more of the phase. `ONWARDPG TODO` prevents receipt refresh,
 and the bundle cannot participate as immutable base history. Only successful
 full clone verification transitions the exact edited files to `planned`.
 
@@ -119,9 +121,9 @@ does not change planning semantics or prompt on a TTY.
 
 `onwardpg diff` (and the compatibility spelling `onwardpg plan --from --to`)
 writes JSON to standard output by default. Its public command protocol is
-`onwardpg.plan/v3` for planned, decision, and unsupported results.
+`onwardpg.plan/v4` for planned, decision, and unsupported results.
 The receipted planner document embedded in bundles retains its separately
-versioned internal `onwardpg.plan/v1` schema.
+versioned internal `onwardpg.plan/v2` schema.
 
 `--output text` is deliberately not JSON: it is a review-only rendering available only
 when a plan is ready. It emits SQL comments for phase boundaries and
@@ -135,7 +137,7 @@ Every normal planner result has this shape:
 
 ```json
 {
-  "protocol_version": "onwardpg.plan/v3",
+  "protocol_version": "onwardpg.plan/v4",
   "current_fingerprint": "sha256:...",
   "desired_fingerprint": "sha256:...",
   "status": "planned | needs_input | needs_sql_edits | unsupported",
@@ -159,11 +161,14 @@ optional `hazards`, and a deterministic content-derived `id`. Bundle amendments
 will bind to the ID rather than a fragile statement-array index. `phase` is one
 of:
 
-- `expand`: compatible additions to run before the application relies on them;
-- `migrate`: reviewed schema work between compatible application releases;
-  application-specific backfills remain an explicit human/agent responsibility;
-- `contract`: work deferred until old application behavior is gone; or
-- `manual`: review-only output that requires an explicit operator decision.
+- `expand`: work safe while pre-deployment code is live, before the one
+  application deployment anchored to the bundle; or
+- `contract`: final catch-up, validation, enforcement, and compatibility
+  cleanup after pre-deployment instances and writers have drained.
+
+Backfill and manual work are statement kinds inside one of these phases, not
+additional deployment phases. If one newly deployed version cannot work before
+and after contract, the change requires another plan.
 
 `batches` are the execution boundary: a batch declares whether it is
 transactional and carries its statements. A non-transactional batch must not
@@ -245,20 +250,20 @@ human-readable context and may become more specific without a protocol change.
 Current codes distinguish invocation, hints, answers, source, ignore, planning,
 configuration, bundle, and history-integrity failures.
 
-`draft` uses `onwardpg.draft/v4` for minimal decision and SQL-edit handoffs.
+`draft` uses `onwardpg.draft/v5` for minimal decision and SQL-edit handoffs.
 Complete and blocked reports currently retain detailed replay, reconciliation,
 and verification receipts. Reconciliation reports exact preserved, refreshed,
 and conflicting phase paths; a conflict leaves the existing bundle untouched.
 Decision and SQL-edit handoffs exit `2`; unsupported state exits `3`; history
 or convergence blockers exit `4`.
 
-`dev plan` emits `onwardpg.dev-plan/v4`. It reports `preserved` typed objects
+`dev plan` emits `onwardpg.dev-plan/v5`. It reports `preserved` typed objects
 when workspace mode intentionally retains D-only catalog state, and uses
 `status: "workspace_compatible"` for a converged safe local reconciliation.
 `diff` (and the compatibility `plan --from --to`) retains the source-to-source
-`onwardpg.plan/v3` protocol; neither writes bundle state.
+`onwardpg.plan/v4` protocol; neither writes bundle state.
 
-The preferred high-level `plan` command emits `onwardpg.plan/v4`. Its envelope
+The preferred high-level `plan` command emits `onwardpg.plan/v5`. Its envelope
 contains a durable H → W `draft` report and a separate development D → W
 report, keyed by one worktree-local PlanID. Consumers must not treat the
 development statements as the durable bundle, and should branch independently

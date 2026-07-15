@@ -14,7 +14,7 @@ cat >"$fixture/.onwardpg.toml" <<'EOF'
 version = 1
 bundle_root = "migrations/onward"
 
-[targets.primary]
+[targets.app]
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
@@ -25,7 +25,7 @@ cat >"$fixture/schema.sql" <<'EOF'
 CREATE SCHEMA app;
 CREATE TABLE app.accounts (
   id bigint,
-  occurred_at timestamp
+  display_name text
 );
 CREATE TABLE app.profile_kinds (
   id bigint PRIMARY KEY
@@ -46,14 +46,14 @@ grep -q 'unknown command.*apply' no-apply.json
 grep -q '"status":"valid"' config-check.json
 grep -q '"fingerprint":"sha256:' config-check.json
 
-"$binary" init --target primary --bundle baseline >init.json
+"$binary" init --bundle baseline >init.json
 grep -q '"status":"initialized"' init.json
 
 cat >schema.sql <<'EOF'
 CREATE SCHEMA app;
-CREATE TABLE app.customers (
+CREATE TABLE app.accounts (
   id bigint,
-  occurred_at date
+  full_name text
 );
 CREATE TABLE app.profile_kinds (
   id bigint PRIMARY KEY
@@ -68,7 +68,7 @@ CREATE INDEX customer_profiles_kind_id_idx
 EOF
 
 set +e
-"$binary" plan customer-profile --target primary >decisions.json
+"$binary" plan customer-profile >decisions.json
 decision_exit=$?
 set -e
 test "$decision_exit" -eq 2
@@ -81,47 +81,33 @@ fi
 
 set +e
 "$binary" plan \
-  --target primary \
-  --hint '{"kind":"rename","object":"table","from":["app","accounts"],"to":["app","customers"]}' \
-  --hint '{"kind":"type_change","name":["app","accounts","occurred_at"],"strategy":"manual_sql"}' \
-  >sql-handoff.json
-handoff_exit=$?
+  --hint '{"kind":"rename","object":"column","from":["app","accounts","display_name"],"to":["app","accounts","full_name"]}' \
+  >planned.json
+planned_exit=$?
 set -e
-test "$handoff_exit" -eq 2
-grep -q '"status":"needs_sql_edits"' sql-handoff.json
+test "$planned_exit" -eq 0
+grep -q '"status":"planned"' planned.json
 
-cat >migrations/onward/primary/customer-profile/phases/migrate.sql <<'EOF'
--- Product-aware conversion supplied by the coding agent.
-ALTER TABLE "app"."accounts"
-  ALTER COLUMN "occurred_at" TYPE date
-  USING "occurred_at"::date;
-EOF
+"$binary" verify --through expand >expand-verify.json
+grep -q '"status":"partial_verified"' expand-verify.json
+grep -q '"remaining_bundle_phases":\["contract"\]' expand-verify.json
 
-cat >migrations/onward/primary/customer-profile/verify.sql <<'EOF'
--- onwardpg:assert occurred_at_is_date
-SELECT data_type = 'date'
-FROM information_schema.columns
-WHERE table_schema = 'app'
-  AND table_name = 'customers'
-  AND column_name = 'occurred_at';
-EOF
-
-"$binary" verify --target primary >verify.json
+"$binary" verify >verify.json
 grep -q '"status":"verified"' verify.json
-grep -q '"receipts_updated":true' verify.json
 
-"$binary" verify --target primary --check >check.json
+"$binary" verify --check >check.json
 grep -q '"status":"verified"' check.json
 
-"$binary" status --target primary >status.json
+"$binary" status >status.json
 grep -q '"plan_id":"plan_' status.json
 
-"$binary" plan --target primary --output sql >dev-plan.sql
+"$binary" plan --output sql >dev-plan.sql
 grep -q 'development workspace reconciliation' dev-plan.sql
 grep -q 'CREATE TABLE' dev-plan.sql
 
 test ! -e .git
-test -f migrations/onward/primary/customer-profile/manifest.json
-grep -q 'ALTER TABLE "app"."accounts"' migrations/onward/primary/customer-profile/phases/migrate.sql
+test -f migrations/onward/app/customer-profile/manifest.json
+grep -q 'CREATE TRIGGER' migrations/onward/app/customer-profile/phases/expand.sql
+grep -q 'RENAME COLUMN "display_name" TO "full_name"' migrations/onward/app/customer-profile/phases/contract.sql
 
 echo "README workflow passed"

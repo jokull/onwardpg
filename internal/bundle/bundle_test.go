@@ -131,8 +131,19 @@ func TestBuildNeedsInputStoresDecisionWithoutExecutablePlan(t *testing.T) {
 	}
 }
 
+func TestManifestRejectsLegacyThreePhaseProtocolWithRegenerationAction(t *testing.T) {
+	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult(statement("CREATE TABLE app.users ();", protocol.PhaseExpand, true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact.Manifest.ProtocolVersion = "onwardpg.bundle/v1"
+	if err := artifact.Manifest.Validate(); err == nil || !strings.Contains(err.Error(), "regenerate") || !strings.Contains(err.Error(), Version) {
+		t.Fatalf("legacy bundle error = %v", err)
+	}
+}
+
 func TestNeedsSQLEditsBundleBecomesPlannedOnlyAfterTODOIsReplaced(t *testing.T) {
-	result := plannedResult(statement("-- ONWARDPG TODO: provide reviewed conversion SQL", "migrate", true))
+	result := plannedResult(statement("-- ONWARDPG TODO: provide reviewed conversion SQL", protocol.PhaseContract, true))
 	result.Status = protocol.NeedsSQLEdits
 	artifact, err := Build(Input{Metadata: metadata(), Result: result})
 	if err != nil {
@@ -145,7 +156,7 @@ func TestNeedsSQLEditsBundleBecomesPlannedOnlyAfterTODOIsReplaced(t *testing.T) 
 	if err := Write(destination, artifact, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	phase := filepath.Join(destination, "phases", "migrate.sql")
+	phase := filepath.Join(destination, "phases", "contract.sql")
 	if err := os.WriteFile(phase, []byte("ALTER TABLE public.events ALTER COLUMN occurred_on TYPE date USING occurred_on::date;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

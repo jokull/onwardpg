@@ -95,11 +95,12 @@ transactional swap. The pinned differential tests
 compare ordering, hazards, timeouts, application, idempotence, and empty
 residual diff. They also prove policy-expression changes, RLS force
 relaxation, table-privilege revocation, grant-option removal, partition-parent
-replacement, and primary-constraint swaps converge in both planners. Both
-planners converge for Stripe's exact primary-key/type-change acceptance DDL;
-Stripe selects a direct cast while onwardpg requires the cast as a
-validated semantic decision. onwardpg's extra intent questions are an intentional
-workflow difference, not normalized away by the harness. The catalog-family
+replacement, and primary-constraint swaps converge in both planners. For
+Stripe's exact primary-key/type-change acceptance DDL, Stripe converges with a
+direct cast. onwardpg deliberately stops at reviewed expand/contract bridge
+pockets (or a second-plan choice), because a valid cast does not establish that
+old and new application versions can overlap. That case is classified weaker
+and intentionally different rather than being normalized away by the harness. The catalog-family
 inventory and the new partition-attachment convergence cases have been
 observed on PostgreSQL 15–18. CI remains the authoritative cross-version proof
 for every commit; most of the 415-case Stripe corpus is still conservatively

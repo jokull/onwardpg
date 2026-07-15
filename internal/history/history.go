@@ -17,7 +17,7 @@ const Version = "onwardpg.history/v1"
 
 const StatusVersion = "onwardpg.history-status/v2"
 
-var phaseOrder = []string{"expand", "migrate", "contract"}
+var phaseOrder = []string{"expand", "contract"}
 
 type Entry struct {
 	Directory string

@@ -80,7 +80,7 @@ func TestResolveWorkspaceRequiresExplicitRenameOrPreserveIntent(t *testing.T) {
 	}
 }
 
-func TestResolveTurnsConfirmedColumnRenameIntoEditableBridge(t *testing.T) {
+func TestResolveTurnsConfirmedColumnRenameIntoGeneratedOverlapBridge(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "app", Name: "accounts"}
 	before := pgschema.Column{Table: table.ObjectID(), Name: "display_name", Position: 1, Type: "text"}
@@ -95,16 +95,14 @@ func TestResolveTurnsConfirmedColumnRenameIntoEditableBridge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	hints := []protocol.Hint{
-		{Kind: "rename", Object: "column", From: []string{"app", "accounts", "display_name"}, To: []string{"app", "accounts", "full_name"}},
-		{Kind: "manual_sql", Object: "column", Name: []string{"app", "accounts", "display_name"}, Action: "rename_compatibility_bridge"},
-	}
+	hints := []protocol.Hint{{Kind: "rename", Object: "column", From: []string{"app", "accounts", "display_name"}, To: []string{"app", "accounts", "full_name"}}}
 	resolution, err := Resolve(current, desired, hints, graphplan.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolution.Result.Status != protocol.NeedsSQLEdits || !strings.Contains(joinResolutionSQL(resolution), "ONWARDPG TODO") || !strings.Contains(joinResolutionSQL(resolution), "Planner analysis:") {
-		t.Fatalf("confirmed rename must hand off an editable bridge: %#v", resolution)
+	sql := joinResolutionSQL(resolution)
+	if resolution.Result.Status != protocol.Planned || !strings.Contains(sql, "CREATE TRIGGER") || !strings.Contains(sql, `RENAME COLUMN "display_name" TO "full_name"`) {
+		t.Fatalf("confirmed rename must produce a generated overlap bridge: %#v", resolution)
 	}
 }
 

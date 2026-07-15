@@ -11,7 +11,7 @@ import (
 )
 
 func TestVersionIsDistinctFromDurableBundleProtocol(t *testing.T) {
-	if Version == "" || Version == "onwardpg.draft/v4" {
+	if Version == "" || Version == "onwardpg.draft/v5" {
 		t.Fatalf("development protocol version = %q", Version)
 	}
 }

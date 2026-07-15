@@ -13,6 +13,7 @@ import (
 	"github.com/jokull/onwardpg/internal/devflow"
 	"github.com/jokull/onwardpg/internal/draftflow"
 	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/workspace"
 )
 
 func TestReadHintsAcceptsPredictableInlineIntent(t *testing.T) {
@@ -59,7 +60,7 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	if err := writeDraftReport(&output, report, "json"); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"protocol_version\":\"onwardpg.draft/v4\",\"status\":\"needs_decisions\",\"next_action\":\"rerun_same_command_with_hints\",\"decisions\":[{\"choices\":[{\"hint\":{\"kind\":\"drop\",\"object\":\"column\",\"name\":[\"public\",\"users\",\"legacy\"]},\"hazards\":[\"data_loss\"]}]}]}\n"
+	want := "{\"protocol_version\":\"onwardpg.draft/v5\",\"status\":\"needs_decisions\",\"next_action\":\"rerun_same_command_with_hints\",\"decisions\":[{\"choices\":[{\"hint\":{\"kind\":\"drop\",\"object\":\"column\",\"name\":[\"public\",\"users\",\"legacy\"]},\"hazards\":[\"data_loss\"]}]}]}\n"
 	if output.String() != want {
 		t.Fatalf("decision protocol bytes changed:\n got: %s\nwant: %s", output.String(), want)
 	}
@@ -67,7 +68,7 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document) != 4 || string(document["protocol_version"]) != `"onwardpg.draft/v4"` || string(document["status"]) != `"needs_decisions"` || string(document["next_action"]) != `"rerun_same_command_with_hints"` {
+	if len(document) != 4 || string(document["protocol_version"]) != `"onwardpg.draft/v5"` || string(document["status"]) != `"needs_decisions"` || string(document["next_action"]) != `"rerun_same_command_with_hints"` {
 		t.Fatalf("document = %s", output.String())
 	}
 	if _, exists := document["target"]; exists {
@@ -84,7 +85,7 @@ func TestWriteDecisionEnvelopeIncludesPlannerAnalysis(t *testing.T) {
 		Kind: "rename_table", From: "table:public.accounts", To: "table:public.customers",
 		Outcome: "rejected", Reason: "child_identity_mismatch:constraint:public.accounts_pkey",
 	}}
-	if err := writeDecisionEnvelope(&output, "onwardpg.plan/v3", nil, analysis); err != nil {
+	if err := writeDecisionEnvelope(&output, "onwardpg.plan/v4", nil, analysis); err != nil {
 		t.Fatal(err)
 	}
 	var document struct {
@@ -134,7 +135,7 @@ func TestWorkflowSQLWarnsOnlyForUnprovableAcceptedWork(t *testing.T) {
 		Outcome: string(protocol.Planned),
 		AcceptedSteps: []draftflow.AcceptedStep{
 			{Path: "upstream/phases/expand.sql", Kind: "generated_structural_phase"},
-			{Path: "upstream/phases/migrate.sql", Kind: "agent_authored_phase", RequiresReview: true},
+			{Path: "upstream/phases/contract.sql", Kind: "agent_authored_phase", RequiresReview: true},
 		},
 	}
 	development := devflow.Report{Status: protocol.Planned, Result: protocol.Result{
@@ -150,6 +151,19 @@ func TestWorkflowSQLWarnsOnlyForUnprovableAcceptedWork(t *testing.T) {
 	}
 	if strings.Contains(text, "generated_structural_phase") {
 		t.Fatalf("structural phase should not be rendered as an unprovable warning: %s", text)
+	}
+}
+
+func TestResolveConfiguredTargetDefaultsOnlyWhenUnambiguous(t *testing.T) {
+	selected := ""
+	target, err := resolveConfiguredTarget(workspace.Config{Targets: map[string]workspace.Target{"app": {SchemaFile: "schema.sql"}}}, &selected)
+	if err != nil || selected != "app" || target.SchemaFile != "schema.sql" {
+		t.Fatalf("single target resolution = %q %#v err=%v", selected, target, err)
+	}
+	selected = ""
+	_, err = resolveConfiguredTarget(workspace.Config{Targets: map[string]workspace.Target{"accounts": {}, "events": {}}}, &selected)
+	if err == nil || !strings.Contains(err.Error(), "accounts, events") {
+		t.Fatalf("multi-target ambiguity = %v", err)
 	}
 }
 

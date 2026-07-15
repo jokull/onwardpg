@@ -24,11 +24,16 @@ development, staging, or production database.
   NOT NULL rollout choices, confirmations, and product-specific SQL handoff.
   Hints can be supplied ahead of time and are bound to narrow graph scopes in
   generated receipts.
-- Readable `expand.sql`, `migrate.sql`, and `contract.sql` files with phase
+- Readable `expand.sql` and `contract.sql` files around exactly one application
+  deployment, with phase
   timing, batch boundaries, hazards, lock/rewrite guidance, and optional
   `verify.sql` boolean assertions.
-- Conservative three-way preservation of agent-edited phase SQL across feature
-  regeneration and incoming history, including explicit same-phase conflicts.
+- Stable edit pockets that transplant agent-owned SQL through regenerated
+  surroundings, plus conservative three-way conflicts for edits outside those
+  pockets.
+- Trigger-backed same-type column rename overlap: old and new names remain
+  writable during rollout, divergent dual writes fail, and contract preserves
+  original catalog identity.
 - Disposable clone verification of generated and edited SQL, expected partial
   residuals, exact edit receipts, typed failure diagnostics, cancellation
   cleanup, and the read-only `verify --check` CI gate.
@@ -59,7 +64,10 @@ development, staging, or production database.
   live inspection and recorded source receipts.
 - Product-specific backfills and orchestration are edited directly in phase SQL
   rather than authored through a JSON operation language.
-- The normal lifecycle has exactly three phases: expand, migrate, and contract.
+- The normal lifecycle has exactly two phases around one application deployment:
+  expand and contract. Backfills are work inside a phase, not another deploy.
+- `--target` defaults to the sole configured database and is required only when
+  multiple targets make selection ambiguous.
 - `dev plan`, `draft`, and low-level `plan` share `--output text|json`; JSON is the stable
   non-interactive default.
 - Empty DDL is accepted as a valid empty desired schema, while destructive

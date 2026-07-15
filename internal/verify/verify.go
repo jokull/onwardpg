@@ -20,9 +20,9 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg.verify/v3"
+const Version = "onwardpg.verify/v4"
 
-var phases = []string{"expand", "migrate", "contract"}
+var phases = []string{protocol.PhaseExpand, protocol.PhaseContract}
 
 type Failure struct {
 	Code          string `json:"code"`

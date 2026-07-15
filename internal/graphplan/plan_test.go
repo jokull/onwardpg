@@ -447,7 +447,7 @@ func TestBuildRendersPartitionAttachDetachAndRejectsReconfiguration(t *testing.T
 	attached := base
 	attached.PartitionOf = &pgschema.PartitionOf{Parent: parent, Bound: "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"}
 	attach, _, unsupported, err := renderModify(base, attached, decisions{}, Options{}, nil, nil)
-	if err != nil || len(unsupported) != 0 || len(attach) != 1 || attach[0].SQL != `ALTER TABLE "app"."events" ATTACH PARTITION "app"."events_2026" FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');` || attach[0].Phase != "migrate" {
+	if err != nil || len(unsupported) != 0 || len(attach) != 1 || attach[0].SQL != `ALTER TABLE "app"."events" ATTACH PARTITION "app"."events_2026" FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');` || attach[0].Phase != protocol.PhaseContract {
 		t.Fatalf("partition attach = %#v, unsupported=%#v, err=%v", attach, unsupported, err)
 	}
 	detach, _, unsupported, err := renderModify(attached, base, decisions{}, Options{}, nil, nil)
@@ -497,7 +497,7 @@ func TestBuildRequiresFingerprintBoundManualContractForPartitionReconfiguration(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].Phase != "migrate" || planned.Statements[0].Manual == nil || len(planned.Batches) != 1 || planned.Batches[0].Transactional {
+	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].Phase != protocol.PhaseContract || planned.Statements[0].Manual == nil || len(planned.Batches) != 1 || planned.Batches[0].Transactional {
 		t.Fatalf("expected a manual planned statement, got %#v", planned)
 	}
 }
@@ -852,8 +852,8 @@ func TestBuildOrdersChangedDefaultAfterColumnType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || !reflect.DeepEqual(pending.Questions[0].Choices, []string{"manual_sql"}) || pending.Questions[0].AllowsFreeform {
-		t.Fatalf("type change must expose only the editable SQL handoff: %#v", pending)
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || !reflect.DeepEqual(pending.Questions[0].Choices, []string{"manual_sql", "split_plan"}) || pending.Questions[0].AllowsFreeform {
+		t.Fatalf("type change must expose the one-deployment handoff or split-plan boundary: %#v", pending)
 	}
 	answer := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: after.ObjectID().String(), Value: "manual_sql"}}}
 	plan, err := Build(current, desired, answer, Options{})
@@ -861,7 +861,7 @@ func TestBuildOrdersChangedDefaultAfterColumnType(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := joinSQL(plan)
-	if plan.Status != protocol.NeedsSQLEdits || strings.Index(joined, "ONWARDPG TODO") > strings.Index(joined, "SET DEFAULT 'abc'") {
+	if plan.Status != protocol.NeedsSQLEdits || strings.Count(joined, "ONWARDPG TODO") != 2 || strings.Index(joined, "ONWARDPG TODO") > strings.Index(joined, "SET DEFAULT 'abc'") {
 		t.Fatalf("editable type handoff must precede the new default: %#v\n%s", plan, joined)
 	}
 }
@@ -931,7 +931,7 @@ func TestBuildRequiresAndRendersColumnMutationChoices(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
 		t.Fatalf("expected type and NOT NULL questions, got %#v", pending)
 	}
-	if !reflect.DeepEqual(pending.Questions[0].Choices, []string{"manual_sql"}) || pending.Questions[0].AllowsFreeform {
+	if !reflect.DeepEqual(pending.Questions[0].Choices, []string{"manual_sql", "split_plan"}) || pending.Questions[0].AllowsFreeform {
 		t.Fatalf("type-change choices contain an unusable shortcut: %#v", pending.Questions[0])
 	}
 	answers := protocol.Answers{
@@ -946,8 +946,18 @@ func TestBuildRequiresAndRendersColumnMutationChoices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.NeedsSQLEdits || !strings.Contains(joinSQL(planned), "ONWARDPG TODO") || strings.Contains(joinSQL(planned), "ALTER COLUMN \"age\" TYPE") {
+	if planned.Status != protocol.NeedsSQLEdits || strings.Count(joinSQL(planned), "ONWARDPG TODO") != 2 || strings.Contains(joinSQL(planned), "ALTER COLUMN \"age\" TYPE") {
 		t.Fatalf("same-name type change must become an editable handoff, not direct SQL: %#v", planned)
+	}
+	splitAnswers := answers
+	splitAnswers.Answers = append([]protocol.Answer(nil), answers.Answers...)
+	splitAnswers.Answers[0].Value = "split_plan"
+	split, err := Build(current, desired, splitAnswers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if split.Status != protocol.Unsupported || !containsString(split.Unsupported, "two_application_deployments_required:"+after.ObjectID().String()) {
+		t.Fatalf("split-plan choice must produce an explicit two-deployment boundary: %#v", split)
 	}
 }
 
@@ -982,7 +992,7 @@ func TestBuildStagesNewRequiredColumnWithoutDefault(t *testing.T) {
 		t.Fatalf("required new column must create an editable staged plan: %#v", plan)
 	}
 	if plan.Statements[0].Phase != "expand" || plan.Statements[0].SQL != `ALTER TABLE "app"."customers" ADD COLUMN "email" text;` ||
-		plan.Statements[1].Phase != "migrate" || !strings.Contains(plan.Statements[1].SQL, "ONWARDPG TODO") ||
+		plan.Statements[1].Phase != protocol.PhaseContract || !strings.Contains(plan.Statements[1].SQL, "ONWARDPG TODO") ||
 		plan.Statements[2].Phase != "contract" || plan.Statements[2].SQL != `ALTER TABLE "app"."customers" ALTER COLUMN "email" SET NOT NULL;` {
 		t.Fatalf("required column phases = %#v", plan.Statements)
 	}
@@ -1076,7 +1086,7 @@ func TestBuildStagesApplicationBackfillBeforeNotNullContract(t *testing.T) {
 	if planned.Status != protocol.Planned || len(planned.Batches) != 3 {
 		t.Fatalf("planned = %#v", planned)
 	}
-	if planned.Batches[0].Phase != "migrate" || planned.Batches[1].Phase != "migrate" || planned.Batches[2].Phase != "contract" {
+	if planned.Batches[0].Phase != protocol.PhaseContract || planned.Batches[1].Phase != protocol.PhaseContract || planned.Batches[2].Phase != protocol.PhaseContract {
 		t.Fatalf("phase order = %#v", planned.Batches)
 	}
 	if !strings.Contains(planned.Batches[0].Statements[0].SQL, "NOT VALID") || planned.Batches[1].Statements[0].Manual == nil || !strings.Contains(planned.Batches[2].Statements[0].SQL, "VALIDATE CONSTRAINT") {
@@ -1969,8 +1979,45 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.NeedsInput || len(planned.Questions) != 1 || planned.Questions[0].Kind != "rename_compatibility_bridge" {
-		t.Fatalf("column rename must request an editable compatibility bridge: %#v", planned)
+	if planned.Status != protocol.Planned || len(planned.Statements) != 9 {
+		t.Fatalf("column rename must produce a two-phase compatibility bridge: %#v", planned)
+	}
+	if planned.Statements[0].Phase != protocol.PhaseExpand || planned.Statements[4].Phase != protocol.PhaseContract {
+		t.Fatalf("column rename phases = %#v", planned.Statements)
+	}
+	joined := joinSQL(planned)
+	for _, fragment := range []string{
+		`ADD COLUMN "new_name" text`,
+		`CREATE FUNCTION "public"."onwardpg_sync_column_`,
+		`BEFORE INSERT OR UPDATE OF "old_name", "new_name"`,
+		`DROP COLUMN "new_name"`,
+		`RENAME COLUMN "old_name" TO "new_name"`,
+	} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("column rename bridge missing %q:\n%s", fragment, joined)
+		}
+	}
+}
+
+func TestColumnRenameRejectsUnmodeledPostgres18NotNullConstraintIdentity(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "display_name", Type: "text", NotNull: true}
+	after := before
+	after.Name = "full_name"
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := current.AddUnsupported("not_null_constraint:app.accounts.accounts_display_name_not_null"); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddUnsupported("not_null_constraint:app.accounts.accounts_full_name_not_null"); err != nil {
+		t.Fatal(err)
+	}
+	if reason := columnTriggerBridgeUnsupported(current, desired, before, after); reason != "not_null_constraint_identity" {
+		t.Fatalf("PostgreSQL 18 NOT NULL constraint identity reason = %q", reason)
 	}
 }
 
@@ -2496,7 +2543,7 @@ func TestBuildValidatesNotValidConstraintWithoutRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != protocol.Planned || len(result.Statements) != 1 || result.Statements[0].SQL != `ALTER TABLE "public"."orders" VALIDATE CONSTRAINT "orders_positive";` || result.Statements[0].Phase != "migrate" {
+	if result.Status != protocol.Planned || len(result.Statements) != 1 || result.Statements[0].SQL != `ALTER TABLE "public"."orders" VALIDATE CONSTRAINT "orders_positive";` || result.Statements[0].Phase != protocol.PhaseExpand {
 		t.Fatalf("unexpected validation plan %#v", result)
 	}
 }
@@ -2903,8 +2950,8 @@ func TestColumnRenamePreservesAutomaticallyRewrittenConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.NeedsInput || len(plan.Questions) != 1 || plan.Questions[0].Kind != "rename_compatibility_bridge" {
-		t.Fatalf("constraint-backed column rename must request an editable compatibility bridge: %#v", plan)
+	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), `RENAME COLUMN "old_name" TO "new_name"`) {
+		t.Fatalf("constraint-backed column rename must use the automatic compatibility bridge: %#v", plan)
 	}
 }
 

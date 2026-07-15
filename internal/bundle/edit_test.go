@@ -50,6 +50,24 @@ func TestParseAssertionsRequiresExplicitDevelopmentPostconditionMarker(t *testin
 	}
 }
 
+func TestTransplantEditedPocketsRefreshesGeneratorOwnedSurroundings(t *testing.T) {
+	oldGenerated := []byte("-- generated before\n-- onwardpg:edit begin stmt-1\n-- ONWARDPG TODO: backfill\n-- onwardpg:edit end stmt-1\nSELECT 'tail';\n")
+	previous := []byte("-- generated before\n-- onwardpg:edit begin stmt-1\nUPDATE app.events SET ready = true;\n-- onwardpg:edit end stmt-1\nSELECT 'tail';\n")
+	newGenerated := []byte("-- generated before\nALTER TABLE app.events ADD COLUMN note text;\n-- onwardpg:edit begin stmt-1\n-- ONWARDPG TODO: backfill\n-- onwardpg:edit end stmt-1\nSELECT 'tail';\n")
+	merged, transplanted, err := transplantEditedPockets(oldGenerated, previous, newGenerated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transplanted || !strings.Contains(string(merged), "ADD COLUMN note") || !strings.Contains(string(merged), "UPDATE app.events") || strings.Contains(string(merged), "ONWARDPG TODO") {
+		t.Fatalf("pocket merge = %q, transplanted=%v", merged, transplanted)
+	}
+
+	outsideEdit := []byte("-- developer changed generated text\n-- onwardpg:edit begin stmt-1\nUPDATE app.events SET ready = true;\n-- onwardpg:edit end stmt-1\nSELECT 'tail';\n")
+	if _, transplanted, err := transplantEditedPockets(oldGenerated, outsideEdit, newGenerated); err != nil || transplanted {
+		t.Fatalf("outside-pocket edit must remain a phase conflict: transplanted=%v err=%v", transplanted, err)
+	}
+}
+
 func TestPrepareEditedAndInstallReceiptsExactSQL(t *testing.T) {
 	meta := metadata()
 	meta.HistoryParentDigest = HistoryRootDigest()
@@ -61,8 +79,8 @@ func TestPrepareEditedAndInstallReceiptsExactSQL(t *testing.T) {
 	if err := Write(destination, artifact, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	migrate := "UPDATE app.users SET id = id;\n"
-	if err := os.WriteFile(filepath.Join(destination, "phases", "migrate.sql"), []byte(migrate), 0o644); err != nil {
+	contract := "UPDATE app.users SET id = id;\n"
+	if err := os.WriteFile(filepath.Join(destination, "phases", "contract.sql"), []byte(contract), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	verification := "-- onwardpg:assert rows_valid\nSELECT true;\n"
@@ -76,7 +94,7 @@ func TestPrepareEditedAndInstallReceiptsExactSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if candidate.Manifest.PhaseSource != "edited" || candidate.Manifest.VerificationDigest == "" || candidate.Manifest.Phases["migrate"].Digest != Digest([]byte(migrate)) {
+	if candidate.Manifest.PhaseSource != "edited" || candidate.Manifest.VerificationDigest == "" || candidate.Manifest.Phases[protocol.PhaseContract].Digest != Digest([]byte(contract)) {
 		t.Fatalf("candidate manifest = %#v", candidate.Manifest)
 	}
 	if err := InstallReceipts(destination, candidate); err != nil {
@@ -105,7 +123,7 @@ func TestNextCoordinatesFromPreparedEditedDraftDoesNotRequireStrictReread(t *tes
 	if err := Write(destination, artifact, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(destination, "phases", "migrate.sql"), []byte("UPDATE app.users SET id = id;\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(destination, "phases", "contract.sql"), []byte("UPDATE app.users SET id = id;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	prepared, err := PrepareEdited(destination)
@@ -135,7 +153,7 @@ func TestWriteCanReplaceExactPreparedUnreceiptedDraft(t *testing.T) {
 	if err := Write(destination, first, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(destination, "phases", "migrate.sql"), []byte("UPDATE app.users SET id = id;\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(destination, "phases", "contract.sql"), []byte("UPDATE app.users SET id = id;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	prepared, err := PrepareEdited(destination)
@@ -169,12 +187,12 @@ func TestReconcileEditedDraftPreservesUntouchedAgentPhase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	migrate := []byte("UPDATE app.users SET id = id;\n")
+	contract := []byte("UPDATE app.users SET id = id;\n")
 	verification := []byte("-- onwardpg:assert rows_valid\nSELECT true;\n")
 	previous, err := PrepareEditedFiles(oldGenerated, map[string][]byte{
-		"phases/expand.sql":  oldGenerated.Files["phases/expand.sql"],
-		"phases/migrate.sql": migrate,
-		"verify.sql":         verification,
+		"phases/expand.sql":   oldGenerated.Files["phases/expand.sql"],
+		"phases/contract.sql": contract,
+		"verify.sql":          verification,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +212,7 @@ func TestReconcileEditedDraftPreservesUntouchedAgentPhase(t *testing.T) {
 	if report.Outcome != "reconciled" || len(report.Conflicts) != 0 {
 		t.Fatalf("reconciliation = %#v", report)
 	}
-	if string(reconciled.Files["phases/migrate.sql"]) != string(migrate) || string(reconciled.Files["verify.sql"]) != string(verification) {
+	if string(reconciled.Files["phases/contract.sql"]) != string(contract) || string(reconciled.Files["verify.sql"]) != string(verification) {
 		t.Fatalf("agent-owned files were not preserved: %v", SortedFiles(reconciled.Files))
 	}
 	if !strings.Contains(string(reconciled.Files["phases/expand.sql"]), "ADD COLUMN email") {
@@ -205,7 +223,7 @@ func TestReconcileEditedDraftPreservesUntouchedAgentPhase(t *testing.T) {
 func TestReconcileEditedDraftCarriesResolvedTODOAcrossNewHistoryParent(t *testing.T) {
 	meta := metadata()
 	meta.HistoryParentDigest = HistoryRootDigest()
-	todo := statement("-- ONWARDPG TODO: convert app.accounts.occurred_at from timestamp to date", "migrate", true)
+	todo := statement("-- ONWARDPG TODO: convert app.accounts.occurred_at from timestamp to date", protocol.PhaseContract, true)
 	oldResult := plannedResult(todo)
 	oldResult.Status = protocol.NeedsSQLEdits
 	oldGenerated, err := Build(Input{Metadata: meta, Result: oldResult})
@@ -213,7 +231,7 @@ func TestReconcileEditedDraftCarriesResolvedTODOAcrossNewHistoryParent(t *testin
 		t.Fatal(err)
 	}
 	conversion := []byte("ALTER TABLE app.accounts ALTER COLUMN occurred_at TYPE date USING occurred_at::date;\n")
-	previous, err := PrepareEditedFiles(oldGenerated, map[string][]byte{"phases/migrate.sql": conversion})
+	previous, err := PrepareEditedFiles(oldGenerated, map[string][]byte{"phases/contract.sql": conversion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +248,7 @@ func TestReconcileEditedDraftCarriesResolvedTODOAcrossNewHistoryParent(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Outcome != "reconciled" || reconciled.Manifest.State != string(protocol.Planned) || string(reconciled.Files["phases/migrate.sql"]) != string(conversion) {
+	if report.Outcome != "reconciled" || reconciled.Manifest.State != string(protocol.Planned) || string(reconciled.Files["phases/contract.sql"]) != string(conversion) {
 		t.Fatalf("TODO reconciliation = %#v, manifest = %#v", report, reconciled.Manifest)
 	}
 }
@@ -306,7 +324,7 @@ func TestPrepareEditedRejectsUnresolvedTODO(t *testing.T) {
 	if err := Write(destination, artifact, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(destination, "phases", "migrate.sql"), []byte("-- ONWARDPG TODO: add the reviewed backfill\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(destination, "phases", "contract.sql"), []byte("-- ONWARDPG TODO: add the reviewed backfill\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := PrepareEdited(destination); err == nil || !strings.Contains(err.Error(), "unresolved") {

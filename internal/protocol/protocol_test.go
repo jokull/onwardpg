@@ -206,14 +206,14 @@ func FuzzResolverAnswerValidation(f *testing.F) {
 func TestRenderSQLIncludesPhaseAndBatchGuidance(t *testing.T) {
 	result := Result{Batches: []Batch{
 		{ID: "batch-001", Phase: "expand", Transactional: true, Statements: []Statement{{SQL: "CREATE TABLE x ();"}}},
-		{ID: "batch-002", Phase: "migrate", Transactional: false, Statements: []Statement{{SQL: "ALTER TABLE x\nADD COLUMN id bigint;"}}},
+		{ID: "batch-002", Phase: "contract", Transactional: false, Statements: []Statement{{SQL: "ALTER TABLE x\nADD COLUMN id bigint;"}}},
 		{ID: "batch-003", Phase: "contract", Transactional: true, Statements: []Statement{{SQL: "ALTER TABLE x DROP COLUMN legacy;"}}},
 	}}
 	want := `  -- onwardpg: forward-only PostgreSQL migration plan.
   -- Review every batch, safety classification, and hazard in the JSON plan before execution.
   -- ============================================================================
-  -- EXPAND — run before deploying application code that relies on the new shape.
-  -- Keep this compatible with the application version currently in production.
+  -- EXPAND — run before the one application deployment anchored to this plan.
+  -- Old code must remain usable while new code begins using the expanded shape.
   -- Transactional and non-transactional batches are marked below; this phase is not split by transaction.
   -- ============================================================================
   -- onwardpg:batch transactional
@@ -221,19 +221,15 @@ func TestRenderSQLIncludesPhaseAndBatchGuidance(t *testing.T) {
   CREATE TABLE x ();
 
   -- ============================================================================
-  -- MIGRATE — a deployment boundary after compatible code is deployed, not an EXPAND transaction split.
-  -- Add any application-specific backfill here or run it separately and observe it.
-  -- onwardpg never invents a cast or data transform that schema state cannot prove.
+  -- CONTRACT — run after pre-deployment instances, workers, pools, and queues have drained.
+  -- The one newly deployed application version must work before and after every batch below.
+  -- Catch-up, validation, enforcement, and compatibility cleanup belong here.
   -- ============================================================================
   -- onwardpg:batch nontransactional
   -- Batch batch-002: non-transactional; execute outside BEGIN/COMMIT.
   ALTER TABLE x
   ADD COLUMN id bigint;
 
-  -- ============================================================================
-  -- CONTRACT — run only after old application code no longer uses the prior shape.
-  -- This section can remove compatibility paths or enforce the final contract.
-  -- ============================================================================
   -- onwardpg:batch transactional
   -- Batch batch-003: transactional.
   ALTER TABLE x DROP COLUMN legacy;`
@@ -269,11 +265,19 @@ func TestRenderSQLIncludesTimeoutGuidanceWithoutApplyingIt(t *testing.T) {
 
 func TestRenderSQLIncludesProductSpecificNonTransactionalBoundary(t *testing.T) {
 	result := Result{Batches: []Batch{{
-		ID: "batch-004", Phase: "migrate", Transactional: false,
-		Statements: []Statement{{SQL: "-- PRODUCT-SPECIFIC SQL: build concurrently\nCREATE INDEX CONCURRENTLY idx ON items (id);", Phase: "migrate", Safety: "manual"}},
+		ID: "batch-004", Phase: "contract", Transactional: false,
+		Statements: []Statement{{SQL: "-- PRODUCT-SPECIFIC SQL: build concurrently\nCREATE INDEX CONCURRENTLY idx ON items (id);", Phase: "contract", Safety: "manual"}},
 	}}}
 	rendered := RenderSQL(result, "")
-	if !strings.Contains(rendered, "-- MIGRATE — a deployment boundary after compatible code is deployed") || !strings.Contains(rendered, "-- Batch batch-004: non-transactional; execute outside BEGIN/COMMIT.") || !strings.Contains(rendered, "CREATE INDEX CONCURRENTLY") {
+	if !strings.Contains(rendered, "-- CONTRACT — run after pre-deployment instances") || !strings.Contains(rendered, "-- Batch batch-004: non-transactional; execute outside BEGIN/COMMIT.") || !strings.Contains(rendered, "CREATE INDEX CONCURRENTLY") {
 		t.Fatalf("manual SQL rendering lost execution guidance: %q", rendered)
+	}
+}
+
+func TestRenderSQLBoundsEditableTODOWithStableMarkers(t *testing.T) {
+	statement := Statement{ID: "stmt-sha256-editable", SQL: "-- ONWARDPG TODO: supply overlap SQL", Phase: PhaseExpand, Safety: "manual"}
+	rendered := RenderSQL(Result{Batches: []Batch{{ID: "batch-expand-001", Phase: PhaseExpand, Transactional: true, Statements: []Statement{statement}}}}, "")
+	if !strings.Contains(rendered, "-- onwardpg:edit begin "+statement.ID+"\n-- ONWARDPG TODO") || !strings.Contains(rendered, "-- onwardpg:edit end "+statement.ID) {
+		t.Fatalf("editable SQL pocket is not stable and bounded: %q", rendered)
 	}
 }

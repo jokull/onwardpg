@@ -3760,20 +3760,20 @@
       "scenario": "Alter primary key columns (name stays same)",
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Alter primary key columns (name stays same)",
       "source_line": 769,
-      "classification": "supported",
+      "classification": "weaker",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "supported",
-        "online_strategy": "supported",
+        "mutation": "weaker",
+        "online_strategy": "intentionally_different",
         "rejection": "intentionally_different",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
         "internal/graphplan#TestContinuousPrimaryAndUniqueConstraintReplacementConvergesOnPostgreSQL",
-        "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardCastIntent"
+        "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardTypeBridgeIntent"
       ],
-      "differential_test": "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardCastIntent",
-      "notes": "Both plans converge with a concurrently built replacement constraint index. Stripe chooses a direct cast; onwardpg requires the cast expression as a fingerprint-bound answer."
+      "differential_test": "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardTypeBridgeIntent",
+      "notes": "Stripe converges with a direct cast and replacement constraint index. onwardpg can plan the index transition but requires reviewed expand/contract type-bridge SQL (or another deployment) instead of treating the cast as rolling-deploy compatibility."
     },
     {
       "id": "index.alter_index_columns_index_replacement_and_prioritized_builds",

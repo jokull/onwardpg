@@ -381,7 +381,7 @@ ALTER TABLE public.foobar ADD CONSTRAINT non_default_primary_key PRIMARY KEY USI
 	}
 }
 
-func TestPinnedStripePrimaryConstraintCaseRequiresOnwardCastIntent(t *testing.T) {
+func TestPinnedStripePrimaryConstraintCaseRequiresOnwardTypeBridgeIntent(t *testing.T) {
 	baseURL, stripeBinary := requireStripeReference(t)
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, baseURL)
@@ -395,8 +395,9 @@ func TestPinnedStripePrimaryConstraintCaseRequiresOnwardCastIntent(t *testing.T)
 	defer func() { _, _ = admin.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) }()
 
 	// This is Stripe v1.0.7's exact "Alter primary key columns (name stays
-	// same)" acceptance DDL. Stripe emits its own direct cast; onwardpg requires
-	// the developer/agent to supply and fingerprint that intent.
+	// same)" acceptance DDL. Stripe emits its own direct cast; onwardpg refuses
+	// to treat a catalog-convergent cast as proof that old and new application
+	// versions can overlap during one deployment.
 	currentDDL := `CREATE TABLE public.foobar (id integer NOT NULL, foo text NOT NULL);
 CREATE UNIQUE INDEX unique_idx ON public.foobar (id);
 ALTER TABLE public.foobar ADD CONSTRAINT non_default_primary_key PRIMARY KEY USING INDEX unique_idx;`
@@ -422,19 +423,12 @@ ALTER TABLE public.foobar ADD CONSTRAINT non_default_primary_key PRIMARY KEY USI
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
 		t.Fatalf("onwardpg must ask for the absent cast: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: `foo::integer`, QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
 	onward, err := graphplan.Build(current, desired, answers, graphplan.Options{ConcurrentIndexes: true})
-	if err != nil || onward.Status != protocol.Planned || !strings.Contains(joinOnwardSQL(onward), `USING foo::integer`) {
-		t.Fatalf("onwardpg cast-aware constraint plan=%#v err=%v", onward, err)
+	if err != nil || onward.Status != protocol.NeedsSQLEdits ||
+		!hasPhaseTODO(onward, protocol.PhaseExpand) || !hasPhaseTODO(onward, protocol.PhaseContract) {
+		t.Fatalf("onwardpg overlap-aware type handoff=%#v err=%v", onward, err)
 	}
-	if err := executeOnwardPlan(ctx, urls["onward"], onward); err != nil {
-		t.Fatal(err)
-	}
-	actual, err := source.LoadGraph(ctx, source.Parse(urls["onward"]), "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertNoOnwardResidual(t, actual, desired)
 	stripeActual, err := source.LoadGraph(ctx, source.Parse(urls["stripe"]), "", nil)
 	if err != nil {
 		t.Fatal(err)

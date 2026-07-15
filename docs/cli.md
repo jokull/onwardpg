@@ -4,12 +4,12 @@ The preferred developer-preview surface is:
 
 ~~~text
 onwardpg config check
-onwardpg init --target TARGET
-onwardpg plan NAME --target TARGET
-onwardpg plan --target TARGET --output sql
-onwardpg status --target TARGET
-onwardpg verify --target TARGET
-onwardpg drift check --target TARGET --database URL
+onwardpg init
+onwardpg plan NAME
+onwardpg plan --output sql
+onwardpg status
+onwardpg verify
+onwardpg drift check --database URL
 onwardpg diff --from SOURCE --to SOURCE
 ~~~
 
@@ -19,6 +19,9 @@ it derives the durable bundle from accepted history to working DDL and, when a
 development database is configured, separately prints a safe D → W
 reconciliation with `--output sql`. init, plan, and verify use scratch_database_env when
 configured and otherwise fall back to dev_database_env for compatibility.
+Commands select the sole configured target automatically. In a multi-target
+repository, pass `--target NAME`; an omitted ambiguous target is an error that
+lists the available names.
 
 `draft`, `dev plan`, `history status`, and source-to-source `plan --from --to`
 remain lower-level compatibility interfaces. New integrations should use
@@ -28,14 +31,14 @@ receipts and protocols remain supported during the developer preview.
 ## plan
 
 ~~~sh
-onwardpg plan [NAME] --target primary \
+onwardpg plan [NAME] \
   [--bundle ID] [--hint JSON] [--hints-file FILE] \
   [--dev-hint JSON] [--dev-hints-file FILE] \
   [--output json|text|sql]
 ~~~
 
 `plan NAME` starts one evolving logical migration in the current worktree.
-Later `plan --target primary` calls resume it; there is no lock or finalize
+Later `plan` calls resume it; there is no lock or finalize
 command. The bundle is always recalculated from replayed accepted history (H)
 to exported working DDL (W), so an incoming accepted migration becomes part of
 the ground beneath the same feature bundle rather than a second feature
@@ -60,12 +63,12 @@ strict/disposable databases or an actual incompatible D → W transition.
 ## status
 
 ~~~sh
-onwardpg status --target primary
+onwardpg status
 ~~~
 
 Reads the worktree-local active-plan anchor and repository history only. It
 reports the PlanID, selected bundle, and whether its parent is current, stale,
-or invalid. It does not read Git or contact PostgreSQL. `verify --target` uses
+or invalid. It does not read Git or contact PostgreSQL. `verify` uses
 this same anchor by default.
 
 ## config check
@@ -87,7 +90,7 @@ target acknowledge provider-owned state that may be absent from replay history.
 ## history status
 
 ~~~sh
-onwardpg history status --target primary [--bundle payment-settlement]
+onwardpg history status [--bundle payment-settlement]
 ~~~
 
 Inspects only repository receipts. Without `--bundle`, it returns the ordered
@@ -101,7 +104,6 @@ not inspect Git or connect to PostgreSQL.
 
 ~~~sh
 onwardpg init \
-  --target primary \
   [--bundle baseline] \
   [--concurrent-indexes] \
   [--ignore SELECTOR]
@@ -117,7 +119,6 @@ configured administrative role.
 
 ~~~sh
 onwardpg dev plan \
-  --target primary \
   [--hint '{"kind":"..."}'] \
   [--hints-file hints.json] \
   [--output text|json]
@@ -153,7 +154,6 @@ the object exists only in the development catalog.
 
 ~~~sh
 onwardpg draft \
-  --target primary \
   --bundle payment-settlement \
   --after "$BASE_HEAD" \
   [--create] \
@@ -205,7 +205,7 @@ unreceipted basis, and return all three SQL versions plus the `verify` next
 step.
 
 draft supports the same planner flags as dev plan.
-Its decision output protocol is `onwardpg.draft/v4`: `needs_decisions` contains
+Its decision output protocol is `onwardpg.draft/v5`: `needs_decisions` contains
 semantic choice sets plus the path and receipts it wrote, while
 `needs_sql_edits` names the bundle path and files the agent must edit.
 Fingerprint-bound answers are generated receipts, not an agent-facing
@@ -220,9 +220,8 @@ its data work remains necessary.
 
 ~~~sh
 onwardpg verify \
-  --target primary \
   --bundle payment-settlement \
-  [--through expand|migrate|contract]
+  [--through expand|contract]
 ~~~
 
 Creates disposable databases, executes validated history through the selected
@@ -251,7 +250,6 @@ split boolean queries in verify.sql.
 
 ~~~sh
 onwardpg drift check \
-  --target primary \
   --database "$PRODUCTION_DATABASE_URL" \
   [--ignore SELECTOR]
 ~~~

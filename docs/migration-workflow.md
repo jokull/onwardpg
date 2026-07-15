@@ -7,18 +7,18 @@ generates down migrations.
 ## The normal path
 
 ```sh
-onwardpg init --target primary
-onwardpg plan add-booking-dates --target primary
+onwardpg init
+onwardpg plan add-booking-dates
 
 # Answer only an ambiguity that schema state cannot prove.
-onwardpg plan --target primary \
+onwardpg plan \
   --hint '{"kind":"rename","object":"column","from":["app","booking","when"],"to":["app","booking","starts_at"]}'
 
 # Repeat as the feature or accepted base changes.
-onwardpg plan --target primary
+onwardpg plan
 
 # Review exact bytes in disposable PostgreSQL clones.
-onwardpg verify --target primary
+onwardpg verify
 ```
 
 The first command establishes the ground floor. `plan NAME` starts a
@@ -38,20 +38,22 @@ Generated operations are classified and rendered into readable phase files:
 
 | Phase | Typical work | Deployment meaning |
 | --- | --- | --- |
-| Expand | additive columns, compatible tables/indexes, `NOT VALID` constraints | run before code that needs the new shape |
-| Migrate | data movement, backfills, validation, agent-edited product SQL | a post-deploy boundary while old and new application paths coexist; not a transaction split |
-| Contract | destructive cleanup and final restrictions | delay until compatibility window is complete |
+| Expand | additive shape, compatibility views/triggers, initial backfill | run while pre-deployment code is still live, before one application rollout |
+| Contract | final catch-up, validation, enforcement, compatibility cleanup | run after pre-deployment instances and writers have drained |
 
 Comments identify transactional boundaries, required non-transactional batches,
 locking/rewrite hazards, and sequencing. Review the files as deployment SQL;
 their application remains the responsibility of the person or system with
 deployment visibility.
 
-`migrate.sql` is a deployment-time hand-off, not a way to put a transaction
-boundary inside `expand.sql`. An expand file may contain one or more explicit
-transactional and non-transactional batches. A migrate file exists only when
-the plan has work that belongs after compatible application code is deployed:
-for example an agent-reviewed backfill, validation, or an online operation.
+Backfill is work, not a third deployment phase. Initial synchronization belongs
+in expand when it is safe with old code live. Final catch-up, assertions, and
+enforcement belong in contract after old writers drain. Either file may contain
+multiple explicit transactional and non-transactional batches.
+
+One bundle surrounds exactly one application deployment. The new application
+must work before and after contract. If it cannot, keep an intermediate shape
+in this feature and remove the old contract in a later feature plan.
 
 ## Development without pretending it is history
 
@@ -59,7 +61,7 @@ When a target has `dev_database_env`, each `plan` also compares developer DB D
 with W. Use this only to bring local development forward:
 
 ```sh
-onwardpg plan --target primary --output sql | psql "$DEV_DATABASE_URL"
+onwardpg plan --output sql | psql "$DEV_DATABASE_URL"
 ```
 
 The command itself does not pipe or apply the SQL. In the default workspace
@@ -83,15 +85,15 @@ reports `workspace_compatibility`; clone verification remains exact.
 
 Git tells the developer that `main` moved. onwardpg validates the actual
 accepted migration history and selected PlanID. After rebase, repeat
-`onwardpg plan --target primary`. The tool replays the newly accepted chain and
+`onwardpg plan`. The tool replays the newly accepted chain and
 regenerates the feature bundle on top of it. It does not inspect branch names,
 merge bases, or commit SHAs as correctness facts.
 
-Agent-authored phase edits are retained only as explicit receipts. On a base
-change, onwardpg inventories generated structural phases separately from
-`migrate`/`manual`, agent-authored, and assertion files. Files whose effects
-cannot be established from catalog state are marked for review rather than
-silently replayed into development.
+Agent-authored phase edits are retained only as explicit receipts. Generated
+TODOs have stable edit-pocket markers; bytes inside those markers can be
+transplanted while surrounding generated SQL refreshes. An edit outside a
+pocket conflicts when the generator also changes that phase, and onwardpg
+returns all three versions for review.
 
 For a narrow extra signal, an accepted Boolean assertion may include
 `-- onwardpg:dev-postcondition`. `plan` evaluates only that opt-in assertion
@@ -108,7 +110,7 @@ second mutable plan while the previous bundle remains present.
 Run this when it is operationally useful, not as a requirement of every PR:
 
 ```sh
-onwardpg drift check --target primary --database "$PROD_DATABASE_URL"
+onwardpg drift check --database "$PROD_DATABASE_URL"
 ```
 
 It compares observed P with W and reports drift. A finding is evidence to

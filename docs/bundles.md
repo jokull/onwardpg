@@ -9,24 +9,24 @@ names.
 Create the ground floor once:
 
 ~~~sh
-onwardpg init --target primary
+onwardpg init
 ~~~
 
 Create one feature entry from the worktree with the preferred high-level
 command:
 
 ~~~sh
-onwardpg plan customer-profile --target primary
+onwardpg plan customer-profile
 ~~~
 
 Verify generated history:
 
 ~~~sh
-onwardpg verify --target primary
+onwardpg verify
 ~~~
 
 `plan` creates a worktree-local PlanID that selects the bundle on later calls;
-`status --target primary` shows that anchor. The compatibility `draft` command
+`status` shows that anchor. The compatibility `draft` command
 below documents the older explicit `history status` / `--after` interface for
 automation and diagnosis, not the default authoring loop.
 
@@ -96,14 +96,14 @@ customer-profile/
 ├── plan.json
 └── phases/
     ├── expand.sql
-    ├── migrate.sql
     └── contract.sql
 ~~~
 
 Only non-empty phases are written. Phase SQL preserves planner comments,
 transaction boundaries, hazards, and deterministic statement IDs.
 
-The manifest is onwardpg.bundle/v1. It records:
+The manifest is `onwardpg.bundle/v2`. Older three-phase developer-preview
+bundles are rejected with a regeneration action. It records:
 
 - logical bundle ID, generation, target, and purpose;
 - redacted source descriptions and typed graph fingerprints;
@@ -126,7 +126,7 @@ Generated and receipted bundles are strict receipts:
 - the history entry digest commits to its parent and manifest;
 - forks, gaps, disconnected entries, and altered parents are rejected.
 
-Direct phase edits make strict reads fail until onwardpg verify succeeds. The
+Direct phase edits make strict reads fail until `onwardpg verify` succeeds. The
 verifier prepares refreshed receipts in memory, executes the exact phase files
 only in disposable PostgreSQL, runs verify.sql boolean assertions, proves an
 empty residual, then atomically updates manifest receipts. Failure writes
@@ -138,17 +138,19 @@ to its own old target but no longer matches the working schema is `stale`, not
 verified; the finding points back to the same
 `draft --bundle ... --after ...` loop.
 
-Files without directives are transactional. Exact -- onwardpg:batch comments
+Files without directives are transactional. Exact `-- onwardpg:batch` comments
 split transactional and nontransactional chunks without requiring onwardpg to
-parse application SQL. Exact -- onwardpg:assert NAME comments split multiple
-verification queries. Verification does not freeze the explicitly selected
-draft. On redraft, onwardpg compares old generated, old edited, and new
-generated phase files. It carries one-sided changes and reports a conflict
-when both the agent and generator changed one phase. For a conflict, onwardpg
-atomically installs the new plan receipts but preserves the current phase bytes
-unreceipted. The report returns old-generated, current, and new-generated SQL.
-After the agent merges the intended work, normal `verify` executes and receipts
-that exact file; `verify --check` continues to reject it until then.
+parse application SQL. Exact `-- onwardpg:assert NAME` comments split multiple
+verification queries.
+
+Generated TODOs are bounded by stable `-- onwardpg:edit begin ID` and
+`-- onwardpg:edit end ID` markers. On redraft, edits confined to such a pocket
+are transplanted into refreshed generated surroundings. Other phase edits use a
+conservative three-way comparison. If both developer and generator changed the
+same generator-owned region, onwardpg installs the new plan receipts but
+preserves the current bytes unreceipted and reports old-generated, current, and
+new-generated SQL. Normal `verify` receipts the resolved file;
+`verify --check` rejects it until then.
 
 ## Moving base
 
@@ -157,7 +159,7 @@ name the same parent. Ordinary history loading rejects that fork. After the
 agent rebases and identifies the accepted upstream tip, it runs:
 
 ~~~sh
-onwardpg draft --target primary --bundle customer-profile --after "$NEW_BASE_HEAD"
+onwardpg draft --bundle customer-profile --after "$NEW_BASE_HEAD"
 ~~~
 
 By naming customer-profile, the developer tells onwardpg which one entry to
@@ -176,8 +178,8 @@ Developer-edited SQL is never discarded by this inference.
 ## Verification
 
 ~~~sh
-onwardpg verify --target primary --bundle customer-profile
-onwardpg verify --target primary --bundle customer-profile --through expand
+onwardpg verify --bundle customer-profile
+onwardpg verify --bundle customer-profile --through expand
 ~~~
 
 Verification executes only in onwardpg-created disposable databases. A partial

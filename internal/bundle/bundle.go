@@ -18,7 +18,7 @@ import (
 	"github.com/jokull/onwardpg/internal/protocol"
 )
 
-const Version = "onwardpg.bundle/v1"
+const Version = "onwardpg.bundle/v2"
 
 var rootHistoryDigest = digestFrames([]byte("onwardpg.history/v1"), []byte("root"))
 
@@ -261,7 +261,7 @@ func samePhaseReceipts(first, second map[string]PhaseArtifact) bool {
 
 func validateEditedPhaseReceipts(phases map[string]PhaseArtifact) error {
 	for phase, artifact := range phases {
-		if phase != "expand" && phase != "migrate" && phase != "contract" {
+		if !protocol.ValidPhase(phase) {
 			return fmt.Errorf("edited phase %q is invalid", phase)
 		}
 		if artifact.Path != path.Join("phases", phase+".sql") {
@@ -521,6 +521,9 @@ func jsonDocument(value any) ([]byte, error) {
 func validatePlanStatements(result protocol.Result) error {
 	ids := make(map[string]protocol.Statement, len(result.Statements))
 	for _, statement := range result.Statements {
+		if !protocol.ValidPhase(statement.Phase) {
+			return fmt.Errorf("planned statement %q uses unsupported phase %q; regenerate the bundle with this onwardpg version", statement.ID, statement.Phase)
+		}
 		if statement.ID == "" {
 			return fmt.Errorf("planned statement is missing a stable id")
 		}
@@ -531,6 +534,9 @@ func validatePlanStatements(result protocol.Result) error {
 	}
 	seen := make(map[string]bool, len(ids))
 	for _, batch := range result.Batches {
+		if !protocol.ValidPhase(batch.Phase) {
+			return fmt.Errorf("planned batch %q uses unsupported phase %q; regenerate the bundle with this onwardpg version", batch.ID, batch.Phase)
+		}
 		if batch.ID == "" {
 			return fmt.Errorf("planned batch is missing an id")
 		}
@@ -560,7 +566,7 @@ func sameStatement(left, right protocol.Statement) bool {
 func renderPhases(result protocol.Result) (map[string]PhaseArtifact, map[string][]byte, error) {
 	phases := make(map[string]PhaseArtifact)
 	files := make(map[string][]byte)
-	for _, phase := range []string{"expand", "migrate", "contract"} {
+	for _, phase := range []string{protocol.PhaseExpand, protocol.PhaseContract} {
 		var batches []protocol.Batch
 		var statements []protocol.Statement
 		transactional := true
@@ -603,7 +609,7 @@ func RenderReplaySQL(result protocol.Result) ([]byte, error) {
 		return nil, err
 	}
 	var sql strings.Builder
-	for _, phase := range []string{"expand", "migrate", "contract"} {
+	for _, phase := range []string{protocol.PhaseExpand, protocol.PhaseContract} {
 		name := path.Join("phases", phase+".sql")
 		body, exists := files[name]
 		if !exists {
@@ -620,7 +626,7 @@ func RenderReplaySQL(result protocol.Result) ([]byte, error) {
 
 func (m Manifest) Validate() error {
 	if m.ProtocolVersion != Version {
-		return fmt.Errorf("bundle protocol_version is %q, want %q", m.ProtocolVersion, Version)
+		return fmt.Errorf("bundle protocol_version %q is unsupported; regenerate this developer-preview history with %s", m.ProtocolVersion, Version)
 	}
 	if !safeName(m.BundleID) || !safeName(m.Target) {
 		return fmt.Errorf("bundle_id and target must contain only letters, numbers, dot, underscore, or dash")
@@ -703,7 +709,7 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("%s bundle requires a decision receipt matching result_digest", m.State)
 	}
 	for phase, artifact := range m.Phases {
-		if phase != "expand" && phase != "migrate" && phase != "contract" {
+		if !protocol.ValidPhase(phase) {
 			return fmt.Errorf("unknown phase artifact %q", phase)
 		}
 		if artifact.Path != path.Join("phases", phase+".sql") || !fingerprintPattern.MatchString(artifact.Digest) {

@@ -11,7 +11,7 @@ import (
 	"github.com/jokull/onwardpg/internal/protocol"
 )
 
-var editablePhases = []string{"expand", "migrate", "contract"}
+var editablePhases = []string{protocol.PhaseExpand, protocol.PhaseContract}
 
 type SQLBatch struct {
 	SQL           string
@@ -148,6 +148,20 @@ func ReconcileEditedDraft(previous, generated Artifact) (Artifact, EditReconcili
 		oldGeneratedBody, oldGeneratedExists := oldGenerated[name]
 		previousBody, previousExists := previous.Files[name]
 		newGeneratedBody, newGeneratedExists := generated.Files[name]
+		if oldGeneratedExists && previousExists && newGeneratedExists {
+			mergedBody, transplanted, err := transplantEditedPockets(oldGeneratedBody, previousBody, newGeneratedBody)
+			if err != nil {
+				return Artifact{}, report, fmt.Errorf("reconcile %s edit pockets: %w", name, err)
+			}
+			if transplanted {
+				merged[name] = mergedBody
+				report.Preserved = append(report.Preserved, name)
+				if !bytes.Equal(oldGeneratedBody, newGeneratedBody) {
+					report.Refreshed = append(report.Refreshed, name)
+				}
+				continue
+			}
+		}
 
 		switch {
 		case sameOptionalBytes(previousBody, previousExists, oldGeneratedBody, oldGeneratedExists):
@@ -187,6 +201,147 @@ func ReconcileEditedDraft(previous, generated Artifact) (Artifact, EditReconcili
 	}
 	report.Outcome = "reconciled"
 	return artifact, report, nil
+}
+
+type editPocketRange struct {
+	id    string
+	start int
+	end   int
+}
+
+type editPocketDocument struct {
+	body     []byte
+	skeleton []byte
+	ranges   []editPocketRange
+	contents map[string][]byte
+}
+
+// transplantEditedPockets recognizes edits made only between the stable
+// markers emitted around generated TODOs. It carries those exact bytes into a
+// refreshed generated phase while leaving every byte outside the pockets
+// under generator ownership. The bool is false when the prior edit was not
+// pocket-bounded, so the caller can fall back to the conservative phase-level
+// three-way conflict rules.
+func transplantEditedPockets(oldGenerated, previous, newGenerated []byte) ([]byte, bool, error) {
+	oldDocument, err := parseEditPocketDocument(oldGenerated)
+	if err != nil {
+		return nil, false, fmt.Errorf("old generated SQL: %w", err)
+	}
+	if len(oldDocument.ranges) == 0 {
+		return nil, false, nil
+	}
+	previousDocument, err := parseEditPocketDocument(previous)
+	if err != nil {
+		return nil, false, fmt.Errorf("current edited SQL: %w", err)
+	}
+	if !bytes.Equal(oldDocument.skeleton, previousDocument.skeleton) || len(oldDocument.contents) != len(previousDocument.contents) {
+		return nil, false, nil
+	}
+	newDocument, err := parseEditPocketDocument(newGenerated)
+	if err != nil {
+		return nil, false, fmt.Errorf("new generated SQL: %w", err)
+	}
+	replacements := make(map[string][]byte)
+	for id, oldContent := range oldDocument.contents {
+		previousContent, exists := previousDocument.contents[id]
+		if !exists {
+			return nil, false, nil
+		}
+		if bytes.Equal(previousContent, oldContent) {
+			continue
+		}
+		if _, exists := newDocument.contents[id]; !exists {
+			return nil, false, nil
+		}
+		replacements[id] = previousContent
+	}
+	if len(replacements) == 0 {
+		return nil, false, nil
+	}
+	return newDocument.render(replacements), true, nil
+}
+
+func parseEditPocketDocument(body []byte) (editPocketDocument, error) {
+	document := editPocketDocument{body: body, contents: make(map[string][]byte)}
+	const beginPrefix = "-- onwardpg:edit begin "
+	const endPrefix = "-- onwardpg:edit end "
+	outsideStart := 0
+	for at := 0; at < len(body); {
+		lineStart := at
+		lineEnd := bytes.IndexByte(body[at:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(body)
+		} else {
+			lineEnd += at + 1
+		}
+		line := strings.TrimSuffix(string(body[lineStart:lineEnd]), "\n")
+		line = strings.TrimSuffix(line, "\r")
+		if strings.HasPrefix(line, endPrefix) {
+			return editPocketDocument{}, fmt.Errorf("unexpected edit-pocket end marker %q", line)
+		}
+		if !strings.HasPrefix(line, beginPrefix) {
+			at = lineEnd
+			continue
+		}
+		id := strings.TrimPrefix(line, beginPrefix)
+		if id == "" || strings.ContainsAny(id, " \t\r\n") {
+			return editPocketDocument{}, fmt.Errorf("invalid edit-pocket id %q", id)
+		}
+		if _, duplicate := document.contents[id]; duplicate {
+			return editPocketDocument{}, fmt.Errorf("duplicate edit-pocket id %q", id)
+		}
+		contentStart := lineEnd
+		search := lineEnd
+		contentEnd, endLineEnd := -1, -1
+		for search < len(body) {
+			candidateStart := search
+			candidateEnd := bytes.IndexByte(body[search:], '\n')
+			if candidateEnd < 0 {
+				candidateEnd = len(body)
+			} else {
+				candidateEnd += search + 1
+			}
+			candidate := strings.TrimSuffix(string(body[candidateStart:candidateEnd]), "\n")
+			candidate = strings.TrimSuffix(candidate, "\r")
+			if strings.HasPrefix(candidate, beginPrefix) {
+				return editPocketDocument{}, fmt.Errorf("nested edit-pocket begin marker %q", candidate)
+			}
+			if strings.HasPrefix(candidate, endPrefix) {
+				if strings.TrimPrefix(candidate, endPrefix) != id {
+					return editPocketDocument{}, fmt.Errorf("edit-pocket %q ends with mismatched marker %q", id, candidate)
+				}
+				contentEnd, endLineEnd = candidateStart, candidateEnd
+				break
+			}
+			search = candidateEnd
+		}
+		if contentEnd < 0 {
+			return editPocketDocument{}, fmt.Errorf("edit-pocket %q is not closed", id)
+		}
+		document.skeleton = append(document.skeleton, body[outsideStart:contentStart]...)
+		document.skeleton = append(document.skeleton, []byte("<onwardpg-edit-content:"+id+">")...)
+		document.contents[id] = append([]byte(nil), body[contentStart:contentEnd]...)
+		document.ranges = append(document.ranges, editPocketRange{id: id, start: contentStart, end: contentEnd})
+		outsideStart = contentEnd
+		at = endLineEnd
+	}
+	document.skeleton = append(document.skeleton, body[outsideStart:]...)
+	return document, nil
+}
+
+func (document editPocketDocument) render(replacements map[string][]byte) []byte {
+	var result []byte
+	at := 0
+	for _, pocket := range document.ranges {
+		result = append(result, document.body[at:pocket.start]...)
+		if replacement, exists := replacements[pocket.id]; exists {
+			result = append(result, replacement...)
+		} else {
+			result = append(result, document.body[pocket.start:pocket.end]...)
+		}
+		at = pocket.end
+	}
+	return append(result, document.body[at:]...)
 }
 
 func optionalSQL(body []byte, exists bool) *string {

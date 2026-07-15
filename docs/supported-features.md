@@ -73,7 +73,7 @@ views, enums, and modeled user routines. The planner supports create, `CREATE
 OR REPLACE` definition/options changes, and approved drops. It recognizes and
 receipts semantic view-rename intent. After the rename choice, it asks for a
 fingerprint-bound `rename_compatibility_bridge` handoff rather than emitting a
-direct cutover. The generated `migrate` file contains an annotated
+direct cutover. The generated contract file contains an annotated
 `ONWARDPG TODO` with the bounded dependent-view analysis; the developer or
 agent supplies the compatibility wrapper and verifies convergence.
 For a materialized dependent, onwardpg permits PostgreSQL's native retained
@@ -87,7 +87,7 @@ Materialized-view rename intent and exact old→new index identity are modeled;
 the same explicit compatibility-bridge handoff is used rather than a guessed
 old-name strategy. Materialized views remain catalog-modeled and support
 create/drop. A definition/options change emits an explicit destructive
-rebuild question, then a reviewed drop/create `migrate` batch if approved.
+rebuild question, then a reviewed drop/create contract batch if approved.
 Indexes on materialized views are graph-modeled and recreated after an approved
 materialized-view rebuild. With the concurrent-index option, their rebuild is
 emitted in a separate non-transactional batch after the transactional view
@@ -115,9 +115,11 @@ the projected column, which is handled without parsing arbitrary SQL. Any
 expression, multi-column projection, alias, quoted identifier, or other
 dependent-view change is a structured unsupported result rather than an
 out-of-order `CREATE OR REPLACE` or guessed rebuild. Even the narrow recognized
-case is not emitted as a bare rename: onwardpg produces the explicit editable
-compatibility-bridge handoff needed to keep both column contracts usable
-through expand and migrate.
+case is not emitted as a bare rename. Eligible same-type columns use two
+physical columns plus a bidirectional trigger through expand, then final
+catch-up and a native identity-preserving rename in contract. Defaults,
+generated/identity values, partitions, existing trigger ordering, RLS, and
+unproven dependent rewrites block the automatic bridge.
 
 Functions, procedures, and triggers are graph-modeled. Their canonical
 PostgreSQL definitions support create, replace/recreate, enable-state changes,
@@ -199,7 +201,7 @@ replacement-table migration outside the current structural planner boundary.
 
 Partition children are graph-modeled. The planner supports an explicit attach
 or detach of an existing range/list/hash/default child and marks the
-lock/possible-scan hazards in the `migrate` phase. Moving a child to a
+lock/possible-scan hazards in the contract phase. Moving a child to a
 different parent, changing a bound, or changing a default partition requires
 an explicit `manual_sql` choice. onwardpg places an `ONWARDPG TODO` in the
 ordered phase and never invents a detach/attach sequence, cast, or data
@@ -210,16 +212,17 @@ executed during self-created clone verification.
 
 A nullable-to-`NOT NULL` transition offers `direct`, `staged`, and
 `staged_with_backfill`. The last option hands the application-owned backfill to
-an explicit phase-local SQL TODO after compatible writers are deployed and the
-`NOT VALID` guard is installed in migrate. Contract performs validation, `SET
-NOT NULL`, and helper-constraint removal. The guard is not placed in expand:
+an explicit contract SQL TODO after compatible writers are deployed. Contract
+installs the `NOT VALID` guard, runs the backfill, validates, sets `NOT NULL`,
+and removes the helper constraint. The guard is not placed in expand:
 PostgreSQL enforces a `NOT VALID` check for new rows immediately, which could
 break old writers. onwardpg never derives the backfill expression from the
 schema.
 
 Adding a new `NOT NULL` column without a default is always staged. Expand adds
-the column as nullable so old writers and existing rows remain valid; migrate
-contains an editable dual-write/backfill TODO; contract enforces `NOT NULL`.
+the column as nullable so old writers and existing rows remain valid; contract
+contains an editable backfill TODO and then enforces `NOT NULL` after old
+writers drain.
 The result remains `needs_sql_edits` until the agent supplies the product-aware
 work. A new required column with a retained default can be added directly,
 subject to the reported lock/rewrite hazards.

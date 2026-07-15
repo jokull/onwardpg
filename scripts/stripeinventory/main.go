@@ -306,10 +306,13 @@ func applyCaseOverrides(entry *caseEntry, family, name string) {
 		entry.Dimensions.OnlineStrategy = "supported"
 		entry.OnwardPGTests = []string{
 			"internal/graphplan#TestContinuousPrimaryAndUniqueConstraintReplacementConvergesOnPostgreSQL",
-			"internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardCastIntent",
+			"internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardTypeBridgeIntent",
 		}
-		entry.DifferentialTest = "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardCastIntent"
-		entry.Notes = "Both plans converge with a concurrently built replacement constraint index. Stripe chooses a direct cast; onwardpg requires the cast expression as a fingerprint-bound answer."
+		entry.DifferentialTest = "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardTypeBridgeIntent"
+		entry.Classification = "weaker"
+		entry.Dimensions.Mutation = "weaker"
+		entry.Dimensions.OnlineStrategy = "intentionally_different"
+		entry.Notes = "Stripe converges with a direct cast and replacement constraint index. onwardpg can plan the index transition but requires reviewed expand/contract type-bridge SQL (or another deployment) instead of treating the cast as rolling-deploy compatibility."
 	case family == "materialized_view_index" && name == "Change index columns on materialized view":
 		entry.Classification = "supported"
 		entry.Dimensions.Mutation = "supported"

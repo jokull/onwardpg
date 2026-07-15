@@ -146,10 +146,11 @@ func TestPinnedAtlasAndOnwardPGConvergeForMutationCorpus(t *testing.T) {
 	}
 	defer func() { _, _ = admin.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) }()
 	cases := []struct {
-		name           string
-		currentDDL     string
-		desiredDDL     string
-		minimumVersion int
+		name                     string
+		currentDDL               string
+		desiredDDL               string
+		minimumVersion           int
+		onwardRequiresTypeBridge bool
 	}{
 		{
 			name:       "default-change",
@@ -321,14 +322,16 @@ CREATE TABLE app.orders (id bigint);`,
 CREATE TABLE app.orders (id bigint NOT NULL);`,
 		},
 		{
-			name: "column-type-change",
+			name:                     "column-type-change",
+			onwardRequiresTypeBridge: true,
 			currentDDL: `CREATE SCHEMA app;
 CREATE TABLE app.orders (id integer);`,
 			desiredDDL: `CREATE SCHEMA app;
 CREATE TABLE app.orders (id bigint);`,
 		},
 		{
-			name: "indexed-column-type-change",
+			name:                     "indexed-column-type-change",
+			onwardRequiresTypeBridge: true,
 			currentDDL: `CREATE SCHEMA app;
 CREATE TABLE app.orders (id integer);
 CREATE INDEX orders_id_idx ON app.orders (id);`,
@@ -592,6 +595,31 @@ CREATE TYPE app.state AS ENUM ('open');`,
 			if err != nil {
 				t.Fatal(err)
 			}
+			if corpus.onwardRequiresTypeBridge {
+				if plan.Status != protocol.NeedsInput || len(plan.Questions) != 1 || plan.Questions[0].Kind != "type_change" {
+					t.Fatalf("onwardpg must ask for one-deployment type compatibility: %#v", plan)
+				}
+				question := plan.Questions[0]
+				answers := protocol.Answers{
+					ProtocolVersion: protocol.Version, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint,
+					Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "manual_sql", QuestionFingerprint: question.ScopeFingerprint}},
+				}
+				plan, err = graphplan.Build(current, desired, answers, graphplan.Options{})
+				if err != nil || plan.Status != protocol.NeedsSQLEdits ||
+					!hasPhaseTODO(plan, protocol.PhaseExpand) || !hasPhaseTODO(plan, protocol.PhaseContract) {
+					t.Fatalf("onwardpg type bridge handoff=%#v err=%v", plan, err)
+				}
+				atlasActual, err := source.LoadGraph(ctx, source.Parse(atlasURL), "", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				targetFingerprint, _ := desired.Fingerprint()
+				atlasFingerprint, _ := atlasActual.Fingerprint()
+				if atlasFingerprint != targetFingerprint {
+					t.Fatalf("atlas did not converge: got %s want %s", atlasFingerprint, targetFingerprint)
+				}
+				return
+			}
 			if plan.Status == protocol.NeedsInput {
 				answers, err := directAnswers(plan)
 				if err != nil {
@@ -732,7 +760,7 @@ func directAnswers(result protocol.Result) (protocol.Answers, error) {
 	for _, question := range result.Questions {
 		var value string
 		switch question.Kind {
-		case "set_not_null", "type_change":
+		case "set_not_null":
 			value = "direct"
 		case "drop":
 			value = "drop"
@@ -742,6 +770,15 @@ func directAnswers(result protocol.Result) (protocol.Answers, error) {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value})
 	}
 	return answers, nil
+}
+
+func hasPhaseTODO(result protocol.Result, phase string) bool {
+	for _, statement := range result.Statements {
+		if statement.Phase == phase && strings.Contains(statement.SQL, "ONWARDPG TODO") {
+			return true
+		}
+	}
+	return false
 }
 
 func assertNoOnwardResidual(t *testing.T, current, target *pgschema.Snapshot) {
