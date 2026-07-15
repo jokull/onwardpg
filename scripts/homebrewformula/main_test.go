@@ -23,7 +23,7 @@ func TestRenderFormulaUsesEverySupportedHomebrewArchive(t *testing.T) {
 		"releases/download/v0.1.0-preview.1/onwardpg_0.1.0-preview.1_darwin_arm64.tar.gz",
 		"releases/download/v0.1.0-preview.1/onwardpg_0.1.0-preview.1_linux_amd64.tar.gz",
 		"if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?",
-		`bin.install "onwardpg_0.1.0-preview.1_linux_arm64/onwardpg" => "onwardpg"`,
+		`bin.install "onwardpg"`,
 		`assert_match '"version":"v0.1.0-preview.1"'`,
 	} {
 		if !strings.Contains(text, fragment) {

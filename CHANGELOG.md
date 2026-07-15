@@ -5,6 +5,11 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ## Unreleased
 
+### Fixed
+
+- Generated Homebrew Formulae install from Homebrew's stripped archive root
+  rather than addressing the tarball's enclosing directory a second time.
+
 ## v0.1.0-preview.1 — 2026-07-15
 
 This is the first developer-preview line. onwardpg generates forward-only,

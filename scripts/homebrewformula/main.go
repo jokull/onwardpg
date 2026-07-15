@@ -125,7 +125,10 @@ func writePlatform(formula *strings.Builder, tag, version, platform string, arti
 		fmt.Fprintf(formula, "      url \"https://github.com/jokull/onwardpg/releases/download/%s/%s\"\n", tag, name)
 		fmt.Fprintf(formula, "      sha256 %q\n", artifact.checksum)
 		formula.WriteString("      define_method(:install) do\n")
-		fmt.Fprintf(formula, "        bin.install %q => \"onwardpg\"\n", strings.TrimSuffix(name, ".tar.gz")+"/onwardpg")
+		// Homebrew strips an archive's single enclosing directory before the
+		// install block runs, so the binary is at the staged root even though the
+		// deterministic release tarball retains that directory for direct users.
+		formula.WriteString("        bin.install \"onwardpg\"\n")
 		formula.WriteString("      end\n")
 		formula.WriteString("    end\n")
 	}
