@@ -413,11 +413,12 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		Planner: bundle.PlannerReceipt{
 			Version: input.BuildVersion,
 			Options: bundle.PlannerOptions{
-				ConcurrentIndexes: input.PlannerOptions.ConcurrentIndexes,
-				IfNotExists:       input.PlannerOptions.IfNotExists,
-				IfExists:          input.PlannerOptions.IfExists,
-				CascadeDrops:      input.PlannerOptions.CascadeDrops,
-				SchemaQualifier:   input.PlannerOptions.SchemaQualifier,
+				ConcurrentIndexes:       input.PlannerOptions.ConcurrentIndexes,
+				IfNotExists:             input.PlannerOptions.IfNotExists,
+				IfExists:                input.PlannerOptions.IfExists,
+				CascadeDrops:            input.PlannerOptions.CascadeDrops,
+				SchemaQualifier:         input.PlannerOptions.SchemaQualifier,
+				IgnoreExtensionVersions: append([]string(nil), input.PlannerOptions.IgnoreExtensionVersions...),
 			},
 			IgnoreSelectors: append([]string(nil), input.Ignores...),
 		},
@@ -699,7 +700,7 @@ func ensureInputsUnchanged(ctx context.Context, input Input, lock *targetlock.Lo
 	if err != nil {
 		return fmt.Errorf("rematerialize desired schema before lifecycle write: %w", err)
 	}
-	currentFingerprint, err := desired.Fingerprint()
+	currentFingerprint, err := graphplan.Fingerprint(desired, input.PlannerOptions)
 	if err != nil {
 		return fmt.Errorf("fingerprint desired schema before lifecycle write: %w", err)
 	}

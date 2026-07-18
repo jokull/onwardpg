@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "reference": {
     "repository": "https://github.com/stripe/pg-schema-diff",
     "tag": "v1.0.7",
@@ -7,6 +7,15 @@
     "license": "MIT"
   },
   "inventory_status": "classified_unverified",
+  "summary": {
+    "total_cases": 415,
+    "differential_parity": 30,
+    "differential_difference": 5,
+    "onward_evidence_only": 10,
+    "family_only_unverified": 368,
+    "confirmed_missing": 0,
+    "out_of_scope": 2
+  },
   "source_files": [
     {
       "path": "migration_acceptance_tests/check_constraint_cases_test.go",
@@ -137,6 +146,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -157,6 +168,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add check constraint (validate constraint added online)",
       "source_line": 33,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -177,6 +190,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add check constraint with UDF dependency should error",
       "source_line": 58,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -197,6 +212,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add check constraint with system function dependency should not error",
       "source_line": 87,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -217,6 +234,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add multiple check constraints",
       "source_line": 108,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -237,6 +256,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add check constraints to new column",
       "source_line": 130,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -257,6 +278,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add check constraint and change data type",
       "source_line": 150,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -277,6 +300,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add check constraint with quoted identifiers",
       "source_line": 173,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -297,6 +322,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add no inherit check constraint",
       "source_line": 195,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -317,6 +344,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Add No-Inherit, Not-Valid check constraint",
       "source_line": 217,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -337,6 +366,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Drop check constraint",
       "source_line": 239,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -357,6 +388,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Drop check constraint with quoted identifiers",
       "source_line": 260,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -377,6 +410,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Drop check constraint and change data type",
       "source_line": 282,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -397,6 +432,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Drop column with check constraints",
       "source_line": 307,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -417,6 +454,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Drop check constraint with UDF dependency should error",
       "source_line": 329,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -437,6 +476,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Drop check constraint with system function dependency should not error",
       "source_line": 358,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -457,6 +498,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Alter an invalid check constraint to be valid (validate constraint isn't dropped and re-added)",
       "source_line": 379,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -477,6 +520,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Alter a valid check constraint to be invalid",
       "source_line": 405,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -497,6 +542,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Alter a no-Inherit check constraint to be Inheritable",
       "source_line": 428,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -517,6 +564,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Alter an Inheritable check constraint to be no-inherit",
       "source_line": 451,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -537,6 +586,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Alter a check constraint expression",
       "source_line": 474,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -557,6 +608,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Alter check constraint with UDF dependency should error",
       "source_line": 495,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -577,6 +630,8 @@
       "stripe_test": "migration_acceptance_tests/check_constraint_cases_test.go#TestCheckConstraintTestCases/Alter check constraint with system function dependency should not error",
       "source_line": 532,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -597,6 +652,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -617,6 +674,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add one column with default",
       "source_line": 36,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -637,6 +696,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add one column with quoted names",
       "source_line": 54,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -657,6 +718,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add one column with nullability",
       "source_line": 72,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -677,6 +740,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add one column with serial",
       "source_line": 90,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -697,6 +762,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add one column with all options",
       "source_line": 108,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -717,6 +784,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add one column and change ordering",
       "source_line": 126,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -737,6 +806,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add identity column - always no cycle",
       "source_line": 151,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -758,6 +829,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add identity column - default cycle",
       "source_line": 169,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -779,6 +852,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Delete one column",
       "source_line": 187,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -799,6 +874,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Delete one column with quoted name",
       "source_line": 208,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -819,6 +896,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Delete one column with serial",
       "source_line": 229,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -839,6 +918,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Delete column with valid not null check constraint",
       "source_line": 250,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -859,6 +940,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Modify data type (int -\u003e serial)",
       "source_line": 271,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -879,6 +962,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Modify data type (serial -\u003e int)",
       "source_line": 290,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -899,6 +984,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change BIGINT to TIMESTAMP (validate conversion and ANALYZE)",
       "source_line": 312,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -919,6 +1006,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Modify data type (varchar -\u003e TEXT) with compatible default",
       "source_line": 339,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -939,6 +1028,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Modify data type and collation (varchar -\u003e char)",
       "source_line": 362,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -959,6 +1050,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Modify data type to incompatible (bytea -\u003e char)",
       "source_line": 385,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -979,6 +1072,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Modify collation (default -\u003e non-default) (validate ANALYZE is run)",
       "source_line": 408,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -999,6 +1094,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Modify collation (non-default -\u003e non-default)",
       "source_line": 435,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1019,6 +1116,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add Default",
       "source_line": 458,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1039,6 +1138,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Remove Default",
       "source_line": 477,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1059,6 +1160,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change Default",
       "source_line": 496,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1079,6 +1182,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL",
       "source_line": 515,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1099,6 +1204,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL (add invalid CC)",
       "source_line": 535,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1119,6 +1226,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL (invalid CC already exists)",
       "source_line": 563,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1139,6 +1248,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL (invalid to valid CC)",
       "source_line": 590,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1159,6 +1270,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL (add valid CC)",
       "source_line": 615,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1179,6 +1292,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL (valid CC already exists)",
       "source_line": 640,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1199,6 +1314,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL (dropping valid CC)",
       "source_line": 664,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1219,6 +1336,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL (dropping valid CC via recreation)",
       "source_line": 688,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1239,6 +1358,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Set NOT NULL (data type change with additional CC)",
       "source_line": 715,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1259,6 +1380,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Remove NOT NULL",
       "source_line": 748,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1279,6 +1402,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add default and change data type (new default is incompatible with old type)",
       "source_line": 767,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1299,6 +1424,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change default and data type (new default is incompatible with old type)",
       "source_line": 790,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1319,6 +1446,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change default and data type (old default is incompatible with new type)",
       "source_line": 813,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1339,6 +1468,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change from NULL default to no default and NOT NULL",
       "source_line": 837,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1359,6 +1490,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change from NOT NULL to no NULL default",
       "source_line": 856,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1379,6 +1512,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change data type and to nullable",
       "source_line": 875,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1399,6 +1534,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change data type and to not nullable",
       "source_line": 898,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1419,6 +1556,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change data type, nullability (NOT NULL), and default",
       "source_line": 921,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1439,6 +1578,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change data type and collation, nullability (NOT NULL), and default with quoted names",
       "source_line": 944,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1459,6 +1600,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Remove identity from column",
       "source_line": 967,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1480,6 +1623,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add identity to column",
       "source_line": 984,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1501,6 +1646,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add identity to column with existing default",
       "source_line": 1001,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1522,6 +1669,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity type - to by default",
       "source_line": 1018,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1543,6 +1692,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity type - to always",
       "source_line": 1035,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1564,6 +1715,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity minvalue",
       "source_line": 1052,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1585,6 +1738,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity maxvalue",
       "source_line": 1069,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1606,6 +1761,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity start",
       "source_line": 1086,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1627,6 +1784,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity increment",
       "source_line": 1103,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1648,6 +1807,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity cache",
       "source_line": 1120,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1669,6 +1830,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity cycle - to cycle",
       "source_line": 1137,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1690,6 +1853,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter identity cycle - to no cycle",
       "source_line": 1154,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1711,6 +1876,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Alter all identity properties (from always to default, from no cycle to cycle)",
       "source_line": 1171,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1732,6 +1899,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add generated column",
       "source_line": 1188,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1752,6 +1921,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Drop generated column",
       "source_line": 1215,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1772,6 +1943,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Add multiple generated columns",
       "source_line": 1242,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1792,6 +1965,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Generated column with index",
       "source_line": 1281,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1812,6 +1987,8 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Generated column no-op",
       "source_line": 1310,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1832,6 +2009,8 @@
       "stripe_test": "migration_acceptance_tests/data_packing_cases_test.go#TestDataPackingTestCases/Create table",
       "source_line": 11,
       "classification": "out_of_scope",
+      "evidence_status": "out_of_scope",
+      "gap_status": "out_of_scope",
       "dimensions": {
         "catalog": "out_of_scope",
         "mutation": "out_of_scope",
@@ -1848,6 +2027,8 @@
       "stripe_test": "migration_acceptance_tests/data_packing_cases_test.go#TestDataPackingTestCases/Create partitioned table with shared primary key and RLS enabled globally",
       "source_line": 67,
       "classification": "out_of_scope",
+      "evidence_status": "out_of_scope",
+      "gap_status": "out_of_scope",
       "dimensions": {
         "catalog": "out_of_scope",
         "mutation": "out_of_scope",
@@ -1864,6 +2045,8 @@
       "stripe_test": "migration_acceptance_tests/database_schema_source_cases_test.go#TestDatabaseSchemaSourceTestCases/Drop partitioned table, Add partitioned table with local keys",
       "source_line": 67,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1883,6 +2066,8 @@
       "stripe_test": "migration_acceptance_tests/database_schema_source_cases_test.go#TestDatabaseSchemaSourceTestCases/Dir src - happy path",
       "source_line": 150,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1902,6 +2087,8 @@
       "stripe_test": "migration_acceptance_tests/database_schema_source_cases_test.go#TestDatabaseSchemaSourceTestCases/Dir src - invalid sql",
       "source_line": 180,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -1921,6 +2108,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/no-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1929,8 +2118,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -1941,6 +2131,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/create enum",
       "source_line": 32,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1949,8 +2141,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -1961,6 +2154,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/drop enum",
       "source_line": 49,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1969,8 +2164,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -1981,6 +2177,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/add values",
       "source_line": 73,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -1989,8 +2187,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2001,6 +2200,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/delete value and add value (enum not used)",
       "source_line": 90,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2009,8 +2210,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2021,6 +2223,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/delete value and add value (enum used)",
       "source_line": 101,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2029,8 +2233,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2041,6 +2246,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/create enum with single-quote labels",
       "source_line": 125,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2049,8 +2256,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2061,6 +2269,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/add value with single-quote label",
       "source_line": 143,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2069,8 +2279,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2081,6 +2292,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/add value before a single-quote label",
       "source_line": 165,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2089,8 +2302,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2101,6 +2315,8 @@
       "stripe_test": "migration_acceptance_tests/enum_cases_test.go#TestEnumTestCases/enum label with sql injection payload",
       "source_line": 188,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2109,8 +2325,9 @@
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL",
-        "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"
+        "internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL",
+        "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite",
+        "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2121,6 +2338,8 @@
       "stripe_test": "migration_acceptance_tests/extensions_cases_test.go#TestExtensionTestCases/no-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2130,7 +2349,7 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL",
-        "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"
+        "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2141,6 +2360,8 @@
       "stripe_test": "migration_acceptance_tests/extensions_cases_test.go#TestExtensionTestCases/create multiple extensions",
       "source_line": 29,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2150,7 +2371,7 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL",
-        "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"
+        "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2161,6 +2382,8 @@
       "stripe_test": "migration_acceptance_tests/extensions_cases_test.go#TestExtensionTestCases/drop one extension",
       "source_line": 39,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2170,7 +2393,7 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL",
-        "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"
+        "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2181,6 +2404,8 @@
       "stripe_test": "migration_acceptance_tests/extensions_cases_test.go#TestExtensionTestCases/upgrade an extension implicitly and explicitly",
       "source_line": 55,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2190,7 +2415,7 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL",
-        "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"
+        "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"
       ],
       "notes": "Conservative family-level classification pending case-by-case differential verification."
     },
@@ -2201,6 +2426,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2221,6 +2448,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK",
       "source_line": 50,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2241,6 +2470,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK on partitioned",
       "source_line": 81,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2261,6 +2492,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK on partition",
       "source_line": 115,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2281,6 +2514,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK referencing partitioned",
       "source_line": 145,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2301,6 +2536,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK referencing partition",
       "source_line": 176,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2321,6 +2558,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK (only referenced table is new)",
       "source_line": 209,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2341,6 +2580,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK (owning table is not new)",
       "source_line": 233,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2361,6 +2602,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK (tables new)",
       "source_line": 259,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2381,6 +2624,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add not-valid FK (neither table is new)",
       "source_line": 278,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2401,6 +2646,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add FK (partitioned table)",
       "source_line": 308,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2421,6 +2668,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Drop FK",
       "source_line": 342,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2441,6 +2690,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Add and drop FK (conflicting schemas)",
       "source_line": 373,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2461,6 +2712,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Drop FK (partitioned table)",
       "source_line": 413,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2481,6 +2734,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Drop FK with table (references partitioned table)",
       "source_line": 449,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2501,6 +2756,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Alter FK not valid to valid (validate FK isn't dropped and re-added)",
       "source_line": 479,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2521,6 +2778,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Alter FK (valid to not valid)",
       "source_line": 514,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2541,6 +2800,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Alter FK (columns)",
       "source_line": 546,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2561,6 +2822,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Alter FK (on update)",
       "source_line": 584,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2581,6 +2844,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Alter FK (on delete)",
       "source_line": 614,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2601,6 +2866,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Alter castable type change",
       "source_line": 644,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2621,6 +2888,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Alter non-castable type change",
       "source_line": 677,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2641,6 +2910,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Switch FK owning table (to partitioned table)",
       "source_line": 708,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2661,6 +2932,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Switch FK owning table (from partitioned table)",
       "source_line": 756,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2681,6 +2954,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Switch FK owning table (analog tables in different schemas stay same)",
       "source_line": 798,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2701,6 +2976,8 @@
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Switch FK referenced table (to partitioned table with new unique index)",
       "source_line": 874,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2721,6 +2998,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2741,6 +3020,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Create functions (with conflicting names)",
       "source_line": 46,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2761,6 +3042,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Create functions with quoted names (with conflicting names)",
       "source_line": 76,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2781,6 +3064,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Create non-sql function",
       "source_line": 94,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2801,6 +3086,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Create function with dependencies",
       "source_line": 107,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2821,6 +3108,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Create function with an extension that also creates functions installed",
       "source_line": 148,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2841,6 +3130,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Drop functions (with conflicting names)",
       "source_line": 167,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2861,6 +3152,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Drop functions with quoted names (with conflicting names)",
       "source_line": 185,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2881,6 +3174,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Drop non-sql function",
       "source_line": 203,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2901,6 +3196,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Drop function with dependencies",
       "source_line": 216,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2921,6 +3218,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Add and drop functions with dependencies (conflicting schemas)",
       "source_line": 257,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2941,6 +3240,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Alter functions (with conflicting names)",
       "source_line": 305,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2961,6 +3262,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Alter functions with quoted names (with conflicting names)",
       "source_line": 336,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -2981,6 +3284,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Alter non-sql function",
       "source_line": 367,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3001,6 +3306,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Alter sql function to be non-sql function",
       "source_line": 387,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3021,6 +3328,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Alter non-sql function to be sql function (no dependency tracking error)",
       "source_line": 406,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3041,6 +3350,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Alter a function's dependencies",
       "source_line": 424,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3061,6 +3372,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Alter a dependent function",
       "source_line": 490,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3081,6 +3394,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Alter a function to no longer depend on a function and drop that function",
       "source_line": 536,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3101,6 +3416,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Create function with name containing double quote",
       "source_line": 577,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3121,6 +3438,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Drop function with name containing double quote",
       "source_line": 590,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3141,6 +3460,8 @@
       "stripe_test": "migration_acceptance_tests/function_cases_test.go#TestFunctionTestCases/Create function with SQL injection in name",
       "source_line": 603,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3161,6 +3482,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3181,6 +3504,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a normal index",
       "source_line": 40,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3201,6 +3526,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a hash index",
       "source_line": 65,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3221,6 +3548,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a normal index with quoted names",
       "source_line": 88,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3241,6 +3570,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a functional index",
       "source_line": 111,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3261,6 +3592,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a unique index",
       "source_line": 136,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3281,6 +3614,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a primary key",
       "source_line": 159,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3301,6 +3636,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a unique constraint",
       "source_line": 181,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3321,6 +3658,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a primary key on NOT NULL column",
       "source_line": 201,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3341,6 +3680,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a primary key when the index already exists",
       "source_line": 221,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3361,6 +3702,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a unique constraint when the index already exists",
       "source_line": 241,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3381,6 +3724,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a primary key when the index already exists but has a name different to the constraint",
       "source_line": 261,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3401,6 +3746,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a unique constraint when the index already exists but has a name different to the constraint",
       "source_line": 286,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3421,6 +3768,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a primary key when the index already exists but is not unique",
       "source_line": 311,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3441,6 +3790,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add a unique constraint when the index already exists but is not unique",
       "source_line": 335,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3461,6 +3812,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Delete a normal index",
       "source_line": 359,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3481,6 +3834,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Delete a normal index and columns (index dropped concurrently first)",
       "source_line": 384,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3501,6 +3856,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Delete a normal index with quoted names",
       "source_line": 411,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3521,6 +3878,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Delete a unique index",
       "source_line": 434,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3541,6 +3900,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Delete a primary key",
       "source_line": 457,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3561,6 +3922,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Delete a unique constraint",
       "source_line": 478,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3581,6 +3944,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Add and delete a normal index (conflicting schemas)",
       "source_line": 499,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3601,6 +3966,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Change an index (with a really long name) columns",
       "source_line": 538,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3621,6 +3988,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Change indexes (conflicting schemas)",
       "source_line": 566,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3641,6 +4010,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Change an index type",
       "source_line": 610,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3661,6 +4032,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Change an index column ordering",
       "source_line": 638,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3681,6 +4054,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Delete columns and associated index",
       "source_line": 666,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3701,6 +4076,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Switch primary key and make old key nullable",
       "source_line": 691,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3721,6 +4098,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Switch primary key with quoted name",
       "source_line": 717,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3741,6 +4120,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Switch primary key when the original primary key constraint has a non-default name",
       "source_line": 742,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3761,6 +4142,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Alter primary key columns (name stays same)",
       "source_line": 769,
       "classification": "weaker",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3782,6 +4165,8 @@
       "stripe_test": "migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/Alter index columns (index replacement and prioritized builds)",
       "source_line": 798,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -3803,6 +4188,8 @@
       "stripe_test": "migration_acceptance_tests/index_no_concurrent_cases_test.go#TestIndexNoConcurrentTestCases/Add",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3822,6 +4209,8 @@
       "stripe_test": "migration_acceptance_tests/index_no_concurrent_cases_test.go#TestIndexNoConcurrentTestCases/Delete",
       "source_line": 35,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3841,6 +4230,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3860,6 +4251,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Add local indexes",
       "source_line": 50,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3879,6 +4272,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Add a unique local index",
       "source_line": 90,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3898,6 +4293,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Add local primary keys",
       "source_line": 120,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3917,6 +4314,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Add local unique constraints",
       "source_line": 164,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3936,6 +4335,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Delete a local index",
       "source_line": 202,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3955,6 +4356,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Delete a unique local index",
       "source_line": 245,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3974,6 +4377,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Delete a primary key",
       "source_line": 283,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -3993,6 +4398,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Change an index columns (with conflicting schemas)",
       "source_line": 330,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -4014,6 +4421,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Delete columns and associated index",
       "source_line": 391,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4033,6 +4442,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Switch primary key (add and drop) (conflicting schemas)",
       "source_line": 421,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4052,6 +4463,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Add a primary key when the index already exists",
       "source_line": 494,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4071,6 +4484,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Add a unique constraint when the index already exists",
       "source_line": 543,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4090,6 +4505,8 @@
       "stripe_test": "migration_acceptance_tests/local_partition_index_cases_test.go#TestLocalPartitionIndexTestCases/Switch partitioned index to local index",
       "source_line": 571,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4109,6 +4526,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4128,6 +4547,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Add materialized view",
       "source_line": 53,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4147,6 +4568,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Add recursive materialized view",
       "source_line": 81,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4166,6 +4589,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Add materialized view with dependent table",
       "source_line": 114,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4185,6 +4610,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Add materialized view with dependent column",
       "source_line": 133,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4204,6 +4631,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Drop materialized view",
       "source_line": 159,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4223,6 +4652,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Drop materialized view and underlying table",
       "source_line": 187,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4242,6 +4673,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Drop materialized view and underlying column",
       "source_line": 208,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4261,6 +4694,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Recreate materialized view due to table recreation (unpartitioned to partitioned)",
       "source_line": 239,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4280,6 +4715,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Recreate materialized view due dependent table changing",
       "source_line": 276,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4299,6 +4736,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Recreate materialized view due to dependent column changing",
       "source_line": 310,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4318,6 +4757,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/alter - add column and change condition",
       "source_line": 346,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4337,6 +4778,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/alter - removing select column",
       "source_line": 376,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4356,6 +4799,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/alter - add fill factor option",
       "source_line": 411,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4375,6 +4820,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/alter - change autovacuum option",
       "source_line": 444,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4394,6 +4841,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/alter - add log_autovacuum_min_duration option",
       "source_line": 477,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4413,6 +4862,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/alter - remove toast_tuple_target option",
       "source_line": 510,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4432,6 +4883,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Add materialized view with index",
       "source_line": 543,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4451,6 +4904,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Drop materialized view with index",
       "source_line": 568,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4470,6 +4925,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Drop materialized view with index and underlying table",
       "source_line": 593,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4489,6 +4946,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_index_cases_test.go#TestMaterializedViewIndexTestCases/Add index to existing materialized view",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4509,6 +4968,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_index_cases_test.go#TestMaterializedViewIndexTestCases/Drop index from materialized view",
       "source_line": 41,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4529,6 +4990,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_index_cases_test.go#TestMaterializedViewIndexTestCases/Add unique index to materialized view",
       "source_line": 71,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4549,6 +5012,8 @@
       "stripe_test": "migration_acceptance_tests/materialized_view_index_cases_test.go#TestMaterializedViewIndexTestCases/Change index columns on materialized view",
       "source_line": 101,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -4570,6 +5035,8 @@
       "stripe_test": "migration_acceptance_tests/named_schema_cases_test.go#TestNamedSchemaTestCases/no op",
       "source_line": 7,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -4589,6 +5056,8 @@
       "stripe_test": "migration_acceptance_tests/named_schema_cases_test.go#TestNamedSchemaTestCases/create schema",
       "source_line": 19,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -4608,6 +5077,8 @@
       "stripe_test": "migration_acceptance_tests/named_schema_cases_test.go#TestNamedSchemaTestCases/Drop schema",
       "source_line": 29,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -4627,6 +5098,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4646,6 +5119,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a normal partitioned index",
       "source_line": 49,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4665,6 +5140,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a hash index",
       "source_line": 83,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4684,6 +5161,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a unique partitioned index",
       "source_line": 113,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4703,6 +5182,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a normal partitioned index with quotes names",
       "source_line": 142,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4722,6 +5203,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a functional partitioned index",
       "source_line": 172,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4741,6 +5224,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a primary key",
       "source_line": 206,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4760,6 +5245,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a unique constraint",
       "source_line": 235,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4779,6 +5266,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a partitioned index that is used by a local primary key",
       "source_line": 268,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4798,6 +5287,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a primary key with quoted names",
       "source_line": 307,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4817,6 +5308,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a partitioned primary key when the local index already exists",
       "source_line": 336,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4836,6 +5329,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a partitioned unique constraint when the local index already exists",
       "source_line": 382,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4855,6 +5350,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add a unique index when the local index already exists",
       "source_line": 428,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4874,6 +5371,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Delete a normal partitioned index",
       "source_line": 474,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4893,6 +5392,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Delete a unique partitioned index",
       "source_line": 508,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4912,6 +5413,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Delete a primary key",
       "source_line": 538,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4931,6 +5434,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Delete a unique constraint",
       "source_line": 572,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4950,6 +5455,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Local index and columns deleted (index dropped first)",
       "source_line": 602,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4969,6 +5476,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Alter index columns (index replacement and prioritized builds)",
       "source_line": 646,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -4988,6 +5497,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Alter index columns (index replacement and prioritized builds) (conflicting schemas)",
       "source_line": 707,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5007,6 +5518,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Change an index type",
       "source_line": 776,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5026,6 +5539,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Change an index column ordering",
       "source_line": 812,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5047,6 +5562,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Delete columns and associated index",
       "source_line": 848,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5066,6 +5583,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Switch primary key",
       "source_line": 879,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5085,6 +5604,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Attach an unnattached, invalid index",
       "source_line": 911,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5106,6 +5627,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add primary key constraint with existing matching base-table index (matching child index does not exist)",
       "source_line": 959,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5125,6 +5648,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add unique constraint with existing matching base-table index (matching child index does not exist)",
       "source_line": 992,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5144,6 +5669,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add primary key constraint with existing matching base-table index (local matching child index exists)",
       "source_line": 1025,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5163,6 +5690,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add primary key constraint with existing matching base-table index (matching non-local index exists that backs local matching PK)",
       "source_line": 1058,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5182,6 +5711,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add unique constraint with existing matching base-table index (matching non-local index exists that backs local matching PK)",
       "source_line": 1086,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5201,6 +5732,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add unique constraint with existing matching base-table index (matching non-local index exists that backs local matching unique constraint)",
       "source_line": 1116,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5220,6 +5753,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add primary key constraint with existing matching base-table index (matching local PK already exists backed by local index)",
       "source_line": 1146,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5239,6 +5774,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add unique constraint with existing matching base-table index (matching local PK already exists backed by local index)",
       "source_line": 1177,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5258,6 +5795,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add primary key to partition using existing index",
       "source_line": 1208,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5279,6 +5818,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_index_cases_test.go#TestPartitionedIndexTestCases/Add unique constraint to partition using existing index",
       "source_line": 1237,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5300,6 +5841,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5320,6 +5863,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Create partitioned table with shared primary key and RLS enabled globally",
       "source_line": 111,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5340,6 +5885,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Create partitioned table with local primary keys and RLS enabled locally",
       "source_line": 150,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5360,6 +5907,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Drop table",
       "source_line": 204,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5380,6 +5929,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Add and drop partitioned table (conflicting schemas)",
       "source_line": 258,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5400,6 +5951,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Alter replica identity of parent and children",
       "source_line": 285,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5420,6 +5973,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Enable RLS of parent and children",
       "source_line": 322,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5440,6 +5995,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Disable RLS of parent and children",
       "source_line": 359,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5460,6 +6017,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Alter table: New primary key, new unique constraint, dropped unique constraint, change column types, delete partitioned index, new partitioned index, delete local index, add local index, validate check constraint, validate FK, delete FK",
       "source_line": 396,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5480,6 +6039,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Changing partition key def errors",
       "source_line": 491,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5500,6 +6061,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Unpartitioned to partitioned",
       "source_line": 520,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5520,6 +6083,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Unpartitioned to partitioned and child tables already exist",
       "source_line": 609,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5540,6 +6105,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Partitioned to unpartitioned",
       "source_line": 727,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5560,6 +6127,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Partitioned to unpartitioned and child tables still exist",
       "source_line": 815,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5580,6 +6149,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Adding a partition",
       "source_line": 929,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5600,6 +6171,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Adding a partition with local primary key that can back the unique index",
       "source_line": 1001,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5620,6 +6193,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Adding a partition with local unique constraint that can back the unique index",
       "source_line": 1066,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5640,6 +6215,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Deleting a partitioning errors",
       "source_line": 1101,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5660,6 +6237,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Altering a partition's 'FOR VALUES' errors",
       "source_line": 1130,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5680,6 +6259,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Re-creating base table causes partitions to be re-created",
       "source_line": 1159,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5700,6 +6281,8 @@
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Can handle scenario where partition is not attached",
       "source_line": 1241,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -5720,6 +6303,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/no-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5741,6 +6326,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Add permissive ALL policy target on non-public schema",
       "source_line": 41,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5762,6 +6349,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Create SELECT policy",
       "source_line": 69,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5783,6 +6372,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Create INSERT policy",
       "source_line": 90,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5804,6 +6395,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Create UPDATE policy",
       "source_line": 111,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5825,6 +6418,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Create DELETE policy",
       "source_line": 132,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5846,6 +6441,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Add policy on new table",
       "source_line": 153,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5867,6 +6464,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Add policy then enable RLS",
       "source_line": 166,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5888,6 +6487,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Drop non-public schema policy",
       "source_line": 195,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5909,6 +6510,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Drop policy and table",
       "source_line": 218,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5930,6 +6533,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Disable RLS then drop policy",
       "source_line": 234,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5951,6 +6556,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Drop policy and columns",
       "source_line": 262,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5972,6 +6579,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Restrictive to permissive policy",
       "source_line": 287,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -5993,6 +6602,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Alter policy target",
       "source_line": 313,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6014,6 +6625,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Alter policy applies to",
       "source_line": 339,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6035,6 +6648,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Alter policy using",
       "source_line": 366,
       "classification": "weaker",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6058,6 +6673,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Alter policy check",
       "source_line": 392,
       "classification": "weaker",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6081,6 +6698,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Remove using check for ALL policy",
       "source_line": 418,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6102,6 +6721,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Remove check for ALL policy",
       "source_line": 445,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6123,6 +6744,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Alter all alterable attributes on non-public schema",
       "source_line": 472,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6144,6 +6767,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Alter policy that references deleted columns and new columns (non-public schema)",
       "source_line": 506,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6165,6 +6790,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Re-create policy that references deleted columns and new columns (non-public schema)",
       "source_line": 543,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6186,6 +6813,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Alter policy (table is re-created)",
       "source_line": 580,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6207,6 +6836,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Policy on new partition (not implemented)",
       "source_line": 611,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6228,6 +6859,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Add policy on existing partition (not implemented)",
       "source_line": 636,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6249,6 +6882,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Create policy with role containing double quote",
       "source_line": 662,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6270,6 +6905,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Alter policy with role containing SQL injection payload",
       "source_line": 687,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6291,6 +6928,8 @@
       "stripe_test": "migration_acceptance_tests/policy_cases_test.go#TestPolicyCases/Create policy with PUBLIC keyword unquoted",
       "source_line": 718,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6312,6 +6951,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/no-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6332,6 +6973,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Grant multiple privileges to role",
       "source_line": 30,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6352,6 +6995,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Revoke privilege from role",
       "source_line": 46,
       "classification": "weaker",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6374,6 +7019,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Grant WITH GRANT OPTION",
       "source_line": 62,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6394,6 +7041,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Change GRANT OPTION (recreates privilege)",
       "source_line": 78,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6414,6 +7063,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Remove GRANT OPTION (recreates privilege)",
       "source_line": 97,
       "classification": "weaker",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6436,6 +7087,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Grant on new table (no hazards since table is new)",
       "source_line": 116,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6456,6 +7109,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Drop table with privileges (only DeletesData hazard)",
       "source_line": 127,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6476,6 +7131,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Grant on non-public schema table",
       "source_line": 140,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6496,6 +7153,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Grant on partitioned parent table",
       "source_line": 160,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6516,6 +7175,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Privilege on new partition (not implemented)",
       "source_line": 184,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6536,6 +7197,8 @@
       "stripe_test": "migration_acceptance_tests/privilege_cases_test.go#TestPrivilegeCases/Add privilege on existing partition (not implemented)",
       "source_line": 205,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6556,6 +7219,8 @@
       "stripe_test": "migration_acceptance_tests/procedure_cases_test.go#TestProcedureTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6575,6 +7240,8 @@
       "stripe_test": "migration_acceptance_tests/procedure_cases_test.go#TestProcedureTestCases/Create procedure with no dependencies",
       "source_line": 34,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6594,6 +7261,8 @@
       "stripe_test": "migration_acceptance_tests/procedure_cases_test.go#TestProcedureTestCases/Create procedure with dependencies that also must be created",
       "source_line": 48,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6613,6 +7282,8 @@
       "stripe_test": "migration_acceptance_tests/procedure_cases_test.go#TestProcedureTestCases/Alter a procedure to have dependencies that must be created",
       "source_line": 71,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6632,6 +7303,8 @@
       "stripe_test": "migration_acceptance_tests/procedure_cases_test.go#TestProcedureTestCases/Drop procedure and its dependencies",
       "source_line": 103,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6651,6 +7324,8 @@
       "stripe_test": "migration_acceptance_tests/procedure_cases_test.go#TestProcedureTestCases/Drop a procedure's dependencies but not the procedure",
       "source_line": 133,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6670,6 +7345,8 @@
       "stripe_test": "migration_acceptance_tests/schema_cases_test.go#TestSchemaTestCases/No-op",
       "source_line": 12,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6689,6 +7366,8 @@
       "stripe_test": "migration_acceptance_tests/schema_cases_test.go#TestSchemaTestCases/Add/drop all objects",
       "source_line": 198,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6708,6 +7387,8 @@
       "stripe_test": "migration_acceptance_tests/schema_cases_test.go#TestSchemaTestCases/Drop partitioned table, Add partitioned table with local keys",
       "source_line": 403,
       "classification": "supported",
+      "evidence_status": "onward_evidence_only",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -6727,6 +7408,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6746,6 +7429,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Add sequence",
       "source_line": 34,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6765,6 +7450,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Add sequence via serial",
       "source_line": 50,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6784,6 +7471,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Drop sequence",
       "source_line": 61,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6803,6 +7492,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Drop sequence via deleting column",
       "source_line": 79,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6822,6 +7513,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Drop sequence via deleting column (partitioned table)",
       "source_line": 98,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6841,6 +7534,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Drop sequence via changing column type",
       "source_line": 125,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6860,6 +7555,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Drop sequence via changing column type (partitioned)",
       "source_line": 147,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6879,6 +7576,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Drop sequence via table drop",
       "source_line": 177,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6898,6 +7597,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Drop sequence via table drop (partitioned)",
       "source_line": 190,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6917,6 +7618,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/And and Drop sequences (conflicting schemas)",
       "source_line": 207,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6936,6 +7639,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter data type",
       "source_line": 236,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6955,6 +7660,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter increment",
       "source_line": 259,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6974,6 +7681,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter min value",
       "source_line": 282,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -6993,6 +7702,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter from no min value and change type",
       "source_line": 305,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7012,6 +7723,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter to no min value and change type",
       "source_line": 328,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7031,6 +7744,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter max value",
       "source_line": 351,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7050,6 +7765,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter from no max value and change type",
       "source_line": 374,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7069,6 +7786,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter to no max value and change type",
       "source_line": 397,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7088,6 +7807,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter start with",
       "source_line": 420,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7107,6 +7828,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter cache",
       "source_line": 443,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7126,6 +7849,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter cycle",
       "source_line": 466,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7145,6 +7870,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter ownership (from none to table)",
       "source_line": 491,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -7166,6 +7893,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter ownership (from table to none)",
       "source_line": 518,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -7187,6 +7916,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter ownership (from table to table)",
       "source_line": 548,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -7208,6 +7939,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter ownership (from table to table; original column dropped)",
       "source_line": 582,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -7229,6 +7962,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter ownership (from table to table; original table dropped)",
       "source_line": 618,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -7250,6 +7985,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter ownership (from table to table; original partitioned table dropped)",
       "source_line": 652,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -7271,6 +8008,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter ownership (from table to table) and sequence properties (new type is not compatible with old table)",
       "source_line": 698,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -7292,6 +8031,8 @@
       "stripe_test": "migration_acceptance_tests/sequence_cases_test.go#TestSequenceTestCases/Alter ownership (from table to table) and sequence properties (old type is not compatible with new table)",
       "source_line": 732,
       "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
         "mutation": "supported",
@@ -7313,6 +8054,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7333,6 +8076,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Create table",
       "source_line": 70,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7353,6 +8098,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Create table with RLS enabled",
       "source_line": 102,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7373,6 +8120,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Create table with force RLS enabled",
       "source_line": 119,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7393,6 +8142,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Create table with index replica identity",
       "source_line": 136,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7413,6 +8164,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Drop table",
       "source_line": 152,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7433,6 +8186,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Drop a table with quoted names",
       "source_line": 182,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7453,6 +8208,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Add and drop a table (conflicting schemas)",
       "source_line": 201,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7473,6 +8230,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Alter replica identity",
       "source_line": 223,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7493,6 +8252,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Alter replica identity to index replica identity",
       "source_line": 247,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7513,6 +8274,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Enable RLS",
       "source_line": 273,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7533,6 +8296,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Disable RLS",
       "source_line": 294,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7553,6 +8318,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Force RLS",
       "source_line": 315,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7573,6 +8340,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Unforce RLS",
       "source_line": 336,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7593,6 +8362,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Alter table: New primary key, drop unique constraint, new unique constraint, change column types, delete unique index, delete FK's, new index, validate check constraint",
       "source_line": 357,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7613,6 +8384,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Alter table: New column, new primary key, new FK, drop FK, alter column to nullable, alter column types, drop column, drop index, drop check constraints, alter policies",
       "source_line": 410,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7633,6 +8406,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Alter table: effectively drop by changing everything",
       "source_line": 481,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7653,6 +8428,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Alter table: translate BIGINT type to TIMESTAMP, set to not null, set default",
       "source_line": 548,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7673,6 +8450,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Add NOT NULL column without default",
       "source_line": 573,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7693,6 +8472,8 @@
       "stripe_test": "migration_acceptance_tests/table_cases_test.go#TestTableTestCases/Add NOT NULL column with constant default avoids backfill hazard",
       "source_line": 591,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7712,6 +8493,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7731,6 +8514,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Create trigger with quoted name",
       "source_line": 87,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7750,6 +8535,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Create triggers with quoted names on partitioned table and partition",
       "source_line": 127,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7769,6 +8556,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Create two triggers depending on the same function",
       "source_line": 175,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7788,6 +8577,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Create two triggers with the same name",
       "source_line": 218,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7807,6 +8598,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Drop trigger with quoted names",
       "source_line": 275,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7826,6 +8619,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Drop triggers with quoted names on partitioned table and partition",
       "source_line": 322,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7845,6 +8640,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Drop two triggers with the same name",
       "source_line": 370,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7864,6 +8661,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Add and drop trigger - conflicting schemas",
       "source_line": 427,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7883,6 +8682,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Alter trigger when clause",
       "source_line": 512,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7902,6 +8703,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Alter trigger table",
       "source_line": 561,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7921,6 +8724,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Change trigger function and keep old function",
       "source_line": 622,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7940,6 +8745,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Change trigger function and drop old function",
       "source_line": 678,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7959,6 +8766,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/Trigger on re-created table is re-created",
       "source_line": 726,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7978,6 +8787,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/alter - non-constraint trigger to constraint trigger",
       "source_line": 794,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -7997,6 +8808,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/alter - constraint trigger",
       "source_line": 844,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8016,6 +8829,8 @@
       "stripe_test": "migration_acceptance_tests/trigger_cases_test.go#TestTriggerTestCases/alter - constraint trigger to non-constraint trigger",
       "source_line": 895,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8035,6 +8850,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/No-op",
       "source_line": 11,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8054,6 +8871,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Add view",
       "source_line": 53,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8073,6 +8892,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Add recursive view",
       "source_line": 81,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8092,6 +8913,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Add view with dependent table",
       "source_line": 114,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8111,6 +8934,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Add view with dependent column",
       "source_line": 133,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8130,6 +8955,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Drop view",
       "source_line": 159,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8149,6 +8976,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Drop view and underlying table",
       "source_line": 187,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8168,6 +8997,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Drop view and underlying column",
       "source_line": 208,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8187,6 +9018,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Recreate view due to table recreation (unpartitioned to partitioned)",
       "source_line": 239,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8206,6 +9039,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Recreate view due dependent table changing",
       "source_line": 276,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8225,6 +9060,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Recreate view due to dependent column changing",
       "source_line": 310,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8244,6 +9081,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/alter - add column and change condition",
       "source_line": 346,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8263,6 +9102,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/alter - removing select column",
       "source_line": 376,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8282,6 +9123,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/alter - add security barrier",
       "source_line": 411,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8301,6 +9144,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/alter - change check option",
       "source_line": 444,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8320,6 +9165,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/alter - add check option",
       "source_line": 479,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",
@@ -8339,6 +9186,8 @@
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/alter - remove check option",
       "source_line": 513,
       "classification": "weaker",
+      "evidence_status": "family_only_unverified",
+      "gap_status": "evidence_gap",
       "dimensions": {
         "catalog": "supported",
         "mutation": "weaker",

@@ -18,24 +18,26 @@ import (
 type Kind string
 
 const (
-	KindSchema       Kind = "schema"
-	KindExtension    Kind = "extension"
-	KindEnum         Kind = "enum"
-	KindDomain       Kind = "domain"
-	KindComposite    Kind = "composite"
-	KindSequence     Kind = "sequence"
-	KindTable        Kind = "table"
-	KindColumn       Kind = "column"
-	KindConstraint   Kind = "constraint"
-	KindIndex        Kind = "index"
-	KindView         Kind = "view"
-	KindMatView      Kind = "materialized_view"
-	KindRoutine      Kind = "routine"
-	KindTrigger      Kind = "trigger"
-	KindPolicy       Kind = "policy"
-	KindRowSecurity  Kind = "row_security"
-	KindPrivilege    Kind = "table_privilege"
-	KindForeignTable Kind = "foreign_table"
+	KindSchema          Kind = "schema"
+	KindExtension       Kind = "extension"
+	KindEnum            Kind = "enum"
+	KindDomain          Kind = "domain"
+	KindComposite       Kind = "composite"
+	KindRange           Kind = "range"
+	KindSequence        Kind = "sequence"
+	KindTable           Kind = "table"
+	KindColumn          Kind = "column"
+	KindConstraint      Kind = "constraint"
+	KindIndex           Kind = "index"
+	KindView            Kind = "view"
+	KindMatView         Kind = "materialized_view"
+	KindRoutine         Kind = "routine"
+	KindTrigger         Kind = "trigger"
+	KindPolicy          Kind = "policy"
+	KindReplicaIdentity Kind = "replica_identity"
+	KindRowSecurity     Kind = "row_security"
+	KindPrivilege       Kind = "table_privilege"
+	KindForeignTable    Kind = "foreign_table"
 )
 
 // ID identifies an object independently of its Go representation. Part is
@@ -88,38 +90,73 @@ type Extension struct {
 	Schema  string
 	Name    string
 	Version string
+	Comment *string
 }
 
 func (o Extension) ObjectID() ID { return ID{Kind: KindExtension, Schema: o.Schema, Name: o.Name} }
 func (Extension) object()        {}
 
 type Enum struct {
-	Schema string
-	Name   string
-	Labels []string
+	Schema  string
+	Name    string
+	Labels  []string
+	Comment *string
 }
 
 func (o Enum) ObjectID() ID { return ID{Kind: KindEnum, Schema: o.Schema, Name: o.Name} }
 func (Enum) object()        {}
 
 type Domain struct {
-	Schema   string
-	Name     string
-	BaseType string
-	Default  *string
-	NotNull  bool
+	Schema      string
+	Name        string
+	BaseType    string
+	Collation   string
+	Default     *string
+	NotNull     bool
+	Constraints []DomainConstraint
+	Comment     *string
+}
+
+type DomainConstraint struct {
+	Name       string
+	Definition string
+	Validated  bool
 }
 
 func (o Domain) ObjectID() ID { return ID{Kind: KindDomain, Schema: o.Schema, Name: o.Name} }
 func (Domain) object()        {}
 
 type Composite struct {
-	Schema string
-	Name   string
+	Schema     string
+	Name       string
+	Attributes []CompositeAttribute
+	Comment    *string
+}
+
+type CompositeAttribute struct {
+	Name      string
+	Position  int
+	Type      string
+	Collation string
 }
 
 func (o Composite) ObjectID() ID { return ID{Kind: KindComposite, Schema: o.Schema, Name: o.Name} }
 func (Composite) object()        {}
+
+type Range struct {
+	Schema         string
+	Name           string
+	Subtype        string
+	Collation      string
+	SubtypeOpClass string
+	Canonical      string
+	SubtypeDiff    string
+	MultirangeName string
+	Comment        *string
+}
+
+func (o Range) ObjectID() ID { return ID{Kind: KindRange, Schema: o.Schema, Name: o.Name} }
+func (Range) object()        {}
 
 type Sequence struct {
 	Schema    string
@@ -131,6 +168,7 @@ type Sequence struct {
 	Max       int64
 	Cache     int64
 	Cycle     bool
+	Unlogged  bool
 	Comment   *string
 	// OwnedBy captures ALTER SEQUENCE ... OWNED BY for standalone
 	// sequences. Identity and canonical serial sequences remain attributes of
@@ -144,6 +182,7 @@ func (Sequence) object()        {}
 type Table struct {
 	Schema      string
 	Name        string
+	Owner       string // Empty means the connection's current role.
 	Unlogged    bool
 	Comment     *string
 	Partition   *Partition
@@ -344,6 +383,7 @@ type Routine struct {
 	Name       string
 	Signature  string
 	Kind       string // function or procedure
+	ReturnType string // PostgreSQL's canonical pg_get_function_result output; empty for procedures.
 	Definition string
 	Comment    *string
 }
@@ -353,8 +393,10 @@ func (o Routine) ObjectID() ID {
 }
 func (Routine) object() {}
 
-// Trigger is a table-bound executable rule. Definition is PostgreSQL's own
-// pg_get_triggerdef output; Routine is a typed edge to the invoked routine.
+// Trigger is an executable rule bound to an ordinary/partitioned table or an
+// ordinary view. Table retains its historical field name but identifies the
+// owning relation kind. Definition is PostgreSQL's own pg_get_triggerdef
+// output; Routine is a typed edge to the invoked routine.
 // Enabled uses PostgreSQL's tg_enabled codes (O, D, R, A) so a state change is
 // not lost merely because its CREATE TRIGGER text is unchanged.
 type Trigger struct {
@@ -363,6 +405,7 @@ type Trigger struct {
 	Routine    ID
 	Definition string
 	Enabled    string
+	Comment    *string
 }
 
 func (o Trigger) ObjectID() ID {
@@ -403,6 +446,31 @@ func (o RowSecurity) ObjectID() ID {
 	return ID{Kind: KindRowSecurity, Schema: o.Table.Schema, Name: o.Table.Name}
 }
 func (RowSecurity) object() {}
+
+// ReplicaIdentity is separate from Table so a USING INDEX identity can depend
+// on the exact index node. That edge guarantees index creation precedes the
+// ALTER TABLE and that a reset to DEFAULT precedes removal of the old index.
+// A node exists for every ordinary or partitioned table, including DEFAULT,
+// so identity transitions are modifications rather than destructive drops.
+type ReplicaIdentity struct {
+	Table ID
+	Mode  ReplicaIdentityMode
+	Index *ID
+}
+
+type ReplicaIdentityMode string
+
+const (
+	ReplicaIdentityDefault ReplicaIdentityMode = "DEFAULT"
+	ReplicaIdentityFull    ReplicaIdentityMode = "FULL"
+	ReplicaIdentityNothing ReplicaIdentityMode = "NOTHING"
+	ReplicaIdentityIndex   ReplicaIdentityMode = "INDEX"
+)
+
+func (o ReplicaIdentity) ObjectID() ID {
+	return ID{Kind: KindReplicaIdentity, Schema: o.Table.Schema, Name: o.Table.Name}
+}
+func (ReplicaIdentity) object() {}
 
 // TablePrivilege models one grantee/privilege pair. The owning role's
 // implicit rights are validated by the catalog loader rather than duplicated

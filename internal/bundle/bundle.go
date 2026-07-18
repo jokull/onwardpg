@@ -37,11 +37,12 @@ type SourceReceipt struct {
 }
 
 type PlannerOptions struct {
-	ConcurrentIndexes bool    `json:"concurrent_indexes,omitempty"`
-	IfNotExists       bool    `json:"if_not_exists,omitempty"`
-	IfExists          bool    `json:"if_exists,omitempty"`
-	CascadeDrops      bool    `json:"cascade_drops,omitempty"`
-	SchemaQualifier   *string `json:"schema_qualifier,omitempty"`
+	ConcurrentIndexes       bool     `json:"concurrent_indexes,omitempty"`
+	IfNotExists             bool     `json:"if_not_exists,omitempty"`
+	IfExists                bool     `json:"if_exists,omitempty"`
+	CascadeDrops            bool     `json:"cascade_drops,omitempty"`
+	SchemaQualifier         *string  `json:"schema_qualifier,omitempty"`
+	IgnoreExtensionVersions []string `json:"ignore_extension_versions,omitempty"`
 }
 
 type PlannerReceipt struct {

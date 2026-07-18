@@ -19,13 +19,16 @@ indexes all 415 acceptance scenarios from the 24 `*_cases_test.go` files in the
 pinned release. Every source file carries a SHA-256 receipt; CI regenerates the
 index and rejects drift. Each scenario records five separate comparisons:
 catalog coverage, mutation support, online strategy, rejection behavior, and
-workflow semantics.
+workflow semantics. Schema version 2 also distinguishes exact differential
+parity, proven deliberate differences, onward-only evidence, family-only
+unverified evidence, confirmed gaps, and out-of-scope cases.
 
 `classified_unverified` is intentionally weaker than parity. It means no
 Stripe acceptance case is absent or unclassified, but most family-level
 classifications still need scenario-specific onwardpg and differential tests.
-The matrix can become `verified` only when every entry links both kinds of
-evidence.
+The matrix can become `verified` only when every in-scope entry links both kinds
+of evidence. The concise, likelihood-oriented explanation is the
+[`Stripe gap inventory`](stripe-gap-inventory.md).
 
 ## Adopted
 
@@ -103,5 +106,6 @@ old and new application versions can overlap. That case is classified weaker
 and intentionally different rather than being normalized away by the harness. The catalog-family
 inventory and the new partition-attachment convergence cases have been
 observed on PostgreSQL 15–18. CI remains the authoritative cross-version proof
-for every commit; most of the 415-case Stripe corpus is still conservatively
-classified `weaker`, not claimed as differential parity.
+for every commit. Of the 415 pinned cases, 30 have exact differential parity,
+5 prove an intentional safety difference, 10 have onward-only support
+evidence, 368 still need exact differential audit, and 2 are out of scope.

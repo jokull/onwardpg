@@ -147,11 +147,11 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err := source.ValidateIgnoreSelectors(input.Ignores, observed, desired); err != nil {
 		return Report{}, err
 	}
-	report.ObservedFingerprint, err = observed.Fingerprint()
+	report.ObservedFingerprint, err = graphplan.Fingerprint(observed, input.Options)
 	if err != nil {
 		return Report{}, err
 	}
-	report.DesiredFingerprint, err = desired.Fingerprint()
+	report.DesiredFingerprint, err = graphplan.Fingerprint(desired, input.Options)
 	if err != nil {
 		return Report{}, err
 	}
@@ -162,6 +162,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("plan verification residual: %w", err)
 	}
+	equivalent, err := graphplan.Equivalent(observed, desired, input.Options)
+	if err != nil {
+		return Report{}, fmt.Errorf("compare verification result with planner equivalence: %w", err)
+	}
 	report.Residual = &residual
 	if len(report.RemainingPhases) > 0 {
 		// The same exact prefix followed by the remaining phases converged in
@@ -169,7 +173,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		// expected checkpoint, not a failed verification.
 		report.Outcome = "partial_verified"
 		report.ContinuationAssertions = assertionIDs
-	} else if report.ObservedFingerprint == report.DesiredFingerprint && residual.Status == protocol.Planned && len(residual.Statements) == 0 {
+	} else if equivalent && residual.Status == protocol.Planned && len(residual.Statements) == 0 {
 		report.Outcome = "verified"
 		report.VerifiedAssertions = assertionIDs
 	} else {

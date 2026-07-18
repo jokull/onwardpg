@@ -79,6 +79,21 @@ func TestNormalizePublicSchemaComment(t *testing.T) {
 	}
 }
 
+func TestRelationObjectIDPreservesViewKinds(t *testing.T) {
+	if got := relationObjectID("r", "app", "orders"); got.Kind != pgschema.KindTable {
+		t.Fatalf("ordinary table relation kind = %s", got.Kind)
+	}
+	if got := relationObjectID("p", "app", "events"); got.Kind != pgschema.KindTable {
+		t.Fatalf("partitioned table relation kind = %s", got.Kind)
+	}
+	if got := relationObjectID("v", "app", "orders_v"); got.Kind != pgschema.KindView {
+		t.Fatalf("ordinary view relation kind = %s", got.Kind)
+	}
+	if got := relationObjectID("m", "app", "orders_mv"); got.Kind != pgschema.KindMatView {
+		t.Fatalf("materialized view relation kind = %s", got.Kind)
+	}
+}
+
 func TestParseOptionsCanonicalizesCatalogOrder(t *testing.T) {
 	options := parseOptions([]string{"pages_per_range=64", "autosummarize=true", "fillfactor=90"})
 	want := []pgschema.Option{

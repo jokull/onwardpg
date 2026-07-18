@@ -3,7 +3,13 @@
 The developer-preview comparison ledger is
 [`parity/pgmig-roadmap.json`](../parity/pgmig-roadmap.json). It tracks onwardpg
 against pgmig's public roadmap and is intentionally marked `in_progress`; it
-is not an exhaustive onwardpg catalog inventory. The separate
+is not an exhaustive onwardpg catalog inventory. The
+[`pgmig scenario-parity plan`](pgmig-parity-plan.md) pins pgmig's executable
+API corpus and defines the work and evidence required for behavioral parity.
+At commit `d2cccb6`, all 454 scenarios are evidence-linked: 405 verified, 25
+served by clone-verified editable handoffs, and 24 intentional rejections, with
+no implemented-but-unverified or unsupported-gap rows.
+The separate
 [`parity/atlas-postgres.json`](../parity/atlas-postgres.json) is a pinned
 reference-behavior study used to find regressions and design cases; it is not a
 promise of one-for-one compatibility. The
@@ -23,6 +29,66 @@ semantics, and the [reference behavior
 study](atlas-postgres-parity.md) for the separate Atlas research boundary.
 
 ## Dependency-aware work in progress
+
+Enums support empty and labeled creation, comments, approved drops, inserted
+values, pure positional label renames, and confirmed identity-changing
+rewrites. A rewrite handles removal, reorder, and mixed rename-plus-insert by
+retyping unchanged scalar/array columns through text, restoring defaults and
+comments, and atomically dropping the old type. These paths converge on
+PostgreSQL 15–18 and preserve retained values. Generated, indexed,
+constrained, domain-mediated, view-read, or otherwise changed dependents remain
+explicit refusals.
+Extensions normalize their package-supplied default descriptions and model
+only user-customized comments; custom comment changes converge on PostgreSQL
+15–18 without creating default-comment drift. Version updates can be
+selectively suppressed by repeating `--ignore-extension-version NAME`; an
+unmatched name is intentionally harmless so one policy can span databases
+with different extension sets. Identity-preserving schema moves use `ALTER
+EXTENSION ... SET SCHEMA`. Both version-ignore branches and schema moves
+converge on PostgreSQL 15–18.
+Standalone sequences model logged/unlogged persistence, including unlogged
+creation and both `SET LOGGED`/`SET UNLOGGED` transitions on PostgreSQL 15–18.
+Temporary sequence persistence remains an explicit blocker.
+Replica identity is a separate typed table child with `DEFAULT`, `FULL`,
+`NOTHING`, and `USING INDEX` modes. The index form has an explicit dependency
+on its unique index, so new-table plans create the table and index before
+setting identity; resets to `DEFAULT` precede an old identity-index removal.
+All pinned lifecycle shapes converge on PostgreSQL 15–18.
+Domains model base type, non-default collation, default, nullability, named
+CHECK constraints, validation state, comments, and typed dependencies. Create,
+approved drop, default/nullability changes, check add/drop/rename, and comment
+changes converge on PostgreSQL 15–18. Base-type or collation replacement is an
+explicit `domain_base_type_change` boundary until dependent values can be
+rewritten safely.
+Composite types model ordered attributes, attribute types/collations,
+comments, and nested or array-element dependencies. Empty and populated
+creation, approved dependent-first drops, appended attributes, removals, type
+changes with `CASCADE`, combined mutations, and comments converge on
+PostgreSQL 15–18. Reordering retained attributes remains an explicit
+`composite_attribute_reorder` rejection because PostgreSQL has no in-place
+form that reproduces it.
+Range types model their subtype, non-default collation and operator class,
+subtype-difference function, canonical-function name, multirange name,
+comments, and typed subtype/column dependencies. Creation, approved drops,
+unchanged state, comment changes, and property-changing recreation converge on
+PostgreSQL 15–18. A property rewrite is rejected with
+`range_rewrite_dependents` while modeled dependents still consume the range;
+custom canonical-function dependency choreography remains outside the verified
+boundary.
+
+Stored generated columns support expression replacement by dropping and
+re-adding the generated column on PostgreSQL 15–18. PostgreSQL 18 virtual
+generated columns support create, add, drop, and in-place expression changes.
+Explicit same-type column collation changes and reset-to-default transitions
+use reviewed `ALTER COLUMN ... TYPE ... USING` operations and converge across
+the PostgreSQL 15–18 matrix.
+
+PostgreSQL 18 `WITHOUT OVERLAPS` primary/unique constraints and `PERIOD`
+foreign keys retain their catalog-rendered definitions and typed dependency
+ordering. `NOT ENFORCED` check and foreign-key constraints are also modeled;
+adds, unchanged state, both foreign-key enforcement transitions, check
+rebuilds, temporal renames/rebuilds, and approved drops converge on PostgreSQL
+18. These forms remain version-gated and are not emitted on older servers.
 
 Standalone same-name index definition changes on ordinary tables,
 materialized views, and independent local partition indexes support continuous
@@ -57,15 +123,15 @@ constraints, and other dependent constraint-backed
 variants remain explicit unsupported transitions until their complete
 vertical slices can preserve PostgreSQL's attachment and ownership semantics.
 
-Constraint names are identity-bearing planner input. A deterministic exporter
-rename (for example a newer compact Drizzle foreign-key name replacing an old
-PostgreSQL-truncated one) is reported as `constraint_rename`; onwardpg does not
-silently ignore, rename, or rebuild a caller-owned constraint to reconcile it.
-The logical baseline remains valid because it is replayed from exported DDL.
-An operator may investigate the physical mismatch with read-only drift audit;
-a later change to the legacy constraint requires an explicit reviewed
-physical-to-declarative transition that accounts for both clone and real
-environment names.
+Constraint names remain identity-bearing planner input. For an ordinary-table
+constraint whose definition and backing index are otherwise identical,
+onwardpg asks a fingerprint-bound `rename_constraint` question and then uses
+`ALTER TABLE ... RENAME CONSTRAINT`. PostgreSQL's backing-index rename is
+modeled as the same identity-preserving operation, and preserved constraint or
+index comments are explicitly reconciled. Check, unique, exclusion,
+`NULLS NOT DISTINCT`, and foreign-key variants converge on PostgreSQL 15–18.
+Partition-propagated constraint renames and ambiguous candidates remain
+outside this proof rather than being inferred.
 
 Ordinary views are catalog-modeled, including PostgreSQL-deparsed definitions,
 reloptions, comments, and typed dependencies on referenced tables, columns,
@@ -123,10 +189,21 @@ unproven dependent rewrites block the automatic bridge.
 
 Functions, procedures, and triggers are graph-modeled. Their canonical
 PostgreSQL definitions support create, replace/recreate, enable-state changes,
-and approved drops; a trigger depends on both its table and its invoked
-routine. Ordinary and materialized views also have typed catalog edges to
+comments, and approved drops; a trigger depends on both its owning relation and
+its invoked routine. This includes ordinary and partitioned tables, constraint
+triggers, and `INSTEAD OF` triggers on ordinary views. Ordinary and materialized
+views also have typed catalog edges to
 invoked user routines, so routine creation precedes dependent views and
 approved drops remove views before their routine. A same-signature routine
+return type is explicit graph state. A changed function return type can be
+confirmed for a blocking drop/recreate while unchanged column defaults, CHECK
+constraints, and expression indexes are removed and restored around it;
+identical comments are reapplied. Catalog-recorded SQL `BEGIN ATOMIC` routine
+dependencies also order chain and diamond drops. Dropped or changed
+dependents, routine-on-routine return changes, and circular dropped-relation
+shapes refuse explicitly. String-body SQL and procedural-language references
+remain opaque because PostgreSQL does not record them in `pg_depend`.
+A same-signature routine
 rename requires a validated semantic hint and then an explicit editable
 expand/contract wrapper handoff; onwardpg does not guess or directly apply a
 routine cutover.
@@ -144,12 +221,16 @@ PostgreSQL does not record arbitrary
 procedural-body references, so
 onwardpg does not rewrite a routine body for a column/table change or claim to
 have inferred those hidden dependencies. Routine ownership remains an explicit
-blocker. RLS state, policies, and ordinary/partitioned-table grants are typed
-verticals: policy column/routine dependencies are catalog edges; policy and
-authorization contractions require explicit semantic decisions; and role
-identifiers are quoted with `PUBLIC` retained as the PostgreSQL keyword.
-Default privileges, column grants, non-owner grant chains, and privileges on
-other relation kinds remain explicit blockers.
+blocker. Ordinary and partitioned table ownership is typed; changes require a
+fingerprint-bound authorization decision, use stable role quoting, and carry
+authorization hazards. A narrow `table_owner:` ignore can suppress that one
+attribute while preserving the table. RLS state, policies, and
+ordinary/partitioned-table grants are typed verticals: policy column/routine
+dependencies are catalog edges; policy and authorization contractions require
+explicit semantic decisions; and role identifiers are quoted with `PUBLIC`
+retained as the PostgreSQL keyword. Default privileges, column grants,
+non-owner grant chains, non-table ownership, and privileges on other relation
+kinds remain explicit blockers.
 
 A confirmed, shape-preserving table rename is an expand/contract transition,
 not a phase-labelled cutover. In expand, onwardpg preserves the old physical
@@ -193,9 +274,9 @@ choosing `preserve` retains the old local column. Durable H → W planning remai
 trigger-backed expand/contract whenever accepted history actually contains the
 old name.
 
-Direct same-name column type changes and extension schema moves are also
-blocked with `expand_contract_*_required` results. A type change may still use
-the explicit `manual_sql` handoff: the generated bundle remains incomplete
+Direct same-name column type changes are blocked with an
+`expand_contract_type_bridge_required` result. A type change may still use the
+explicit `manual_sql` handoff: the generated bundle remains incomplete
 until the agent supplies reviewed SQL and clone verification proves the final
 catalog. This preserves intricate product-aware migrations without allowing a
 bare `ALTER COLUMN TYPE` to masquerade as an online rollout.

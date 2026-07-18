@@ -106,6 +106,9 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 		inspectGraphSchemas,
 		inspectGraphExtensions,
 		inspectGraphEnums,
+		inspectGraphDomains,
+		inspectGraphComposites,
+		inspectGraphRanges,
 		inspectGraphTables,
 		inspectGraphConstraints,
 		inspectGraphSequences,
@@ -129,7 +132,13 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 	if err := inspectGraphIndexes(ctx, tx, snapshot, tracker, version); err != nil {
 		return nil, err
 	}
+	if err := inspectGraphReplicaIdentities(ctx, tx, snapshot, tracker); err != nil {
+		return nil, err
+	}
 	if err := inspectGraphRoutines(ctx, tx, snapshot, tracker); err != nil {
+		return nil, err
+	}
+	if err := addRoutineDependencies(ctx, tx, snapshot); err != nil {
 		return nil, err
 	}
 	if err := addViewRoutineDependencies(ctx, tx, snapshot); err != nil {
@@ -206,14 +215,23 @@ func normalizeSchemaComment(name string, comment *string) *string {
 }
 
 func inspectGraphExtensions(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
-	rows, err := tx.Query(ctx, `SELECT e.extname, e.extversion, n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace ORDER BY e.extname`)
+	rows, err := tx.Query(ctx, `
+SELECT e.extname, e.extversion, n.nspname,
+       CASE
+         WHEN obj_description(e.oid, 'pg_extension') IS DISTINCT FROM available.comment
+           THEN obj_description(e.oid, 'pg_extension')
+       END
+FROM pg_extension e
+JOIN pg_namespace n ON n.oid = e.extnamespace
+LEFT JOIN pg_available_extensions available ON available.name = e.extname
+ORDER BY e.extname`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var object pgschema.Extension
-		if err := rows.Scan(&object.Name, &object.Version, &object.Schema); err != nil {
+		if err := rows.Scan(&object.Name, &object.Version, &object.Schema, &object.Comment); err != nil {
 			return err
 		}
 		skip, err := tracker.Skip("extension:"+object.Name, snapshot)
@@ -235,9 +253,16 @@ func inspectGraphExtensions(ctx context.Context, tx pgx.Tx, snapshot *pgschema.S
 
 func inspectGraphEnums(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	rows, err := tx.Query(ctx, `
-SELECT n.nspname, t.typname, e.enumlabel
-FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace JOIN pg_enum e ON e.enumtypid = t.oid
-WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+SELECT n.nspname, t.typname, e.enumlabel, obj_description(t.oid, 'pg_type')
+FROM pg_type t
+JOIN pg_namespace n ON n.oid = t.typnamespace
+LEFT JOIN pg_enum e ON e.enumtypid = t.oid
+WHERE t.typtype = 'e'
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e'
+  )
 ORDER BY n.nspname, t.typname, e.enumsortorder`)
 	if err != nil {
 		return err
@@ -245,14 +270,17 @@ ORDER BY n.nspname, t.typname, e.enumsortorder`)
 	defer rows.Close()
 	enums := make(map[string]pgschema.Enum)
 	for rows.Next() {
-		var namespace, name, label string
-		if err := rows.Scan(&namespace, &name, &label); err != nil {
+		var namespace, name string
+		var label, comment *string
+		if err := rows.Scan(&namespace, &name, &label, &comment); err != nil {
 			return err
 		}
 		key := namespace + "." + name
 		object := enums[key]
-		object.Schema, object.Name = namespace, name
-		object.Labels = append(object.Labels, label)
+		object.Schema, object.Name, object.Comment = namespace, name, comment
+		if label != nil {
+			object.Labels = append(object.Labels, *label)
+		}
 		enums[key] = object
 	}
 	if err := rows.Err(); err != nil {
@@ -282,18 +310,374 @@ ORDER BY n.nspname, t.typname, e.enumsortorder`)
 	return nil
 }
 
+func inspectGraphDomains(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
+	rows, err := tx.Query(ctx, `
+SELECT t.oid, n.nspname, t.typname, format_type(t.typbasetype, t.typtypmod),
+       CASE WHEN t.typdefaultbin IS NOT NULL THEN pg_get_expr(t.typdefaultbin, 0, true) END,
+       t.typnotnull,
+       CASE WHEN t.typcollation <> 0 AND t.typcollation IS DISTINCT FROM base.typcollation
+            THEN quote_ident(collation_ns.nspname) || '.' || quote_ident(coll.collname) END,
+       obj_description(t.oid, 'pg_type'), dependency_ns.nspname, dependency_type.typname,
+       dependency_type.typtype::text
+FROM pg_type t
+JOIN pg_namespace n ON n.oid = t.typnamespace
+JOIN pg_type base ON base.oid = t.typbasetype
+LEFT JOIN pg_collation coll ON coll.oid = t.typcollation
+LEFT JOIN pg_namespace collation_ns ON collation_ns.oid = coll.collnamespace
+LEFT JOIN pg_type dependency_type ON dependency_type.oid = CASE WHEN base.typelem <> 0 THEN base.typelem ELSE base.oid END
+LEFT JOIN pg_namespace dependency_ns ON dependency_ns.oid = dependency_type.typnamespace
+WHERE t.typtype = 'd'
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY n.nspname, t.typname`)
+	if err != nil {
+		return err
+	}
+	type dependency struct {
+		schema string
+		name   string
+		kind   string
+	}
+	domains := make(map[uint32]pgschema.Domain)
+	dependencies := make(map[uint32]dependency)
+	for rows.Next() {
+		var oid uint32
+		var object pgschema.Domain
+		var collation *string
+		var dependencySchema, dependencyName, dependencyKind string
+		if err := rows.Scan(&oid, &object.Schema, &object.Name, &object.BaseType, &object.Default, &object.NotNull, &collation, &object.Comment, &dependencySchema, &dependencyName, &dependencyKind); err != nil {
+			rows.Close()
+			return err
+		}
+		if collation != nil {
+			object.Collation = *collation
+		}
+		domains[oid] = object
+		dependencies[oid] = dependency{schema: dependencySchema, name: dependencyName, kind: dependencyKind}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = tx.Query(ctx, `
+SELECT con.contypid, con.conname, pg_get_constraintdef(con.oid, true), con.convalidated
+FROM pg_constraint con
+JOIN pg_type domain_type ON domain_type.oid = con.contypid
+JOIN pg_namespace n ON n.oid = domain_type.typnamespace
+WHERE con.contype = 'c' AND domain_type.typtype = 'd'
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY con.contypid, con.conname`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var oid uint32
+		var constraint pgschema.DomainConstraint
+		if err := rows.Scan(&oid, &constraint.Name, &constraint.Definition, &constraint.Validated); err != nil {
+			rows.Close()
+			return err
+		}
+		object, exists := domains[oid]
+		if !exists {
+			continue
+		}
+		object.Constraints = append(object.Constraints, constraint)
+		domains[oid] = object
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	oids := make([]uint32, 0, len(domains))
+	for oid := range domains {
+		oids = append(oids, oid)
+	}
+	sort.Slice(oids, func(i, j int) bool {
+		return domains[oids[i]].ObjectID().String() < domains[oids[j]].ObjectID().String()
+	})
+	added := make(map[uint32]bool, len(oids))
+	for _, oid := range oids {
+		object := domains[oid]
+		skip, err := tracker.Skip("domain:"+object.Schema+"."+object.Name, snapshot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if err := snapshot.Add(object); err != nil {
+			return err
+		}
+		if err := addSchemaDependency(snapshot, object, object.Schema); err != nil {
+			return err
+		}
+		added[oid] = true
+	}
+	for _, oid := range oids {
+		if !added[oid] {
+			continue
+		}
+		dependency := dependencies[oid]
+		var kind pgschema.Kind
+		switch dependency.kind {
+		case "d":
+			kind = pgschema.KindDomain
+		case "e":
+			kind = pgschema.KindEnum
+		case "c":
+			kind = pgschema.KindComposite
+		default:
+			continue
+		}
+		dependencyID := pgschema.ID{Kind: kind, Schema: dependency.schema, Name: dependency.name}
+		if _, exists := snapshot.Object(dependencyID); !exists {
+			continue
+		}
+		if err := snapshot.AddDependency(domains[oid].ObjectID(), dependencyID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func inspectGraphComposites(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
+	rows, err := tx.Query(ctx, `
+SELECT composite_type.oid, n.nspname, composite_type.typname, obj_description(composite_type.oid, 'pg_type'),
+       attribute.attname, format_type(attribute.atttypid, attribute.atttypmod),
+       CASE WHEN attribute.attcollation <> 0 AND attribute.attcollation IS DISTINCT FROM attribute_type.typcollation
+            THEN quote_ident(collation_ns.nspname) || '.' || quote_ident(coll.collname) END,
+       dependency_ns.nspname, dependency_type.typname, dependency_type.typtype::text
+FROM pg_class relation
+JOIN pg_namespace n ON n.oid = relation.relnamespace
+JOIN pg_type composite_type ON composite_type.typrelid = relation.oid AND composite_type.typtype = 'c'
+LEFT JOIN pg_attribute attribute ON attribute.attrelid = relation.oid
+  AND attribute.attnum > 0 AND NOT attribute.attisdropped
+LEFT JOIN pg_type attribute_type ON attribute_type.oid = attribute.atttypid
+LEFT JOIN pg_collation coll ON coll.oid = attribute.attcollation
+LEFT JOIN pg_namespace collation_ns ON collation_ns.oid = coll.collnamespace
+LEFT JOIN pg_type dependency_type ON dependency_type.oid = CASE WHEN attribute_type.typelem <> 0 THEN attribute_type.typelem ELSE attribute_type.oid END
+LEFT JOIN pg_namespace dependency_ns ON dependency_ns.oid = dependency_type.typnamespace
+WHERE relation.relkind = 'c'
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY n.nspname, composite_type.typname, attribute.attnum`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	composites := make(map[uint32]pgschema.Composite)
+	dependencies := make(map[uint32][]pgschema.ID)
+	for rows.Next() {
+		var oid uint32
+		var schema, name string
+		var comment, attributeName, attributeType, collation, dependencySchema, dependencyName, dependencyKind *string
+		if err := rows.Scan(&oid, &schema, &name, &comment, &attributeName, &attributeType, &collation, &dependencySchema, &dependencyName, &dependencyKind); err != nil {
+			return err
+		}
+		object := composites[oid]
+		object.Schema, object.Name, object.Comment = schema, name, comment
+		if attributeName != nil && attributeType != nil {
+			attribute := pgschema.CompositeAttribute{Name: *attributeName, Position: len(object.Attributes) + 1, Type: *attributeType}
+			if collation != nil {
+				attribute.Collation = *collation
+			}
+			object.Attributes = append(object.Attributes, attribute)
+		}
+		composites[oid] = object
+		if dependencySchema != nil && dependencyName != nil && dependencyKind != nil {
+			var kind pgschema.Kind
+			switch *dependencyKind {
+			case "c":
+				kind = pgschema.KindComposite
+			case "d":
+				kind = pgschema.KindDomain
+			case "e":
+				kind = pgschema.KindEnum
+			}
+			if kind != "" {
+				dependencies[oid] = append(dependencies[oid], pgschema.ID{Kind: kind, Schema: *dependencySchema, Name: *dependencyName})
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	oids := make([]uint32, 0, len(composites))
+	for oid := range composites {
+		oids = append(oids, oid)
+	}
+	sort.Slice(oids, func(i, j int) bool {
+		return composites[oids[i]].ObjectID().String() < composites[oids[j]].ObjectID().String()
+	})
+	added := make(map[uint32]bool, len(oids))
+	for _, oid := range oids {
+		object := composites[oid]
+		skip, err := tracker.Skip("composite:"+object.Schema+"."+object.Name, snapshot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if err := snapshot.Add(object); err != nil {
+			return err
+		}
+		if err := addSchemaDependency(snapshot, object, object.Schema); err != nil {
+			return err
+		}
+		added[oid] = true
+	}
+	for _, oid := range oids {
+		if !added[oid] {
+			continue
+		}
+		seen := make(map[pgschema.ID]bool)
+		for _, dependencyID := range dependencies[oid] {
+			if seen[dependencyID] {
+				continue
+			}
+			seen[dependencyID] = true
+			if _, exists := snapshot.Object(dependencyID); !exists {
+				continue
+			}
+			if err := snapshot.AddDependency(composites[oid].ObjectID(), dependencyID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func inspectGraphRanges(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
+	rows, err := tx.Query(ctx, `
+SELECT range_type.oid, n.nspname, range_type.typname, format_type(range_catalog.rngsubtype, NULL),
+       CASE WHEN range_catalog.rngcollation <> 0 AND range_catalog.rngcollation IS DISTINCT FROM subtype.typcollation
+            THEN quote_ident(collation_ns.nspname) || '.' || quote_ident(coll.collname) END,
+       CASE WHEN NOT opclass.opcdefault THEN quote_ident(opclass_ns.nspname) || '.' || quote_ident(opclass.opcname) END,
+       CASE WHEN range_catalog.rngcanonical <> 0 THEN range_catalog.rngcanonical::regproc::text END,
+       CASE WHEN range_catalog.rngsubdiff <> 0 THEN range_catalog.rngsubdiff::regproc::text END,
+       multirange_type.typname, obj_description(range_type.oid, 'pg_type'),
+       dependency_ns.nspname, dependency_type.typname, dependency_type.typtype::text
+FROM pg_range range_catalog
+JOIN pg_type range_type ON range_type.oid = range_catalog.rngtypid
+JOIN pg_namespace n ON n.oid = range_type.typnamespace
+JOIN pg_type subtype ON subtype.oid = range_catalog.rngsubtype
+JOIN pg_opclass opclass ON opclass.oid = range_catalog.rngsubopc
+JOIN pg_namespace opclass_ns ON opclass_ns.oid = opclass.opcnamespace
+LEFT JOIN pg_collation coll ON coll.oid = range_catalog.rngcollation
+LEFT JOIN pg_namespace collation_ns ON collation_ns.oid = coll.collnamespace
+LEFT JOIN pg_type multirange_type ON multirange_type.oid = range_catalog.rngmultitypid
+LEFT JOIN pg_type dependency_type ON dependency_type.oid = CASE WHEN subtype.typelem <> 0 THEN subtype.typelem ELSE subtype.oid END
+LEFT JOIN pg_namespace dependency_ns ON dependency_ns.oid = dependency_type.typnamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ORDER BY n.nspname, range_type.typname`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type entry struct {
+		object     pgschema.Range
+		dependency *pgschema.ID
+	}
+	var entries []entry
+	for rows.Next() {
+		var oid uint32
+		var object pgschema.Range
+		var collation, opclass, canonical, subtypeDiff, multirangeName, dependencySchema, dependencyName, dependencyKind *string
+		if err := rows.Scan(&oid, &object.Schema, &object.Name, &object.Subtype, &collation, &opclass, &canonical, &subtypeDiff, &multirangeName, &object.Comment, &dependencySchema, &dependencyName, &dependencyKind); err != nil {
+			return err
+		}
+		if collation != nil {
+			object.Collation = *collation
+		}
+		if opclass != nil {
+			object.SubtypeOpClass = *opclass
+		}
+		if canonical != nil {
+			object.Canonical = *canonical
+		}
+		if subtypeDiff != nil {
+			object.SubtypeDiff = *subtypeDiff
+		}
+		if multirangeName != nil {
+			object.MultirangeName = *multirangeName
+		}
+		item := entry{object: object}
+		if dependencySchema != nil && dependencyName != nil && dependencyKind != nil {
+			var kind pgschema.Kind
+			switch *dependencyKind {
+			case "c":
+				kind = pgschema.KindComposite
+			case "d":
+				kind = pgschema.KindDomain
+			case "e":
+				kind = pgschema.KindEnum
+			case "r":
+				kind = pgschema.KindRange
+			}
+			if kind != "" {
+				dependencyID := pgschema.ID{Kind: kind, Schema: *dependencySchema, Name: *dependencyName}
+				item.dependency = &dependencyID
+			}
+		}
+		entries = append(entries, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for index := range entries {
+		object := entries[index].object
+		skip, err := tracker.Skip("range_type:"+object.Schema+"."+object.Name, snapshot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if err := snapshot.Add(object); err != nil {
+			return err
+		}
+		if err := addSchemaDependency(snapshot, object, object.Schema); err != nil {
+			return err
+		}
+	}
+	for _, item := range entries {
+		if item.dependency == nil {
+			continue
+		}
+		if _, exists := snapshot.Object(item.object.ObjectID()); !exists {
+			continue
+		}
+		if _, exists := snapshot.Object(*item.dependency); !exists {
+			continue
+		}
+		if err := snapshot.AddDependency(item.object.ObjectID(), *item.dependency); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func inspectGraphTables(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	rows, err := tx.Query(ctx, `
-SELECT n.nspname, c.relname, c.relpersistence = 'u', obj_description(c.oid, 'pg_class'), c.relkind::text, c.relispartition,
+SELECT n.nspname, c.relname, CASE WHEN r.rolname <> current_user THEN r.rolname END,
+       c.relpersistence = 'u', obj_description(c.oid, 'pg_class'), c.relkind::text, c.relispartition,
        CASE pt.partstrat WHEN 'r' THEN 'RANGE' WHEN 'l' THEN 'LIST' WHEN 'h' THEN 'HASH' END,
        pg_get_partkeydef(c.oid), pn.nspname, pc.relname, pg_get_expr(c.relpartbound, c.oid, true)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_roles r ON r.oid = c.relowner
 LEFT JOIN pg_partitioned_table pt ON pt.partrelid = c.oid
 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
 LEFT JOIN pg_class pc ON pc.oid = i.inhparent
 LEFT JOIN pg_namespace pn ON pn.oid = pc.relnamespace
 WHERE c.relkind IN ('r', 'p') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
 ORDER BY n.nspname, c.relname`)
 	if err != nil {
 		return err
@@ -304,9 +688,19 @@ ORDER BY n.nspname, c.relname`)
 		var object pgschema.Table
 		var relkind string
 		var isPartition bool
-		var strategy, raw, parentSchema, parentName, bound *string
-		if err := rows.Scan(&object.Schema, &object.Name, &object.Unlogged, &object.Comment, &relkind, &isPartition, &strategy, &raw, &parentSchema, &parentName, &bound); err != nil {
+		var owner, strategy, raw, parentSchema, parentName, bound *string
+		if err := rows.Scan(&object.Schema, &object.Name, &owner, &object.Unlogged, &object.Comment, &relkind, &isPartition, &strategy, &raw, &parentSchema, &parentName, &bound); err != nil {
 			return err
+		}
+		if owner != nil {
+			object.Owner = *owner
+			ignored, err := tracker.Skip("table_owner:"+object.Schema+"."+object.Name, snapshot)
+			if err != nil {
+				return err
+			}
+			if ignored {
+				object.Owner = ""
+			}
 		}
 		if isPartition {
 			if parentSchema == nil || parentName == nil || bound == nil {
@@ -363,7 +757,8 @@ SELECT n.nspname, c.relname, a.attname, a.attnum, format_type(a.atttypid, a.attt
             THEN quote_ident(cn.nspname) || '.' || quote_ident(coll.collname) END,
        col_description(a.attrelid, a.attnum),
        seq.seqstart, seq.seqincrement, seq.seqmin, seq.seqmax, seq.seqcache, seq.seqcycle,
-       dtn.nspname, dt.typname, defaultseq.schema_name, defaultseq.sequence_name, serialseq.relname,
+       dtn.nspname, dt.typname, extn.nspname, ext.extname,
+       defaultseq.schema_name, defaultseq.sequence_name, serialseq.relname,
        %s
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
@@ -378,6 +773,10 @@ LEFT JOIN pg_class seqc ON seqc.oid = dep.objid AND seqc.relkind = 'S'
 LEFT JOIN pg_sequence seq ON seq.seqrelid = seqc.oid
 LEFT JOIN pg_type dt ON dt.oid = CASE WHEN typ.typelem <> 0 THEN typ.typelem ELSE typ.oid END
 LEFT JOIN pg_namespace dtn ON dtn.oid = dt.typnamespace
+LEFT JOIN pg_depend typedep ON typedep.classid = 'pg_type'::regclass AND typedep.objid = dt.oid
+  AND typedep.refclassid = 'pg_extension'::regclass AND typedep.deptype = 'e'
+LEFT JOIN pg_extension ext ON ext.oid = typedep.refobjid
+LEFT JOIN pg_namespace extn ON extn.oid = ext.extnamespace
 LEFT JOIN LATERAL (
   SELECT defaultn.nspname AS schema_name, defaultclass.relname AS sequence_name
   FROM pg_depend defaultdep
@@ -406,7 +805,7 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 	positions := make(map[pgschema.ID]int)
 	for rows.Next() {
 		var namespace, tableName, identity, generated string
-		var defaultOrGenerated, collation, typeSchema, typeName, defaultSequenceSchema, defaultSequenceName, serialSequenceName, notNullName *string
+		var defaultOrGenerated, collation, typeSchema, typeName, extensionSchema, extensionName, defaultSequenceSchema, defaultSequenceName, serialSequenceName, notNullName *string
 		var seqStart, seqIncrement, seqMin, seqMax, seqCache *int64
 		var seqCycle *bool
 		object := pgschema.Column{}
@@ -414,7 +813,8 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 			&namespace, &tableName, &object.Name, &object.Position, &object.Type, &object.NotNull,
 			&defaultOrGenerated, &identity, &generated, &collation, &object.Comment,
 			&seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle,
-			&typeSchema, &typeName, &defaultSequenceSchema, &defaultSequenceName, &serialSequenceName, &notNullName,
+			&typeSchema, &typeName, &extensionSchema, &extensionName,
+			&defaultSequenceSchema, &defaultSequenceName, &serialSequenceName, &notNullName,
 		); err != nil {
 			return err
 		}
@@ -436,7 +836,11 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 		}
 		if generated != "" {
 			if defaultOrGenerated != nil {
-				object.Generated = &pgschema.Generated{Expression: *defaultOrGenerated, Kind: "STORED"}
+				kind := "STORED"
+				if generated == "v" {
+					kind = "VIRTUAL"
+				}
+				object.Generated = &pgschema.Generated{Expression: *defaultOrGenerated, Kind: kind}
 			}
 		} else {
 			object.Default = defaultOrGenerated
@@ -481,13 +885,46 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 			return err
 		}
 		if typeSchema != nil && typeName != nil {
-			for _, kind := range []pgschema.Kind{pgschema.KindEnum, pgschema.KindDomain, pgschema.KindComposite} {
-				typeID := pgschema.ID{Kind: kind, Schema: *typeSchema, Name: *typeName}
-				if _, exists := snapshot.Object(typeID); exists {
-					if err := snapshot.AddDependency(object.ObjectID(), typeID); err != nil {
-						return err
-					}
+			var dependencyID *pgschema.ID
+			for _, kind := range []pgschema.Kind{pgschema.KindEnum, pgschema.KindDomain, pgschema.KindComposite, pgschema.KindRange} {
+				candidate := pgschema.ID{Kind: kind, Schema: *typeSchema, Name: *typeName}
+				if _, exists := snapshot.Object(candidate); exists {
+					dependencyID = &candidate
 					break
+				}
+			}
+			if dependencyID == nil {
+				for _, candidate := range snapshot.Objects() {
+					rangeType, ok := candidate.(pgschema.Range)
+					if ok && rangeType.Schema == *typeSchema && rangeType.MultirangeName == *typeName {
+						id := rangeType.ObjectID()
+						dependencyID = &id
+						break
+					}
+				}
+			}
+			if dependencyID != nil {
+				if err := snapshot.AddDependency(object.ObjectID(), *dependencyID); err != nil {
+					return err
+				}
+				// CREATE TABLE consumes its columns into one statement, so the
+				// table must carry the same free-standing type dependency for
+				// dependency-safe creation and reverse drop ordering.
+				if err := snapshot.AddDependency(object.Table, *dependencyID); err != nil {
+					return err
+				}
+			}
+		}
+		if extensionSchema != nil && extensionName != nil {
+			extensionID := (pgschema.Extension{Schema: *extensionSchema, Name: *extensionName}).ObjectID()
+			if _, exists := snapshot.Object(extensionID); exists {
+				if err := snapshot.AddDependency(object.ObjectID(), extensionID); err != nil {
+					return err
+				}
+				// CREATE/DROP TABLE consumes its columns as one unit, so carry the
+				// extension type dependency onto the owning table as well.
+				if err := snapshot.AddDependency(object.Table, extensionID); err != nil {
+					return err
 				}
 			}
 		}
@@ -525,7 +962,7 @@ func serialTypeForCatalogType(typ string) (string, bool) {
 func inspectGraphSequences(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	rows, err := tx.Query(ctx, `
 SELECT n.nspname, c.relname, format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement,
-       s.seqmin, s.seqmax, s.seqcache, s.seqcycle, obj_description(c.oid, 'pg_class'),
+       s.seqmin, s.seqmax, s.seqcache, s.seqcycle, c.relpersistence = 'u', obj_description(c.oid, 'pg_class'),
        owned.schema_name, owned.table_name, owned.column_name
 FROM pg_sequence s
 JOIN pg_class c ON c.oid = s.seqrelid
@@ -548,6 +985,15 @@ WHERE c.relkind = 'S' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'informatio
   AND NOT EXISTS (
     SELECT 1
     FROM pg_depend owner_dep
+    JOIN pg_attribute owner_attr
+      ON owner_attr.attrelid = owner_dep.refobjid AND owner_attr.attnum = owner_dep.refobjsubid
+    WHERE owner_dep.classid = 'pg_class'::regclass AND owner_dep.objid = c.oid
+      AND owner_dep.refclassid = 'pg_class'::regclass AND owner_dep.deptype = 'a'
+      AND owner_attr.attidentity <> ''
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_depend owner_dep
     JOIN pg_attrdef ad ON ad.adrelid = owner_dep.refobjid AND ad.adnum = owner_dep.refobjsubid
     JOIN pg_depend default_dep ON default_dep.classid = 'pg_attrdef'::regclass AND default_dep.objid = ad.oid
       AND default_dep.refclassid = 'pg_class'::regclass AND default_dep.refobjid = c.oid
@@ -562,7 +1008,7 @@ ORDER BY n.nspname, c.relname`)
 	for rows.Next() {
 		object := pgschema.Sequence{}
 		var ownedSchema, ownedTable, ownedColumn *string
-		if err := rows.Scan(&object.Schema, &object.Name, &object.Type, &object.Start, &object.Increment, &object.Min, &object.Max, &object.Cache, &object.Cycle, &object.Comment, &ownedSchema, &ownedTable, &ownedColumn); err != nil {
+		if err := rows.Scan(&object.Schema, &object.Name, &object.Type, &object.Start, &object.Increment, &object.Min, &object.Max, &object.Cache, &object.Cycle, &object.Unlogged, &object.Comment, &ownedSchema, &ownedTable, &ownedColumn); err != nil {
 			return err
 		}
 		if ownedSchema != nil && ownedTable != nil && ownedColumn != nil {
@@ -929,7 +1375,7 @@ ORDER BY n.nspname, t.relname, i.relname, idx.ord`, included)
 		if nullsLast != nil {
 			part.NullsLast = *nullsLast
 		}
-		if opclassName != nil {
+		if opclassName != nil && (opclassDefault == nil || !*opclassDefault || len(parameters) > 0) {
 			name := *opclassName
 			if opclassSchema != nil && *opclassSchema != "pg_catalog" {
 				name = *opclassSchema + "." + name
@@ -988,6 +1434,10 @@ FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('v', 'm')
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
 ORDER BY n.nspname, c.relname`)
 	if err != nil {
 		return err
@@ -1024,7 +1474,7 @@ ORDER BY n.nspname, c.relname`)
 	if err := addViewDependencies(ctx, tx, snapshot); err != nil {
 		return err
 	}
-	return addViewEnumDependencies(ctx, tx, snapshot)
+	return addViewTypeDependencies(ctx, tx, snapshot)
 }
 
 // addViewDependencies uses pg_rewrite/pg_depend rather than inspecting SQL
@@ -1035,7 +1485,8 @@ ORDER BY n.nspname, c.relname`)
 func addViewDependencies(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot) error {
 	rows, err := tx.Query(ctx, `
 SELECT vn.nspname, vc.relname, vc.relkind::text,
-       rn.nspname, rc.relname, rc.relkind::text, d.refobjsubid, ra.attname
+       rn.nspname, rc.relname, rc.relkind::text, d.refobjsubid, ra.attname,
+       extn.nspname, ext.extname
 FROM pg_rewrite rw
 JOIN pg_class vc ON vc.oid = rw.ev_class
 JOIN pg_namespace vn ON vn.oid = vc.relnamespace
@@ -1043,6 +1494,10 @@ JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid
 JOIN pg_class rc ON rc.oid = d.refobjid
 JOIN pg_namespace rn ON rn.oid = rc.relnamespace
 LEFT JOIN pg_attribute ra ON ra.attrelid = rc.oid AND ra.attnum = d.refobjsubid
+LEFT JOIN pg_depend extdep ON extdep.classid = 'pg_class'::regclass AND extdep.objid = rc.oid
+  AND extdep.refclassid = 'pg_extension'::regclass AND extdep.deptype = 'e'
+LEFT JOIN pg_extension ext ON ext.oid = extdep.refobjid
+LEFT JOIN pg_namespace extn ON extn.oid = ext.extnamespace
 WHERE rw.rulename = '_RETURN'
   AND vc.relkind IN ('v', 'm')
   AND d.refclassid = 'pg_class'::regclass
@@ -1057,8 +1512,8 @@ ORDER BY vn.nspname, vc.relname, rn.nspname, rc.relname, d.refobjsubid`)
 	for rows.Next() {
 		var viewSchema, viewName, viewKind, referenceSchema, referenceName, referenceKind string
 		var referenceColumn int
-		var referenceColumnName *string
-		if err := rows.Scan(&viewSchema, &viewName, &viewKind, &referenceSchema, &referenceName, &referenceKind, &referenceColumn, &referenceColumnName); err != nil {
+		var referenceColumnName, extensionSchema, extensionName *string
+		if err := rows.Scan(&viewSchema, &viewName, &viewKind, &referenceSchema, &referenceName, &referenceKind, &referenceColumn, &referenceColumnName, &extensionSchema, &extensionName); err != nil {
 			return err
 		}
 		view := pgschema.View{Schema: viewSchema, Name: viewName, Materialized: viewKind == "m"}.ObjectID()
@@ -1082,6 +1537,14 @@ ORDER BY vn.nspname, vc.relname, rn.nspname, rc.relname, d.refobjsubid`)
 			continue
 		}
 		if _, exists := snapshot.Object(reference); !exists {
+			if extensionSchema != nil && extensionName != nil {
+				extensionID := (pgschema.Extension{Schema: *extensionSchema, Name: *extensionName}).ObjectID()
+				if _, extensionExists := snapshot.Object(extensionID); extensionExists {
+					if err := snapshot.AddDependency(view, extensionID); err != nil {
+						return err
+					}
+				}
+			}
 			continue
 		}
 		if err := snapshot.AddDependency(view, reference); err != nil {
@@ -1139,12 +1602,11 @@ ORDER BY vn.nspname, vc.relname, pn.nspname, p.proname, pg_get_function_identity
 	return rows.Err()
 }
 
-// addViewEnumDependencies preserves pg_rewrite -> pg_type edges for modeled
-// enum types. Domain, range, and composite type families remain explicit
-// blockers elsewhere; never synthesize a type node from a dependency row.
-func addViewEnumDependencies(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot) error {
+// addViewTypeDependencies preserves pg_rewrite -> pg_type edges for modeled
+// free-standing types. Never synthesize a type node from a dependency row.
+func addViewTypeDependencies(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot) error {
 	rows, err := tx.Query(ctx, `
-SELECT vn.nspname, vc.relname, vc.relkind::text, tn.nspname, t.typname
+SELECT vn.nspname, vc.relname, vc.relkind::text, tn.nspname, t.typname, t.typtype::text
 FROM pg_rewrite rw
 JOIN pg_class vc ON vc.oid = rw.ev_class
 JOIN pg_namespace vn ON vn.oid = vc.relnamespace
@@ -1155,7 +1617,7 @@ WHERE rw.rulename = '_RETURN'
   AND vc.relkind IN ('v', 'm')
   AND d.refclassid = 'pg_type'::regclass
   AND d.deptype = 'n'
-  AND t.typtype = 'e'
+  AND t.typtype IN ('e', 'd', 'c')
   AND vn.nspname NOT LIKE 'pg_%' AND vn.nspname <> 'information_schema'
 ORDER BY vn.nspname, vc.relname, tn.nspname, t.typname`)
 	if err != nil {
@@ -1163,19 +1625,25 @@ ORDER BY vn.nspname, vc.relname, tn.nspname, t.typname`)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var viewSchema, viewName, viewKind, enumSchema, enumName string
-		if err := rows.Scan(&viewSchema, &viewName, &viewKind, &enumSchema, &enumName); err != nil {
+		var viewSchema, viewName, viewKind, typeSchema, typeName, typeKind string
+		if err := rows.Scan(&viewSchema, &viewName, &viewKind, &typeSchema, &typeName, &typeKind); err != nil {
 			return err
 		}
 		view := pgschema.View{Schema: viewSchema, Name: viewName, Materialized: viewKind == "m"}.ObjectID()
-		enum := pgschema.Enum{Schema: enumSchema, Name: enumName}.ObjectID()
+		kind := pgschema.KindEnum
+		if typeKind == "d" {
+			kind = pgschema.KindDomain
+		} else if typeKind == "c" {
+			kind = pgschema.KindComposite
+		}
+		typeID := pgschema.ID{Kind: kind, Schema: typeSchema, Name: typeName}
 		if _, exists := snapshot.Object(view); !exists {
 			continue
 		}
-		if _, exists := snapshot.Object(enum); !exists {
+		if _, exists := snapshot.Object(typeID); !exists {
 			continue
 		}
-		if err := snapshot.AddDependency(view, enum); err != nil {
+		if err := snapshot.AddDependency(view, typeID); err != nil {
 			return err
 		}
 	}
@@ -1191,6 +1659,7 @@ func inspectGraphRoutines(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Sna
 	rows, err := tx.Query(ctx, `
 SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
        CASE p.prokind WHEN 'f' THEN 'function' WHEN 'p' THEN 'procedure' END,
+       COALESCE(pg_get_function_result(p.oid), ''),
        pg_get_functiondef(p.oid), obj_description(p.oid, 'pg_proc')
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1198,7 +1667,11 @@ WHERE p.prokind IN ('f', 'p')
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (
     SELECT 1 FROM pg_depend d
-    WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+    WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype IN ('e', 'i')
   )
 ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)`)
 	if err != nil {
@@ -1207,7 +1680,7 @@ ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)`)
 	defer rows.Close()
 	for rows.Next() {
 		object := pgschema.Routine{}
-		if err := rows.Scan(&object.Schema, &object.Name, &object.Signature, &object.Kind, &object.Definition, &object.Comment); err != nil {
+		if err := rows.Scan(&object.Schema, &object.Name, &object.Signature, &object.Kind, &object.ReturnType, &object.Definition, &object.Comment); err != nil {
 			return err
 		}
 		selector := "routine:" + object.Schema + "." + object.Name + "(" + object.Signature + ")"
@@ -1228,18 +1701,172 @@ ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)`)
 	return rows.Err()
 }
 
+// addRoutineDependencies turns PostgreSQL's catalog-proven expression and
+// SQL-standard body references into graph edges. String-literal SQL and
+// PL/pgSQL bodies deliberately remain opaque because PostgreSQL itself does
+// not record their referenced objects in pg_depend.
+func addRoutineDependencies(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot) error {
+	type edge struct{ object, dependency pgschema.ID }
+	var edges []edge
+	queries := []string{
+		`SELECT pn.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
+                rn.nspname, r.proname, pg_get_function_identity_arguments(r.oid)
+           FROM pg_depend d
+           JOIN pg_proc p ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+           JOIN pg_namespace pn ON pn.oid = p.pronamespace
+           JOIN pg_proc r ON d.refclassid = 'pg_proc'::regclass AND d.refobjid = r.oid
+           JOIN pg_namespace rn ON rn.oid = r.pronamespace
+          WHERE p.oid <> r.oid AND d.deptype = 'n'
+            AND pn.nspname NOT LIKE 'pg_%' AND pn.nspname <> 'information_schema'
+            AND rn.nspname NOT LIKE 'pg_%' AND rn.nspname <> 'information_schema'`,
+	}
+	for _, query := range queries {
+		rows, err := tx.Query(ctx, query)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var objectSchema, objectName, objectSignature, dependencySchema, dependencyName, dependencySignature string
+			if err := rows.Scan(&objectSchema, &objectName, &objectSignature, &dependencySchema, &dependencyName, &dependencySignature); err != nil {
+				rows.Close()
+				return err
+			}
+			edges = append(edges, edge{
+				object:     (pgschema.Routine{Schema: objectSchema, Name: objectName, Signature: objectSignature}).ObjectID(),
+				dependency: (pgschema.Routine{Schema: dependencySchema, Name: dependencyName, Signature: dependencySignature}).ObjectID(),
+			})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	relationRows, err := tx.Query(ctx, `
+SELECT pn.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
+       rn.nspname, c.relname, c.relkind::text
+FROM pg_depend d
+JOIN pg_proc p ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+JOIN pg_namespace pn ON pn.oid = p.pronamespace
+JOIN pg_class c ON d.refclassid = 'pg_class'::regclass AND d.refobjid = c.oid
+JOIN pg_namespace rn ON rn.oid = c.relnamespace
+WHERE d.deptype = 'n' AND c.relkind IN ('r', 'p', 'v', 'm')
+  AND pn.nspname NOT LIKE 'pg_%' AND pn.nspname <> 'information_schema'
+  AND rn.nspname NOT LIKE 'pg_%' AND rn.nspname <> 'information_schema'
+ORDER BY 1, 2, 3, 4, 5`)
+	if err != nil {
+		return err
+	}
+	for relationRows.Next() {
+		var routineSchema, routineName, routineSignature, relationSchema, relationName, relationKind string
+		if err := relationRows.Scan(&routineSchema, &routineName, &routineSignature, &relationSchema, &relationName, &relationKind); err != nil {
+			relationRows.Close()
+			return err
+		}
+		edges = append(edges, edge{
+			object:     (pgschema.Routine{Schema: routineSchema, Name: routineName, Signature: routineSignature}).ObjectID(),
+			dependency: relationObjectID(relationKind, relationSchema, relationName),
+		})
+	}
+	if err := relationRows.Err(); err != nil {
+		relationRows.Close()
+		return err
+	}
+	relationRows.Close()
+
+	rows, err := tx.Query(ctx, `
+SELECT 'column', n.nspname, c.relname, a.attname, '',
+       rn.nspname, r.proname, pg_get_function_identity_arguments(r.oid)
+FROM pg_attrdef ad
+JOIN pg_class c ON c.oid = ad.adrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+JOIN pg_depend d ON d.classid = 'pg_attrdef'::regclass AND d.objid = ad.oid
+JOIN pg_proc r ON d.refclassid = 'pg_proc'::regclass AND d.refobjid = r.oid
+JOIN pg_namespace rn ON rn.oid = r.pronamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND rn.nspname NOT LIKE 'pg_%' AND rn.nspname <> 'information_schema'
+UNION ALL
+SELECT 'constraint', n.nspname, c.relname, con.conname, '',
+       rn.nspname, r.proname, pg_get_function_identity_arguments(r.oid)
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_depend d ON d.classid = 'pg_constraint'::regclass AND d.objid = con.oid
+JOIN pg_proc r ON d.refclassid = 'pg_proc'::regclass AND d.refobjid = r.oid
+JOIN pg_namespace rn ON rn.oid = r.pronamespace
+WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND rn.nspname NOT LIKE 'pg_%' AND rn.nspname <> 'information_schema'
+UNION ALL
+SELECT 'index', tn.nspname, t.relname, i.relname, '',
+       rn.nspname, r.proname, pg_get_function_identity_arguments(r.oid)
+FROM pg_class i
+JOIN pg_index x ON x.indexrelid = i.oid
+JOIN pg_class t ON t.oid = x.indrelid
+JOIN pg_namespace tn ON tn.oid = t.relnamespace
+JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = i.oid
+JOIN pg_proc r ON d.refclassid = 'pg_proc'::regclass AND d.refobjid = r.oid
+JOIN pg_namespace rn ON rn.oid = r.pronamespace
+WHERE i.relkind IN ('i', 'I')
+  AND tn.nspname NOT LIKE 'pg_%' AND tn.nspname <> 'information_schema'
+  AND rn.nspname NOT LIKE 'pg_%' AND rn.nspname <> 'information_schema'
+ORDER BY 1, 2, 3, 4, 6, 7, 8`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, schema, relation, name, unused, routineSchema, routineName, routineSignature string
+		if err := rows.Scan(&kind, &schema, &relation, &name, &unused, &routineSchema, &routineName, &routineSignature); err != nil {
+			return err
+		}
+		table := (pgschema.Table{Schema: schema, Name: relation}).ObjectID()
+		var object pgschema.ID
+		switch kind {
+		case "column":
+			object = (pgschema.Column{Table: table, Name: name}).ObjectID()
+			edges = append(edges, edge{object: table, dependency: (pgschema.Routine{Schema: routineSchema, Name: routineName, Signature: routineSignature}).ObjectID()})
+		case "constraint":
+			object = (pgschema.Constraint{Table: table, Name: name}).ObjectID()
+		case "index":
+			object = (pgschema.Index{Table: table, Name: name}).ObjectID()
+		}
+		edges = append(edges, edge{object: object, dependency: (pgschema.Routine{Schema: routineSchema, Name: routineName, Signature: routineSignature}).ObjectID()})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range edges {
+		if _, exists := snapshot.Object(item.object); !exists {
+			continue
+		}
+		if _, exists := snapshot.Object(item.dependency); !exists {
+			continue
+		}
+		if err := snapshot.AddDependency(item.object, item.dependency); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func inspectGraphTriggers(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	rows, err := tx.Query(ctx, `
-SELECT n.nspname, c.relname, tg.tgname,
+SELECT n.nspname, c.relname, c.relkind::text, tg.tgname,
        pn.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
-       pg_get_triggerdef(tg.oid, true), tg.tgenabled::text
+       pg_get_triggerdef(tg.oid, true), tg.tgenabled::text,
+       obj_description(tg.oid, 'pg_trigger')
 FROM pg_trigger tg
 JOIN pg_class c ON c.oid = tg.tgrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_proc p ON p.oid = tg.tgfoid
 JOIN pg_namespace pn ON pn.oid = p.pronamespace
-WHERE NOT tg.tgisinternal AND c.relkind IN ('r', 'p')
+WHERE NOT tg.tgisinternal AND tg.tgparentid = 0 AND c.relkind IN ('r', 'p', 'v')
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
 ORDER BY n.nspname, c.relname, tg.tgname`)
 	if err != nil {
 		return err
@@ -1248,13 +1875,13 @@ ORDER BY n.nspname, c.relname, tg.tgname`)
 	for rows.Next() {
 		var routineSchema, routineName, routineSignature string
 		object := pgschema.Trigger{}
-		var schema, table string
-		if err := rows.Scan(&schema, &table, &object.Name, &routineSchema, &routineName, &routineSignature, &object.Definition, &object.Enabled); err != nil {
+		var schema, relation, relationKind string
+		if err := rows.Scan(&schema, &relation, &relationKind, &object.Name, &routineSchema, &routineName, &routineSignature, &object.Definition, &object.Enabled, &object.Comment); err != nil {
 			return err
 		}
-		object.Table = (pgschema.Table{Schema: schema, Name: table}).ObjectID()
+		object.Table = relationObjectID(relationKind, schema, relation)
 		object.Routine = (pgschema.Routine{Schema: routineSchema, Name: routineName, Signature: routineSignature}).ObjectID()
-		selector := "trigger:" + schema + "." + table + "." + object.Name
+		selector := "trigger:" + schema + "." + relation + "." + object.Name
 		skip, err := tracker.Skip(selector, snapshot)
 		if err != nil {
 			return err
@@ -1298,7 +1925,7 @@ JOIN pg_class c ON c.oid = tg.tgrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN LATERAL unnest(tg.tgattr::smallint[]) AS attrs(attnum) ON true
 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = attrs.attnum
-WHERE NOT tg.tgisinternal AND c.relkind IN ('r', 'p')
+WHERE NOT tg.tgisinternal AND tg.tgparentid = 0 AND c.relkind IN ('r', 'p')
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
 ORDER BY n.nspname, c.relname, tg.tgname, a.attnum`)
 	if err != nil {
@@ -1506,6 +2133,77 @@ ORDER BY n.nspname, c.relname, p.polname, d.refclassid, d.refobjid, d.refobjsubi
 	return rows.Err()
 }
 
+func inspectGraphReplicaIdentities(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
+	rows, err := tx.Query(ctx, `
+SELECT n.nspname, c.relname, c.relreplident::text, identity_index.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_index identity ON identity.indrelid = c.oid AND identity.indisreplident
+LEFT JOIN pg_class identity_index ON identity_index.oid = identity.indexrelid
+WHERE c.relkind IN ('r', 'p')
+  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
+ORDER BY n.nspname, c.relname`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var schema, table, mode string
+		var indexName *string
+		if err := rows.Scan(&schema, &table, &mode, &indexName); err != nil {
+			return err
+		}
+		object := pgschema.ReplicaIdentity{Table: (pgschema.Table{Schema: schema, Name: table}).ObjectID()}
+		switch mode {
+		case "d":
+			object.Mode = pgschema.ReplicaIdentityDefault
+		case "f":
+			object.Mode = pgschema.ReplicaIdentityFull
+		case "n":
+			object.Mode = pgschema.ReplicaIdentityNothing
+		case "i":
+			object.Mode = pgschema.ReplicaIdentityIndex
+			if indexName == nil {
+				return fmt.Errorf("replica identity index is missing for %s", object.Table)
+			}
+			index := (pgschema.Index{Table: object.Table, Name: *indexName}).ObjectID()
+			object.Index = &index
+		default:
+			return fmt.Errorf("unknown replica identity mode %q for %s", mode, object.Table)
+		}
+		selector := "replica_identity:" + schema + "." + table
+		skip, err := tracker.Skip(selector, snapshot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if _, exists := snapshot.Object(object.Table); !exists {
+			return fmt.Errorf("replica identity table %s is missing from graph", object.Table)
+		}
+		if err := snapshot.Add(object); err != nil {
+			return err
+		}
+		if err := snapshot.AddDependency(object.ObjectID(), object.Table); err != nil {
+			return err
+		}
+		if object.Index != nil {
+			if _, exists := snapshot.Object(*object.Index); !exists {
+				return fmt.Errorf("replica identity index %s is missing from graph", *object.Index)
+			}
+			if err := snapshot.AddDependency(object.ObjectID(), *object.Index); err != nil {
+				return err
+			}
+		}
+	}
+	return rows.Err()
+}
+
 func inspectGraphTablePrivileges(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	rows, err := tx.Query(ctx, `
 SELECT n.nspname, c.relname,
@@ -1603,6 +2301,9 @@ func relationObjectID(kind, schema, name string) pgschema.ID {
 	if kind == "m" {
 		return (pgschema.View{Schema: schema, Name: name, Materialized: true}).ObjectID()
 	}
+	if kind == "v" {
+		return (pgschema.View{Schema: schema, Name: name}).ObjectID()
+	}
 	return (pgschema.Table{Schema: schema, Name: name}).ObjectID()
 }
 
@@ -1617,7 +2318,7 @@ func inspectGraphBlockers(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Sna
 		"extension": true, "index": true, "sequence": true, "view": true, "materialized_view": true,
 	}
 	for _, selector := range selectors {
-		if modeled[strings.SplitN(selector, ":", 2)[0]] {
+		if modeled[strings.SplitN(selector, ":", 2)[0]] || strings.HasPrefix(selector, "comment:trigger:") {
 			continue
 		}
 		if err := addBlocker(selector, snapshot, tracker); err != nil {
@@ -1633,6 +2334,9 @@ func inspectGraphBlockers(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Sna
 		var selector string
 		if err := rows.Scan(&selector); err != nil {
 			return err
+		}
+		if strings.HasPrefix(selector, "comment:trigger:") {
+			continue
 		}
 		if err := addBlocker(selector, snapshot, tracker); err != nil {
 			return err
@@ -1661,6 +2365,9 @@ func inspectCatalogSafetyBlockers(ctx context.Context, tx pgx.Tx, snapshot *pgsc
 		var selector string
 		if err := rows.Scan(&selector); err != nil {
 			return err
+		}
+		if strings.HasPrefix(selector, "comment:trigger:") {
+			continue
 		}
 		if err := addBlocker(selector, snapshot, tracker); err != nil {
 			return err
@@ -1715,25 +2422,7 @@ WHERE con.contype = 'n' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'informat
        OR (con.conislocal AND con.coninhcount = 0 AND
            (array_length(con.conkey, 1) <> 1 OR a.attname IS NULL
             OR con.conname <> c.relname || '_' || a.attname || '_not_null')))
-UNION ALL
-SELECT 'unenforced_constraint:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(con.conname)
-FROM pg_constraint con
-JOIN pg_class c ON c.oid = con.conrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE NOT con.conenforced AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-UNION ALL
-SELECT 'period_constraint:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(con.conname)
-FROM pg_constraint con
-JOIN pg_class c ON c.oid = con.conrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE con.conperiod AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-UNION ALL
-SELECT 'virtual_generated_column:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(a.attname)
-FROM pg_attribute a
-JOIN pg_class c ON c.oid = a.attrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE a.attgenerated = 'v' AND c.relkind IN ('r', 'p')
-  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'`)
+`)
 	}
 	if len(queries) == 0 {
 		return ""
@@ -1809,14 +2498,6 @@ func addBlocker(selector string, snapshot *pgschema.Snapshot, tracker *ignoreTra
 }
 
 const graphOutsideCoreQuery = `
-SELECT 'domain:' || n.nspname || '.' || t.typname
-FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-WHERE t.typtype = 'd' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-UNION ALL
-SELECT 'composite:' || n.nspname || '.' || c.relname
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind = 'c' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-UNION ALL
 SELECT 'aggregate:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE $ROUTINE_KIND$ AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
@@ -1825,10 +2506,6 @@ UNION ALL
 SELECT 'collation:' || n.nspname || '.' || c.collname
 FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace
 WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-UNION ALL
-SELECT 'range_type:' || n.nspname || '.' || t.typname
-FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-WHERE t.typtype IN ('r', 'm') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
 UNION ALL
 SELECT 'foreign_table:' || n.nspname || '.' || c.relname
 FROM pg_foreign_table ft
@@ -1846,7 +2523,7 @@ WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND r.roln
 UNION ALL
 SELECT 'ownership:relation:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || quote_ident(r.rolname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner
-WHERE c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+WHERE c.relkind IN ('S', 'v', 'm', 'f') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND r.rolname <> current_user
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 UNION ALL
@@ -1854,6 +2531,7 @@ SELECT 'ownership:type:' || quote_ident(n.nspname) || '.' || quote_ident(t.typna
 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace JOIN pg_roles r ON r.oid = t.typowner
 WHERE t.typtype IN ('e', 'd', 'c', 'r', 'm') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND r.rolname <> current_user
+  AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind IN ('r', 'p'))
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
 UNION ALL
 SELECT 'ownership:routine:' || quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' || pg_get_function_identity_arguments(p.oid) || ')=' || quote_ident(r.rolname)
@@ -1921,12 +2599,6 @@ WHERE p.proacl IS NOT NULL AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'infor
 UNION ALL
 SELECT 'acl:default:' || quote_ident(r.rolname) || ':' || COALESCE(quote_ident(n.nspname), '*') || ':' || d.defaclobjtype::text
 FROM pg_default_acl d JOIN pg_roles r ON r.oid = d.defaclrole LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
-UNION ALL
-SELECT 'replica_identity:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || c.relreplident::text
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind IN ('r', 'p') AND c.relreplident <> 'd'
-  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 UNION ALL
 SELECT 'clustered_index:' || quote_ident(n.nspname) || '.' || quote_ident(i.relname)
 FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_class c ON c.oid = x.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -2019,7 +2691,7 @@ WHERE c.relkind IN ('r', 'p', 'm') AND am.amname <> 'heap'
 UNION ALL
 SELECT 'sequence_persistence:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || c.relpersistence::text
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind = 'S' AND c.relpersistence <> 'p'
+WHERE c.relkind = 'S' AND c.relpersistence = 't'
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 UNION ALL
@@ -2070,7 +2742,10 @@ UNION ALL
 SELECT 'cast:' || format_type(c.castsource, NULL) || '->' || format_type(c.casttarget, NULL)
 FROM pg_cast c
 WHERE c.oid >= 16384
-  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_cast'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_depend d
+      WHERE d.classid = 'pg_cast'::regclass AND d.objid = c.oid AND d.deptype IN ('e', 'i')
+  )
 UNION ALL
 SELECT 'conversion:' || quote_ident(n.nspname) || '.' || quote_ident(c.conname)
 FROM pg_conversion c JOIN pg_namespace n ON n.oid = c.connamespace
@@ -2092,17 +2767,6 @@ UNION ALL
 SELECT 'security_label:' || quote_ident(s.provider) || ':' || identified.identity
 FROM pg_seclabel s
 CROSS JOIN LATERAL pg_identify_object(s.classoid, s.objoid, s.objsubid) identified
-UNION ALL
-SELECT 'comment:extension:' || quote_ident(e.extname)
-FROM pg_extension e
-LEFT JOIN pg_available_extensions available ON available.name = e.extname
-WHERE obj_description(e.oid, 'pg_extension') IS NOT NULL
-  AND obj_description(e.oid, 'pg_extension') IS DISTINCT FROM available.comment
-UNION ALL
-SELECT 'comment:enum:' || quote_ident(n.nspname) || '.' || quote_ident(t.typname)
-FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-WHERE t.typtype = 'e' AND obj_description(t.oid, 'pg_type') IS NOT NULL
-  AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
 UNION ALL
 SELECT 'comment:trigger:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(t.tgname)
 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace

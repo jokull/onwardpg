@@ -106,6 +106,7 @@ not inspect Git or connect to PostgreSQL.
 onwardpg init \
   [--bundle baseline] \
   [--concurrent-indexes] \
+  [--ignore-extension-version NAME] \
   [--ignore SELECTOR]
 ~~~
 
@@ -142,6 +143,7 @@ Planner options include:
 | --if-exists | Use supported IF EXISTS forms |
 | --cascade-drops | Permit supported CASCADE rendering after destructive approval |
 | --schema-qualifier VALUE | Scope and render through one schema qualifier |
+| --ignore-extension-version NAME | Suppress version changes for this exact extension name; repeatable, and unmatched names are allowed |
 | --ignore SELECTOR | Narrow validated catalog exclusion; repeatable |
 | --output text\|json | Render copyable decisions/phased SQL or the JSON protocol |
 

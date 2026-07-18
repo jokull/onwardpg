@@ -42,30 +42,31 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | Schema create/drop | Yes | **Plannable** | Drops are destructive and require approval. |
 | Schema comments | No verified diff family | **Plannable** | Migra's final fixtures do not establish general object-comment diffing. |
 | Extensions create/drop | Yes | **Plannable** | Drop is destructive and approved. |
-| Extension version / schema changes | Version changes; no verified schema-move family | Version **Plannable**; schema move **Blocked** | A direct schema move is not an expand/contract rollout. Extension-owned objects remain a boundary risk. |
+| Extension version / schema changes | Version changes; no verified schema-move family | **Plannable** | Version updates support repeatable exact-name ignores; identity-preserving schema moves use `ALTER EXTENSION ... SET SCHEMA`. Both paths are verified on PostgreSQL 15–18. |
 | Tables create/drop | Yes | **Plannable** | Drops require approval. |
 | Table comments | No verified diff family | **Plannable** | |
 | Table rename | Drop/create-oriented diff | **Decision required**, then **Plannable** for the supported shape | Expand keeps the old physical table and creates a new-name security-invoker view; contract atomically replaces the view with the renamed table. Retained child names must remain stable, and new code must tolerate the temporary view. |
 | Table persistence | Partial | **Plannable** | Includes logged/unlogged transitions; ownership is separate. |
+| Table ownership | Explicit deviations detected | **Decision required**, then **Plannable** | Ordinary and partitioned tables use a fingerprint-bound authorization decision and quoted role identity; non-table ownership remains blocked. |
 | Columns add/drop/null/default | Yes | **Plannable** or **SQL handoff** | Drops require approval. A new required column without a default is added nullable, handed off for dual-write/backfill, then enforced in contract. New columns append physically; a different declarative position is reported as compatibility evidence rather than blocked. |
 | Column comments | No verified diff family | **Plannable** | |
 | Column rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Intent and catalog rewrites are recognized, but no bare rename is emitted until both column contracts can overlap. |
 | Column type change | Yes | **Blocked** or **SQL handoff** | onwardpg never invents a `USING` expression or lets a direct `ALTER COLUMN TYPE` masquerade as expand/contract. Product-specific shadow-column work can be handed to edited SQL. |
-| Identity / generated / serial / collation | Yes | **Plannable** for supported forms | Some add/change combinations remain explicit unsupported work. |
+| Identity / generated / serial / collation | Yes | **Plannable** for supported forms | Stored generated-expression changes work on PostgreSQL 15–18; virtual generated columns work on PostgreSQL 18; same-type explicit collation changes and reset-to-default transitions are reviewed rewrites. |
 
 ## Constraints, indexes, and sequences
 
 | Capability | Migra | onwardpg preview | Notes |
 | --- | --- | --- | --- |
-| Primary / unique / check constraints | Yes | **Plannable** | Create, drop, and structural rebuilds; destructive changes require approval. |
-| Foreign keys and dependency cycles | Yes | **Plannable** | Dependency-aware ordering; `NOT VALID` / validation behavior is modeled. |
+| Primary / unique / check constraints | Yes | **Plannable** | Create, drop, and structural rebuilds; destructive changes require approval. PostgreSQL 18 `WITHOUT OVERLAPS` and `NOT ENFORCED` forms are retained. |
+| Foreign keys and dependency cycles | Yes | **Plannable** | Dependency-aware ordering; `NOT VALID` / validation behavior is modeled, including PostgreSQL 18 `PERIOD` and enforcement transitions. |
 | Exclusion constraints | Yes | **Plannable** for supported forms | PostgreSQL and partition-version limits still apply. |
 | Constraint rename | No general rename detection | **Decision required** | Migra's name-keyed comparison generally renders remove/add; onwardpg does not guess. |
 | Ordinary indexes | Yes | **Plannable** | Create, drop, rename, expression/opclass/include/predicate/method/options. |
 | Concurrent index operation | No phase model | **Plannable** | Emitted in a valid non-transactional batch when requested. |
 | Index attached to a constraint | Yes | **Plannable** | Attachment requires structural proof. |
 | Standalone sequences | Yes | **Plannable** | Create/drop and parameter updates. |
-| Sequence `OWNED BY` transitions | Yes | **Not inventoried** | Not yet modeled or reliably detected as a lifecycle transition. |
+| Sequence `OWNED BY` transitions | Yes | **Plannable** | Ownership is a typed column edge and is ordered before owner drops. |
 
 ## Types, views, routines, and triggers
 
@@ -73,15 +74,17 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | --- | --- | --- | --- |
 | Enum create/drop/add labels | Yes | **Plannable** | Drops require approval. |
 | Enum rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Both old and new type contracts cannot yet overlap automatically. |
-| Enum label reorder/removal | Limited / unsafe | **Blocked** or explicit rejection | Never silently treated as safe. |
-| Domain, composite, range types | No verified Migra diff family | **Blocked** | Explicitly outside the onwardpg preview boundary. |
+| Enum label reorder/removal | Limited / unsafe | **Decision required** | A confirmed blocking rewrite handles unchanged scalar/array columns and restores defaults/comments; generated, indexed, constrained, domain-mediated, view-read, or changed dependents block. |
+| Domain types | No verified Migra diff family | **Plannable** | Full pinned lifecycle and named CHECK transitions; base-type replacement remains blocked. |
+| Composite types | No verified Migra diff family | **Plannable** | Lifecycle and CASCADE attribute changes; retained-attribute reorder remains blocked. |
+| Range types | No verified Migra diff family | **Plannable** | Lifecycle, options, comments, multirange identity, and typed subtype/column dependencies; property rewrites with retained dependents and custom canonical-function choreography remain blocked. |
 | Ordinary view create/replace/drop | Yes | **Plannable** | Typed dependencies on relations, columns, enums, views, and modeled routines. |
 | Ordinary view rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | A direct rename would cut over callers. |
 | Materialized view create/drop | Yes | **Plannable** | Drop is destructive. |
 | Materialized view rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Native PostgreSQL rewrite behavior is modeled, but not emitted without a compatibility path. |
 | Materialized view definition rebuild | Yes, via rebuild-style SQL | **Decision required** | Reviewed destructive rebuild; dependent data freshness can require a SQL handoff. |
 | Refresh materialized view after semantic dependency change | No rollout model | **SQL handoff** | Developer supplies normal/concurrent refresh and optional verification in the phase files. |
-| Functions create, replace, drop | Yes | **Plannable** | Migra's historical fixtures should not be read as broad modern procedure coverage; onwardpg typed dependencies are limited to catalog-visible references. |
+| Functions create, replace, drop | Yes | **Plannable** | Includes return-type recreation around unchanged defaults, CHECK constraints, expression indexes, and comments; catalog-visible SQL-body chains are topologically ordered. Opaque procedural references and changed/dropped/circular dependents block. |
 | Routine rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Same-signature intent is fingerprint-bound, but a direct rename would cut over callers. |
 | Procedural-body dependency rewrite | No safe general guarantee | **Blocked** | PostgreSQL does not catalog arbitrary body references. |
 | Triggers create/drop/recreate | Yes | **Plannable** | Includes typed table/routine dependency ordering. |
@@ -96,7 +99,7 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | Attach / detach partition child | Yes in final fixtures | **Plannable** | onwardpg hazards record locks and possible validation scans. |
 | Parent/bound/default-partition reconfiguration | Limited | **SQL handoff** | onwardpg will not infer detach/attach order, casts, or data movement. |
 | Propagated partition indexes and constraints | Limited | **Plannable** for modeled parent operations | Child resources are handled through their parent; ambiguous independent child mutation is blocked. |
-| Roles, grants, default privileges, ownership | Privileges optional | **Table grants plannable; remainder blocked** | Ordinary/partitioned-table grants are typed with safe role quoting and intent questions. Default privileges, column/non-table ACLs, non-owner grant chains, and ownership deviations block. Role creation is outside scope. |
+| Roles, grants, default privileges, non-table ownership | Privileges optional | **Table grants plannable; remainder blocked** | Ordinary/partitioned-table grants are typed with safe role quoting and intent questions. Default privileges, column/non-table ACLs, non-owner grant chains, and non-table ownership deviations block. Role creation is outside scope. |
 | RLS and policies | Yes | **Plannable** | Enable/force state, policy modes/commands/roles/expressions, typed dependencies, authorization hazards, and explicit semantic decisions for contractions. |
 | Rules and text-search objects | Inspector support varies | **Blocked** | Catalog selectors are reported and require exact validated ignores until modeled. |
 | Foreign tables | Inspector support varies | **Blocked** | Explicit unsupported result. |

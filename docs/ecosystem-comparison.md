@@ -3,7 +3,7 @@
 This document compares onwardpg with tools that answer several different
 questions commonly hidden behind the phrase “database migrations.” It is a
 research snapshot, not a compatibility certification. It was checked on
-2026-07-13 against project documentation, source, and tests.
+2026-07-18 against project documentation, source, and tests.
 
 The short version is:
 
@@ -146,14 +146,14 @@ current documented boundary; its catalog inventory is still incomplete.
 | Exclusion constraints | Partial | Yes | No | No |
 | Indexes | Structural indexes, concurrent mode, partition propagation, and continuous same-name standalone replacement; advanced attached/constraint/partition-parent cases remain narrower | Ordinary and materialized-view indexes; no concurrent mode | Ordinary indexes and optional concurrent mode; no materialized-view indexes | Strong ordinary, materialized, local, and partitioned coverage; continuous same-name concurrent replacement |
 | Sequences | Create/drop/parameters and typed `OWNED BY` transitions; complete identity options with confirmed removal | Create/drop/ownership changes | Create/drop/parameters; no `OWNED BY` transition | Create/drop/parameters/type/cycle/`OWNED BY` |
-| Enums | Create/drop/add; ambiguous/destructive changes stop | Create and replacement-oriented changes | Create/drop/add | Create/drop/add |
-| Domains | Blocked | No verified diff family | **Create/drop and common alterations** | Not modeled |
-| Composite / range types | Blocked | No verified diff family | Composite create/drop on current `main`; range blocked | Not modeled |
+| Enums | Create/drop/add/label rename plus confirmed removal/reorder/mixed rewrites for bounded dependents; unsafe dependents stop | Create and replacement-oriented changes | Create/drop/add | Create/drop/add |
+| Domains | Create/drop, defaults, nullability, named checks, comments, and typed dependencies; base-type replacement blocked | No verified diff family | **Create/drop and common alterations** | Not modeled |
+| Composite / range types | Both families model lifecycle, comments, properties, and typed dependencies; retained composite reorder and dependent range rewrites block explicitly | No verified diff family | Composite create/drop on current `main`; range blocked | Not modeled |
 | Views | Create/replace/drop and explicit rename within documented dependency proofs | Ordinary views with dependency-aware recreation | Create/drop/rebuild; view-on-view cases blocked | Create/drop and rebuild-style changes |
 | Materialized views | Create/drop/rename/rebuild with explicit destructive intent; refresh contracts | Create/drop/rebuild and indexes | Basic create/drop/rebuild on current `main`, always `WITH NO DATA`; indexes blocked | Create/drop/rebuild/options/tablespace/indexes |
-| Functions / procedures / triggers | Modeled common lifecycle with typed edges; arbitrary procedural-body dependencies remain unknowable | Functions/triggers; historical coverage | Functions, procedures, triggers; incomplete global ordering | Functions, procedures, triggers; non-SQL dependencies become hazards |
+| Functions / procedures / triggers | Lifecycle, return identity, default/check/index recreation, catalog-visible chain ordering, and trigger edges; arbitrary procedural-body dependencies remain unknowable | Functions/triggers; historical coverage | Functions, procedures, triggers; incomplete global ordering | Functions, procedures, triggers; non-SQL dependencies become hazards |
 | Partitioning | Create/hierarchy/attach/detach and propagated resources; reconfiguration requires manual contract | Historical create/attach/detach support | Explicitly blocked | Strong creation/attachment and partition/local-index coverage; difficult reconfiguration rejected |
-| Ownership / grants / RLS | Typed table grants and RLS/policies with intent questions; ownership deviations, default/column/non-table ACLs, and grant chains block | Optional privileges and RLS/policies; sequence ownership | Table ownership on current `main`; other security blocked | Table privileges and RLS/policies; ownership generally absent |
+| Ownership / grants / RLS | Typed table ownership, table grants, and RLS/policies with intent questions; default/column/non-table ACLs, non-table ownership, and grant chains block | Optional privileges and RLS/policies; sequence ownership | Table ownership on current `main`; other security blocked | Table privileges and RLS/policies; ownership generally absent |
 | Unknown catalog state | Inventoried blockers stop explicitly; preview inventory is not exhaustive | No general unknown-object stop | A few explicit blockers, not a complete unknown-state inventory | Unmodeled families are outside its snapshot rather than a general stop |
 | PostgreSQL versions | 15–18 | Historical/deprecated; no current support policy | 14–18 in CI | 14–17 in documented CI |
 
@@ -161,7 +161,7 @@ Reference points:
 
 - Migra was reviewed at [`3450382`](https://github.com/djrobstep/migra/tree/345038271b9fd76296c89e01c7256d0d38e2ce83),
   corresponding to the deprecated final public line.
-- pgmig was reviewed at current `main` [`4685ada`](https://github.com/Apakottur/pgmig/tree/4685adaf1636aca2e1303effc1d5f130795708e1).
+- pgmig was reviewed at current `main` [`d2cccb6`](https://github.com/Apakottur/pgmig/tree/d2cccb6886bfb0b6ad0649bbe1430a9ab57ae983).
   Some capabilities above—materialized views, table ownership, and composite
   types—are newer than its published `v0.0.5` release.
 - Stripe pg-schema-diff was reviewed at released commit [`6208f8f`](https://github.com/stripe/pg-schema-diff/tree/6208f8f3ceccae8ca634055dc47907a6a864cb76),
@@ -250,23 +250,33 @@ the [roadmap](https://github.com/Apakottur/pgmig/issues/8). Destructive changes
 are emitted without a typed approval gate. Concurrent indexes are optional,
 but the user must honor the warning to run them outside a transaction.
 
-pgmig also proves why the comparison must stay current. Its `main` now covers
-three concrete areas onwardpg does not:
+pgmig also proves why the comparison must stay current. Its `main` recently
+added or deepened several concrete areas:
 
 - domains;
 - standalone composite-type create/drop; and
 - table ownership.
 
+The pinned onwardpg parity work now covers those three areas with
+real-PostgreSQL evidence, along with ranges, multiranges, replica identity,
+generated-column changes, column collation changes, and extension
+schema/version options. The exact pinned inventory is fully classified: 405
+scenarios have direct convergence evidence, 25 have clone-verified editable
+handoffs, and 24 have explicit intentional-rejection evidence. No row remains
+implemented-but-unverified or an unsupported gap.
+
 onwardpg is ahead on declarative-DDL materialization, typed dependency and
 transaction planning, rename/cast/drop/backfill questions, hazards, phased
 application handoffs, a broader explicit blocker inventory, clone receipts, and PR
-restacking. It should not claim 100% pgmig coverage.
+restacking. This is behavioral parity with the pinned executable corpus, not a
+claim that every broader PostgreSQL catalog family or production operating
+condition is covered.
 
 Primary evidence: pgmig's [current
-README](https://github.com/Apakottur/pgmig/blob/4685adaf1636aca2e1303effc1d5f130795708e1/README.md),
-[snapshot API](https://github.com/Apakottur/pgmig/blob/4685adaf1636aca2e1303effc1d5f130795708e1/src/pgmig/api.py),
-[phase engine](https://github.com/Apakottur/pgmig/blob/4685adaf1636aca2e1303effc1d5f130795708e1/src/pgmig/_diff/_core.py),
-[unsupported-state query](https://github.com/Apakottur/pgmig/blob/4685adaf1636aca2e1303effc1d5f130795708e1/src/pgmig/_build/queries/unsupported.sql),
+README](https://github.com/Apakottur/pgmig/blob/d2cccb6886bfb0b6ad0649bbe1430a9ab57ae983/README.md),
+[snapshot API](https://github.com/Apakottur/pgmig/blob/d2cccb6886bfb0b6ad0649bbe1430a9ab57ae983/src/pgmig/api.py),
+[phase engine](https://github.com/Apakottur/pgmig/blob/d2cccb6886bfb0b6ad0649bbe1430a9ab57ae983/src/pgmig/_diff/_core.py),
+[unsupported-state query](https://github.com/Apakottur/pgmig/blob/d2cccb6886bfb0b6ad0649bbe1430a9ab57ae983/src/pgmig/_build/queries/unsupported.sql),
 and [roadmap](https://github.com/Apakottur/pgmig/issues/8).
 
 ### Stripe pg-schema-diff: the closest planner-core peer
@@ -456,9 +466,9 @@ The comparison suggests concrete planner work:
 1. Extend the adopted Stripe-quality continuous index replacement and
    per-statement timeout/lock guidance through constraint-backed, attached,
    partition-parent, and materialized-view edge cases.
-2. Close the explicitly useful object gaps: domains, composite types, sequence
-   ownership, table ownership, grants, and RLS—only when they can satisfy the
-   unknown-state and convergence rules.
+2. Finish exact scenario certification for the now-modeled domain, composite,
+   range, sequence/table ownership, grants, and RLS surfaces; keep extending
+   them only where the unknown-state and convergence rules hold.
 3. Keep strengthening real-PostgreSQL convergence and failure tests; both
    pgmig and Stripe have good second-diff practices.
 4. Make the answer-writing loop and PR restacking as obvious as Django's best
@@ -482,8 +492,9 @@ Today:
 - Migra's final surface still includes inheritance, collations, and historical
   transitions onwardpg lacks; grants, RLS/policies, and sequence ownership are
   no longer blanket onwardpg gaps, though case-level parity remains unproven.
-- pgmig current `main` has domains, basic composites, and table ownership that
-  onwardpg does not plan; onwardpg explicitly blocks those unmodeled states.
+- pgmig's 454-scenario pinned corpus is fully evidence-linked (405 direct
+  convergence cases, 25 clone-verified handoffs, and 24 intentional
+  rejections), though future upstream movement requires a deliberate repin.
 - Alembic, Django, and Drizzle have mature framework integration, migration
   runners, custom-data hooks, installed bases, and years of operational use.
 - onwardpg has no published binaries, checksums, stable release record, broad

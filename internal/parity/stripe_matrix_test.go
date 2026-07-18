@@ -18,8 +18,19 @@ type stripeMatrix struct {
 	SchemaVersion   int                `json:"schema_version"`
 	Reference       stripeReference    `json:"reference"`
 	InventoryStatus string             `json:"inventory_status"`
+	Summary         stripeAuditSummary `json:"summary"`
 	SourceFiles     []stripeSourceFile `json:"source_files"`
 	Cases           []stripeCase       `json:"cases"`
+}
+
+type stripeAuditSummary struct {
+	TotalCases             int `json:"total_cases"`
+	DifferentialParity     int `json:"differential_parity"`
+	DifferentialDifference int `json:"differential_difference"`
+	OnwardEvidenceOnly     int `json:"onward_evidence_only"`
+	FamilyOnlyUnverified   int `json:"family_only_unverified"`
+	ConfirmedMissing       int `json:"confirmed_missing"`
+	OutOfScope             int `json:"out_of_scope"`
 }
 
 type stripeReference struct {
@@ -42,6 +53,8 @@ type stripeCase struct {
 	StripeTest       string           `json:"stripe_test"`
 	SourceLine       int              `json:"source_line"`
 	Classification   string           `json:"classification"`
+	EvidenceStatus   string           `json:"evidence_status"`
+	GapStatus        string           `json:"gap_status"`
 	Dimensions       stripeDimensions `json:"dimensions"`
 	OnwardPGTests    []string         `json:"onwardpg_tests"`
 	DifferentialTest string           `json:"differential_test"`
@@ -57,7 +70,7 @@ type stripeDimensions struct {
 
 func TestStripeAcceptanceMatrixIsCompleteAndClassified(t *testing.T) {
 	matrix := loadStripeMatrix(t)
-	if matrix.SchemaVersion != 1 || matrix.Reference.Repository != "https://github.com/stripe/pg-schema-diff" || matrix.Reference.Tag != "v1.0.7" || matrix.Reference.Commit != pinnedStripeCommit || matrix.Reference.License != "MIT" {
+	if matrix.SchemaVersion != 2 || matrix.Reference.Repository != "https://github.com/stripe/pg-schema-diff" || matrix.Reference.Tag != "v1.0.7" || matrix.Reference.Commit != pinnedStripeCommit || matrix.Reference.License != "MIT" {
 		t.Fatalf("invalid Stripe reference header: %#v", matrix.Reference)
 	}
 	if matrix.InventoryStatus != "classified_unverified" && matrix.InventoryStatus != "verified" {
@@ -71,6 +84,15 @@ func TestStripeAcceptanceMatrixIsCompleteAndClassified(t *testing.T) {
 	allowed := map[string]bool{
 		"supported": true, "weaker": true, "missing": true,
 		"intentionally_different": true, "out_of_scope": true,
+	}
+	allowedEvidence := map[string]bool{
+		"differential_parity": true, "differential_difference": true,
+		"onward_evidence_only": true, "family_only_unverified": true,
+		"confirmed_missing": true, "out_of_scope": true,
+	}
+	allowedGap := map[string]bool{
+		"none": true, "deliberate_difference": true, "evidence_gap": true,
+		"confirmed_gap": true, "out_of_scope": true,
 	}
 	files := make(map[string]stripeSourceFile, len(matrix.SourceFiles))
 	total := 0
@@ -90,6 +112,7 @@ func TestStripeAcceptanceMatrixIsCompleteAndClassified(t *testing.T) {
 
 	seen := make(map[string]bool, len(matrix.Cases))
 	countsByFile := make(map[string]int, len(files))
+	actualSummary := stripeAuditSummary{TotalCases: len(matrix.Cases)}
 	for _, entry := range matrix.Cases {
 		if entry.ID == "" || entry.Capability == "" || entry.Scenario == "" || entry.SourceLine < 1 || seen[entry.ID] {
 			t.Fatalf("invalid or duplicate Stripe case %#v", entry)
@@ -97,6 +120,23 @@ func TestStripeAcceptanceMatrixIsCompleteAndClassified(t *testing.T) {
 		seen[entry.ID] = true
 		if !allowed[entry.Classification] {
 			t.Fatalf("Stripe case %s is unclassified: %q", entry.ID, entry.Classification)
+		}
+		if !allowedEvidence[entry.EvidenceStatus] || !allowedGap[entry.GapStatus] {
+			t.Fatalf("Stripe case %s has invalid evidence/gap status: %q/%q", entry.ID, entry.EvidenceStatus, entry.GapStatus)
+		}
+		switch entry.EvidenceStatus {
+		case "differential_parity":
+			actualSummary.DifferentialParity++
+		case "differential_difference":
+			actualSummary.DifferentialDifference++
+		case "onward_evidence_only":
+			actualSummary.OnwardEvidenceOnly++
+		case "family_only_unverified":
+			actualSummary.FamilyOnlyUnverified++
+		case "confirmed_missing":
+			actualSummary.ConfirmedMissing++
+		case "out_of_scope":
+			actualSummary.OutOfScope++
 		}
 		for name, value := range map[string]string{
 			"catalog": entry.Dimensions.Catalog, "mutation": entry.Dimensions.Mutation,
@@ -121,6 +161,9 @@ func TestStripeAcceptanceMatrixIsCompleteAndClassified(t *testing.T) {
 		if matrix.InventoryStatus == "verified" && (len(entry.OnwardPGTests) == 0 || entry.DifferentialTest == "") {
 			t.Fatalf("verified Stripe case %s lacks onwardpg and differential evidence", entry.ID)
 		}
+	}
+	if matrix.Summary != actualSummary {
+		t.Fatalf("Stripe audit summary = %#v, want %#v", matrix.Summary, actualSummary)
 	}
 	for path, file := range files {
 		if countsByFile[path] != file.Cases {

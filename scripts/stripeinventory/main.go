@@ -30,8 +30,19 @@ type matrix struct {
 	SchemaVersion   int          `json:"schema_version"`
 	Reference       reference    `json:"reference"`
 	InventoryStatus string       `json:"inventory_status"`
+	Summary         auditSummary `json:"summary"`
 	SourceFiles     []sourceFile `json:"source_files"`
 	Cases           []caseEntry  `json:"cases"`
+}
+
+type auditSummary struct {
+	TotalCases             int `json:"total_cases"`
+	DifferentialParity     int `json:"differential_parity"`
+	DifferentialDifference int `json:"differential_difference"`
+	OnwardEvidenceOnly     int `json:"onward_evidence_only"`
+	FamilyOnlyUnverified   int `json:"family_only_unverified"`
+	ConfirmedMissing       int `json:"confirmed_missing"`
+	OutOfScope             int `json:"out_of_scope"`
 }
 
 type reference struct {
@@ -54,6 +65,8 @@ type caseEntry struct {
 	StripeTest       string     `json:"stripe_test"`
 	SourceLine       int        `json:"source_line"`
 	Classification   string     `json:"classification"`
+	EvidenceStatus   string     `json:"evidence_status"`
+	GapStatus        string     `json:"gap_status"`
 	Dimensions       dimensions `json:"dimensions"`
 	OnwardPGTests    []string   `json:"onwardpg_tests,omitempty"`
 	DifferentialTest string     `json:"differential_test,omitempty"`
@@ -81,8 +94,8 @@ var policies = map[string]familyPolicy{
 	"column":                  weaker("columns", []string{"internal/graphplan#TestMutationPlanConvergesOnPostgreSQL", "internal/graphplan#TestIdentityGenerationStartAndIncrementConvergeOnPostgreSQL"}),
 	"data_packing":            outOfScope("planner.data_packing", "onwardpg preserves declarative column order and does not optimize table layout as a migration-planner side effect"),
 	"database_schema_source":  supported("inputs.database_and_ddl", []string{"internal/source#TestLoadGraphDDLEquivalentToLiveDatabase"}),
-	"enum":                    weaker("types.enum", []string{"internal/graphplan#TestEnumCreateAndDropConvergeOnPostgreSQL", "internal/graphplan#TestBuildRejectsEnumLabelDropAndReorder"}),
-	"extensions":              weaker("extensions", []string{"internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL", "internal/graphplan#TestExtensionSchemaMoveRequiresCompatibilityBridgeOnPostgreSQL"}),
+	"enum":                    weaker("types.enum", []string{"internal/graphplan#TestEnumBasicLifecycleConvergesOnPostgreSQL", "internal/graphplan#TestBuildRequiresConfirmedEnumLabelRewrite", "internal/graphplan#TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL"}),
+	"extensions":              weaker("extensions", []string{"internal/graphplan#TestExtensionCreateConvergesOnPostgreSQL", "internal/graphplan#TestExtensionSchemaMoveConvergesOnPostgreSQL"}),
 	"foreign_key_constraint":  weaker("constraints.foreign_key", []string{"internal/graphplan#TestForeignKeyActionsAndDeferrabilityConvergeOnPostgreSQL", "internal/graphplan#TestForeignKeyCycleCreateConvergesOnPostgreSQL"}),
 	"function":                weaker("routines.function", []string{"internal/graphplan#TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL", "internal/graphplan#TestRoutineViewDependencyOrderingConvergesOnPostgreSQL"}),
 	"index":                   weaker("indexes", []string{"internal/graphplan#TestExpressionIndexWithOpClassConvergesOnPostgreSQL", "internal/graphplan#TestConstraintAndIndexRebuildConvergeOnPostgreSQL"}),
@@ -162,7 +175,7 @@ func run(source, output string) error {
 	sort.Strings(files)
 
 	result := matrix{
-		SchemaVersion:   1,
+		SchemaVersion:   2,
 		Reference:       reference{Repository: "https://github.com/stripe/pg-schema-diff", Tag: pinnedTag, Commit: pinnedCommit, License: "MIT"},
 		InventoryStatus: "classified_unverified",
 	}
@@ -185,6 +198,7 @@ func run(source, output string) error {
 	if len(result.Cases) == 0 {
 		return fmt.Errorf("no Stripe acceptance cases found in %s", root)
 	}
+	result.Summary = summarizeAudit(result.Cases)
 
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -265,12 +279,57 @@ func inspectFile(root, path string) ([]caseEntry, sourceFile, error) {
 			Notes:          policy.Notes,
 		}
 		applyCaseOverrides(&entry, family, name)
+		finalizeAudit(&entry)
 		entries = append(entries, entry)
 		return true
 	})
 	sort.Slice(entries, func(i, j int) bool { return entries[i].SourceLine < entries[j].SourceLine })
 	digest := sha256.Sum256(data)
 	return entries, sourceFile{Path: rel, SHA256: hex.EncodeToString(digest[:]), Cases: len(entries)}, nil
+}
+
+func finalizeAudit(entry *caseEntry) {
+	switch {
+	case entry.Classification == "out_of_scope":
+		entry.EvidenceStatus = "out_of_scope"
+		entry.GapStatus = "out_of_scope"
+	case entry.Classification == "missing":
+		entry.EvidenceStatus = "confirmed_missing"
+		entry.GapStatus = "confirmed_gap"
+	case entry.DifferentialTest != "" && entry.Classification == "supported":
+		entry.EvidenceStatus = "differential_parity"
+		entry.GapStatus = "none"
+	case entry.DifferentialTest != "":
+		entry.EvidenceStatus = "differential_difference"
+		entry.GapStatus = "deliberate_difference"
+	case entry.Classification == "supported":
+		entry.EvidenceStatus = "onward_evidence_only"
+		entry.GapStatus = "evidence_gap"
+	default:
+		entry.EvidenceStatus = "family_only_unverified"
+		entry.GapStatus = "evidence_gap"
+	}
+}
+
+func summarizeAudit(cases []caseEntry) auditSummary {
+	summary := auditSummary{TotalCases: len(cases)}
+	for _, entry := range cases {
+		switch entry.EvidenceStatus {
+		case "differential_parity":
+			summary.DifferentialParity++
+		case "differential_difference":
+			summary.DifferentialDifference++
+		case "onward_evidence_only":
+			summary.OnwardEvidenceOnly++
+		case "family_only_unverified":
+			summary.FamilyOnlyUnverified++
+		case "confirmed_missing":
+			summary.ConfirmedMissing++
+		case "out_of_scope":
+			summary.OutOfScope++
+		}
+	}
+	return summary
 }
 
 func applyCaseOverrides(entry *caseEntry, family, name string) {

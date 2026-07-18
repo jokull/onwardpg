@@ -57,6 +57,20 @@ func TestBuildCreatesDependencyOrderedGraphPlan(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsRangeCanonicalFunctionChoreography(t *testing.T) {
+	desired := snapshotForTest(t,
+		pgschema.Schema{Name: "app"},
+		pgschema.Range{Schema: "app", Name: "canonical_range", Subtype: "integer", Canonical: "app.canonical_range_canonical", MultirangeName: "canonical_range_multirange"},
+	)
+	result, err := Build(pgschema.New(), desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Unsupported || !hasUnsupportedPrefix(result, "range_canonical_dependency:") {
+		t.Fatalf("custom range canonical function must remain explicit: %#v", result)
+	}
+}
+
 func TestBuildNullableColumnWithoutDefaultDoesNotClaimTableRewrite(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	schema := pgschema.Schema{Name: "app"}
@@ -365,7 +379,40 @@ func TestBuildRendersExtensionVersionUpdate(t *testing.T) {
 	}
 }
 
-func TestBuildBlocksExtensionSchemaMoveWithoutCompatibilityBridge(t *testing.T) {
+func TestBuildSelectivelyIgnoresExtensionVersionUpdates(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	before := pgschema.Extension{Schema: "public", Name: "pgcrypto", Version: "1.2"}
+	after := before
+	after.Version = "1.3"
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.Add(after); err != nil {
+		t.Fatal(err)
+	}
+	ignored, err := Build(current, desired, protocol.Answers{}, Options{IgnoreExtensionVersions: []string{"pgcrypto"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ignored.Status != protocol.Planned || len(ignored.Statements) != 0 || ignored.CurrentFingerprint != ignored.DesiredFingerprint {
+		t.Fatalf("matching extension version ignore was not honored: %#v", ignored)
+	}
+	if equivalent, err := Equivalent(current, desired, Options{IgnoreExtensionVersions: []string{"pgcrypto"}}); err != nil || !equivalent {
+		t.Fatalf("matching extension version ignore was not planner-equivalent: %v, %v", equivalent, err)
+	}
+	nonMatching, err := Build(current, desired, protocol.Answers{}, Options{IgnoreExtensionVersions: []string{"some_other_extension"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nonMatching.Status != protocol.Planned || len(nonMatching.Statements) != 1 || nonMatching.CurrentFingerprint == nonMatching.DesiredFingerprint || nonMatching.Statements[0].SQL != `ALTER EXTENSION "pgcrypto" UPDATE TO '1.3';` {
+		t.Fatalf("nonmatching extension version ignore suppressed the update: %#v", nonMatching)
+	}
+	if equivalent, err := Equivalent(current, desired, Options{IgnoreExtensionVersions: []string{"some_other_extension"}}); err != nil || equivalent {
+		t.Fatalf("nonmatching extension version ignore became planner-equivalent: %v, %v", equivalent, err)
+	}
+}
+
+func TestBuildRendersExtensionSchemaMove(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	before := pgschema.Extension{Schema: "old_schema", Name: "pgcrypto", Version: "1.3"}
 	after := before
@@ -380,8 +427,8 @@ func TestBuildBlocksExtensionSchemaMoveWithoutCompatibilityBridge(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Unsupported || !hasUnsupportedPrefix(planned, "expand_contract_extension_move_required:") {
-		t.Fatalf("extension schema move must not become a direct cutover: %#v", planned)
+	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `ALTER EXTENSION "pgcrypto" SET SCHEMA "new_schema";` {
+		t.Fatalf("extension schema move was not rendered: %#v", planned)
 	}
 }
 
@@ -1368,6 +1415,75 @@ func TestBuildRequiresFingerprintBoundTriggerRenameAnswer(t *testing.T) {
 	}
 	if planned.Status != protocol.Planned || !strings.Contains(joinSQL(planned), `ALTER TRIGGER "audit_old" ON "app"."orders" RENAME TO "audit";`) {
 		t.Fatalf("unexpected trigger rename plan %#v", planned)
+	}
+}
+
+func TestConstraintTriggerDefinitionAndRenameIdentityAreSupported(t *testing.T) {
+	table := (pgschema.Table{Schema: "app", Name: "orders"}).ObjectID()
+	routine := (pgschema.Routine{Schema: "app", Name: "enforce_orders", Signature: ""}).ObjectID()
+	before := pgschema.Trigger{
+		Table: table, Name: "orders_guard_old", Routine: routine, Enabled: "O",
+		Definition: `CREATE CONSTRAINT TRIGGER orders_guard_old AFTER INSERT ON app.orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION app.enforce_orders()`,
+	}
+	after := before
+	after.Name = "orders_guard"
+	after.Definition = `CREATE CONSTRAINT TRIGGER orders_guard AFTER INSERT ON app.orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION app.enforce_orders()`
+
+	if sql, unsupported := renderTriggerDefinition(after); unsupported != "" || !strings.HasPrefix(sql, "CREATE CONSTRAINT TRIGGER ") {
+		t.Fatalf("constraint trigger render = %q, %q", sql, unsupported)
+	}
+	if !equivalentTriggerForRename(before, after) {
+		t.Fatalf("constraint trigger names should be removable from canonical identity: before=%q after=%q", triggerDefinitionTail(before.Definition), triggerDefinitionTail(after.Definition))
+	}
+
+	changed := after
+	changed.Definition = `CREATE CONSTRAINT TRIGGER orders_guard AFTER INSERT ON app.orders NOT DEFERRABLE FOR EACH ROW EXECUTE FUNCTION app.enforce_orders()`
+	if equivalentTriggerForRename(before, changed) {
+		t.Fatal("constraint-trigger deferrability must remain part of rename identity")
+	}
+}
+
+func TestViewTriggerDefinitionIsSupported(t *testing.T) {
+	view := (pgschema.View{Schema: "app", Name: "orders_v"}).ObjectID()
+	routine := (pgschema.Routine{Schema: "app", Name: "change_orders", Signature: ""}).ObjectID()
+	trigger := pgschema.Trigger{
+		Table: view, Name: "orders_v_insert", Routine: routine, Enabled: "O",
+		Definition: `CREATE TRIGGER orders_v_insert INSTEAD OF INSERT ON app.orders_v FOR EACH ROW EXECUTE FUNCTION app.change_orders()`,
+	}
+	if sql, unsupported := renderTriggerDefinition(trigger); unsupported != "" || !strings.HasPrefix(sql, "CREATE TRIGGER ") {
+		t.Fatalf("view trigger render = %q, %q", sql, unsupported)
+	}
+	invalid := trigger
+	invalid.Table = (pgschema.View{Schema: "app", Name: "orders_mv", Materialized: true}).ObjectID()
+	if _, unsupported := renderTriggerDefinition(invalid); !strings.HasPrefix(unsupported, "trigger_render:") {
+		t.Fatalf("materialized-view trigger should remain invalid, got %q", unsupported)
+	}
+}
+
+func TestTriggerRecreateRestoresMatchingNonDefaultEnableState(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "orders"}
+	routine := pgschema.Routine{Schema: "app", Name: "audit", Kind: "function", Definition: "CREATE OR REPLACE FUNCTION app.audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$"}
+	before := pgschema.Trigger{Table: table.ObjectID(), Name: "audit", Routine: routine.ObjectID(), Enabled: "D", Definition: "CREATE TRIGGER audit BEFORE INSERT ON app.orders FOR EACH ROW EXECUTE FUNCTION app.audit()"}
+	after := before
+	after.Definition = "CREATE TRIGGER audit BEFORE UPDATE ON app.orders FOR EACH ROW EXECUTE FUNCTION app.audit()"
+	for _, object := range []pgschema.Object{table, routine, before} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{table, routine, after} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := joinSQL(plan)
+	if plan.Status != protocol.Planned || !strings.Contains(joined, "DROP TRIGGER") || !strings.Contains(joined, "CREATE TRIGGER") || !strings.Contains(joined, "DISABLE TRIGGER") || strings.Index(joined, "CREATE TRIGGER") > strings.Index(joined, "DISABLE TRIGGER") {
+		t.Fatalf("trigger recreate did not restore disabled state: %#v", plan)
 	}
 }
 
@@ -2733,7 +2849,7 @@ func TestBuildRendersStandaloneSequenceMutation(t *testing.T) {
 	}
 }
 
-func TestBuildRejectsAtlasUnsupportedGeneratedAndPartitionMutations(t *testing.T) {
+func TestBuildRequiresManualContractForPartitionKeyMutation(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	beforeTable := pgschema.Table{Schema: "app", Name: "orders"}
 	afterTable := beforeTable
@@ -2767,8 +2883,8 @@ func TestBuildRejectsAtlasUnsupportedGeneratedAndPartitionMutations(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != protocol.Unsupported || !containsString(result.Unsupported, "partition_rewrite:table:app:orders") || !containsString(result.Unsupported, "generated_column_rewrite:column:app:orders:slug") {
-		t.Fatalf("expected explicit rejected mutations, got %#v", result)
+	if result.Status != protocol.NeedsInput || len(result.Questions) != 1 || result.Questions[0].Kind != "partition_reconfiguration" || result.Questions[0].Key != afterTable.ObjectID().String() {
+		t.Fatalf("expected explicit partition-reconfiguration handoff, got %#v", result)
 	}
 }
 
@@ -2796,7 +2912,7 @@ func TestBuildRejectsNullableSerialColumn(t *testing.T) {
 	}
 }
 
-func TestBuildRejectsEnumLabelDropAndReorder(t *testing.T) {
+func TestBuildRequiresConfirmedEnumLabelRewrite(t *testing.T) {
 	tests := []struct {
 		name   string
 		labels []string
@@ -2825,18 +2941,55 @@ func TestBuildRejectsEnumLabelDropAndReorder(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			result, err := Build(current, desired, protocol.Answers{}, Options{})
+			pending, err := Build(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Status != protocol.Unsupported || len(result.Unsupported) != 1 || result.Unsupported[0] != "enum_rewrite:enum:app:state" {
-				t.Fatalf("enum %s must be explicit unsupported: %#v", test.name, result)
+			if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rewrite_enum" {
+				t.Fatalf("enum %s must require confirmation: %#v", test.name, pending)
+			}
+			question := pending.Questions[0]
+			answers := protocol.Answers{
+				ProtocolVersion:    pending.ProtocolVersion,
+				CurrentFingerprint: pending.CurrentFingerprint,
+				DesiredFingerprint: pending.DesiredFingerprint,
+				Answers:            []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "rewrite", QuestionFingerprint: question.ScopeFingerprint}},
+			}
+			planned, err := Build(current, desired, answers, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			joined := joinSQL(planned)
+			if planned.Status != protocol.Planned || !strings.Contains(joined, `ALTER TYPE "app"."state" RENAME TO "onwardpg_tmpenum_`) || !strings.Contains(joined, `CREATE TYPE "app"."state" AS ENUM (`) || !strings.Contains(joined, `DROP TYPE "app"."onwardpg_tmpenum_`) {
+				t.Fatalf("enum %s rewrite was not planned: %#v", test.name, planned)
 			}
 		})
 	}
 }
 
-func TestBuildRejectsConstraintRename(t *testing.T) {
+func TestRenameEnumValuesAcceptsOnlyPurePositionalRenames(t *testing.T) {
+	before := pgschema.Enum{Schema: "app", Name: "state", Labels: []string{"new", "active", "archived"}}
+	after := pgschema.Enum{Schema: "app", Name: "state", Labels: []string{"fresh", "enabled", "archived"}}
+	statements, ok := renameEnumValues(before, after)
+	if !ok || len(statements) != 2 || statements[0].SQL != `ALTER TYPE "app"."state" RENAME VALUE 'new' TO 'fresh';` || statements[1].SQL != `ALTER TYPE "app"."state" RENAME VALUE 'active' TO 'enabled';` {
+		t.Fatalf("pure enum rename = %#v, %v", statements, ok)
+	}
+
+	for name, labels := range map[string][]string{
+		"reorder":          {"active", "new", "archived"},
+		"mixed_add":        {"fresh", "active", "archived", "deleted"},
+		"existing_target":  {"active", "active", "archived"},
+		"unchanged_labels": {"new", "active", "archived"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if statements, ok := renameEnumValues(before, pgschema.Enum{Schema: "app", Name: "state", Labels: labels}); ok || len(statements) != 0 {
+				t.Fatalf("unsafe enum rename accepted: %#v", statements)
+			}
+		})
+	}
+}
+
+func TestBuildRequiresFingerprintBoundConstraintRenameAnswer(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "app", Name: "orders"}
 	before := pgschema.Constraint{Table: table.ObjectID(), Name: "orders_value_check", Type: pgschema.ConstraintCheck, Definition: "CHECK (value > 0)", Validated: true}
@@ -2868,12 +3021,23 @@ func TestBuildRejectsConstraintRename(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != protocol.Unsupported || len(result.Unsupported) != 1 || result.Unsupported[0] != "constraint_rename:constraint:app:orders:orders_value_check" {
-		t.Fatalf("constraint rename must be rejected: %#v", result)
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_constraint" {
+		t.Fatalf("constraint rename must require confirmation: %#v", pending)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "rename_constraint", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
+	}
+	result, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Planned || joinSQL(result) != `ALTER TABLE "app"."orders" RENAME CONSTRAINT "orders_value_check" TO "orders_positive";` {
+		t.Fatalf("confirmed constraint rename = %#v", result)
 	}
 }
 

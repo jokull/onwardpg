@@ -358,6 +358,8 @@ func runHistoryAt(arguments []string, start string) int {
 	concurrentIndexes := flags.Bool("concurrent-indexes", false, "create standalone indexes concurrently")
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
+	var ignoreExtensionVersions stringsFlag
+	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
 	if help, err := parseFlagSet(flags, arguments[1:]); help {
 		return 0
 	} else if err != nil {
@@ -399,7 +401,10 @@ func runHistoryAt(arguments []string, start string) int {
 		BuildVersion:    currentBuildVersion(),
 		Ignores:         selectors,
 		RequiredIgnores: sortedUniqueStrings(ignores),
-		PlannerOptions:  graphplan.Options{ConcurrentIndexes: *concurrentIndexes},
+		PlannerOptions: graphplan.Options{
+			ConcurrentIndexes:       *concurrentIndexes,
+			IgnoreExtensionVersions: sortedUniqueStrings(ignoreExtensionVersions),
+		},
 	})
 	if err != nil {
 		return writeError("history_init_error", err)
@@ -444,6 +449,8 @@ func runDevAt(arguments []string, start string) int {
 	flags.Var(&schemaQualifier, "schema-qualifier", "scope to one schema and render names using this qualifier")
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
+	var ignoreExtensionVersions stringsFlag
+	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
 	if help, err := parseFlagSet(flags, arguments[1:]); help {
 		return 0
 	} else if err != nil {
@@ -485,8 +492,11 @@ func runDevAt(arguments []string, start string) int {
 		return writeError("invalid_hints", err)
 	}
 	options := graphplan.Options{
-		ConcurrentIndexes: *concurrentIndexes, IfNotExists: *ifNotExists,
-		IfExists: *ifExists, CascadeDrops: *cascadeDrops,
+		ConcurrentIndexes:       *concurrentIndexes,
+		IfNotExists:             *ifNotExists,
+		IfExists:                *ifExists,
+		CascadeDrops:            *cascadeDrops,
+		IgnoreExtensionVersions: sortedUniqueStrings(ignoreExtensionVersions),
 	}
 	if schemaQualifier.set {
 		options.SchemaQualifier = &schemaQualifier.value
@@ -582,6 +592,8 @@ func runDraftAt(arguments []string, start string) int {
 	flags.Var(&schemaQualifier, "schema-qualifier", "scope to one schema and render names using this qualifier")
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
+	var ignoreExtensionVersions stringsFlag
+	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
 	if help, err := parseFlagSet(flags, arguments); help {
 		return 0
 	} else if err != nil {
@@ -622,10 +634,11 @@ func runDraftAt(arguments []string, start string) int {
 		return writeError("invalid_hints", err)
 	}
 	options := graphplan.Options{
-		ConcurrentIndexes: *concurrentIndexes,
-		IfNotExists:       *ifNotExists,
-		IfExists:          *ifExists,
-		CascadeDrops:      *cascadeDrops,
+		ConcurrentIndexes:       *concurrentIndexes,
+		IfNotExists:             *ifNotExists,
+		IfExists:                *ifExists,
+		CascadeDrops:            *cascadeDrops,
+		IgnoreExtensionVersions: sortedUniqueStrings(ignoreExtensionVersions),
 	}
 	if schemaQualifier.set {
 		options.SchemaQualifier = &schemaQualifier.value
@@ -795,11 +808,12 @@ func runBundleAt(arguments []string, start string) int {
 			"select the intended bundle explicitly or remove the stale local active-plan anchor")
 	}
 	options := graphplan.Options{
-		ConcurrentIndexes: manifest.Planner.Options.ConcurrentIndexes,
-		IfNotExists:       manifest.Planner.Options.IfNotExists,
-		IfExists:          manifest.Planner.Options.IfExists,
-		CascadeDrops:      manifest.Planner.Options.CascadeDrops,
-		SchemaQualifier:   manifest.Planner.Options.SchemaQualifier,
+		ConcurrentIndexes:       manifest.Planner.Options.ConcurrentIndexes,
+		IfNotExists:             manifest.Planner.Options.IfNotExists,
+		IfExists:                manifest.Planner.Options.IfExists,
+		CascadeDrops:            manifest.Planner.Options.CascadeDrops,
+		SchemaQualifier:         manifest.Planner.Options.SchemaQualifier,
+		IgnoreExtensionVersions: append([]string(nil), manifest.Planner.Options.IgnoreExtensionVersions...),
 	}
 	ctx := context.Background()
 	compiled, err := workspace.CompileDDL(ctx, root, *targetName, target)
@@ -810,7 +824,7 @@ func runBundleAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("materialize current desired schema: %w", err))
 	}
-	workingFingerprint, err := working.Fingerprint()
+	workingFingerprint, err := graphplan.Fingerprint(working, options)
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("fingerprint current desired schema: %w", err))
 	}
@@ -963,6 +977,8 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	flags.Var(&schemaQualifier, "schema-qualifier", "scope to one schema and render names using this qualifier")
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
+	var ignoreExtensionVersions stringsFlag
+	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
 	if help, err := parseFlagSet(flags, arguments); help {
 		return 0
 	} else if err != nil {
@@ -1088,7 +1104,13 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_development_hints", err)
 	}
-	options := graphplan.Options{ConcurrentIndexes: *concurrentIndexes, IfNotExists: *ifNotExists, IfExists: *ifExists, CascadeDrops: *cascadeDrops}
+	options := graphplan.Options{
+		ConcurrentIndexes:       *concurrentIndexes,
+		IfNotExists:             *ifNotExists,
+		IfExists:                *ifExists,
+		CascadeDrops:            *cascadeDrops,
+		IgnoreExtensionVersions: sortedUniqueStrings(ignoreExtensionVersions),
+	}
 	if schemaQualifier.set {
 		options.SchemaQualifier = &schemaQualifier.value
 	}
@@ -1343,6 +1365,8 @@ func runLowLevelPlan(arguments []string) int {
 	flags.Var(&schemaQualifier, "schema-qualifier", "scope to one schema and render names using this qualifier (empty means unqualified)")
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "selector to exclude")
+	var ignoreExtensionVersions stringsFlag
+	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
 	if help, err := parseFlagSet(flags, arguments); help {
 		return 0
 	} else if err != nil {
@@ -1374,7 +1398,13 @@ func runLowLevelPlan(arguments []string) int {
 	if err := source.ValidateIgnoreSelectors(ignores, current, desired); err != nil {
 		return writeError("invalid_ignore", err)
 	}
-	options := graphplan.Options{ConcurrentIndexes: *concurrentIndexes, IfNotExists: *ifNotExists, IfExists: *ifExists, CascadeDrops: *cascadeDrops}
+	options := graphplan.Options{
+		ConcurrentIndexes:       *concurrentIndexes,
+		IfNotExists:             *ifNotExists,
+		IfExists:                *ifExists,
+		CascadeDrops:            *cascadeDrops,
+		IgnoreExtensionVersions: sortedUniqueStrings(ignoreExtensionVersions),
+	}
 	if schemaQualifier.set {
 		options.SchemaQualifier = &schemaQualifier.value
 	}

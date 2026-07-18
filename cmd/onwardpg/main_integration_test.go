@@ -1621,7 +1621,7 @@ bundle_root = "onward-bundles"
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 `)
-	writeTestFile(t, repository, "schema.sql", "CREATE DOMAIN public.email_address AS text CHECK (VALUE <> '');\n")
+	writeTestFile(t, repository, "schema.sql", "CREATE TABLE public.people (id bigint); CREATE RULE people_no_delete AS ON DELETE TO public.people DO INSTEAD NOTHING;\n")
 
 	output := captureStdout(t, func() int {
 		return runHistoryAt([]string{"init", "--target", "primary"}, repository)

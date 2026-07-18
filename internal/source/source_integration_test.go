@@ -185,17 +185,40 @@ func TestLoadGraphBlocksPreviouslyBlindCatalogFamilies(t *testing.T) {
 	if !ok || len(index.Parts) != 1 || index.Parts[0].Collation != `pg_catalog."C"` {
 		t.Fatalf("collated index = %#v", object)
 	}
+	triggerID := (pgschema.Trigger{Table: objects, Name: "objects_trigger"}).ObjectID()
+	triggerObject, ok := snapshot.Object(triggerID)
+	trigger, triggerOK := triggerObject.(pgschema.Trigger)
+	if !ok || !triggerOK || trigger.Comment == nil || *trigger.Comment != "must not disappear" {
+		t.Fatalf("commented trigger = %#v", triggerObject)
+	}
+	enumID := (pgschema.Enum{Schema: schemaName, Name: "code"}).ObjectID()
+	enumObject, ok := snapshot.Object(enumID)
+	enumValue, enumOK := enumObject.(pgschema.Enum)
+	if !ok || !enumOK || enumValue.Comment == nil || *enumValue.Comment != "must not disappear" {
+		t.Fatalf("commented enum = %#v", enumObject)
+	}
+	replicaID := (pgschema.ReplicaIdentity{Table: objects}).ObjectID()
+	replicaObject, ok := snapshot.Object(replicaID)
+	replica, replicaOK := replicaObject.(pgschema.ReplicaIdentity)
+	if !ok || !replicaOK || replica.Mode != pgschema.ReplicaIdentityFull || replica.Index != nil {
+		t.Fatalf("replica identity = %#v", replicaObject)
+	}
+	ownedObject, ok := snapshot.Object((pgschema.Table{Schema: schemaName, Name: "owned"}).ObjectID())
+	owned, ownedOK := ownedObject.(pgschema.Table)
+	if !ok || !ownedOK || owned.Owner != roleName {
+		t.Fatalf("owned table = %#v", ownedObject)
+	}
 	unsupported := snapshot.Unsupported()
 	for _, prefix := range []string{
-		"ownership:relation:", "acl:default:", "rule:",
-		"replica_identity:", "clustered_index:", "table_options:",
+		"acl:default:", "rule:",
+		"clustered_index:", "table_options:",
 		"text_search_configuration:", "text_search_dictionary:", "event_trigger:",
 		"publication:", "extended_statistics:", "foreign_data_wrapper:",
 		"foreign_server:", "user_mapping:", "table_inheritance:",
 		"column_storage:", "column_statistics:",
 		"access_method:", "operator:", "operator_family:", "cast:",
 		"conversion:", "procedural_language:", "subscription:",
-		"comment:enum:", "comment:trigger:", "comment:policy:", "comment:view_column:",
+		"comment:policy:", "comment:view_column:",
 	} {
 		found := false
 		for _, selector := range unsupported {
@@ -238,7 +261,7 @@ func TestLoadGraphBlocksPreviouslyBlindCatalogFamilies(t *testing.T) {
 	}
 }
 
-func TestPostgres18NamedNotNullConstraintsBlock(t *testing.T) {
+func TestPostgres18NamedNotNullConstraintsBlockAndVirtualColumnsLoad(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -266,10 +289,7 @@ func TestPostgres18NamedNotNullConstraintsBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"not_null_constraint:" + schemaName + ".objects.id_required",
-		"virtual_generated_column:" + schemaName + ".objects.doubled",
-	} {
+	for _, want := range []string{"not_null_constraint:" + schemaName + ".objects.id_required"} {
 		found := false
 		for _, selector := range snapshot.Unsupported() {
 			if selector == want {
@@ -280,6 +300,12 @@ func TestPostgres18NamedNotNullConstraintsBlock(t *testing.T) {
 		if !found {
 			t.Fatalf("missing %q blocker in %#v", want, snapshot.Unsupported())
 		}
+	}
+	columnID := (pgschema.Column{Table: (pgschema.Table{Schema: schemaName, Name: "objects"}).ObjectID(), Name: "doubled"}).ObjectID()
+	columnObject, exists := snapshot.Object(columnID)
+	column, ok := columnObject.(pgschema.Column)
+	if !exists || !ok || column.Generated == nil || column.Generated.Kind != "VIRTUAL" || column.Generated.Expression != "(id * 2)" {
+		t.Fatalf("virtual generated column = %#v", columnObject)
 	}
 }
 

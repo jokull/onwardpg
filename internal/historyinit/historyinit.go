@@ -149,11 +149,12 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		Planner: bundle.PlannerReceipt{
 			Version: input.BuildVersion,
 			Options: bundle.PlannerOptions{
-				ConcurrentIndexes: input.PlannerOptions.ConcurrentIndexes,
-				IfNotExists:       input.PlannerOptions.IfNotExists,
-				IfExists:          input.PlannerOptions.IfExists,
-				CascadeDrops:      input.PlannerOptions.CascadeDrops,
-				SchemaQualifier:   input.PlannerOptions.SchemaQualifier,
+				ConcurrentIndexes:       input.PlannerOptions.ConcurrentIndexes,
+				IfNotExists:             input.PlannerOptions.IfNotExists,
+				IfExists:                input.PlannerOptions.IfExists,
+				CascadeDrops:            input.PlannerOptions.CascadeDrops,
+				SchemaQualifier:         input.PlannerOptions.SchemaQualifier,
+				IgnoreExtensionVersions: append([]string(nil), input.PlannerOptions.IgnoreExtensionVersions...),
 			},
 			IgnoreSelectors: append([]string(nil), input.Ignores...),
 		},
@@ -271,7 +272,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("rematerialize desired schema after baseline verification: %w", err)
 	}
-	desiredAfterFingerprint, err := desiredAfter.Fingerprint()
+	desiredAfterFingerprint, err := graphplan.Fingerprint(desiredAfter, input.PlannerOptions)
 	if err != nil {
 		return report, fmt.Errorf("fingerprint desired schema after baseline verification: %w", err)
 	}
