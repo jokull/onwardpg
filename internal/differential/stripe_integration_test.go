@@ -117,6 +117,211 @@ func TestPinnedStripeColumnMutationRequiresOnwardBridgeWithCompleteChoreography(
 	}
 }
 
+// Combined Stripe fixture receipt:
+// migration_acceptance_tests/view_cases_test.go#TestViewTestCases/
+// Recreate view due to dependent column changing, and
+// migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/
+// Recreate materialized view due to dependent column changing.
+func TestPinnedStripeRejectsDerivedViewTypeClosureOnwardGeneratesIt(t *testing.T) {
+	baseURL, stripeBinary := requireStripeReference(t)
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	if _, err := admin.Exec(ctx, "SELECT pg_advisory_lock($1)", integrationLock); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) }()
+
+	currentDDL := `CREATE SCHEMA app;
+CREATE TABLE app.facts (val integer NOT NULL);
+INSERT INTO app.facts VALUES (7);
+CREATE VIEW app.fact_view AS SELECT val FROM app.facts;
+CREATE MATERIALIZED VIEW app.fact_cache AS SELECT val FROM app.fact_view;
+CREATE UNIQUE INDEX fact_cache_val_idx ON app.fact_cache (val);`
+	desiredDDL := strings.Replace(currentDDL, "val integer", "val bigint", 1)
+	urls := createStripeDatabases(t, ctx, admin, baseURL, currentDDL, "source", "onward")
+	desiredDir, desiredPath := writeStripeDesiredDDL(t, desiredDDL)
+
+	stripeError := runStripePlanExpectFailure(t, ctx, stripeBinary, urls["source"], desiredDir)
+	if !strings.Contains(stripeError, "validating migration plan") || !strings.Contains(stripeError, `relation "app.fact_view" does not exist`) {
+		t.Fatalf("pinned Stripe derived type-closure failure changed:\n%s", stripeError)
+	}
+
+	current, err := source.LoadGraph(ctx, source.Parse(urls["source"]), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+desiredPath), baseURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{ConcurrentIndexes: true})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
+		t.Fatalf("onwardpg derived closure decision=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
+	}
+	onward, err := graphplan.Build(current, desired, answers, graphplan.Options{ConcurrentIndexes: true})
+	if err != nil || onward.Status != protocol.NeedsSQLEdits {
+		t.Fatalf("onwardpg derived closure handoff=%#v err=%v", onward, err)
+	}
+	onwardSQL := joinOnwardSQL(onward)
+	onwardDropMatView := strings.Index(onwardSQL, `DROP MATERIALIZED VIEW "app"."fact_cache"`)
+	onwardDropView := strings.Index(onwardSQL, `DROP VIEW "app"."fact_view"`)
+	onwardType := strings.LastIndex(onwardSQL, "ONWARDPG TODO")
+	onwardCreateView := strings.Index(onwardSQL, `CREATE VIEW "app"."fact_view"`)
+	onwardCreateMatView := strings.Index(onwardSQL, `CREATE MATERIALIZED VIEW "app"."fact_cache"`)
+	onwardCreateIndex := strings.Index(onwardSQL, `CREATE UNIQUE INDEX CONCURRENTLY "fact_cache_val_idx"`)
+	if onwardDropMatView < 0 || onwardDropView < 0 || onwardType < 0 || onwardCreateView < 0 || onwardCreateMatView < 0 || onwardCreateIndex < 0 ||
+		onwardDropMatView > onwardDropView || onwardDropView > onwardType || onwardType > onwardCreateView || onwardCreateView > onwardCreateMatView || onwardCreateMatView > onwardCreateIndex || !strings.Contains(onwardSQL, "WITH DATA") {
+		t.Fatalf("onwardpg derived closure is incomplete or unordered:\n%s", onwardSQL)
+	}
+
+	onward = editOnwardTypeHandoff(onward, `ALTER TABLE "app"."facts" ALTER COLUMN "val" TYPE bigint USING "val"::bigint;`)
+	if err := executeOnwardPlan(ctx, urls["onward"], onward); err != nil {
+		t.Fatal(err)
+	}
+	targetFingerprint, _ := desired.Fingerprint()
+	for name, databaseURL := range map[string]string{"onwardpg": urls["onward"]} {
+		actual, err := source.LoadGraph(ctx, source.Parse(databaseURL), "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fingerprint, _ := actual.Fingerprint()
+		if fingerprint != targetFingerprint {
+			t.Fatalf("%s derived closure did not converge: got %s want %s", name, fingerprint, targetFingerprint)
+		}
+		assertNoOnwardResidual(t, actual, desired)
+	}
+}
+
+// Stripe pg-schema-diff v1.0.7 receipts:
+// migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Unpartitioned to partitioned,
+// /Partitioned to unpartitioned, and /Changing partition key def errors.
+func TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData(t *testing.T) {
+	baseURL, stripeBinary := requireStripeReference(t)
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	if _, err := admin.Exec(ctx, "SELECT pg_advisory_lock($1)", integrationLock); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) }()
+
+	t.Run("ordinary_to_partitioned", func(t *testing.T) {
+		currentDDL := `CREATE TABLE public.events (id bigint NOT NULL, occurred_at date NOT NULL, payload text, CONSTRAINT events_pkey PRIMARY KEY (id));
+INSERT INTO public.events VALUES (1, '2026-04-05', 'retained');`
+		desiredDDL := `CREATE TABLE public.events (id bigint NOT NULL, occurred_at date NOT NULL, payload text, CONSTRAINT events_pkey PRIMARY KEY (id, occurred_at)) PARTITION BY RANGE (occurred_at);
+CREATE TABLE public.events_2026 PARTITION OF public.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+CREATE INDEX events_payload_idx ON public.events_2026 (payload);`
+		urls := createStripeDatabases(t, ctx, admin, baseURL, currentDDL, "source")
+		desiredDir, desiredPath := writeStripeDesiredDDL(t, desiredDDL)
+		stripe := runStripePlan(t, ctx, stripeBinary, urls["source"], desiredDir)
+		stripeSQL := stripeDDL(stripe)
+		if !strings.Contains(stripeSQL, `DROP TABLE "public"."events"`) || !strings.Contains(stripeSQL, `CREATE TABLE "public"."events"`) || !stripeHasHazard(stripe, "DELETES_DATA") {
+			t.Fatalf("pinned Stripe ordinary-to-partitioned receipt changed: %#v", stripe)
+		}
+		current, err := source.LoadGraph(ctx, source.Parse(urls["source"]), "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		desired, err := source.LoadGraph(ctx, source.Parse("file://"+desiredPath), baseURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		onward, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{})
+		if err != nil || onward.Status != protocol.NeedsInput || len(onward.Guidance) != 1 {
+			t.Fatalf("onwardpg partition scaffold=%#v err=%v", onward, err)
+		}
+		runbook := joinGuidanceSQL(onward.Guidance[0])
+		for _, fragment := range []string{"CREATE TABLE \"public\".\"onwardpg_shadow_", "OVERRIDING SYSTEM VALUE", "onwardpg_row_count_matches", "onwardpg_rows_match", "CREATE INDEX \"onwardpg_idx_", "separate, current-catalog fingerprint authorization"} {
+			if !strings.Contains(runbook, fragment) {
+				t.Fatalf("onwardpg retained-data runbook omitted %q:\n%s", fragment, runbook)
+			}
+		}
+	})
+
+	t.Run("partition_key_replacement", func(t *testing.T) {
+		currentDDL := `CREATE TABLE public.events (id bigint NOT NULL, occurred_at date NOT NULL) PARTITION BY RANGE (occurred_at);
+CREATE TABLE public.events_2026 PARTITION OF public.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');`
+		desiredDDL := `CREATE TABLE public.events (id bigint NOT NULL, occurred_at date NOT NULL) PARTITION BY HASH (id);
+CREATE TABLE public.events_0 PARTITION OF public.events FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE public.events_1 PARTITION OF public.events FOR VALUES WITH (MODULUS 2, REMAINDER 1);`
+		urls := createStripeDatabases(t, ctx, admin, baseURL, currentDDL, "source")
+		desiredDir, desiredPath := writeStripeDesiredDDL(t, desiredDDL)
+		stripeFailure := runStripePlanExpectFailure(t, ctx, stripeBinary, urls["source"], desiredDir)
+		if !strings.Contains(strings.ToLower(stripeFailure), "partition") {
+			t.Fatalf("pinned Stripe partition-key rejection changed: %s", stripeFailure)
+		}
+		current, err := source.LoadGraph(ctx, source.Parse(urls["source"]), "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		desired, err := source.LoadGraph(ctx, source.Parse("file://"+desiredPath), baseURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		onward, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{})
+		if err != nil || onward.Status != protocol.NeedsInput || len(onward.Guidance) != 1 {
+			t.Fatalf("onwardpg key-replacement scaffold=%#v err=%v", onward, err)
+		}
+		runbook := joinGuidanceSQL(onward.Guidance[0])
+		for _, fragment := range []string{"PARTITION BY HASH (id)", "FOR VALUES WITH (modulus 2, remainder 0)", "contract_cutover_assertions", "brief_rename_cutover_and_typed_closure"} {
+			if !strings.Contains(strings.ToLower(runbook), strings.ToLower(fragment)) {
+				t.Fatalf("onwardpg partition-key runbook omitted %q:\n%s", fragment, runbook)
+			}
+		}
+	})
+
+	t.Run("partitioned_to_ordinary", func(t *testing.T) {
+		currentDDL := `CREATE TABLE public.events (id bigint NOT NULL, occurred_at date NOT NULL, payload text, CONSTRAINT events_pkey PRIMARY KEY (id, occurred_at)) PARTITION BY RANGE (occurred_at);
+CREATE TABLE public.events_2026 PARTITION OF public.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+INSERT INTO public.events VALUES (1, '2026-04-05', 'retained');`
+		desiredDDL := `CREATE TABLE public.events (id bigint NOT NULL, occurred_at date NOT NULL, payload text, CONSTRAINT events_pkey PRIMARY KEY (id));`
+		urls := createStripeDatabases(t, ctx, admin, baseURL, currentDDL, "source")
+		desiredDir, desiredPath := writeStripeDesiredDDL(t, desiredDDL)
+		stripe := runStripePlan(t, ctx, stripeBinary, urls["source"], desiredDir)
+		stripeSQL := stripeDDL(stripe)
+		if !strings.Contains(stripeSQL, `DROP TABLE "public"."events"`) || !strings.Contains(stripeSQL, `CREATE TABLE "public"."events"`) || !stripeHasHazard(stripe, "DELETES_DATA") {
+			t.Fatalf("pinned Stripe partitioned-to-ordinary receipt changed: %#v", stripe)
+		}
+		current, err := source.LoadGraph(ctx, source.Parse(urls["source"]), "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		desired, err := source.LoadGraph(ctx, source.Parse("file://"+desiredPath), baseURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		onward, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{})
+		if err != nil || onward.Status != protocol.NeedsInput || len(onward.Guidance) != 1 {
+			t.Fatalf("onwardpg unpartition scaffold=%#v err=%v", onward, err)
+		}
+		runbook := joinGuidanceSQL(onward.Guidance[0])
+		for _, fragment := range []string{"table:public:events_2026", "OVERRIDING SYSTEM VALUE", "RENAME TO \"onwardpg_old_", "onwardpg_rows_match", "Never infer production copy duration"} {
+			if !strings.Contains(runbook, fragment) {
+				t.Fatalf("onwardpg unpartition runbook omitted %q:\n%s", fragment, runbook)
+			}
+		}
+	})
+}
+
+func joinGuidanceSQL(guidance protocol.Guidance) string {
+	parts := make([]string, 0, len(guidance.Steps))
+	for _, step := range guidance.Steps {
+		parts = append(parts, step.Stage+"\n"+step.SQL)
+	}
+	return strings.Join(parts, "\n")
+}
+
 func TestPinnedStripeAndOnwardPGContinuousIndexReplacement(t *testing.T) {
 	baseURL, stripeBinary := requireStripeReference(t)
 	ctx := context.Background()
@@ -455,6 +660,118 @@ ALTER TABLE public.foobar ADD CONSTRAINT non_default_primary_key PRIMARY KEY USI
 	}
 	if residual := runStripePlan(t, ctx, stripeBinary, urls["stripe"], desiredDir); len(residual.Statements) != 0 {
 		t.Fatalf("Stripe primary-constraint residual: %#v", residual)
+	}
+}
+
+// Combined Stripe fixture receipt:
+// migration_acceptance_tests/index_cases_test.go#TestIndexTestCases/
+// Alter primary key columns (name stays same), and
+// migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/
+// Alter FK (columns).
+func TestPinnedStripeAndOnwardPGCoordinateReferencedKeyAndForeignKey(t *testing.T) {
+	baseURL, stripeBinary := requireStripeReference(t)
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	if _, err := admin.Exec(ctx, "SELECT pg_advisory_lock($1)", integrationLock); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) }()
+
+	currentDDL := `CREATE SCHEMA app;
+CREATE TABLE app.accounts (
+  id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  CONSTRAINT accounts_pkey PRIMARY KEY (id)
+);
+CREATE TABLE app.orders (
+  account_id bigint,
+  tenant_id bigint,
+  CONSTRAINT orders_account_fkey FOREIGN KEY (account_id)
+    REFERENCES app.accounts(id) DEFERRABLE INITIALLY DEFERRED
+);`
+	desiredDDL := `CREATE SCHEMA app;
+CREATE TABLE app.accounts (
+  id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  CONSTRAINT accounts_pkey PRIMARY KEY (id, tenant_id)
+);
+CREATE TABLE app.orders (
+  account_id bigint,
+  tenant_id bigint,
+  CONSTRAINT orders_account_fkey FOREIGN KEY (account_id, tenant_id)
+    REFERENCES app.accounts(id, tenant_id) DEFERRABLE INITIALLY DEFERRED
+);`
+	urls := createStripeDatabases(t, ctx, admin, baseURL, currentDDL, "source", "stripe", "onward")
+	desiredDir, desiredPath := writeStripeDesiredDDL(t, desiredDDL)
+
+	stripe := runStripePlan(t, ctx, stripeBinary, urls["source"], desiredDir)
+	stripeSQL := stripeDDL(stripe)
+	for _, fragment := range []string{"CREATE UNIQUE INDEX CONCURRENTLY", `DROP CONSTRAINT "orders_account_fkey"`, `DROP CONSTRAINT "accounts_pkey"`, `ADD CONSTRAINT "accounts_pkey"`, `ADD CONSTRAINT "orders_account_fkey"`, "VALIDATE CONSTRAINT"} {
+		if !strings.Contains(stripeSQL, fragment) {
+			t.Fatalf("pinned Stripe key/FK receipt omitted %q: %#v", fragment, stripe)
+		}
+	}
+
+	current, err := source.LoadGraph(ctx, source.Parse(urls["source"]), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+desiredPath), baseURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onward, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{ConcurrentIndexes: true})
+	if err != nil || onward.Status != protocol.Planned {
+		t.Fatalf("onwardpg key/FK replacement=%#v err=%v", onward, err)
+	}
+	onwardSQL := joinOnwardSQL(onward)
+	foreignKeyDrop := strings.Index(onwardSQL, `DROP CONSTRAINT "orders_account_fkey"`)
+	keyDrop := strings.Index(onwardSQL, `DROP CONSTRAINT "accounts_pkey"`)
+	keyAdd := strings.Index(onwardSQL, `ADD CONSTRAINT "accounts_pkey"`)
+	foreignKeyAdd := strings.Index(onwardSQL, `ADD CONSTRAINT "orders_account_fkey"`)
+	foreignKeyValidate := strings.Index(onwardSQL, `VALIDATE CONSTRAINT "orders_account_fkey"`)
+	if !strings.Contains(onwardSQL, "CREATE UNIQUE INDEX CONCURRENTLY") || foreignKeyDrop < 0 || keyDrop < 0 || keyAdd < 0 || foreignKeyAdd < 0 || foreignKeyValidate < 0 ||
+		foreignKeyDrop > keyDrop || keyDrop > keyAdd || keyAdd > foreignKeyAdd || foreignKeyAdd > foreignKeyValidate {
+		t.Fatalf("onwardpg key/FK closure is incomplete or unordered:\n%s", onwardSQL)
+	}
+	for _, fragment := range []string{"DEFERRABLE INITIALLY DEFERRED", "NOT VALID"} {
+		if !strings.Contains(onwardSQL, fragment) {
+			t.Fatalf("onwardpg key/FK replacement lost %q:\n%s", fragment, onwardSQL)
+		}
+	}
+
+	applyStripePlan(t, ctx, urls["stripe"], stripe)
+	if err := executeOnwardPlan(ctx, urls["onward"], onward); err != nil {
+		t.Fatal(err)
+	}
+	targetFingerprint, _ := desired.Fingerprint()
+	for name, databaseURL := range map[string]string{"stripe": urls["stripe"], "onwardpg": urls["onward"]} {
+		actual, err := source.LoadGraph(ctx, source.Parse(databaseURL), "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fingerprint, _ := actual.Fingerprint()
+		if fingerprint != targetFingerprint {
+			actualJSON, _ := actual.CanonicalJSON()
+			desiredJSON, _ := desired.CanonicalJSON()
+			t.Fatalf("%s key/FK result did not converge: got %s want %s\nactual: %s\ndesired: %s", name, fingerprint, targetFingerprint, actualJSON, desiredJSON)
+		}
+		assertNoOnwardResidual(t, actual, desired)
+	}
+	if residual := runStripePlan(t, ctx, stripeBinary, urls["stripe"], desiredDir); len(residual.Statements) != 0 {
+		t.Fatalf("Stripe key/FK residual: %#v", residual)
+	}
+	actual, err := source.LoadGraph(ctx, source.Parse(urls["onward"]), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onwardResidual, err := graphplan.Build(actual, desired, protocol.Answers{}, graphplan.Options{ConcurrentIndexes: true})
+	if err != nil || onwardResidual.Status != protocol.Planned || len(onwardResidual.Statements) != 0 {
+		t.Fatalf("onwardpg key/FK residual=%#v err=%v", onwardResidual, err)
 	}
 }
 
@@ -959,6 +1276,17 @@ func runStripePlan(t *testing.T, ctx context.Context, binary, fromURL, desiredDi
 	return plan
 }
 
+func runStripePlanExpectFailure(t *testing.T, ctx context.Context, binary, fromURL, desiredDir string) string {
+	t.Helper()
+	command := exec.CommandContext(ctx, binary, "plan", "--from-dsn", fromURL, "--to-dir", desiredDir, "--output-format", "json", "--data-pack-new-tables=false")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if output, err := command.Output(); err == nil {
+		t.Fatalf("pinned Stripe plan unexpectedly succeeded: %s", output)
+	}
+	return stderr.String()
+}
+
 func assertStripeTimeoutsAndHazards(t *testing.T, plan stripePlan) {
 	t.Helper()
 	for i, statement := range plan.Statements {
@@ -1045,6 +1373,29 @@ func joinOnwardSQL(plan protocol.Result) string {
 		parts[i] = statement.SQL
 	}
 	return strings.Join(parts, "\n")
+}
+
+func editOnwardTypeHandoff(plan protocol.Result, contractSQL string) protocol.Result {
+	rewrite := func(statement protocol.Statement) protocol.Statement {
+		switch {
+		case strings.Contains(statement.SQL, "reviewed EXPAND SQL"):
+			statement.SQL = "SELECT true;"
+			statement.Manual = nil
+		case strings.Contains(statement.SQL, "reviewed CONTRACT SQL"):
+			statement.SQL = contractSQL
+			statement.Manual = nil
+		}
+		return statement
+	}
+	for index := range plan.Statements {
+		plan.Statements[index] = rewrite(plan.Statements[index])
+	}
+	for batchIndex := range plan.Batches {
+		for statementIndex := range plan.Batches[batchIndex].Statements {
+			plan.Batches[batchIndex].Statements[statementIndex] = rewrite(plan.Batches[batchIndex].Statements[statementIndex])
+		}
+	}
+	return plan
 }
 
 func applyOnwardPlanWithInvariant(t *testing.T, ctx context.Context, databaseURL string, plan protocol.Result) {

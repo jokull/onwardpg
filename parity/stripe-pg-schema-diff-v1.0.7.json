@@ -9,10 +9,10 @@
   "inventory_status": "classified_unverified",
   "summary": {
     "total_cases": 415,
-    "differential_parity": 30,
-    "differential_difference": 6,
+    "differential_parity": 31,
+    "differential_difference": 11,
     "onward_evidence_only": 10,
-    "family_only_unverified": 367,
+    "family_only_unverified": 361,
     "confirmed_missing": 0,
     "out_of_scope": 2
   },
@@ -2801,21 +2801,24 @@
       "scenario": "Alter FK (columns)",
       "stripe_test": "migration_acceptance_tests/foreign_key_constraint_cases_test.go#TestForeignKeyConstraintTestCases/Alter FK (columns)",
       "source_line": 546,
-      "classification": "weaker",
-      "evidence_status": "family_only_unverified",
-      "gap_status": "evidence_gap",
+      "classification": "supported",
+      "evidence_status": "differential_parity",
+      "gap_status": "none",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "weaker",
-        "online_strategy": "weaker",
+        "mutation": "supported",
+        "online_strategy": "supported",
         "rejection": "intentionally_different",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestForeignKeyActionsAndDeferrabilityConvergeOnPostgreSQL",
-        "internal/graphplan#TestForeignKeyCycleCreateConvergesOnPostgreSQL"
+        "internal/source#TestForeignKeyDependsOnExactReferencedKeyIndex",
+        "internal/graphplan#TestContinuousConstraintReplacementCoordinatesCrossSchemaForeignKeyMetadata",
+        "internal/graphplan#TestContinuousConstraintReplacementCoordinatesForeignKeyCycle",
+        "internal/differential#TestPinnedStripeAndOnwardPGCoordinateReferencedKeyAndForeignKey"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "differential_test": "internal/differential#TestPinnedStripeAndOnwardPGCoordinateReferencedKeyAndForeignKey",
+      "notes": "Both planners coordinate a changed foreign key with its changed referenced primary key. onwardpg identifies the exact referenced key index, builds the replacement concurrently, performs the short key swap, re-adds the FK NOT VALID, validates separately, and preserves typed metadata."
     },
     {
       "id": "foreign_key_constraint.alter_fk_on_update",
@@ -4155,7 +4158,10 @@
       },
       "onwardpg_tests": [
         "internal/graphplan#TestContinuousPrimaryAndUniqueConstraintReplacementConvergesOnPostgreSQL",
-        "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardTypeBridgeIntent"
+        "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardTypeBridgeIntent",
+        "internal/graphplan#TestContinuousConstraintReplacementCoordinatesCrossSchemaForeignKeyMetadata",
+        "internal/graphplan#TestContinuousConstraintReplacementCoordinatesForeignKeyCycle",
+        "internal/differential#TestPinnedStripeAndOnwardPGCoordinateReferencedKeyAndForeignKey"
       ],
       "differential_test": "internal/differential#TestPinnedStripePrimaryConstraintCaseRequiresOnwardTypeBridgeIntent",
       "notes": "Stripe converges with a direct cast and replacement constraint index. onwardpg can plan the index transition but requires reviewed expand/contract type-bridge SQL (or another deployment) instead of treating the cast as rolling-deploy compatibility."
@@ -4737,20 +4743,23 @@
       "scenario": "Recreate materialized view due to dependent column changing",
       "stripe_test": "migration_acceptance_tests/materialized_view_cases_test.go#TestMaterializedViewTestCases/Recreate materialized view due to dependent column changing",
       "source_line": 310,
-      "classification": "weaker",
-      "evidence_status": "family_only_unverified",
-      "gap_status": "evidence_gap",
+      "classification": "intentionally_different",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "weaker",
-        "online_strategy": "weaker",
+        "mutation": "supported",
+        "online_strategy": "intentionally_different",
         "rejection": "intentionally_different",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL"
+        "internal/graphplan#TestViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL",
+        "internal/graphplan#TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL",
+        "internal/differential#TestPinnedStripeRejectsDerivedViewTypeClosureOnwardGeneratesIt"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "differential_test": "internal/differential#TestPinnedStripeRejectsDerivedViewTypeClosureOnwardGeneratesIt",
+      "notes": "For a column type change crossing an ordinary view, materialized view, and materialized-view index, the pinned Stripe planner emits only ALTER TYPE and fails its own validation. onwardpg keeps the reviewed rolling-deployment transform decision and generates the exact typed drop/recreate closure around it, including populated state, indexes, comments, and view triggers."
     },
     {
       "id": "materialized_view.alter_add_column_and_change_condition",
@@ -6040,21 +6049,23 @@
       "scenario": "Changing partition key def errors",
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Changing partition key def errors",
       "source_line": 491,
-      "classification": "weaker",
-      "evidence_status": "family_only_unverified",
-      "gap_status": "evidence_gap",
+      "classification": "intentionally_different",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "weaker",
-        "online_strategy": "weaker",
+        "mutation": "supported",
+        "online_strategy": "intentionally_different",
         "rejection": "intentionally_different",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestPartitionAttachAndDetachConvergeOnPostgreSQL",
-        "internal/graphplan#TestPartitionedTableCreateConvergesOnPostgreSQL"
+        "internal/graphplan#TestBuildScaffoldsOrdinaryToPartitionedShadowHierarchy",
+        "internal/graphplan#TestBuildScaffoldsPartitionedToOrdinaryRetainedDataCutover",
+        "internal/differential#TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "differential_test": "internal/differential#TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData",
+      "notes": "Stripe replaces ordinary/partitioned tables with DROP/CREATE and a DELETES_DATA hazard, and rejects an in-place partition-key change. onwardpg keeps the fingerprint-bound operator decision but supplies a deterministic shadow-hierarchy runbook with copy/catch-up stages, row and bound assertions, typed dependent recreation, brief rename cutover, and separately authorized old-hierarchy cleanup."
     },
     {
       "id": "partitioned_table.unpartitioned_to_partitioned",
@@ -6062,21 +6073,23 @@
       "scenario": "Unpartitioned to partitioned",
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Unpartitioned to partitioned",
       "source_line": 520,
-      "classification": "weaker",
-      "evidence_status": "family_only_unverified",
-      "gap_status": "evidence_gap",
+      "classification": "intentionally_different",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "weaker",
-        "online_strategy": "weaker",
+        "mutation": "supported",
+        "online_strategy": "intentionally_different",
         "rejection": "intentionally_different",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestPartitionAttachAndDetachConvergeOnPostgreSQL",
-        "internal/graphplan#TestPartitionedTableCreateConvergesOnPostgreSQL"
+        "internal/graphplan#TestBuildScaffoldsOrdinaryToPartitionedShadowHierarchy",
+        "internal/graphplan#TestBuildScaffoldsPartitionedToOrdinaryRetainedDataCutover",
+        "internal/differential#TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "differential_test": "internal/differential#TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData",
+      "notes": "Stripe replaces ordinary/partitioned tables with DROP/CREATE and a DELETES_DATA hazard, and rejects an in-place partition-key change. onwardpg keeps the fingerprint-bound operator decision but supplies a deterministic shadow-hierarchy runbook with copy/catch-up stages, row and bound assertions, typed dependent recreation, brief rename cutover, and separately authorized old-hierarchy cleanup."
     },
     {
       "id": "partitioned_table.unpartitioned_to_partitioned_and_child_tables_already_exist",
@@ -6106,21 +6119,23 @@
       "scenario": "Partitioned to unpartitioned",
       "stripe_test": "migration_acceptance_tests/partitioned_table_cases_test.go#TestPartitionedTableTestCases/Partitioned to unpartitioned",
       "source_line": 727,
-      "classification": "weaker",
-      "evidence_status": "family_only_unverified",
-      "gap_status": "evidence_gap",
+      "classification": "intentionally_different",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "weaker",
-        "online_strategy": "weaker",
+        "mutation": "supported",
+        "online_strategy": "intentionally_different",
         "rejection": "intentionally_different",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestPartitionAttachAndDetachConvergeOnPostgreSQL",
-        "internal/graphplan#TestPartitionedTableCreateConvergesOnPostgreSQL"
+        "internal/graphplan#TestBuildScaffoldsOrdinaryToPartitionedShadowHierarchy",
+        "internal/graphplan#TestBuildScaffoldsPartitionedToOrdinaryRetainedDataCutover",
+        "internal/differential#TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "differential_test": "internal/differential#TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData",
+      "notes": "Stripe replaces ordinary/partitioned tables with DROP/CREATE and a DELETES_DATA hazard, and rejects an in-place partition-key change. onwardpg keeps the fingerprint-bound operator decision but supplies a deterministic shadow-hierarchy runbook with copy/catch-up stages, row and bound assertions, typed dependent recreation, brief rename cutover, and separately authorized old-hierarchy cleanup."
     },
     {
       "id": "partitioned_table.partitioned_to_unpartitioned_and_child_tables_still_exist",
@@ -9061,20 +9076,23 @@
       "scenario": "Recreate view due to dependent column changing",
       "stripe_test": "migration_acceptance_tests/view_cases_test.go#TestViewTestCases/Recreate view due to dependent column changing",
       "source_line": 310,
-      "classification": "weaker",
-      "evidence_status": "family_only_unverified",
-      "gap_status": "evidence_gap",
+      "classification": "intentionally_different",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "weaker",
-        "online_strategy": "weaker",
+        "mutation": "supported",
+        "online_strategy": "intentionally_different",
         "rejection": "intentionally_different",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestViewCreateAndReplaceConvergeOnPostgreSQL"
+        "internal/graphplan#TestViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL",
+        "internal/graphplan#TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL",
+        "internal/differential#TestPinnedStripeRejectsDerivedViewTypeClosureOnwardGeneratesIt"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "differential_test": "internal/differential#TestPinnedStripeRejectsDerivedViewTypeClosureOnwardGeneratesIt",
+      "notes": "For a column type change crossing an ordinary view, materialized view, and materialized-view index, the pinned Stripe planner emits only ALTER TYPE and fails its own validation. onwardpg keeps the reviewed rolling-deployment transform decision and generates the exact typed drop/recreate closure around it, including populated state, indexes, comments, and view triggers."
     },
     {
       "id": "view.alter_add_column_and_change_condition",

@@ -513,8 +513,11 @@ func runDevAt(arguments []string, start string) int {
 		var outputErr error
 		if *output == "text" {
 			outputErr = writeDecisionsText(os.Stdout, "dev plan", report.Decisions)
+			if outputErr == nil {
+				outputErr = writeGuidanceText(os.Stdout, result.Guidance)
+			}
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, devflow.Version, report.Decisions, result.Analysis)
+			outputErr = writeDecisionEnvelope(os.Stdout, devflow.Version, report.Decisions, result.Analysis, result.Guidance)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -1426,8 +1429,11 @@ func runLowLevelPlan(arguments []string) int {
 		var outputErr error
 		if *output == "text" {
 			outputErr = writeDecisionsText(os.Stdout, "plan", decisions)
+			if outputErr == nil {
+				outputErr = writeGuidanceText(os.Stdout, result.Guidance)
+			}
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v4", decisions, result.Analysis)
+			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v4", decisions, result.Analysis, result.Guidance)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -1644,7 +1650,13 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 					return err
 				}
 			}
-			return writeDecisionsText(writer, report.BundleID, report.Decisions)
+			if err := writeDecisionsText(writer, report.BundleID, report.Decisions); err != nil {
+				return err
+			}
+			if report.Plan != nil {
+				return writeGuidanceText(writer, report.Plan.Guidance)
+			}
+			return nil
 		}
 		if report.Outcome == string(protocol.NeedsSQLEdits) {
 			if _, err := fmt.Fprintf(writer, "needs SQL edits: %s\n", report.Path); err != nil {
@@ -1678,10 +1690,11 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 			WrittenReceipts []string                    `json:"written_receipts,omitempty"`
 			Decisions       []protocol.Decision         `json:"decisions"`
 			Analysis        []protocol.DecisionAnalysis `json:"analysis,omitempty"`
+			Guidance        []protocol.Guidance         `json:"guidance,omitempty"`
 		}{
 			ProtocolVersion: draftflow.Version, Status: "needs_decisions", NextAction: nextAction,
 			Path: report.Path, WrittenReceipts: report.WrittenReceipts, Decisions: report.Decisions,
-			Analysis: analysisFromPlan(report.Plan),
+			Analysis: analysisFromPlan(report.Plan), Guidance: guidanceFromPlan(report.Plan),
 		})
 	}
 	if report.Outcome == string(protocol.NeedsSQLEdits) {
@@ -1703,6 +1716,13 @@ func analysisFromPlan(plan *protocol.Result) []protocol.DecisionAnalysis {
 	return plan.Analysis
 }
 
+func guidanceFromPlan(plan *protocol.Result) []protocol.Guidance {
+	if plan == nil {
+		return nil
+	}
+	return plan.Guidance
+}
+
 func writeUnsupportedText(writer io.Writer, result protocol.Result) error {
 	if _, err := fmt.Fprintln(writer, "unsupported"); err != nil {
 		return err
@@ -1712,7 +1732,11 @@ func writeUnsupportedText(writer io.Writer, result protocol.Result) error {
 			return err
 		}
 	}
-	for _, guidance := range result.Guidance {
+	return writeGuidanceText(writer, result.Guidance)
+}
+
+func writeGuidanceText(writer io.Writer, guidanceItems []protocol.Guidance) error {
+	for _, guidance := range guidanceItems {
 		if _, err := fmt.Fprintf(writer, "\n%s guidance for %s\n", guidance.Kind, guidance.Key); err != nil {
 			return err
 		}
@@ -1766,14 +1790,15 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func writeDecisionEnvelope(writer io.Writer, version string, decisions []protocol.Decision, analysis []protocol.DecisionAnalysis) error {
+func writeDecisionEnvelope(writer io.Writer, version string, decisions []protocol.Decision, analysis []protocol.DecisionAnalysis, guidance []protocol.Guidance) error {
 	return json.NewEncoder(writer).Encode(struct {
 		ProtocolVersion string                      `json:"protocol_version"`
 		Status          string                      `json:"status"`
 		NextAction      string                      `json:"next_action"`
 		Decisions       []protocol.Decision         `json:"decisions"`
 		Analysis        []protocol.DecisionAnalysis `json:"analysis,omitempty"`
-	}{ProtocolVersion: version, Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisions, Analysis: analysis})
+		Guidance        []protocol.Guidance         `json:"guidance,omitempty"`
+	}{ProtocolVersion: version, Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisions, Analysis: analysis, Guidance: guidance})
 }
 
 func writeError(code string, err error) int {

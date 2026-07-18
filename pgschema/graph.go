@@ -355,8 +355,11 @@ type PartitionPart struct {
 }
 
 type View struct {
-	Schema       string
-	Name         string
+	Schema string
+	Name   string
+	// Owner is empty for the connected role and otherwise preserves the
+	// explicit catalog role across drop/recreate closures.
+	Owner        string
 	Definition   string
 	Materialized bool
 	// Populated records the WITH [NO] DATA state of a materialized view.
@@ -472,10 +475,11 @@ func (o ReplicaIdentity) ObjectID() ID {
 }
 func (ReplicaIdentity) object() {}
 
-// TablePrivilege models one grantee/privilege pair. The owning role's
-// implicit rights are validated by the catalog loader rather than duplicated
-// as nodes. Grantor is retained so a non-owner grant chain can never vanish
-// from a snapshot; the planner currently accepts only the @owner sentinel.
+// TablePrivilege models one grantee/privilege pair on a table, view, or
+// materialized view. The owning role's implicit rights are validated by the
+// catalog loader rather than duplicated as nodes. Grantor is retained so a
+// non-owner grant chain can never vanish from a snapshot; recreation uses an
+// explicit SET LOCAL ROLE boundary for a non-owner grantor.
 type TablePrivilege struct {
 	Table     ID
 	Grantee   string

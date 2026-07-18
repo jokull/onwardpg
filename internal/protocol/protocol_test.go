@@ -24,6 +24,11 @@ func TestStableStatementIDUsesCompleteNormalizedContract(t *testing.T) {
 		t.Fatal("transaction boundary did not affect stable statement identity")
 	}
 	right = left
+	right.BatchBoundaryBefore = true
+	if StableStatementID(left) == StableStatementID(right) {
+		t.Fatal("explicit batch boundary did not affect stable statement identity")
+	}
+	right = left
 	right.StatementTimeoutMS, right.LockTimeoutMS = 1200000, 3000
 	if StableStatementID(left) == StableStatementID(right) {
 		t.Fatal("timeout guidance did not affect stable statement identity")

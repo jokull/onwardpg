@@ -94,6 +94,35 @@ func TestRelationObjectIDPreservesViewKinds(t *testing.T) {
 	}
 }
 
+func TestForeignKeyDependsOnExactReferencedKeyIndex(t *testing.T) {
+	snapshot := pgschema.New()
+	accounts := pgschema.Table{Schema: "app", Name: "accounts"}
+	orders := pgschema.Table{Schema: "app", Name: "orders"}
+	primary := pgschema.Constraint{
+		Table: accounts.ObjectID(), Name: "accounts_pkey", Type: pgschema.ConstraintPrimary, UsingIndex: "accounts_pkey",
+	}
+	tenantKey := pgschema.Constraint{
+		Table: accounts.ObjectID(), Name: "accounts_tenant_key", Type: pgschema.ConstraintUnique, UsingIndex: "accounts_tenant_key",
+	}
+	reference := accounts.ObjectID()
+	foreignKey := pgschema.Constraint{
+		Table: orders.ObjectID(), Name: "orders_account_fkey", Type: pgschema.ConstraintForeign,
+		Reference: &reference, UsingIndex: "accounts_tenant_key",
+	}
+	for _, object := range []pgschema.Object{accounts, orders, primary, tenantKey, foreignKey} {
+		if err := snapshot.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := addForeignKeyKeyDependencies(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	dependencies := snapshot.Dependencies(foreignKey.ObjectID())
+	if len(dependencies) != 1 || dependencies[0] != tenantKey.ObjectID() {
+		t.Fatalf("foreign key dependencies = %#v, want only %s", dependencies, tenantKey.ObjectID())
+	}
+}
+
 func TestParseOptionsCanonicalizesCatalogOrder(t *testing.T) {
 	options := parseOptions([]string{"pages_per_range=64", "autosummarize=true", "fillfactor=90"})
 	want := []pgschema.Option{

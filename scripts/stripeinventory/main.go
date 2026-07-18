@@ -386,6 +386,23 @@ func applyCaseOverrides(entry *caseEntry, family, name string) {
 		entry.Dimensions.Mutation = "weaker"
 		entry.Dimensions.OnlineStrategy = "intentionally_different"
 		entry.Notes = "Stripe converges with a direct cast and replacement constraint index. onwardpg can plan the index transition but requires reviewed expand/contract type-bridge SQL (or another deployment) instead of treating the cast as rolling-deploy compatibility."
+		entry.OnwardPGTests = append(entry.OnwardPGTests,
+			"internal/graphplan#TestContinuousConstraintReplacementCoordinatesCrossSchemaForeignKeyMetadata",
+			"internal/graphplan#TestContinuousConstraintReplacementCoordinatesForeignKeyCycle",
+			"internal/differential#TestPinnedStripeAndOnwardPGCoordinateReferencedKeyAndForeignKey",
+		)
+	case family == "foreign_key_constraint" && name == "Alter FK (columns)":
+		entry.Classification = "supported"
+		entry.Dimensions.Mutation = "supported"
+		entry.Dimensions.OnlineStrategy = "supported"
+		entry.OnwardPGTests = []string{
+			"internal/source#TestForeignKeyDependsOnExactReferencedKeyIndex",
+			"internal/graphplan#TestContinuousConstraintReplacementCoordinatesCrossSchemaForeignKeyMetadata",
+			"internal/graphplan#TestContinuousConstraintReplacementCoordinatesForeignKeyCycle",
+			"internal/differential#TestPinnedStripeAndOnwardPGCoordinateReferencedKeyAndForeignKey",
+		}
+		entry.DifferentialTest = "internal/differential#TestPinnedStripeAndOnwardPGCoordinateReferencedKeyAndForeignKey"
+		entry.Notes = "Both planners coordinate a changed foreign key with its changed referenced primary key. onwardpg identifies the exact referenced key index, builds the replacement concurrently, performs the short key swap, re-adds the FK NOT VALID, validates separately, and preserves typed metadata."
 	case family == "materialized_view_index" && name == "Change index columns on materialized view":
 		entry.Classification = "supported"
 		entry.Dimensions.Mutation = "supported"
@@ -396,6 +413,19 @@ func applyCaseOverrides(entry *caseEntry, family, name string) {
 		}
 		entry.DifferentialTest = "internal/differential#TestPinnedStripeAndOnwardPGContinuousMaterializedViewAndLocalIndexReplacement"
 		entry.Notes = "Both planners continuously replace the same-name materialized-view index and converge without a residual diff."
+	case (family == "view" && name == "Recreate view due to dependent column changing") ||
+		(family == "materialized_view" && name == "Recreate materialized view due to dependent column changing"):
+		entry.Classification = "intentionally_different"
+		entry.Dimensions.Mutation = "supported"
+		entry.Dimensions.OnlineStrategy = "intentionally_different"
+		entry.Dimensions.Rejection = "intentionally_different"
+		entry.OnwardPGTests = []string{
+			"internal/graphplan#TestViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL",
+			"internal/graphplan#TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL",
+			"internal/differential#TestPinnedStripeRejectsDerivedViewTypeClosureOnwardGeneratesIt",
+		}
+		entry.DifferentialTest = "internal/differential#TestPinnedStripeRejectsDerivedViewTypeClosureOnwardGeneratesIt"
+		entry.Notes = "For a column type change crossing an ordinary view, materialized view, and materialized-view index, the pinned Stripe planner emits only ALTER TYPE and fails its own validation. onwardpg keeps the reviewed rolling-deployment transform decision and generates the exact typed drop/recreate closure around it, including populated state, indexes, comments, and view triggers."
 	case family == "local_partition_index" && name == "Change an index columns (with conflicting schemas)":
 		entry.Classification = "supported"
 		entry.Dimensions.Mutation = "supported"
@@ -436,6 +466,18 @@ func applyCaseOverrides(entry *caseEntry, family, name string) {
 		}
 		entry.DifferentialTest = "internal/differential#TestPinnedStripeAndOnwardPGAttachExistingPartitionConstraintIndexes"
 		entry.Notes = "Both planners let a new local primary/unique constraint claim the prebuilt matching unique index, then attach the constraint-owned index to its parent in dependency order. Identity or structural mismatches reject."
+	case family == "partitioned_table" && (name == "Unpartitioned to partitioned" || name == "Partitioned to unpartitioned" || name == "Changing partition key def errors"):
+		entry.Classification = "intentionally_different"
+		entry.Dimensions.Mutation = "supported"
+		entry.Dimensions.OnlineStrategy = "intentionally_different"
+		entry.Dimensions.Rejection = "intentionally_different"
+		entry.OnwardPGTests = []string{
+			"internal/graphplan#TestBuildScaffoldsOrdinaryToPartitionedShadowHierarchy",
+			"internal/graphplan#TestBuildScaffoldsPartitionedToOrdinaryRetainedDataCutover",
+			"internal/differential#TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData",
+		}
+		entry.DifferentialTest = "internal/differential#TestPinnedStripePartitionTopologyReplacementOnwardScaffoldsRetainedData"
+		entry.Notes = "Stripe replaces ordinary/partitioned tables with DROP/CREATE and a DELETES_DATA hazard, and rejects an in-place partition-key change. onwardpg keeps the fingerprint-bound operator decision but supplies a deterministic shadow-hierarchy runbook with copy/catch-up stages, row and bound assertions, typed dependent recreation, brief rename cutover, and separately authorized old-hierarchy cleanup."
 	case family == "sequence" && strings.HasPrefix(name, "Alter ownership"):
 		entry.Classification = "supported"
 		entry.Dimensions.Mutation = "supported"

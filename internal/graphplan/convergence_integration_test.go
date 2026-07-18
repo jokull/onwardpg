@@ -434,19 +434,34 @@ func TestViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL(t *test
 	suffix := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 	dataSchema := "onwardpg_view_type_data_" + suffix
 	apiSchema := "onwardpg_view_type_api_" + suffix
+	viewOwner := "onwardpg_view_owner_" + suffix
+	viewReader := "onwardpg_view_reader_" + suffix
 	defer func() {
 		_, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+apiSchema+`" CASCADE`)
 		_, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+dataSchema+`" CASCADE`)
+		_, _ = conn.Exec(context.Background(), `DROP ROLE IF EXISTS "`+viewReader+`"`)
+		_, _ = conn.Exec(context.Background(), `DROP ROLE IF EXISTS "`+viewOwner+`"`)
 	}()
+	if _, err := conn.Exec(ctx, `CREATE ROLE "`+viewOwner+`"; CREATE ROLE "`+viewReader+`";`); err != nil {
+		t.Fatal(err)
+	}
 	currentDDL := `CREATE SCHEMA "` + dataSchema + `"; CREATE SCHEMA "` + apiSchema + `";
 CREATE TABLE "` + dataSchema + `".t (keep integer, val integer);
+CREATE FUNCTION "` + apiSchema + `".base_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
 CREATE VIEW "` + apiSchema + `".base AS SELECT val FROM "` + dataSchema + `".t;
+CREATE TRIGGER base_insert INSTEAD OF INSERT ON "` + apiSchema + `".base FOR EACH ROW EXECUTE FUNCTION "` + apiSchema + `".base_insert();
+COMMENT ON TRIGGER base_insert ON "` + apiSchema + `".base IS 'typed view trigger';
+ALTER VIEW "` + apiSchema + `".base OWNER TO "` + viewOwner + `";
+GRANT SELECT ON "` + apiSchema + `".base TO "` + viewReader + `";
 CREATE VIEW "` + apiSchema + `".derived AS SELECT val FROM "` + apiSchema + `".base;
 CREATE VIEW "` + apiSchema + `".keep_view AS SELECT keep FROM "` + dataSchema + `".t;`
 	if _, err := conn.Exec(ctx, currentDDL); err != nil {
 		t.Fatal(err)
 	}
 	desiredDDL := strings.Replace(currentDDL, "val integer", "val bigint", 1)
+	desiredDDL = strings.Replace(desiredDDL,
+		`CREATE VIEW "`+apiSchema+`".base AS SELECT val FROM "`+dataSchema+`".t;`,
+		`CREATE VIEW "`+apiSchema+`".base AS SELECT val + 1 AS val FROM "`+dataSchema+`".t;`, 1)
 	path := filepath.Join(t.TempDir(), "schema.sql")
 	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
 		t.Fatal(err)
@@ -472,6 +487,41 @@ CREATE VIEW "` + apiSchema + `".keep_view AS SELECT keep FROM "` + dataSchema + 
 	if !strings.Contains(sql, "ONWARDPG TODO") || !strings.Contains(sql, "view:"+apiSchema+":base") || !strings.Contains(sql, "view:"+apiSchema+":derived") || strings.Contains(sql, "view:"+apiSchema+":keep_view") {
 		t.Fatalf("view-column dependency handoff scope/order was incorrect:\n%s", sql)
 	}
+	dropDerived := strings.Index(sql, `DROP VIEW "`+apiSchema+`"."derived"`)
+	dropBase := strings.Index(sql, `DROP VIEW "`+apiSchema+`"."base"`)
+	contractTODO := strings.LastIndex(sql, "ONWARDPG TODO")
+	createBase := strings.Index(sql, `CREATE VIEW "`+apiSchema+`"."base"`)
+	createTrigger := strings.Index(sql, "CREATE TRIGGER base_insert INSTEAD OF INSERT ON ")
+	createDerived := strings.Index(sql, `CREATE VIEW "`+apiSchema+`"."derived"`)
+	if dropDerived < 0 || dropBase < 0 || contractTODO < 0 || createBase < 0 || createTrigger < 0 || createDerived < 0 ||
+		dropDerived > dropBase || dropBase > contractTODO || contractTODO > createBase || createBase > createTrigger || createTrigger > createDerived || !strings.Contains(sql, "typed view trigger") {
+		t.Fatalf("view closure is not ordered around the editable conversion:\n%s", sql)
+	}
+	if !strings.Contains(sql, "val + 1") {
+		t.Fatalf("changed dependent view definition was not recreated from desired catalog state:\n%s", sql)
+	}
+	for _, fragment := range []string{`ALTER VIEW "` + apiSchema + `"."base" OWNER TO "` + viewOwner + `"`, `GRANT SELECT ON TABLE "` + apiSchema + `"."base" TO "` + viewReader + `"`} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("view closure did not preserve ownership/privileges %q:\n%s", fragment, sql)
+		}
+	}
+	edited := editTypeHandoffForTest(plan, `ALTER TABLE "`+dataSchema+`".t ALTER COLUMN val TYPE bigint USING val::bigint;`)
+	applyPlan(t, ctx, conn, edited)
+	assertGraphConverges(t, ctx, url, desired)
+	var outputType string
+	if err := conn.QueryRow(ctx, `SELECT format_type(a.atttypid, a.atttypmod)
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relname = 'derived' AND a.attname = 'val' AND a.attnum > 0`, apiSchema).Scan(&outputType); err != nil || outputType != "bigint" {
+		t.Fatalf("recreated transitive view output type=%q err=%v", outputType, err)
+	}
+	var actualOwner string
+	var readerCanSelect bool
+	if err := conn.QueryRow(ctx, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'base'`, apiSchema).Scan(&actualOwner); err != nil || actualOwner != viewOwner {
+		t.Fatalf("recreated view owner=%q err=%v", actualOwner, err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT has_table_privilege($1::text, format('%I.%I', $2::text, 'base'), 'SELECT')`, viewReader, apiSchema).Scan(&readerCanSelect); err != nil || !readerCanSelect {
+		t.Fatalf("recreated view privilege select=%v err=%v", readerCanSelect, err)
+	}
 }
 
 func TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL(t *testing.T) {
@@ -491,9 +541,12 @@ func TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgr
 	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+q+" CASCADE") }()
 	currentDDL := "CREATE SCHEMA " + q + ";" +
 		"CREATE TABLE " + q + ".t (keep integer, val integer);" +
+		"INSERT INTO " + q + ".t VALUES (1, 7);" +
 		"CREATE MATERIALIZED VIEW " + q + ".direct AS SELECT val FROM " + q + ".t WITH NO DATA;" +
 		"CREATE UNIQUE INDEX direct_val_idx ON " + q + ".direct (val);" +
 		"CREATE MATERIALIZED VIEW " + q + ".derived AS SELECT val FROM " + q + ".direct WITH NO DATA;" +
+		"CREATE MATERIALIZED VIEW " + q + ".populated AS SELECT val FROM " + q + ".t;" +
+		"COMMENT ON MATERIALIZED VIEW " + q + ".populated IS 'preserve populated state';" +
 		"CREATE MATERIALIZED VIEW " + q + ".whole_row AS SELECT t FROM " + q + ".t WITH NO DATA;" +
 		"CREATE MATERIALIZED VIEW " + q + ".keep_only AS SELECT keep FROM " + q + ".t WITH NO DATA;"
 	if _, err := conn.Exec(ctx, currentDDL); err != nil {
@@ -522,13 +575,40 @@ func TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgr
 		t.Fatalf("materialized-view type-change handoff plan=%#v err=%v", plan, err)
 	}
 	sql := joinPlan(plan)
-	for _, id := range []string{"materialized_view:" + schemaName + ":direct", "materialized_view:" + schemaName + ":derived", "materialized_view:" + schemaName + ":whole_row", "index:" + schemaName + ":direct:direct_val_idx"} {
+	for _, id := range []string{"materialized_view:" + schemaName + ":direct", "materialized_view:" + schemaName + ":derived", "materialized_view:" + schemaName + ":populated", "materialized_view:" + schemaName + ":whole_row", "index:" + schemaName + ":direct:direct_val_idx"} {
 		if !strings.Contains(sql, id) {
 			t.Fatalf("materialized-view handoff omitted %s:\n%s", id, sql)
 		}
 	}
 	if strings.Contains(sql, "materialized_view:"+schemaName+":keep_only") {
 		t.Fatalf("materialized-view handoff included an unaffected column dependency:\n%s", sql)
+	}
+	if !strings.Contains(sql, "CREATE MATERIALIZED VIEW "+q+`."populated"`) || !strings.Contains(sql, "WITH DATA") || !strings.Contains(sql, "preserve populated state") {
+		t.Fatalf("populated materialized-view state/comment is not explicit:\n%s", sql)
+	}
+	dropDerived := strings.Index(sql, "DROP MATERIALIZED VIEW "+q+`."derived"`)
+	dropDirect := strings.Index(sql, "DROP MATERIALIZED VIEW "+q+`."direct"`)
+	contractTODO := strings.LastIndex(sql, "ONWARDPG TODO")
+	createDirect := strings.Index(sql, "CREATE MATERIALIZED VIEW "+q+`."direct"`)
+	createIndex := strings.Index(sql, `CREATE UNIQUE INDEX "direct_val_idx"`)
+	createDerived := strings.Index(sql, "CREATE MATERIALIZED VIEW "+q+`."derived"`)
+	if dropDerived < 0 || dropDirect < 0 || contractTODO < 0 || createDirect < 0 || createIndex < 0 || createDerived < 0 ||
+		dropDerived > dropDirect || dropDirect > contractTODO || contractTODO > createDirect || createDirect > createIndex || createIndex > createDerived {
+		t.Fatalf("materialized-view closure is not ordered around the editable conversion:\n%s", sql)
+	}
+	edited := editTypeHandoffForTest(plan, "ALTER TABLE "+q+`.t ALTER COLUMN val TYPE bigint USING val::bigint;`)
+	applyPlan(t, ctx, conn, edited)
+	assertGraphConverges(t, ctx, url, desired)
+	var populated, indexValid bool
+	if err := conn.QueryRow(ctx, `SELECT c.relispopulated FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'direct'`, schemaName).Scan(&populated); err != nil || populated {
+		t.Fatalf("WITH NO DATA state was not preserved: populated=%v err=%v", populated, err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'direct_val_idx'`, schemaName).Scan(&indexValid); err != nil || !indexValid {
+		t.Fatalf("materialized-view index was not restored: valid=%v err=%v", indexValid, err)
+	}
+	var populatedValue int64
+	if err := conn.QueryRow(ctx, "SELECT val FROM "+q+`."populated"`).Scan(&populatedValue); err != nil || populatedValue != 7 {
+		t.Fatalf("populated materialized-view data was not recomputed: value=%d err=%v", populatedValue, err)
 	}
 }
 
@@ -841,6 +921,93 @@ func TestManualPartitionStrategyChangePreservesPrimaryKeyOnPostgreSQL(t *testing
 	}
 	applyPlan(t, ctx, conn, plan)
 	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestPartitionTopologyRunbookCoversNestedCrossSchemaClosureOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := fmt.Sprintf("onwardpg_partition_runbook_%d", time.Now().UTC().UnixNano())
+	archiveName := schemaName + "_archive"
+	defer func() {
+		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE")
+		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(archiveName)+" CASCADE")
+	}()
+	currentDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE SCHEMA " + quote(archiveName) + ";" +
+		"CREATE TABLE " + qualified(schemaName, "accounts") + " (tenant_id bigint NOT NULL, id bigint NOT NULL, last_event_id bigint, last_event_at date, CONSTRAINT accounts_pkey PRIMARY KEY (tenant_id, id));" +
+		"CREATE TABLE " + qualified(schemaName, "events") + " (tenant_id bigint NOT NULL, id bigint NOT NULL, occurred_at date NOT NULL, account_id bigint NOT NULL, payload text, CONSTRAINT events_pkey PRIMARY KEY (tenant_id, id, occurred_at), CONSTRAINT events_account_fkey FOREIGN KEY (tenant_id, account_id) REFERENCES " + qualified(schemaName, "accounts") + " (tenant_id, id) DEFERRABLE INITIALLY DEFERRED);" +
+		"ALTER TABLE " + qualified(schemaName, "accounts") + " ADD CONSTRAINT accounts_last_event_fkey FOREIGN KEY (tenant_id, last_event_id, last_event_at) REFERENCES " + qualified(schemaName, "events") + " (tenant_id, id, occurred_at) DEFERRABLE INITIALLY DEFERRED;" +
+		"CREATE VIEW " + qualified(schemaName, "event_ids") + " AS SELECT tenant_id, id FROM " + qualified(schemaName, "events") + ";" +
+		"CREATE MATERIALIZED VIEW " + qualified(schemaName, "event_counts") + " AS SELECT tenant_id, count(*) AS count FROM " + qualified(schemaName, "events") + " GROUP BY tenant_id WITH DATA;" +
+		"INSERT INTO " + qualified(schemaName, "accounts") + " VALUES (7, 9, NULL, NULL);" +
+		"INSERT INTO " + qualified(schemaName, "events") + " VALUES (7, 11, '2026-04-05', 9, 'retained');" +
+		"UPDATE " + qualified(schemaName, "accounts") + " SET last_event_id = 11, last_event_at = '2026-04-05' WHERE tenant_id = 7 AND id = 9;"
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	desiredDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE SCHEMA " + quote(archiveName) + ";" +
+		"CREATE TABLE " + qualified(schemaName, "accounts") + " (tenant_id bigint NOT NULL, id bigint NOT NULL, last_event_id bigint, last_event_at date, CONSTRAINT accounts_pkey PRIMARY KEY (tenant_id, id));" +
+		"CREATE TABLE " + qualified(schemaName, "events") + " (tenant_id bigint NOT NULL, id bigint NOT NULL, occurred_at date NOT NULL, account_id bigint NOT NULL, payload text) PARTITION BY RANGE (occurred_at);" +
+		"CREATE TABLE " + qualified(archiveName, "events_2026") + " PARTITION OF " + qualified(schemaName, "events") + " FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY HASH (tenant_id);" +
+		"CREATE TABLE " + qualified(archiveName, "events_2026_0") + " PARTITION OF " + qualified(archiveName, "events_2026") + " FOR VALUES WITH (MODULUS 2, REMAINDER 0);" +
+		"CREATE TABLE " + qualified(archiveName, "events_2026_1") + " PARTITION OF " + qualified(archiveName, "events_2026") + " FOR VALUES WITH (MODULUS 2, REMAINDER 1);" +
+		"ALTER TABLE " + qualified(schemaName, "events") + " ADD CONSTRAINT events_pkey PRIMARY KEY (tenant_id, id, occurred_at);" +
+		"ALTER TABLE " + qualified(schemaName, "events") + " ADD CONSTRAINT events_account_fkey FOREIGN KEY (tenant_id, account_id) REFERENCES " + qualified(schemaName, "accounts") + " (tenant_id, id) DEFERRABLE INITIALLY DEFERRED;" +
+		"ALTER TABLE " + qualified(schemaName, "accounts") + " ADD CONSTRAINT accounts_last_event_fkey FOREIGN KEY (tenant_id, last_event_id, last_event_at) REFERENCES " + qualified(schemaName, "events") + " (tenant_id, id, occurred_at) DEFERRABLE INITIALLY DEFERRED;" +
+		"CREATE INDEX events_2026_0_payload_idx ON " + qualified(archiveName, "events_2026_0") + " (payload);" +
+		"CREATE VIEW " + qualified(schemaName, "event_ids") + " AS SELECT tenant_id, id FROM " + qualified(schemaName, "events") + ";" +
+		"CREATE MATERIALIZED VIEW " + qualified(schemaName, "event_counts") + " AS SELECT tenant_id, count(*) AS count FROM " + qualified(schemaName, "events") + " GROUP BY tenant_id WITH DATA;"
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.NeedsInput || len(result.Guidance) != 1 {
+		t.Fatalf("expected one partition topology handoff, got %#v", result)
+	}
+	runbook := ""
+	for _, step := range result.Guidance[0].Steps {
+		runbook += step.Stage + "\n" + step.SQL + "\n"
+	}
+	for _, fragment := range []string{
+		"table:" + archiveName + ":events_2026", "table:" + archiveName + ":events_2026_0",
+		"PARTITION BY HASH (tenant_id)", "events_2026_0_payload_idx", "events_account_fkey", "accounts_last_event_fkey",
+		"DROP VIEW " + qualified(schemaName, "event_ids"), "DROP MATERIALIZED VIEW " + qualified(schemaName, "event_counts"),
+		"onwardpg_row_count_matches", "onwardpg_catalog_bound_matches", "Never infer production copy duration",
+	} {
+		if !strings.Contains(runbook, fragment) {
+			t.Fatalf("nested partition runbook omitted %q:\n%s", fragment, runbook)
+		}
+	}
+	for _, step := range result.Guidance[0].Steps {
+		switch step.Stage {
+		case "temporary_identity_preflight", "expand_shadow_hierarchy", "expand_keys_indexes_and_partition_locals", "expand_bulk_copy", "contract_cutover_assertions":
+			if _, err := conn.Exec(ctx, step.SQL); err != nil {
+				t.Fatalf("execute generated %s scaffold: %v\n%s", step.Stage, err, step.SQL)
+			}
+		}
+	}
 }
 
 func TestManualDefaultPartitionReconfigurationContractConvergesOnPostgreSQL(t *testing.T) {
@@ -1568,7 +1735,7 @@ COMMENT ON CONSTRAINT accounts_pkey ON "` + schemaName + `".accounts IS 'stable 
 	assertGraphConverges(t, ctx, url, desired)
 }
 
-func TestContinuousConstraintReplacementRejectsForeignKeyDependents(t *testing.T) {
+func TestContinuousConstraintReplacementCoordinatesDroppedForeignKey(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -1615,9 +1782,328 @@ CREATE TABLE "` + schemaName + `".orders (account_id bigint);`
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 	}
 	result, err := Build(current, desired, answers, Options{ConcurrentIndexes: true})
-	if err != nil || result.Status != protocol.Unsupported || len(result.Unsupported) == 0 || !strings.Contains(strings.Join(result.Unsupported, ","), "continuous_constraint_replacement_dependents") {
-		t.Fatalf("foreign-key dependent swap must reject explicitly: plan=%#v err=%v", result, err)
+	if err != nil || result.Status != protocol.Planned {
+		t.Fatalf("foreign-key dependent swap plan=%#v err=%v", result, err)
 	}
+	joined := joinPlan(result)
+	foreignKeyDrop := strings.Index(joined, `ALTER TABLE "`+schemaName+`"."orders" DROP CONSTRAINT`)
+	keyDrop := strings.Index(joined, `ALTER TABLE "`+schemaName+`"."accounts" DROP CONSTRAINT "accounts_pkey"`)
+	keyAdd := strings.Index(joined, `ALTER TABLE "`+schemaName+`"."accounts" ADD CONSTRAINT "accounts_pkey"`)
+	if foreignKeyDrop < 0 || keyDrop < 0 || keyAdd < 0 || foreignKeyDrop > keyDrop || keyDrop > keyAdd {
+		t.Fatalf("foreign key must be removed before the referenced-key swap:\n%s", joined)
+	}
+	if strings.Count(joined, `ALTER TABLE "`+schemaName+`"."orders" DROP CONSTRAINT`) != 1 {
+		t.Fatalf("foreign key drop must be coordinated exactly once:\n%s", joined)
+	}
+	applyPlan(t, ctx, conn, result)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestContinuousConstraintReplacementCoordinatesCrossSchemaForeignKeyMetadata(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	suffix := time.Now().UTC().Format("20060102150405")
+	coreSchema := "onwardpg_key_core_" + suffix
+	orderSchema := "onwardpg_key_orders_" + suffix
+	defer func() {
+		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(orderSchema)+" CASCADE")
+		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(coreSchema)+" CASCADE")
+	}()
+	currentDDL := `CREATE SCHEMA "` + coreSchema + `";
+CREATE SCHEMA "` + orderSchema + `";
+CREATE TABLE "` + coreSchema + `".accounts (
+  id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  CONSTRAINT accounts_pkey PRIMARY KEY (id)
+);
+ALTER TABLE "` + coreSchema + `".accounts REPLICA IDENTITY USING INDEX accounts_pkey;
+CREATE TABLE "` + orderSchema + `".orders (
+  account_id bigint,
+  CONSTRAINT orders_account_fkey FOREIGN KEY (account_id)
+    REFERENCES "` + coreSchema + `".accounts(id)
+    MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED
+);
+COMMENT ON CONSTRAINT orders_account_fkey ON "` + orderSchema + `".orders IS 'preserved foreign-key contract';`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + coreSchema + `";
+CREATE SCHEMA "` + orderSchema + `";
+CREATE TABLE "` + coreSchema + `".accounts (
+  id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  CONSTRAINT accounts_pkey PRIMARY KEY (id, tenant_id)
+);
+ALTER TABLE "` + coreSchema + `".accounts REPLICA IDENTITY USING INDEX accounts_pkey;
+CREATE TABLE "` + orderSchema + `".orders (
+  account_id bigint,
+  tenant_id bigint,
+  CONSTRAINT orders_account_fkey FOREIGN KEY (account_id, tenant_id)
+    REFERENCES "` + coreSchema + `".accounts(id, tenant_id)
+    MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED
+);
+COMMENT ON CONSTRAINT orders_account_fkey ON "` + orderSchema + `".orders IS 'preserved foreign-key contract';`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("cross-schema foreign-key plan=%#v err=%v", plan, err)
+	}
+	joined := joinPlan(plan)
+	foreignKeyDrop := strings.Index(joined, `ALTER TABLE "`+orderSchema+`"."orders" DROP CONSTRAINT "orders_account_fkey"`)
+	replicaIdentityReset := strings.Index(joined, `ALTER TABLE "`+coreSchema+`"."accounts" REPLICA IDENTITY DEFAULT`)
+	keyDrop := strings.Index(joined, `ALTER TABLE "`+coreSchema+`"."accounts" DROP CONSTRAINT "accounts_pkey"`)
+	keyAdd := strings.Index(joined, `ALTER TABLE "`+coreSchema+`"."accounts" ADD CONSTRAINT "accounts_pkey"`)
+	replicaIdentityRestore := strings.Index(joined, `ALTER TABLE "`+coreSchema+`"."accounts" REPLICA IDENTITY USING INDEX "accounts_pkey"`)
+	foreignKeyAdd := strings.Index(joined, `ALTER TABLE "`+orderSchema+`"."orders" ADD CONSTRAINT "orders_account_fkey"`)
+	foreignKeyValidate := strings.Index(joined, `ALTER TABLE "`+orderSchema+`"."orders" VALIDATE CONSTRAINT "orders_account_fkey"`)
+	if replicaIdentityReset < 0 || foreignKeyDrop < 0 || keyDrop < 0 || keyAdd < 0 || replicaIdentityRestore < 0 || foreignKeyAdd < 0 || foreignKeyValidate < 0 ||
+		replicaIdentityReset > foreignKeyDrop || foreignKeyDrop > keyDrop || keyDrop > keyAdd || keyAdd > replicaIdentityRestore || replicaIdentityRestore > foreignKeyAdd || foreignKeyAdd > foreignKeyValidate {
+		t.Fatalf("foreign-key closure is not ordered around the key swap:\n%s", joined)
+	}
+	for _, fragment := range []string{"CREATE UNIQUE INDEX CONCURRENTLY", "MATCH FULL", "ON UPDATE CASCADE", "ON DELETE SET NULL", "DEFERRABLE INITIALLY DEFERRED", "NOT VALID", "preserved foreign-key contract"} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("coordinated replacement lost %q:\n%s", fragment, joined)
+		}
+	}
+	for _, statement := range plan.Statements {
+		if !containsString(statement.Hazards, "continuous_constraint_replacement") {
+			continue
+		}
+		if statement.StatementTimeoutMS <= 0 || statement.LockTimeoutMS <= 0 {
+			t.Fatalf("coordinated replacement lacks timeout guidance: %#v", statement)
+		}
+	}
+	var sawSwapBatch, sawValidationBatch bool
+	for _, batch := range plan.Batches {
+		batchSQL := joinPlan(protocol.Result{Statements: batch.Statements})
+		if strings.Contains(batchSQL, `DROP CONSTRAINT "accounts_pkey"`) {
+			sawSwapBatch = true
+			if strings.Contains(batchSQL, "VALIDATE CONSTRAINT") {
+				t.Fatalf("key identity locks must commit before FK validation: %#v", batch)
+			}
+		}
+		if strings.Contains(batchSQL, `VALIDATE CONSTRAINT "orders_account_fkey"`) {
+			sawValidationBatch = true
+			if len(batch.Statements) != 1 {
+				t.Fatalf("FK validation must have its own timeout-bounded batch: %#v", batch)
+			}
+		}
+	}
+	if !sawSwapBatch || !sawValidationBatch {
+		t.Fatalf("missing short key-swap or separate validation batch: %#v", plan.Batches)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestContinuousConstraintReplacementCoordinatesForeignKeyCycle(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_key_cycle_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".alpha (
+  id bigint NOT NULL, tenant_id bigint NOT NULL, beta_id bigint, beta_tenant_id bigint,
+  CONSTRAINT alpha_pkey PRIMARY KEY (id)
+);
+CREATE TABLE "` + schemaName + `".beta (
+  id bigint NOT NULL, tenant_id bigint NOT NULL, gamma_id bigint, gamma_tenant_id bigint,
+  CONSTRAINT beta_pkey PRIMARY KEY (id)
+);
+CREATE TABLE "` + schemaName + `".gamma (
+  id bigint NOT NULL, tenant_id bigint NOT NULL, alpha_id bigint, alpha_tenant_id bigint,
+  CONSTRAINT gamma_pkey PRIMARY KEY (id)
+);
+ALTER TABLE "` + schemaName + `".alpha ADD CONSTRAINT alpha_beta_fkey FOREIGN KEY (beta_id) REFERENCES "` + schemaName + `".beta(id);
+ALTER TABLE "` + schemaName + `".beta ADD CONSTRAINT beta_gamma_fkey FOREIGN KEY (gamma_id) REFERENCES "` + schemaName + `".gamma(id);
+ALTER TABLE "` + schemaName + `".gamma ADD CONSTRAINT gamma_alpha_fkey FOREIGN KEY (alpha_id) REFERENCES "` + schemaName + `".alpha(id);`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".alpha (
+  id bigint NOT NULL, tenant_id bigint NOT NULL, beta_id bigint, beta_tenant_id bigint,
+  CONSTRAINT alpha_pkey PRIMARY KEY (id, tenant_id)
+);
+CREATE TABLE "` + schemaName + `".beta (
+  id bigint NOT NULL, tenant_id bigint NOT NULL, gamma_id bigint, gamma_tenant_id bigint,
+  CONSTRAINT beta_pkey PRIMARY KEY (id, tenant_id)
+);
+CREATE TABLE "` + schemaName + `".gamma (
+  id bigint NOT NULL, tenant_id bigint NOT NULL, alpha_id bigint, alpha_tenant_id bigint,
+  CONSTRAINT gamma_pkey PRIMARY KEY (id, tenant_id)
+);
+ALTER TABLE "` + schemaName + `".alpha ADD CONSTRAINT alpha_beta_fkey FOREIGN KEY (beta_id, beta_tenant_id) REFERENCES "` + schemaName + `".beta(id, tenant_id);
+ALTER TABLE "` + schemaName + `".beta ADD CONSTRAINT beta_gamma_fkey FOREIGN KEY (gamma_id, gamma_tenant_id) REFERENCES "` + schemaName + `".gamma(id, tenant_id);
+ALTER TABLE "` + schemaName + `".gamma ADD CONSTRAINT gamma_alpha_fkey FOREIGN KEY (alpha_id, alpha_tenant_id) REFERENCES "` + schemaName + `".alpha(id, tenant_id);`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("cyclic foreign-key replacement plan=%#v err=%v", plan, err)
+	}
+	joined := joinPlan(plan)
+	if strings.Count(joined, "CREATE UNIQUE INDEX CONCURRENTLY") != 3 ||
+		strings.Count(joined, " ADD CONSTRAINT \"") < 6 ||
+		strings.Count(joined, " VALIDATE CONSTRAINT ") != 3 {
+		t.Fatalf("cyclic closure did not coordinate all keys and foreign keys:\n%s", joined)
+	}
+	for _, foreignKeyName := range []string{"alpha_beta_fkey", "beta_gamma_fkey", "gamma_alpha_fkey"} {
+		drop := strings.Index(joined, "DROP CONSTRAINT "+quote(foreignKeyName))
+		add := strings.Index(joined, "ADD CONSTRAINT "+quote(foreignKeyName))
+		validate := strings.Index(joined, "VALIDATE CONSTRAINT "+quote(foreignKeyName))
+		if drop < 0 || add < 0 || validate < 0 || drop > add || add > validate {
+			t.Fatalf("cyclic foreign key %s is not rebuilt in dependency order:\n%s", foreignKeyName, joined)
+		}
+	}
+	var swapBatches, validationBatches int
+	for _, batch := range plan.Batches {
+		batchSQL := joinPlan(protocol.Result{Statements: batch.Statements})
+		if strings.Contains(batchSQL, "_pkey\"") && strings.Contains(batchSQL, "DROP CONSTRAINT") {
+			swapBatches++
+			if strings.Contains(batchSQL, "VALIDATE CONSTRAINT") {
+				t.Fatalf("cyclic key swap retained locks through validation: %#v", batch)
+			}
+		}
+		if strings.Contains(batchSQL, "VALIDATE CONSTRAINT") {
+			validationBatches++
+			if len(batch.Statements) != 1 {
+				t.Fatalf("cyclic FK validation must be isolated: %#v", batch)
+			}
+		}
+	}
+	if swapBatches != 3 || validationBatches != 3 {
+		t.Fatalf("cyclic replacement batches: swaps=%d validations=%d batches=%#v", swapBatches, validationBatches, plan.Batches)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestContinuousConstraintReplacementRetriesFailedBuildWithoutDroppingOldKey(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_key_retry_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (
+  email text NOT NULL,
+  tenant_id bigint NOT NULL,
+  CONSTRAINT accounts_key UNIQUE (email)
+);
+CREATE TABLE "` + schemaName + `".orders (
+  account_email text,
+  account_tenant_id bigint,
+  CONSTRAINT orders_account_fkey FOREIGN KEY (account_email) REFERENCES "` + schemaName + `".accounts(email)
+);
+INSERT INTO "` + schemaName + `".accounts VALUES ('one', 1), ('two', 1);`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE "` + schemaName + `".accounts (
+  email text NOT NULL,
+  tenant_id bigint NOT NULL,
+  CONSTRAINT accounts_key UNIQUE (tenant_id)
+);
+CREATE TABLE "` + schemaName + `".orders (
+  account_email text,
+  account_tenant_id bigint,
+  CONSTRAINT orders_account_fkey FOREIGN KEY (account_tenant_id) REFERENCES "` + schemaName + `".accounts(tenant_id)
+);`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil || plan.Status != protocol.Planned || len(plan.Statements) < 2 {
+		t.Fatalf("retryable key/FK plan=%#v err=%v", plan, err)
+	}
+	if !strings.HasPrefix(plan.Statements[0].SQL, "DROP INDEX CONCURRENTLY IF EXISTS ") || !strings.Contains(plan.Statements[1].SQL, "CREATE UNIQUE INDEX CONCURRENTLY") {
+		t.Fatalf("replacement must start with deterministic retry cleanup and build: %#v", plan.Statements[:2])
+	}
+	if _, err := conn.Exec(ctx, plan.Statements[0].SQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, plan.Statements[1].SQL); err == nil {
+		t.Fatal("expected replacement unique-index build to reject duplicate tenant IDs")
+	}
+	var usableOldKey bool
+	if err := conn.QueryRow(ctx, `
+SELECT i.indisvalid AND i.indisready
+FROM pg_constraint c
+JOIN pg_class t ON t.oid = c.conrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+JOIN pg_index i ON i.indexrelid = c.conindid
+WHERE n.nspname = $1 AND t.relname = 'accounts' AND c.conname = 'accounts_key'`, schemaName).Scan(&usableOldKey); err != nil || !usableOldKey {
+		t.Fatalf("old unique constraint/index was not usable after failed build: usable=%v err=%v", usableOldKey, err)
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO "+quote(schemaName)+".accounts VALUES ('one', 3)"); err == nil {
+		t.Fatal("old unique constraint stopped enforcing after failed replacement build")
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO "+quote(schemaName)+".orders (account_email) VALUES ('missing')"); err == nil {
+		t.Fatal("old inbound foreign key stopped enforcing after failed replacement build")
+	}
+	if _, err := conn.Exec(ctx, "UPDATE "+quote(schemaName)+".accounts SET tenant_id = 2 WHERE email = 'two'"); err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
 }
 
 func TestPartitionedParentPrimaryKeyRebuildConvergesOnPostgreSQL(t *testing.T) {
@@ -9162,6 +9648,29 @@ func applyPlan(t *testing.T, ctx context.Context, conn *pgx.Conn, plan protocol.
 			t.Fatal(err)
 		}
 	}
+}
+
+func editTypeHandoffForTest(plan protocol.Result, contractSQL string) protocol.Result {
+	rewrite := func(statement protocol.Statement) protocol.Statement {
+		switch {
+		case strings.Contains(statement.SQL, "reviewed EXPAND SQL"):
+			statement.SQL = "SELECT true;"
+			statement.Manual = nil
+		case strings.Contains(statement.SQL, "reviewed CONTRACT SQL"):
+			statement.SQL = contractSQL
+			statement.Manual = nil
+		}
+		return statement
+	}
+	for index := range plan.Statements {
+		plan.Statements[index] = rewrite(plan.Statements[index])
+	}
+	for batchIndex := range plan.Batches {
+		for statementIndex := range plan.Batches[batchIndex].Statements {
+			plan.Batches[batchIndex].Statements[statementIndex] = rewrite(plan.Batches[batchIndex].Statements[statementIndex])
+		}
+	}
+	return plan
 }
 
 func applyPlanPhase(t *testing.T, ctx context.Context, conn *pgx.Conn, plan protocol.Result, phase string) {

@@ -113,7 +113,7 @@ func batchesForRender(statements []Statement) []Batch {
 		transactional := !statement.NonTransactional
 		if len(batches) > 0 {
 			last := &batches[len(batches)-1]
-			if last.Phase == phase && last.Transactional == transactional {
+			if last.Phase == phase && last.Transactional == transactional && !statement.BatchBoundaryBefore {
 				last.Statements = append(last.Statements, statement)
 				continue
 			}

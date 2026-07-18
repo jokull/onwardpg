@@ -1436,10 +1436,12 @@ ORDER BY n.nspname, t.relname, i.relname, idx.ord`, included)
 // onwardpg never attempts to parse a view body itself.
 func inspectGraphViews(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	rows, err := tx.Query(ctx, `
-SELECT n.nspname, c.relname, c.relkind = 'm', pg_get_viewdef(c.oid, true),
+SELECT n.nspname, c.relname, COALESCE(CASE WHEN owner.rolname <> current_user THEN owner.rolname END, ''),
+       c.relkind = 'm', pg_get_viewdef(c.oid, true),
        c.relispopulated, c.reloptions, obj_description(c.oid, 'pg_class')
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_roles owner ON owner.oid = c.relowner
 WHERE c.relkind IN ('v', 'm')
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (
@@ -1454,7 +1456,7 @@ ORDER BY n.nspname, c.relname`)
 	for rows.Next() {
 		var options []string
 		object := pgschema.View{}
-		if err := rows.Scan(&object.Schema, &object.Name, &object.Materialized, &object.Definition, &object.Populated, &options, &object.Comment); err != nil {
+		if err := rows.Scan(&object.Schema, &object.Name, &object.Owner, &object.Materialized, &object.Definition, &object.Populated, &options, &object.Comment); err != nil {
 			return err
 		}
 		object.Options = parseOptions(options)
@@ -2214,7 +2216,7 @@ ORDER BY n.nspname, c.relname`)
 
 func inspectGraphTablePrivileges(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	rows, err := tx.Query(ctx, `
-SELECT n.nspname, c.relname,
+SELECT n.nspname, c.relname, c.relkind::text,
        CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END,
        CASE WHEN x.grantor = c.relowner THEN '@owner' ELSE grantor.rolname END,
        x.privilege_type, x.is_grantable
@@ -2223,8 +2225,15 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) x
 LEFT JOIN pg_roles grantee ON grantee.oid = x.grantee
 LEFT JOIN pg_roles grantor ON grantor.oid = x.grantor
-WHERE c.relkind IN ('r', 'p') AND x.grantee <> c.relowner
+WHERE c.relkind IN ('r', 'p', 'v', 'm') AND x.grantee <> c.relowner
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend extdep
+    WHERE extdep.classid = 'pg_class'::regclass
+      AND extdep.objid = c.oid
+      AND extdep.refclassid = 'pg_extension'::regclass
+      AND extdep.deptype = 'e'
+  )
 ORDER BY n.nspname, c.relname, x.privilege_type,
          CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END`)
 	if err != nil {
@@ -2232,24 +2241,18 @@ ORDER BY n.nspname, c.relname, x.privilege_type,
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var schema, table string
+		var schema, table, relationKind string
 		object := pgschema.TablePrivilege{}
-		if err := rows.Scan(&schema, &table, &object.Grantee, &object.Grantor, &object.Privilege, &object.Grantable); err != nil {
+		if err := rows.Scan(&schema, &table, &relationKind, &object.Grantee, &object.Grantor, &object.Privilege, &object.Grantable); err != nil {
 			return err
 		}
-		object.Table = (pgschema.Table{Schema: schema, Name: table}).ObjectID()
+		object.Table = relationObjectID(relationKind, schema, table)
 		selector := "table_privilege:" + schema + "." + table + "." + object.Privilege + "." + object.Grantee
 		skip, err := tracker.Skip(selector, snapshot)
 		if err != nil {
 			return err
 		}
 		if skip {
-			continue
-		}
-		if object.Grantor != "@owner" {
-			if err := snapshot.AddUnsupported("table_privilege_grantor:" + object.ObjectID().String() + ":" + object.Grantor); err != nil {
-				return err
-			}
 			continue
 		}
 		if _, exists := snapshot.Object(object.Table); !exists {
@@ -2531,7 +2534,7 @@ WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND r.roln
 UNION ALL
 SELECT 'ownership:relation:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '=' || quote_ident(r.rolname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner
-WHERE c.relkind IN ('S', 'v', 'm', 'f') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+WHERE c.relkind IN ('S', 'f') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND r.rolname <> current_user
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 UNION ALL
@@ -2539,7 +2542,7 @@ SELECT 'ownership:type:' || quote_ident(n.nspname) || '.' || quote_ident(t.typna
 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace JOIN pg_roles r ON r.oid = t.typowner
 WHERE t.typtype IN ('e', 'd', 'c', 'r', 'm') AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND r.rolname <> current_user
-  AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind IN ('r', 'p'))
+  AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind IN ('r', 'p', 'v', 'm'))
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
 UNION ALL
 SELECT 'ownership:routine:' || quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' || pg_get_function_identity_arguments(p.oid) || ')=' || quote_ident(r.rolname)
@@ -2562,7 +2565,7 @@ WHERE n.nspacl IS NOT NULL AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'infor
 UNION ALL
 SELECT 'acl:relation:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relacl IS NOT NULL AND c.relkind IN ('S', 'v', 'm', 'f')
+WHERE c.relacl IS NOT NULL AND c.relkind IN ('S', 'f')
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 UNION ALL

@@ -333,9 +333,10 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 		result.Status, result.Questions = protocol.NeedsInput, questions
 		scopeQuestions(result.Questions, current, desired)
+		result.Guidance = partitionReconfigurationGuidance(changes, current, desired, options)
 		return result, nil
 	}
-	result.Guidance = splitPlanGuidance(changes, choices)
+	result.Guidance = append(splitPlanGuidance(changes, choices), partitionReconfigurationGuidance(changes, current, desired, options)...)
 	// These statements must precede same-phase work that refers to the desired
 	// routine identity. Trigger definitions are reapplied after a confirmed
 	// routine rename, never before the new routine name exists.
@@ -374,7 +375,8 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	deferredIndexCreates := make([]change.Change, 0)
 	deferredPostConstraintStatements := make([]protocol.Statement, 0)
 	consumed := make(map[pgschema.ID]bool)
-	coordinatedForeignKeyChanges := coordinatedForeignKeyChangeIDs(changes, current, desired, options)
+	coordinatedConstraintChanges := coordinatedConstraintChangeIDs(changes, current, desired, options)
+	coordinatedDerivedChanges := coordinatedColumnDerivedChangeIDs(changes, current, desired, choices)
 	var dynamicUnsupported []string
 	scheduledChanges := change.Schedule(current, desired, changes)
 	if options.UnsortedDump {
@@ -388,7 +390,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			if consumed[item.ID] {
 				continue
 			}
-			if coordinatedForeignKeyChanges[item.ID] {
+			if coordinatedConstraintChanges[item.ID] || coordinatedDerivedChanges[item.ID] {
 				continue
 			}
 			if implicitConstraintIndexDrop(item, changes) || propagatedPartitionChildDrop(item, changes) || propagatedPartitionChildModify(item, changes) || propagatedPartitionChildRebuild(item, changes) {
@@ -3987,6 +3989,17 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			}
 			statements = append(statements, statement("COMMENT ON "+kind+" "+qualified(object.Schema, object.Name)+" IS "+literal(*object.Comment)+";", "expand", "safe", true))
 		}
+		if object.Owner != "" {
+			owner, ownerUnsupported := renderRole(object.Owner, object.ObjectID())
+			if ownerUnsupported != "" {
+				return nil, nil, []string{ownerUnsupported}, nil
+			}
+			kind := "VIEW"
+			if object.Materialized {
+				kind = "MATERIALIZED VIEW"
+			}
+			statements = append(statements, authorizationStatement("ALTER "+kind+" "+qualified(object.Schema, object.Name)+" OWNER TO "+owner+";", "expand", "review", "relation_owner_preserved", "authorization_change"))
+		}
 		return statements, nil, nil, nil
 	case pgschema.Routine:
 		sql, unsupported := renderRoutineDefinition(object)
@@ -4056,6 +4069,13 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		sql, unsupported := renderTablePrivilege(object, "GRANT")
 		if unsupported != "" {
 			return nil, nil, []string{unsupported}, nil
+		}
+		if grantor := object.Grantor; grantor != "@owner" {
+			renderedGrantor, grantorUnsupported := renderRole(grantor, object.ObjectID())
+			if grantorUnsupported != "" {
+				return nil, nil, []string{grantorUnsupported}, nil
+			}
+			sql = "SET LOCAL ROLE " + renderedGrantor + ";\n" + sql + "\nRESET ROLE;"
 		}
 		return []protocol.Statement{authorizationStatement(sql, "expand", "review", "privilege_granted", "authorization_change")}, nil, nil, nil
 	default:
@@ -4265,8 +4285,12 @@ func renderViewCreate(view pgschema.View, replace bool) (string, string) {
 	}
 	definition := strings.TrimSuffix(strings.TrimSpace(view.Definition), ";")
 	sql := prefix + " AS " + definition
-	if view.Materialized && !view.Populated {
-		sql += " WITH NO DATA"
+	if view.Materialized {
+		if view.Populated {
+			sql += " WITH DATA"
+		} else {
+			sql += " WITH NO DATA"
+		}
 	}
 	return sql + ";", ""
 }
@@ -4588,7 +4612,7 @@ func renderPrivilege(privilege string, id pgschema.ID) (string, string) {
 }
 
 func renderTablePrivilege(privilege pgschema.TablePrivilege, operation string) (string, string) {
-	if privilege.Table.Kind != pgschema.KindTable || privilege.Table.Schema == "" || privilege.Table.Name == "" || privilege.Grantor != "@owner" {
+	if (privilege.Table.Kind != pgschema.KindTable && privilege.Table.Kind != pgschema.KindView && privilege.Table.Kind != pgschema.KindMatView) || privilege.Table.Schema == "" || privilege.Table.Name == "" || privilege.Grantor == "" {
 		return "", "table_privilege_render:" + privilege.ObjectID().String()
 	}
 	renderedPrivilege, unsupported := renderPrivilege(privilege.Privilege, privilege.ObjectID())
@@ -4853,7 +4877,7 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		return statements, nil, nil, nil
 	case pgschema.Column:
 		next := after.(pgschema.Column)
-		return renderColumnModify(before, next, choices, current, desired)
+		return renderColumnModify(before, next, choices, current, desired, options)
 	case pgschema.Index:
 		next := after.(pgschema.Index)
 		if before.Parent == nil && next.Parent != nil {
@@ -5389,6 +5413,13 @@ func renderContinuousConstraintReplacement(before, after pgschema.Constraint, cu
 	if !oldExists || !newExists || oldIndex.Parent != nil || newIndex.Parent != nil || !oldIndex.Unique || !newIndex.Unique {
 		return nil, nil, []string{"continuous_constraint_backing_index:" + after.ObjectID().String()}, nil
 	}
+	replicaIdentity, identityRelevant, identityUnsupported := coordinatedConstraintReplicaIdentity(oldIndex, newIndex, current, desired)
+	if len(identityUnsupported) > 0 {
+		return nil, nil, identityUnsupported, nil
+	}
+	if identityRelevant {
+		consumed = append(consumed, replicaIdentity.before.ObjectID())
+	}
 	temporaryName, err := replacementIndexName(oldIndex, newIndex)
 	if err != nil {
 		return nil, nil, nil, err
@@ -5408,6 +5439,7 @@ func renderContinuousConstraintReplacement(before, after pgschema.Constraint, cu
 	createSQL = strings.Replace(createSQL, "CREATE INDEX", "CREATE INDEX CONCURRENTLY", 1)
 	createSQL = strings.Replace(createSQL, "CREATE UNIQUE INDEX", "CREATE UNIQUE INDEX CONCURRENTLY", 1)
 	statements := []protocol.Statement{
+		withTimeoutGuidance(statement("DROP INDEX CONCURRENTLY IF EXISTS "+qualified(newIndex.Table.Schema, temporaryName)+";", "expand", "review", false, "continuous_constraint_replacement", "retry_cleanup", "reserved_temporary_identity", "index_drop"), 1200000, 3000),
 		withTimeoutGuidance(statement(strings.TrimSuffix(createSQL, ";")+";", "expand", "review", false, "continuous_constraint_replacement", "index_build", "table_lock_possible"), 1200000, 3000),
 	}
 	if newIndex.Comment != nil {
@@ -5417,6 +5449,10 @@ func renderContinuousConstraintReplacement(before, after pgschema.Constraint, cu
 	addSQL, unsupported := renderConstraintUsingReplacementIndex(after, temporaryName)
 	if unsupported != "" {
 		return nil, nil, []string{unsupported}, nil
+	}
+	contractStart := len(statements)
+	if identityRelevant && replicaIdentity.resetBeforeSwap {
+		statements = append(statements, renderCoordinatedReplicaIdentityDefault(replicaIdentity.before.Table))
 	}
 	for _, foreignKey := range foreignKeys {
 		statements = append(statements, renderCoordinatedForeignKeyDrop(foreignKey.before))
@@ -5428,11 +5464,21 @@ func renderContinuousConstraintReplacement(before, after pgschema.Constraint, cu
 	if after.Comment != nil {
 		statements = append(statements, withTimeoutGuidance(statement("COMMENT ON CONSTRAINT "+quote(after.Name)+" ON "+qualified(after.Table.Schema, after.Table.Name)+" IS "+literal(*after.Comment)+";", "contract", "safe", true, "continuous_constraint_replacement"), 30000, 3000))
 	}
+	if identityRelevant && replicaIdentity.restoreAfterSwap {
+		identitySQL, unsupported := renderReplicaIdentity(replicaIdentity.after)
+		if unsupported != "" {
+			return nil, nil, []string{unsupported}, nil
+		}
+		statements = append(statements, renderCoordinatedReplicaIdentity(identitySQL))
+	}
 	for _, foreignKey := range foreignKeys {
 		if foreignKey.after == nil {
 			continue
 		}
 		statements = append(statements, renderCoordinatedForeignKeyAdd(*foreignKey.after)...)
+	}
+	if contractStart < len(statements) {
+		statements[contractStart].BatchBoundaryBefore = true
 	}
 	return statements, consumed, nil, nil
 }
@@ -5453,6 +5499,38 @@ func backingIndexForConstraint(snapshot *pgschema.Snapshot, constraint pgschema.
 type coordinatedForeignKey struct {
 	before pgschema.Constraint
 	after  *pgschema.Constraint
+}
+
+type coordinatedReplicaIdentity struct {
+	before           pgschema.ReplicaIdentity
+	after            pgschema.ReplicaIdentity
+	resetBeforeSwap  bool
+	restoreAfterSwap bool
+}
+
+func coordinatedConstraintReplicaIdentity(beforeIndex, afterIndex pgschema.Index, current, desired *pgschema.Snapshot) (coordinatedReplicaIdentity, bool, []string) {
+	if current == nil || desired == nil || beforeIndex.Table != afterIndex.Table {
+		return coordinatedReplicaIdentity{}, false, []string{"continuous_constraint_replica_identity_snapshot:" + afterIndex.ObjectID().String()}
+	}
+	identityID := (pgschema.ReplicaIdentity{Table: beforeIndex.Table}).ObjectID()
+	beforeObject, beforeExists := current.Object(identityID)
+	afterObject, afterExists := desired.Object(identityID)
+	before, beforeOK := beforeObject.(pgschema.ReplicaIdentity)
+	after, afterOK := afterObject.(pgschema.ReplicaIdentity)
+	if !beforeExists || !afterExists || !beforeOK || !afterOK || before.Table != beforeIndex.Table || after.Table != afterIndex.Table {
+		return coordinatedReplicaIdentity{}, false, []string{"continuous_constraint_replica_identity:" + identityID.String()}
+	}
+	beforeUsesReplacedIndex := before.Mode == pgschema.ReplicaIdentityIndex && before.Index != nil && *before.Index == beforeIndex.ObjectID()
+	afterUsesReplacementIndex := after.Mode == pgschema.ReplicaIdentityIndex && after.Index != nil && *after.Index == afterIndex.ObjectID()
+	if !beforeUsesReplacedIndex && !afterUsesReplacementIndex {
+		return coordinatedReplicaIdentity{}, false, nil
+	}
+	return coordinatedReplicaIdentity{
+		before:           before,
+		after:            after,
+		resetBeforeSwap:  beforeUsesReplacedIndex,
+		restoreAfterSwap: after.Mode != pgschema.ReplicaIdentityDefault,
+	}, true, nil
 }
 
 func coordinatedConstraintForeignKeys(before, after pgschema.Constraint, current, desired *pgschema.Snapshot) ([]coordinatedForeignKey, []pgschema.ID, []string) {
@@ -5497,7 +5575,7 @@ func coordinatedConstraintForeignKeys(before, after pgschema.Constraint, current
 	return foreignKeys, consumed, unionStrings(unsupported, nil)
 }
 
-func coordinatedForeignKeyChangeIDs(changes []change.Change, current, desired *pgschema.Snapshot, options Options) map[pgschema.ID]bool {
+func coordinatedConstraintChangeIDs(changes []change.Change, current, desired *pgschema.Snapshot, options Options) map[pgschema.ID]bool {
 	result := make(map[pgschema.ID]bool)
 	if !options.ConcurrentIndexes {
 		return result
@@ -5520,8 +5598,26 @@ func coordinatedForeignKeyChangeIDs(changes []change.Change, current, desired *p
 		for _, foreignKey := range foreignKeys {
 			result[foreignKey.before.ObjectID()] = true
 		}
+		oldIndex, oldExists := backingIndexForConstraint(current, before)
+		newIndex, newExists := backingIndexForConstraint(desired, after)
+		if !oldExists || !newExists {
+			continue
+		}
+		replicaIdentity, relevant, identityUnsupported := coordinatedConstraintReplicaIdentity(oldIndex, newIndex, current, desired)
+		if relevant && len(identityUnsupported) == 0 {
+			result[replicaIdentity.before.ObjectID()] = true
+		}
 	}
 	return result
+}
+
+func renderCoordinatedReplicaIdentityDefault(table pgschema.ID) protocol.Statement {
+	sql := "ALTER TABLE " + qualified(table.Schema, table.Name) + " REPLICA IDENTITY DEFAULT;"
+	return renderCoordinatedReplicaIdentity(sql)
+}
+
+func renderCoordinatedReplicaIdentity(sql string) protocol.Statement {
+	return withTimeoutGuidance(statement(sql, "contract", "review", true, "continuous_constraint_replacement", "replica_identity_change", "logical_replication_contract", "brief_constraint_swap", "access_exclusive_lock"), 30000, 3000)
 }
 
 func renderCoordinatedForeignKeyDrop(constraint pgschema.Constraint) protocol.Statement {
@@ -5538,13 +5634,16 @@ func renderCoordinatedForeignKeyAdd(constraint pgschema.Constraint) []protocol.S
 	statements := []protocol.Statement{
 		withTimeoutGuidance(statement(addSQL, "contract", "review", true, "continuous_constraint_replacement", "foreign_key_coordination", "share_row_exclusive_lock"), 30000, 3000),
 	}
+	statements[0].BatchBoundaryBefore = true
 	if constraint.Comment != nil {
 		commentSQL := "COMMENT ON CONSTRAINT " + quote(constraint.Name) + " ON " + qualified(constraint.Table.Schema, constraint.Table.Name) + " IS " + literal(*constraint.Comment) + ";"
 		statements = append(statements, withTimeoutGuidance(statement(commentSQL, "contract", "safe", true, "continuous_constraint_replacement", "foreign_key_coordination"), 30000, 3000))
 	}
 	if constraint.Validated {
 		validateSQL := "ALTER TABLE " + qualified(constraint.Table.Schema, constraint.Table.Name) + " VALIDATE CONSTRAINT " + quote(constraint.Name) + ";"
-		statements = append(statements, withTimeoutGuidance(statement(validateSQL, "contract", "review", true, "continuous_constraint_replacement", "foreign_key_coordination", "table_scan", "share_update_exclusive_lock"), 1200000, 3000))
+		validate := withTimeoutGuidance(statement(validateSQL, "contract", "review", true, "continuous_constraint_replacement", "foreign_key_coordination", "table_scan", "share_update_exclusive_lock"), 1200000, 3000)
+		validate.BatchBoundaryBefore = true
+		statements = append(statements, validate)
 	}
 	return statements
 }
@@ -6651,13 +6750,591 @@ func splitPlanGuidance(changes []change.Change, choices decisions) []protocol.Gu
 	return guidance
 }
 
+// partitionReconfigurationGuidance turns the otherwise operator-authored
+// partition handoff into a bounded, schema-aware runbook. It remains guidance:
+// copying and dual-write semantics are product decisions, and old hierarchy
+// cleanup must be authorized by a later fingerprint-bound plan rather than
+// smuggled into this one.
+func partitionReconfigurationGuidance(changes []change.Change, current, desired *pgschema.Snapshot, options Options) []protocol.Guidance {
+	var guidance []protocol.Guidance
+	for _, item := range changes {
+		if item.Kind != change.Modify || item.ID.Kind != pgschema.KindTable {
+			continue
+		}
+		before, beforeOK := item.Before.(pgschema.Table)
+		after, afterOK := item.After.(pgschema.Table)
+		if !beforeOK || !afterOK || (!partitionReconfiguration(before.PartitionOf, after.PartitionOf) && reflect.DeepEqual(before.Partition, after.Partition)) {
+			continue
+		}
+		if reflect.DeepEqual(before.Partition, after.Partition) {
+			guidance = append(guidance, partitionBoundGuidance(before, after, current, desired))
+			continue
+		}
+		guidance = append(guidance, partitionTopologyShadowGuidance(before, after, current, desired, options))
+	}
+	sort.Slice(guidance, func(i, j int) bool { return guidance[i].Key < guidance[j].Key })
+	return guidance
+}
+
+func partitionBoundGuidance(before, after pgschema.Table, current, desired *pgschema.Snapshot) protocol.Guidance {
+	constraint := partitionTemporaryName("bound", before.ObjectID(), after.ObjectID())
+	oldParent, newParent := "detached", "detached"
+	oldBound, newBound := "unattached", "unattached"
+	if before.PartitionOf != nil {
+		oldParent, oldBound = qualified(before.PartitionOf.Parent.Schema, before.PartitionOf.Parent.Name), before.PartitionOf.Bound
+	}
+	if after.PartitionOf != nil {
+		newParent, newBound = qualified(after.PartitionOf.Parent.Schema, after.PartitionOf.Parent.Name), after.PartitionOf.Bound
+	}
+	table := qualified(after.Schema, after.Name)
+	steps := []protocol.GuidanceStep{
+		{Stage: "topology_inventory", SQL: partitionTreeInventory(current, before.ObjectID(), "current") + "\n" + partitionTreeInventory(desired, after.ObjectID(), "desired")},
+		{Stage: "prevalidate_new_bound", SQL: "-- ONWARDPG TODO: replace <new-bound-predicate> with the exact boolean predicate equivalent to " + newBound + ".\n" +
+			"ALTER TABLE " + table + " ADD CONSTRAINT " + quote(constraint) + " CHECK (<new-bound-predicate>) NOT VALID;\n" +
+			"ALTER TABLE " + table + " VALIDATE CONSTRAINT " + quote(constraint) + ";\n" +
+			"-- A validated matching CHECK lets PostgreSQL avoid scanning this child during ATTACH; prove equivalence during review."},
+		{Stage: "brief_detach_attach_cutover", SQL: "-- Current parent: " + oldParent + "; desired parent: " + newParent + ".\n" +
+			"-- Current bound: " + oldBound + "; desired bound: " + newBound + ".\n" +
+			partitionDetachSQL(before) + "\n" + partitionAttachSQL(after)},
+		{Stage: "post_cutover_assertions", SQL: "DO $onwardpg$ BEGIN IF EXISTS (SELECT 1 FROM " + table + " WHERE NOT (<new-bound-predicate>)) THEN RAISE EXCEPTION 'onwardpg_partition_bound_holds failed'; END IF; END $onwardpg$;\n" +
+			partitionCatalogBoundAssertion(after)},
+		{Stage: "separately_authorized_cleanup", SQL: "ALTER TABLE " + table + " DROP CONSTRAINT " + quote(constraint) + ";\n" +
+			"-- Do not drop or truncate detached/populated relations here. Any destructive cleanup belongs to a later fingerprint-bound onwardpg plan."},
+	}
+	return protocol.Guidance{
+		Kind: "partition_reconfiguration", Key: after.ObjectID().String(),
+		Summary: "Move the partition only after validating its desired bound. The supplied manual contract must preserve rows, account for overlapping/default partitions, and keep the detach/attach lock window brief.",
+		Steps:   steps,
+	}
+}
+
+func partitionTopologyShadowGuidance(before, after pgschema.Table, current, desired *pgschema.Snapshot, options Options) protocol.Guidance {
+	currentTree := partitionTreeTables(current, before.ObjectID())
+	desiredTree := partitionTreeTables(desired, after.ObjectID())
+	shadowNames := partitionTemporaryTableNames("shadow", after.ObjectID(), desiredTree)
+	oldNames := partitionTemporaryTableNames("old", before.ObjectID(), currentTree)
+	temporaryPreflight := partitionTemporaryIdentityPreflight(current, desired, currentTree, desiredTree, oldNames, shadowNames)
+
+	shadowDDL, shadowIntegrity := partitionShadowDDL(desired, desiredTree, shadowNames)
+	shadowIntegrity = partitionKeyCoverageEvidence(desired, desiredTree) + "\n" + shadowIntegrity
+	copyColumns := partitionCopyColumns(desired, after.ObjectID())
+	columns := joinQuoted(copyColumns)
+	copySQL := "-- ONWARDPG TODO: choose batching, throttling, retry, and conflict policy for this data volume.\n"
+	if len(copyColumns) == 0 {
+		copySQL += "-- No insertable columns were proven; supply a reviewed projection for generated/identity/sequence behavior."
+	} else {
+		copySQL += "INSERT INTO " + qualified(after.Schema, shadowNames[after.ObjectID()]) + " (" + columns + ") OVERRIDING SYSTEM VALUE\n" +
+			"SELECT " + columns + " FROM " + qualified(before.Schema, before.Name) + ";"
+	}
+
+	dependencyDrop, dependencyRecreate := partitionTypedDependencyClosure(current, desired, before.ObjectID(), after.ObjectID(), options)
+	cutover := partitionCutoverSQL(current, desired, currentTree, desiredTree, oldNames, shadowNames)
+	if dependencyDrop != "" {
+		cutover = dependencyDrop + "\n" + cutover
+	}
+	if dependencyRecreate != "" {
+		cutover += "\n" + dependencyRecreate
+	}
+
+	rootBefore := qualified(before.Schema, before.Name)
+	rootShadow := qualified(after.Schema, shadowNames[after.ObjectID()])
+	assertions := []string{
+		"DO $onwardpg$ BEGIN\n  IF (SELECT count(*) FROM " + rootBefore + ") <> (SELECT count(*) FROM " + rootShadow + ") THEN\n    RAISE EXCEPTION 'onwardpg_row_count_matches failed';\n  END IF;\n  IF EXISTS ((TABLE " + rootBefore + " EXCEPT ALL TABLE " + rootShadow + ") UNION ALL (TABLE " + rootShadow + " EXCEPT ALL TABLE " + rootBefore + ")) THEN\n    RAISE EXCEPTION 'onwardpg_rows_match failed';\n  END IF;\nEND $onwardpg$;",
+	}
+	for _, table := range desiredTree {
+		if table.PartitionOf != nil {
+			assertions = append(assertions, partitionCatalogBoundAssertionWithName(table, shadowNames[table.ObjectID()]))
+		}
+	}
+
+	cleanup := "-- Requires a separate, current-catalog fingerprint authorization after rollback retention expires:\n-- DROP TABLE " + qualified(before.Schema, oldNames[before.ObjectID()]) + " CASCADE;\n" +
+		"-- Never infer production copy duration, write-catch-up tolerance, or a safe rollback-retention interval from disposable-clone convergence."
+	return protocol.Guidance{
+		Kind: "partition_reconfiguration", Key: after.ObjectID().String(),
+		Summary: "Build the complete desired hierarchy under deterministic shadow identities, synchronize and verify retained data, perform one brief rename cutover, and retain the old populated hierarchy until separately authorized cleanup.",
+		Steps: []protocol.GuidanceStep{
+			{Stage: "topology_inventory", SQL: partitionTreeInventory(current, before.ObjectID(), "current") + "\n" + partitionTreeInventory(desired, after.ObjectID(), "desired")},
+			{Stage: "temporary_identity_preflight", SQL: temporaryPreflight},
+			{Stage: "expand_shadow_hierarchy", SQL: shadowDDL},
+			{Stage: "expand_keys_indexes_and_partition_locals", SQL: shadowIntegrity},
+			{Stage: "expand_write_synchronization", SQL: "-- ONWARDPG TODO: install reviewed dual-write/capture behavior from " + rootBefore + " to " + rootShadow + ".\n-- Define conflict precedence, delete propagation, sequence/identity ownership, trigger ordering, RLS behavior, and retry semantics; onwardpg cannot infer them from DDL."},
+			{Stage: "expand_bulk_copy", SQL: copySQL},
+			{Stage: "contract_catch_up", SQL: "-- ONWARDPG TODO: after pre-deployment writers drain, replay the final captured changes idempotently and disable the synchronization path.\n-- Do not proceed to cutover until the assertions in the next stage all return true."},
+			{Stage: "contract_cutover_assertions", SQL: strings.Join(assertions, "\n")},
+			{Stage: "brief_rename_cutover_and_typed_closure", SQL: cutover},
+			{Stage: "separately_authorized_cleanup", SQL: cleanup},
+		},
+	}
+}
+
+func partitionTemporaryIdentityPreflight(current, desired *pgschema.Snapshot, currentTree, desiredTree []pgschema.Table, oldNames, shadowNames map[pgschema.ID]string) string {
+	type relationName struct{ schema, name string }
+	unique := make(map[relationName]bool)
+	for _, table := range currentTree {
+		unique[relationName{table.Schema, oldNames[table.ObjectID()]}] = true
+	}
+	for _, table := range desiredTree {
+		unique[relationName{table.Schema, shadowNames[table.ObjectID()]}] = true
+	}
+	if len(desiredTree) > 0 {
+		root := desiredTree[0].ObjectID()
+		for _, object := range desired.Objects() {
+			switch object := object.(type) {
+			case pgschema.Constraint:
+				if (object.Type == pgschema.ConstraintPrimary || object.Type == pgschema.ConstraintUnique || object.Type == pgschema.ConstraintExclusion) && shadowNames[object.Table] != "" && object.Parent == nil {
+					unique[relationName{object.Table.Schema, partitionTemporaryName("key", root, object.ObjectID())}] = true
+				}
+			case pgschema.Index:
+				if shadowNames[object.Table] != "" && object.Parent == nil && object.Constraint == "" {
+					unique[relationName{object.Table.Schema, partitionTemporaryName("idx", root, object.ObjectID())}] = true
+				}
+			}
+		}
+	}
+	if len(currentTree) > 0 {
+		root := currentTree[0].ObjectID()
+		for _, object := range current.Objects() {
+			switch object := object.(type) {
+			case pgschema.Constraint:
+				if (object.Type == pgschema.ConstraintPrimary || object.Type == pgschema.ConstraintUnique || object.Type == pgschema.ConstraintExclusion) && oldNames[object.Table] != "" && object.Parent == nil {
+					unique[relationName{object.Table.Schema, partitionTemporaryName("oldkey", root, object.ObjectID())}] = true
+				}
+			case pgschema.Index:
+				if oldNames[object.Table] != "" && object.Parent == nil && object.Constraint == "" {
+					unique[relationName{object.Table.Schema, partitionTemporaryName("oldidx", root, object.ObjectID())}] = true
+				}
+			}
+		}
+	}
+	names := make([]relationName, 0, len(unique))
+	for name := range unique {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if names[i].schema != names[j].schema {
+			return names[i].schema < names[j].schema
+		}
+		return names[i].name < names[j].name
+	})
+	var lines []string
+	for _, name := range names {
+		qualifiedName := qualified(name.schema, name.name)
+		lines = append(lines, "DO $onwardpg$ BEGIN IF to_regclass("+literal(qualifiedName)+") IS NOT NULL THEN RAISE EXCEPTION 'reserved partition handoff identity already exists: "+strings.ReplaceAll(qualifiedName, "'", "''")+"'; END IF; END $onwardpg$;")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func partitionTreeTables(snapshot *pgschema.Snapshot, root pgschema.ID) []pgschema.Table {
+	if snapshot == nil {
+		return nil
+	}
+	reached := map[pgschema.ID]int{root: 0}
+	changed := true
+	for changed {
+		changed = false
+		for _, object := range snapshot.Objects() {
+			table, ok := object.(pgschema.Table)
+			if !ok || table.PartitionOf == nil {
+				continue
+			}
+			parentDepth, parentReached := reached[table.PartitionOf.Parent]
+			if !parentReached {
+				continue
+			}
+			if _, exists := reached[table.ObjectID()]; !exists {
+				reached[table.ObjectID()] = parentDepth + 1
+				changed = true
+			}
+		}
+	}
+	result := make([]pgschema.Table, 0, len(reached))
+	for id := range reached {
+		if object, exists := snapshot.Object(id); exists {
+			if table, ok := object.(pgschema.Table); ok {
+				result = append(result, table)
+			}
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, right := reached[result[i].ObjectID()], reached[result[j].ObjectID()]
+		if left != right {
+			return left < right
+		}
+		return result[i].ObjectID().String() < result[j].ObjectID().String()
+	})
+	return result
+}
+
+func partitionTreeInventory(snapshot *pgschema.Snapshot, root pgschema.ID, label string) string {
+	tables := partitionTreeTables(snapshot, root)
+	lines := []string{"-- " + label + " partition tree:"}
+	if len(tables) == 0 {
+		return strings.Join(append(lines, "--   "+root.String()+" (not present)"), "\n")
+	}
+	for _, table := range tables {
+		detail := "ordinary"
+		if table.Partition != nil {
+			detail = "PARTITION BY " + table.Partition.Raw
+		}
+		if table.PartitionOf != nil {
+			detail += "; PARTITION OF " + table.PartitionOf.Parent.String() + " " + table.PartitionOf.Bound
+		}
+		lines = append(lines, "--   "+table.ObjectID().String()+" — "+detail)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func partitionTemporaryTableNames(kind string, transition pgschema.ID, tables []pgschema.Table) map[pgschema.ID]string {
+	names := make(map[pgschema.ID]string, len(tables))
+	for _, table := range tables {
+		names[table.ObjectID()] = partitionTemporaryName(kind, transition, table.ObjectID())
+	}
+	return names
+}
+
+func partitionTemporaryName(kind string, transition, object pgschema.ID) string {
+	digest := sha256.Sum256([]byte("partition\x00" + kind + "\x00" + transition.String() + "\x00" + object.String()))
+	return "onwardpg_" + kind + "_" + hex.EncodeToString(digest[:8])
+}
+
+func partitionShadowDDL(snapshot *pgschema.Snapshot, tables []pgschema.Table, names map[pgschema.ID]string) (string, string) {
+	var create, integrity []string
+	createdTables := make(map[pgschema.ID]bool, len(tables))
+	for _, table := range tables {
+		createdTables[table.ObjectID()] = true
+		name := qualified(table.Schema, names[table.ObjectID()])
+		prefix := "CREATE TABLE "
+		if table.Unlogged {
+			prefix = "CREATE UNLOGGED TABLE "
+		}
+		if table.PartitionOf == nil {
+			columns := tableColumns(snapshot, table.ObjectID())
+			definitions := make([]string, 0, len(columns))
+			for _, column := range columns {
+				definitions = append(definitions, renderColumn(column))
+			}
+			sql := prefix + name + " (" + strings.Join(definitions, ", ") + ")"
+			if table.Partition != nil {
+				sql += " PARTITION BY " + table.Partition.Raw
+			}
+			create = append(create, sql+";")
+		} else {
+			parentName := names[table.PartitionOf.Parent]
+			sql := prefix + name + " PARTITION OF " + qualified(table.PartitionOf.Parent.Schema, parentName) + " " + table.PartitionOf.Bound
+			if table.Partition != nil {
+				sql += " PARTITION BY " + table.Partition.Raw
+			}
+			create = append(create, sql+";")
+		}
+		if table.Owner != "" {
+			create = append(create, "ALTER TABLE "+name+" OWNER TO "+quote(table.Owner)+";")
+		}
+		if table.Comment != nil {
+			create = append(create, "COMMENT ON TABLE "+name+" IS "+literal(*table.Comment)+";")
+		}
+		for _, column := range tableColumns(snapshot, table.ObjectID()) {
+			if column.Comment != nil {
+				create = append(create, "COMMENT ON COLUMN "+name+"."+quote(column.Name)+" IS "+literal(*column.Comment)+";")
+			}
+		}
+	}
+
+	tree := make(map[pgschema.ID]bool, len(tables))
+	for _, table := range tables {
+		tree[table.ObjectID()] = true
+	}
+	for _, object := range snapshot.Objects() {
+		switch object := object.(type) {
+		case pgschema.Constraint:
+			if !tree[object.Table] || object.Parent != nil || object.Type == pgschema.ConstraintForeign {
+				continue
+			}
+			name := object.Name
+			if object.Type == pgschema.ConstraintPrimary || object.Type == pgschema.ConstraintUnique || object.Type == pgschema.ConstraintExclusion {
+				name = partitionTemporaryName("key", tables[0].ObjectID(), object.ObjectID())
+			}
+			integrity = append(integrity, "ALTER TABLE "+qualified(object.Table.Schema, names[object.Table])+" ADD CONSTRAINT "+quote(name)+" "+object.Definition+";")
+			if object.Comment != nil {
+				integrity = append(integrity, "COMMENT ON CONSTRAINT "+quote(name)+" ON "+qualified(object.Table.Schema, names[object.Table])+" IS "+literal(*object.Comment)+";")
+			}
+		case pgschema.Index:
+			if !tree[object.Table] || object.Parent != nil || object.Constraint != "" {
+				continue
+			}
+			shadow := object
+			shadow.Table.Name = names[object.Table]
+			shadow.Name = partitionTemporaryName("idx", tables[0].ObjectID(), object.ObjectID())
+			sql, unsupported := renderIndex(shadow)
+			if unsupported != "" {
+				integrity = append(integrity, "-- ONWARDPG TODO: render "+object.ObjectID().String()+" after resolving "+unsupported+".")
+			} else {
+				integrity = append(integrity, strings.TrimSuffix(sql, ";")+";")
+				if object.Comment != nil {
+					integrity = append(integrity, "COMMENT ON INDEX "+qualified(object.Table.Schema, shadow.Name)+" IS "+literal(*object.Comment)+";")
+				}
+			}
+		}
+	}
+	if len(integrity) == 0 {
+		integrity = append(integrity, "-- No desired primary/unique/check/exclusion constraints or standalone indexes were present in this hierarchy.")
+	}
+	return strings.Join(create, "\n"), strings.Join(integrity, "\n")
+}
+
+func partitionKeyCoverageEvidence(snapshot *pgschema.Snapshot, tables []pgschema.Table) string {
+	var lines []string
+	for _, table := range tables {
+		if table.Partition == nil {
+			continue
+		}
+		var required []string
+		provable := len(table.Partition.Parts) > 0
+		for _, part := range table.Partition.Parts {
+			if part.Column == "" || part.Expression != "" {
+				provable = false
+				continue
+			}
+			required = append(required, part.Column)
+		}
+		if len(required) == 0 {
+			if parsed, ok := constraintKeyColumns(table.Partition.Raw); ok {
+				required, provable = parsed, true
+			}
+		}
+		for _, object := range snapshot.Objects() {
+			constraint, ok := object.(pgschema.Constraint)
+			if !ok || constraint.Table != table.ObjectID() || constraint.Parent != nil || (constraint.Type != pgschema.ConstraintPrimary && constraint.Type != pgschema.ConstraintUnique) {
+				continue
+			}
+			columns, parsed := constraintKeyColumns(constraint.Definition)
+			covered := provable && parsed
+			for _, partitionColumn := range required {
+				if !stringIn(columns, partitionColumn) {
+					covered = false
+				}
+			}
+			if covered {
+				lines = append(lines, "-- PROVED: "+constraint.ObjectID().String()+" includes partition columns ("+strings.Join(required, ", ")+").")
+			} else {
+				lines = append(lines, "-- BLOCKED: cannot prove "+constraint.ObjectID().String()+" covers every partition column; do not cut over until the desired key is corrected and re-introspected.")
+			}
+		}
+	}
+	if len(lines) == 0 {
+		return "-- No primary or unique key required partition-column coverage proof."
+	}
+	return strings.Join(lines, "\n")
+}
+
+func partitionCopyColumns(snapshot *pgschema.Snapshot, table pgschema.ID) []string {
+	var result []string
+	for _, column := range tableColumns(snapshot, table) {
+		if column.Generated == nil {
+			result = append(result, column.Name)
+		}
+	}
+	return result
+}
+
+func joinQuoted(values []string) string {
+	quoted := make([]string, len(values))
+	for index, value := range values {
+		quoted[index] = quote(value)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func partitionDetachSQL(table pgschema.Table) string {
+	if table.PartitionOf == nil {
+		return "-- Current table is not attached; no DETACH statement is required."
+	}
+	return "ALTER TABLE " + qualified(table.PartitionOf.Parent.Schema, table.PartitionOf.Parent.Name) + " DETACH PARTITION " + qualified(table.Schema, table.Name) + ";"
+}
+
+func partitionAttachSQL(table pgschema.Table) string {
+	if table.PartitionOf == nil {
+		return "-- Desired table is not attached; retain it as an ordinary table after DETACH."
+	}
+	return "ALTER TABLE " + qualified(table.PartitionOf.Parent.Schema, table.PartitionOf.Parent.Name) + " ATTACH PARTITION " + qualified(table.Schema, table.Name) + " " + table.PartitionOf.Bound + ";"
+}
+
+func partitionCatalogBoundAssertion(table pgschema.Table) string {
+	return partitionCatalogBoundAssertionWithName(table, table.Name)
+}
+
+func partitionCatalogBoundAssertionWithName(table pgschema.Table, relationName string) string {
+	if table.PartitionOf == nil {
+		return "-- Desired relation is unattached; no catalog partition bound is expected."
+	}
+	return "DO $onwardpg$ DECLARE actual_bound text; BEGIN SELECT pg_get_expr(c.relpartbound, c.oid) INTO actual_bound FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = " + literal(table.Schema) + " AND c.relname = " + literal(relationName) + "; IF actual_bound IS DISTINCT FROM " + literal(table.PartitionOf.Bound) + " THEN RAISE EXCEPTION 'onwardpg_catalog_bound_matches failed for %.%', " + literal(table.Schema) + ", " + literal(relationName) + "; END IF; END $onwardpg$;"
+}
+
+func partitionCutoverSQL(current, desired *pgschema.Snapshot, currentTree, desiredTree []pgschema.Table, oldNames, shadowNames map[pgschema.ID]string) string {
+	var sql []string
+	currentSet, desiredSet := make(map[pgschema.ID]bool), make(map[pgschema.ID]bool)
+	for _, table := range currentTree {
+		currentSet[table.ObjectID()] = true
+	}
+	for _, table := range desiredTree {
+		desiredSet[table.ObjectID()] = true
+	}
+	// Foreign keys retain relation OIDs across a rename. Drop every FK touching
+	// the old hierarchy before swapping identities, then recreate the desired
+	// definitions only after the shadow hierarchy owns the public names.
+	for _, object := range current.Objects() {
+		constraint, ok := object.(pgschema.Constraint)
+		if !ok || constraint.Type != pgschema.ConstraintForeign || (!currentSet[constraint.Table] && (constraint.Reference == nil || !currentSet[*constraint.Reference])) {
+			continue
+		}
+		sql = append(sql, "ALTER TABLE "+qualified(constraint.Table.Schema, constraint.Table.Name)+" DROP CONSTRAINT "+quote(constraint.Name)+";")
+	}
+	for _, object := range current.Objects() {
+		switch object := object.(type) {
+		case pgschema.Constraint:
+			if currentSet[object.Table] && object.Parent == nil && (object.Type == pgschema.ConstraintPrimary || object.Type == pgschema.ConstraintUnique || object.Type == pgschema.ConstraintExclusion) {
+				sql = append(sql, "ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" RENAME CONSTRAINT "+quote(object.Name)+" TO "+quote(partitionTemporaryName("oldkey", currentTree[0].ObjectID(), object.ObjectID()))+";")
+			}
+		case pgschema.Index:
+			if currentSet[object.Table] && object.Parent == nil && object.Constraint == "" {
+				sql = append(sql, "ALTER INDEX "+qualified(object.Table.Schema, object.Name)+" RENAME TO "+quote(partitionTemporaryName("oldidx", currentTree[0].ObjectID(), object.ObjectID()))+";")
+			}
+		}
+	}
+	for index := len(currentTree) - 1; index >= 0; index-- {
+		table := currentTree[index]
+		sql = append(sql, "ALTER TABLE "+qualified(table.Schema, table.Name)+" RENAME TO "+quote(oldNames[table.ObjectID()])+";")
+	}
+	for _, table := range desiredTree {
+		sql = append(sql, "ALTER TABLE "+qualified(table.Schema, shadowNames[table.ObjectID()])+" RENAME TO "+quote(table.Name)+";")
+	}
+	for _, object := range desired.Objects() {
+		switch object := object.(type) {
+		case pgschema.Constraint:
+			if desiredSet[object.Table] && object.Parent == nil && (object.Type == pgschema.ConstraintPrimary || object.Type == pgschema.ConstraintUnique || object.Type == pgschema.ConstraintExclusion) {
+				temporary := partitionTemporaryName("key", desiredTree[0].ObjectID(), object.ObjectID())
+				sql = append(sql, "ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" RENAME CONSTRAINT "+quote(temporary)+" TO "+quote(object.Name)+";")
+			}
+		case pgschema.Index:
+			if desiredSet[object.Table] && object.Parent == nil && object.Constraint == "" {
+				temporary := partitionTemporaryName("idx", desiredTree[0].ObjectID(), object.ObjectID())
+				sql = append(sql, "ALTER INDEX "+qualified(object.Table.Schema, temporary)+" RENAME TO "+quote(object.Name)+";")
+			}
+		}
+	}
+	createdTables := make(map[pgschema.ID]bool, len(desiredTree))
+	for _, table := range desiredTree {
+		createdTables[table.ObjectID()] = true
+	}
+	for _, object := range desired.Objects() {
+		include := false
+		switch object := object.(type) {
+		case pgschema.Constraint:
+			include = object.Type == pgschema.ConstraintForeign && (desiredSet[object.Table] || object.Reference != nil && desiredSet[*object.Reference])
+		case pgschema.Trigger:
+			include = desiredSet[object.Table]
+		case pgschema.Policy:
+			include = desiredSet[object.Table]
+		case pgschema.RowSecurity:
+			include = desiredSet[object.Table]
+		case pgschema.ReplicaIdentity:
+			include = desiredSet[object.Table]
+		case pgschema.TablePrivilege:
+			include = desiredSet[object.Table]
+		}
+		if !include {
+			continue
+		}
+		statements, _, unsupported, err := renderCreate(object, desired, createdTables, Options{})
+		if err != nil || len(unsupported) > 0 {
+			sql = append(sql, "-- ONWARDPG TODO: recreate "+object.ObjectID().String()+" from its typed desired definition after cutover.")
+			continue
+		}
+		for _, statement := range statements {
+			sql = append(sql, statement.SQL)
+		}
+		if constraint, ok := object.(pgschema.Constraint); ok && constraint.Comment != nil {
+			sql = append(sql, "COMMENT ON CONSTRAINT "+quote(constraint.Name)+" ON "+qualified(constraint.Table.Schema, constraint.Table.Name)+" IS "+literal(*constraint.Comment)+";")
+		}
+	}
+	for _, object := range desired.Objects() {
+		sequence, ok := object.(pgschema.Sequence)
+		if !ok || sequence.OwnedBy == nil {
+			continue
+		}
+		column := *sequence.OwnedBy
+		tableID := (pgschema.Table{Schema: column.Schema, Name: column.Name}).ObjectID()
+		if !desiredSet[tableID] {
+			continue
+		}
+		sql = append(sql, "ALTER SEQUENCE "+qualified(sequence.Schema, sequence.Name)+" OWNED BY "+qualified(column.Schema, column.Name)+"."+quote(column.Part)+";")
+	}
+	return strings.Join(sql, "\n")
+}
+
+func partitionTypedDependencyClosure(current, desired *pgschema.Snapshot, currentRoot, desiredRoot pgschema.ID, options Options) (string, string) {
+	currentViews := dependentViewsForRoot(current, currentRoot)
+	desiredViews := dependentViewsForRoot(desired, desiredRoot)
+	for id := range currentViews {
+		if object, exists := desired.Object(id); exists {
+			if _, ok := object.(pgschema.View); ok {
+				desiredViews[id] = true
+			}
+		}
+	}
+	desiredViews = dependentViewsForViewSeeds(desired, desiredViews)
+	currentOrder, currentUnsupported := orderedTypedDerivedViews(current, currentViews, currentRoot)
+	desiredOrder, desiredUnsupported := orderedTypedDerivedViews(desired, desiredViews, desiredRoot)
+	if len(currentUnsupported) > 0 || len(desiredUnsupported) > 0 {
+		return "-- ONWARDPG TODO: typed dependent-view closure could not be ordered: " + strings.Join(unionStrings(currentUnsupported, desiredUnsupported), ", ") + ".", ""
+	}
+	var drops, recreates []string
+	for index := len(currentOrder) - 1; index >= 0; index-- {
+		for _, statement := range renderDrop(currentOrder[index].view) {
+			drops = append(drops, statement.SQL)
+		}
+	}
+	for _, node := range desiredOrder {
+		statements, _, unsupported, err := renderCreate(node.view, desired, nil, options)
+		if err != nil || len(unsupported) > 0 {
+			recreates = append(recreates, "-- ONWARDPG TODO: recreate "+node.view.ObjectID().String()+" from its typed desired definition.")
+			continue
+		}
+		for _, statement := range statements {
+			recreates = append(recreates, statement.SQL)
+		}
+		for _, object := range desired.Objects() {
+			associated := false
+			switch object := object.(type) {
+			case pgschema.Index:
+				associated = object.Table == node.view.ObjectID()
+			case pgschema.Trigger:
+				associated = object.Table == node.view.ObjectID()
+			case pgschema.TablePrivilege:
+				associated = object.Table == node.view.ObjectID()
+			}
+			if !associated {
+				continue
+			}
+			created, _, _, err := renderCreate(object, desired, nil, options)
+			if err == nil {
+				for _, statement := range created {
+					recreates = append(recreates, statement.SQL)
+				}
+			}
+		}
+	}
+	return strings.Join(drops, "\n"), strings.Join(recreates, "\n")
+}
+
 func splitPlanShadowColumnName(before, after pgschema.Column) string {
 	digest := sha256.Sum256([]byte(before.ObjectID().String() + "\x00" + before.Type + "\x00" + after.Type))
 	return "onwardpg_next_" + hex.EncodeToString(digest[:6])
 }
 
-func renderColumnModify(before, after pgschema.Column, choices decisions, current, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
+func renderColumnModify(before, after pgschema.Column, choices decisions, current, desired *pgschema.Snapshot, options Options) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	var statements []protocol.Statement
+	var deferredDerivedRecreate []protocol.Statement
+	var consumed []pgschema.ID
 	table := qualified(after.Table.Schema, after.Table.Name)
 	column := quote(after.Name)
 	if before.Collation != after.Collation {
@@ -6761,10 +7438,22 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 			return nil, nil, nil, fmt.Errorf("missing type-change decision for %s", after.ObjectID())
 		}
 		if using == "manual_sql" {
+			derivedDrops, derivedRecreate, derivedConsumed, derivedUnsupported, err := renderColumnDerivedViewClosure(before, after, current, desired, options)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if len(derivedUnsupported) > 0 {
+				return nil, nil, derivedUnsupported, nil
+			}
+			deferredDerivedRecreate = derivedRecreate
+			consumed = append(consumed, derivedConsumed...)
 			dependentViews := dependentViewAndIndexIDs(current, desired, after.ObjectID())
 			dependencyGuidance := ""
 			if len(dependentViews) > 0 {
 				dependencyGuidance = "\n-- Dependent view/materialized-view/index objects in scope: " + strings.Join(dependentViews, ", ") + ". Preserve or recreate this exact dependency closure in the reviewed bridge SQL."
+				if opaqueRoutines := boundedRoutineReviewIDs(current, desired, 25); len(opaqueRoutines) > 0 {
+					dependencyGuidance += "\n-- Opaque routine bodies are outside PostgreSQL catalog dependency proof; review these bounded candidates separately: " + strings.Join(opaqueRoutines, ", ") + "."
+				}
 			}
 			statements = append(statements,
 				statement(
@@ -6774,6 +7463,7 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 					protocol.PhaseExpand, "manual", true, "manual_sql", "single_deployment_bridge_required", "product_semantics_required",
 				),
 			)
+			statements = append(statements, derivedDrops...)
 			if before.Default != nil {
 				statements = append(statements, statement(
 					"ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP DEFAULT;",
@@ -6840,7 +7530,8 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 		}
 	}
 	statements = append(statements, commentModification("COLUMN", table+"."+column, before.Comment, after.Comment)...)
-	return statements, nil, nil, nil
+	statements = append(statements, deferredDerivedRecreate...)
+	return statements, consumed, nil, nil
 }
 
 func renderSetNotNull(after pgschema.Column, choices decisions, current, desired *pgschema.Snapshot) ([]protocol.Statement, error) {
@@ -6909,6 +7600,331 @@ func preservedValidatedNotNullCheck(current, desired *pgschema.Snapshot, column 
 		return before.Name, true
 	}
 	return "", false
+}
+
+type typedDerivedView struct {
+	view  pgschema.View
+	depth int
+}
+
+type columnDerivedViewClosure struct {
+	current     []typedDerivedView
+	desired     []typedDerivedView
+	objectIDs   map[pgschema.ID]bool
+	unsupported []string
+}
+
+func coordinatedColumnDerivedChangeIDs(changes []change.Change, current, desired *pgschema.Snapshot, choices decisions) map[pgschema.ID]bool {
+	result := make(map[pgschema.ID]bool)
+	for _, item := range changes {
+		if item.Kind != change.Modify || item.ID.Kind != pgschema.KindColumn || choices.typeUsing[item.ID] != "manual_sql" {
+			continue
+		}
+		before, beforeOK := item.Before.(pgschema.Column)
+		after, afterOK := item.After.(pgschema.Column)
+		if !beforeOK || !afterOK || before.Type == after.Type {
+			continue
+		}
+		closure := buildColumnDerivedViewClosure(before, after, current, desired)
+		if len(closure.unsupported) > 0 {
+			continue
+		}
+		for _, candidate := range changes {
+			if closure.objectIDs[candidate.ID] {
+				result[candidate.ID] = true
+			}
+		}
+	}
+	return result
+}
+
+func renderColumnDerivedViewClosure(before, after pgschema.Column, current, desired *pgschema.Snapshot, options Options) ([]protocol.Statement, []protocol.Statement, []pgschema.ID, []string, error) {
+	closure := buildColumnDerivedViewClosure(before, after, current, desired)
+	if len(closure.unsupported) > 0 {
+		return nil, nil, nil, closure.unsupported, nil
+	}
+	var drops []protocol.Statement
+	for index := len(closure.current) - 1; index >= 0; index-- {
+		view := closure.current[index].view
+		hazards := []string{"derived_object_rebuild", "blocking_lock"}
+		if view.Materialized {
+			hazards = append(hazards, "materialized_view_rebuild", "stored_data_recomputed")
+		}
+		drops = append(drops, withPhase(renderDrop(view), protocol.PhaseContract, "review", hazards...)...)
+	}
+	var recreates []protocol.Statement
+	for _, node := range closure.desired {
+		view := node.view
+		created, _, unsupported, err := renderCreate(view, desired, nil, options)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		if len(unsupported) > 0 {
+			return nil, nil, nil, unsupported, nil
+		}
+		hazards := []string{"derived_object_rebuild", "blocking_lock"}
+		if view.Materialized {
+			hazards = append(hazards, "materialized_view_rebuild", "stored_data_recomputed")
+		}
+		recreates = append(recreates, withPhase(created, protocol.PhaseContract, "review", hazards...)...)
+		for _, relationIndex := range indexesForRelation(desired, view.ObjectID()) {
+			indexStatements, _, indexUnsupported, err := renderCreate(relationIndex, desired, nil, options)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			if len(indexUnsupported) > 0 {
+				return nil, nil, nil, indexUnsupported, nil
+			}
+			recreates = append(recreates, withPhase(indexStatements, protocol.PhaseContract, "review", "derived_object_rebuild", "materialized_view_index_rebuild", "index_build")...)
+		}
+		for _, trigger := range triggersForRelation(desired, view.ObjectID()) {
+			triggerStatements, _, triggerUnsupported, err := renderCreate(trigger, desired, nil, options)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			if len(triggerUnsupported) > 0 {
+				return nil, nil, nil, triggerUnsupported, nil
+			}
+			recreates = append(recreates, withPhase(triggerStatements, protocol.PhaseContract, "review", "derived_object_rebuild", "typed_trigger_dependency")...)
+		}
+		for _, privilege := range privilegesForRelation(desired, view.ObjectID()) {
+			privilegeStatements, _, privilegeUnsupported, err := renderCreate(privilege, desired, nil, options)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			if len(privilegeUnsupported) > 0 {
+				return nil, nil, nil, privilegeUnsupported, nil
+			}
+			recreates = append(recreates, withPhase(privilegeStatements, protocol.PhaseContract, "review", "derived_object_rebuild", "relation_privilege_preserved")...)
+		}
+	}
+	consumed := make([]pgschema.ID, 0, len(closure.objectIDs))
+	for id := range closure.objectIDs {
+		consumed = append(consumed, id)
+	}
+	sort.Slice(consumed, func(i, j int) bool { return consumed[i].String() < consumed[j].String() })
+	return drops, recreates, consumed, nil, nil
+}
+
+func buildColumnDerivedViewClosure(before, after pgschema.Column, current, desired *pgschema.Snapshot) columnDerivedViewClosure {
+	closure := columnDerivedViewClosure{objectIDs: make(map[pgschema.ID]bool)}
+	if current == nil || desired == nil || before.Table != after.Table || before.ObjectID() != after.ObjectID() {
+		closure.unsupported = []string{"derived_view_closure_snapshot:" + after.ObjectID().String()}
+		return closure
+	}
+	currentViews := dependentViewsForRoot(current, before.ObjectID())
+	desiredViews := dependentViewsForRoot(desired, after.ObjectID())
+	desiredSeeds := make(map[pgschema.ID]bool)
+	for id := range desiredViews {
+		desiredSeeds[id] = true
+	}
+	for id := range currentViews {
+		if object, exists := desired.Object(id); exists {
+			if _, ok := object.(pgschema.View); ok {
+				desiredSeeds[id] = true
+			}
+		}
+	}
+	desiredViews = dependentViewsForViewSeeds(desired, desiredSeeds)
+	closure.current, closure.unsupported = orderedTypedDerivedViews(current, currentViews, after.ObjectID())
+	if len(closure.unsupported) > 0 {
+		return closure
+	}
+	closure.desired, closure.unsupported = orderedTypedDerivedViews(desired, desiredViews, after.ObjectID())
+	if len(closure.unsupported) > 0 {
+		return closure
+	}
+	for id := range currentViews {
+		closure.objectIDs[id] = true
+		for _, associated := range derivedRelationSecondaryObjectIDs(current, id) {
+			closure.objectIDs[associated] = true
+		}
+		for _, dependentID := range current.IDs() {
+			if dependentID == id || !containsID(current.Dependencies(dependentID), id) || currentViews[dependentID] {
+				continue
+			}
+			object, _ := current.Object(dependentID)
+			supported := false
+			switch object := object.(type) {
+			case pgschema.Index:
+				supported = object.Table == id
+			case pgschema.Trigger:
+				supported = object.Table == id
+			case pgschema.TablePrivilege:
+				supported = object.Table == id
+			}
+			if !supported {
+				closure.unsupported = append(closure.unsupported, "derived_view_external_dependent:"+dependentID.String())
+			}
+		}
+	}
+	for id := range desiredViews {
+		closure.objectIDs[id] = true
+		for _, associated := range derivedRelationSecondaryObjectIDs(desired, id) {
+			closure.objectIDs[associated] = true
+		}
+	}
+	closure.unsupported = unionStrings(closure.unsupported, nil)
+	return closure
+}
+
+func dependentViewsForRoot(snapshot *pgschema.Snapshot, root pgschema.ID) map[pgschema.ID]bool {
+	reached := map[pgschema.ID]bool{root: true}
+	if root.Kind == pgschema.KindColumn {
+		reached[(pgschema.Table{Schema: root.Schema, Name: root.Name}).ObjectID()] = true
+	} else if root.Kind == pgschema.KindTable {
+		for _, object := range snapshot.Objects() {
+			if column, ok := object.(pgschema.Column); ok && column.Table == root {
+				reached[column.ObjectID()] = true
+			}
+		}
+	}
+	views := make(map[pgschema.ID]bool)
+	changed := true
+	for changed {
+		changed = false
+		for _, object := range snapshot.Objects() {
+			view, ok := object.(pgschema.View)
+			if !ok || views[view.ObjectID()] {
+				continue
+			}
+			for _, dependency := range snapshot.Dependencies(view.ObjectID()) {
+				if reached[dependency] {
+					views[view.ObjectID()] = true
+					reached[view.ObjectID()] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return views
+}
+
+func dependentViewsForViewSeeds(snapshot *pgschema.Snapshot, seeds map[pgschema.ID]bool) map[pgschema.ID]bool {
+	views := make(map[pgschema.ID]bool, len(seeds))
+	for id := range seeds {
+		views[id] = true
+	}
+	changed := true
+	for changed {
+		changed = false
+		for _, object := range snapshot.Objects() {
+			view, ok := object.(pgschema.View)
+			if !ok || views[view.ObjectID()] {
+				continue
+			}
+			for _, dependency := range snapshot.Dependencies(view.ObjectID()) {
+				if views[dependency] {
+					views[view.ObjectID()] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return views
+}
+
+func orderedTypedDerivedViews(snapshot *pgschema.Snapshot, included map[pgschema.ID]bool, root pgschema.ID) ([]typedDerivedView, []string) {
+	depths := make(map[pgschema.ID]int, len(included))
+	remaining := make(map[pgschema.ID]bool, len(included))
+	for id := range included {
+		remaining[id] = true
+	}
+	for len(remaining) > 0 {
+		progress := false
+		for id := range remaining {
+			object, exists := snapshot.Object(id)
+			view, ok := object.(pgschema.View)
+			if !exists || !ok {
+				return nil, []string{"derived_view_closure_object:" + id.String()}
+			}
+			depth := 1
+			ready := true
+			for _, dependency := range snapshot.Dependencies(id) {
+				if !included[dependency] {
+					continue
+				}
+				dependencyDepth, resolved := depths[dependency]
+				if !resolved {
+					ready = false
+					break
+				}
+				if dependencyDepth+1 > depth {
+					depth = dependencyDepth + 1
+				}
+			}
+			if !ready {
+				continue
+			}
+			depths[id] = depth
+			delete(remaining, id)
+			progress = true
+			_ = view
+		}
+		if !progress {
+			return nil, []string{"derived_view_dependency_cycle:" + root.String()}
+		}
+	}
+	result := make([]typedDerivedView, 0, len(included))
+	for id, depth := range depths {
+		object, _ := snapshot.Object(id)
+		result = append(result, typedDerivedView{view: object.(pgschema.View), depth: depth})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].depth != result[j].depth {
+			return result[i].depth < result[j].depth
+		}
+		return result[i].view.ObjectID().String() < result[j].view.ObjectID().String()
+	})
+	return result, nil
+}
+
+func derivedRelationSecondaryObjectIDs(snapshot *pgschema.Snapshot, relation pgschema.ID) []pgschema.ID {
+	var ids []pgschema.ID
+	for _, object := range snapshot.Objects() {
+		switch object := object.(type) {
+		case pgschema.Index:
+			if object.Table == relation {
+				ids = append(ids, object.ObjectID())
+			}
+		case pgschema.Trigger:
+			if object.Table == relation {
+				ids = append(ids, object.ObjectID())
+			}
+		case pgschema.TablePrivilege:
+			if object.Table == relation {
+				ids = append(ids, object.ObjectID())
+			}
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	return ids
+}
+
+func triggersForRelation(snapshot *pgschema.Snapshot, relation pgschema.ID) []pgschema.Trigger {
+	var triggers []pgschema.Trigger
+	for _, object := range snapshot.Objects() {
+		trigger, ok := object.(pgschema.Trigger)
+		if ok && trigger.Table == relation {
+			triggers = append(triggers, trigger)
+		}
+	}
+	sort.Slice(triggers, func(i, j int) bool { return triggers[i].ObjectID().String() < triggers[j].ObjectID().String() })
+	return triggers
+}
+
+func privilegesForRelation(snapshot *pgschema.Snapshot, relation pgschema.ID) []pgschema.TablePrivilege {
+	var privileges []pgschema.TablePrivilege
+	for _, object := range snapshot.Objects() {
+		privilege, ok := object.(pgschema.TablePrivilege)
+		if ok && privilege.Table == relation {
+			privileges = append(privileges, privilege)
+		}
+	}
+	sort.Slice(privileges, func(i, j int) bool { return privileges[i].ObjectID().String() < privileges[j].ObjectID().String() })
+	return privileges
 }
 
 func isSimpleNotNullCheck(definition, columnName string) bool {
@@ -7040,6 +8056,34 @@ func dependentViewAndIndexIDs(current, desired *pgschema.Snapshot, dependency pg
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+func boundedRoutineReviewIDs(current, desired *pgschema.Snapshot, limit int) []string {
+	if limit < 1 {
+		return nil
+	}
+	ids := make(map[string]bool)
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if snapshot == nil {
+			continue
+		}
+		for _, object := range snapshot.Objects() {
+			if routine, ok := object.(pgschema.Routine); ok {
+				ids[routine.ObjectID().String()] = true
+			}
+		}
+	}
+	result := make([]string, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	if len(result) <= limit {
+		return result
+	}
+	omitted := len(result) - limit
+	result = append(result[:limit], fmt.Sprintf("... and %d more routines", omitted))
+	return result
 }
 
 func generatedColumnTypeChange(before, after pgschema.Column) bool {
@@ -7578,7 +8622,7 @@ func rebuildBatches(result *protocol.Result) error {
 			if len(result.Batches) > 0 {
 				last := &result.Batches[len(result.Batches)-1]
 				lastIsManual := len(last.Statements) > 0 && last.Statements[len(last.Statements)-1].Manual != nil
-				if last.Phase == phase && last.Transactional == transactional && !lastIsManual && item.Manual == nil {
+				if last.Phase == phase && last.Transactional == transactional && !lastIsManual && item.Manual == nil && !item.BatchBoundaryBefore {
 					last.Statements = append(last.Statements, item)
 					continue
 				}
@@ -7602,7 +8646,7 @@ func rebuildUnsortedBatches(result *protocol.Result) error {
 		transactional := !item.NonTransactional
 		if len(result.Batches) > 0 {
 			last := &result.Batches[len(result.Batches)-1]
-			if last.Transactional == transactional {
+			if last.Transactional == transactional && !item.BatchBoundaryBefore {
 				last.Statements = append(last.Statements, item)
 				continue
 			}

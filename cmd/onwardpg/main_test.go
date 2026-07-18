@@ -85,17 +85,22 @@ func TestWriteDecisionEnvelopeIncludesPlannerAnalysis(t *testing.T) {
 		Kind: "rename_table", From: "table:public.accounts", To: "table:public.customers",
 		Outcome: "rejected", Reason: "child_identity_mismatch:constraint:public.accounts_pkey",
 	}}
-	if err := writeDecisionEnvelope(&output, "onwardpg.plan/v4", nil, analysis); err != nil {
+	guidance := []protocol.Guidance{{Kind: "partition_reconfiguration", Key: "table:app:events", Summary: "Build a shadow hierarchy."}}
+	if err := writeDecisionEnvelope(&output, "onwardpg.plan/v4", nil, analysis, guidance); err != nil {
 		t.Fatal(err)
 	}
 	var document struct {
 		Analysis []protocol.DecisionAnalysis `json:"analysis"`
+		Guidance []protocol.Guidance         `json:"guidance"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(document.Analysis, analysis) {
 		t.Fatalf("analysis = %#v, want %#v", document.Analysis, analysis)
+	}
+	if !reflect.DeepEqual(document.Guidance, guidance) {
+		t.Fatalf("guidance = %#v, want %#v", document.Guidance, guidance)
 	}
 }
 

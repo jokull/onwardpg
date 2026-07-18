@@ -5,6 +5,26 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ## Unreleased
 
+### Added
+
+- Stripe pg-schema-diff drift-close recipes for reviewed column-type handoffs,
+  dependency-aware primary/unique replacement across inbound foreign keys,
+  typed ordinary/materialized-view recreation closures, and retained-data
+  partition-topology runbooks. Partition conversions enumerate deterministic
+  shadow trees, copy/catch-up and verification gates, brief rename cutover,
+  and separately authorized old-hierarchy cleanup instead of copying Stripe's
+  data-deleting replacement strategy.
+
+### Changed
+
+- Decision output now carries non-executable SQL guidance in both text and JSON,
+  so a fingerprint-bound partition decision arrives with a bounded scaffold
+  rather than an open-ended request to invent the migration.
+- View and materialized-view ownership, privileges, triggers, indexes,
+  population state, and transitive dependencies survive typed rebuilds;
+  extension-owned view ACLs remain represented by their extension rather than
+  leaking into caller-schema diffs.
+
 ### Fixed
 
 - Generated Homebrew Formulae install from Homebrew's stripped archive root

@@ -292,12 +292,18 @@ Partition children are graph-modeled. The planner supports an explicit attach
 or detach of an existing range/list/hash/default child and marks the
 lock/possible-scan hazards in the contract phase. Moving a child to a
 different parent, changing a bound, or changing a default partition requires
-an explicit `manual_sql` choice. onwardpg places an `ONWARDPG TODO` in the
-ordered phase and never invents a detach/attach sequence, cast, or data
-movement. The developer or agent edits the ordinary SQL file, declares any
-non-transactional boundary with a batch directive, and may add boolean
-postconditions to `verify.sql`. Only TODO-free, explicitly supplied SQL is
-executed during self-created clone verification.
+an explicit fingerprint-bound manual contract. The decision now carries a
+non-executable, schema-aware runbook: a matching validated `CHECK` plus
+detach/attach path for bounds, or a deterministic shadow hierarchy for
+ordinary↔partitioned and key/strategy conversions. The latter enumerates the
+complete old/desired trees, keys, indexes, partition locals, foreign keys,
+triggers, policies, grants, sequence ownership, and typed view/materialized
+view dependents; separates synchronization, copy, catch-up, assertions, and a
+brief rename cutover; and leaves the populated old hierarchy for separately
+fingerprint-authorized cleanup. Product-specific write synchronization and
+conflict policy remain operator-authored. The runbook explicitly does not
+treat clone convergence as evidence of acceptable production copy or cutover
+time.
 
 A nullable-to-`NOT NULL` transition offers `direct`, `staged`, and
 `staged_with_backfill`. The last option hands the application-owned backfill to

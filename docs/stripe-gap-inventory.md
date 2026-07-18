@@ -76,10 +76,17 @@ Most applications never need advanced partition maintenance. For time-series,
 audit, or very large multi-tenant tables it becomes central. Onwardpg directly
 handles normal hierarchy creation, partition add/remove or attach/detach, and
 several parent/local index operations. Parent changes, bound/key/strategy
-rewrites, and complex local-constraint transitions still favor explicit
-handoffs. Stripe often provides more automatic online choreography here, so
-this branch contains the most likely **advanced operational gaps**, but they
-are niche for ordinary applications.
+rewrites, and ordinary↔partitioned conversions remain explicit handoffs
+because synchronization and cutover policy are product decisions. They are no
+longer blank handoffs: onwardpg enumerates both trees and emits deterministic
+shadow identities, key/index and partition-local scaffolding, copy/catch-up
+stages, blocking row/bound assertions, the typed derived-object closure, a
+brief rename cutover, and separately authorized cleanup. Stripe's pinned
+conversion cases use a data-deleting DROP/CREATE replacement, while its
+partition-key case rejects; the differential receipt records onwardpg's
+retained-data runbook as a deliberate strategy difference. These operations
+remain niche for ordinary applications and operationally significant at
+scale.
 
 ### Database security
 
@@ -101,13 +108,13 @@ boundary. These two acceptance cases are out of scope rather than product gaps.
 
 The pinned corpus contains 415 cases:
 
-- **30** have exact differential parity evidence;
-- **5** have exact differential evidence of a deliberate safety difference;
+- **31** have exact differential parity evidence;
+- **11** have exact differential evidence of a deliberate strategy difference;
 - **10** are supported with onward-only evidence but lack an exact Stripe run;
-- **368** remain family-classified and need case-level differential audit;
+- **361** remain family-classified and need case-level differential audit;
 - **2** are deliberately out of scope;
 - **0** are currently proven missing—but that means “not yet demonstrated,”
-  not that the 368 unresolved cases are known to work.
+  not that the 361 unresolved cases are known to work.
 
 The practical order is: certify everyday columns/constraints/indexes first,
 then views and dependency-heavy database code, then advanced partitioning.

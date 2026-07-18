@@ -106,6 +106,11 @@ type Statement struct {
 	// batches. It is intentionally not part of the public statement JSON: the
 	// batch is the execution boundary exposed by the protocol.
 	NonTransactional bool `json:"-"`
+	// BatchBoundaryBefore prevents adjacent transactional statements from being
+	// coalesced when committing the preceding short lock-holding operation is
+	// part of the safety contract. Like NonTransactional, the resulting Batch
+	// is the public execution boundary.
+	BatchBoundaryBefore bool `json:"-"`
 	// Manual is present only for operator-authored work. onwardpg records it
 	// verbatim instead of inventing a data transformation from schema state.
 	Manual *ManualWork `json:"manual,omitempty"`
@@ -120,18 +125,20 @@ func StableStatementID(statement Statement) string {
 	hazards := append([]string(nil), statement.Hazards...)
 	sort.Strings(hazards)
 	canonical := struct {
-		SQL                string      `json:"sql"`
-		Safety             string      `json:"safety"`
-		Hazards            []string    `json:"hazards,omitempty"`
-		Phase              string      `json:"phase"`
-		NonTransactional   bool        `json:"non_transactional"`
-		StatementTimeoutMS int64       `json:"statement_timeout_ms,omitempty"`
-		LockTimeoutMS      int64       `json:"lock_timeout_ms,omitempty"`
-		Manual             *ManualWork `json:"manual,omitempty"`
+		SQL                 string      `json:"sql"`
+		Safety              string      `json:"safety"`
+		Hazards             []string    `json:"hazards,omitempty"`
+		Phase               string      `json:"phase"`
+		NonTransactional    bool        `json:"non_transactional"`
+		BatchBoundaryBefore bool        `json:"batch_boundary_before"`
+		StatementTimeoutMS  int64       `json:"statement_timeout_ms,omitempty"`
+		LockTimeoutMS       int64       `json:"lock_timeout_ms,omitempty"`
+		Manual              *ManualWork `json:"manual,omitempty"`
 	}{
 		SQL: statement.SQL, Safety: statement.Safety, Hazards: hazards,
 		Phase: statement.Phase, NonTransactional: statement.NonTransactional,
-		StatementTimeoutMS: statement.StatementTimeoutMS, LockTimeoutMS: statement.LockTimeoutMS,
+		BatchBoundaryBefore: statement.BatchBoundaryBefore,
+		StatementTimeoutMS:  statement.StatementTimeoutMS, LockTimeoutMS: statement.LockTimeoutMS,
 		Manual: statement.Manual,
 	}
 	data, err := json.Marshal(canonical)

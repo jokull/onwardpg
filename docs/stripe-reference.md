@@ -106,6 +106,17 @@ old and new application versions can overlap. That case is classified weaker
 and intentionally different rather than being normalized away by the harness. The catalog-family
 inventory and the new partition-attachment convergence cases have been
 observed on PostgreSQL 15–18. CI remains the authoritative cross-version proof
-for every commit. Of the 415 pinned cases, 30 have exact differential parity,
-5 prove an intentional safety difference, 10 have onward-only support
-evidence, 368 still need exact differential audit, and 2 are out of scope.
+for every commit. The referenced-key/FK receipt additionally proves that both
+planners can coordinate a primary-key column change with an inbound FK column
+change; onwardpg preserves typed FK metadata and separates `NOT VALID` creation
+from validation. A derived-object receipt also records a stronger onwardpg
+outcome: for a type change crossing an ordinary view, materialized view, and
+materialized-view index, Stripe v1.0.7 fails plan validation while onwardpg
+generates and converges the typed recreation closure around reviewed transform
+SQL. Partition-topology receipts additionally show Stripe's data-deleting
+ordinary↔partitioned replacements and partition-key rejection beside
+onwardpg's deterministic retained-data shadow runbook, verification gates,
+typed dependent closure, and separately authorized cleanup. Of the 415 pinned
+cases, 31 have exact differential parity, 11 prove an intentional strategy
+difference, 10 have onward-only support evidence, 361
+still need exact differential audit, and 2 are out of scope.

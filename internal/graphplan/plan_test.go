@@ -533,6 +533,15 @@ func TestBuildRequiresFingerprintBoundManualContractForPartitionReconfiguration(
 	if needed.Status != protocol.NeedsInput || len(needed.Questions) != 1 || needed.Questions[0].Kind != "partition_reconfiguration" {
 		t.Fatalf("expected a manual-contract question, got %#v", needed)
 	}
+	if len(needed.Guidance) != 1 || needed.Guidance[0].Kind != "partition_reconfiguration" {
+		t.Fatalf("expected a bounded partition runbook with the question, got %#v", needed.Guidance)
+	}
+	boundRunbook := guidanceSQL(needed.Guidance[0])
+	for _, fragment := range []string{"ADD CONSTRAINT \"onwardpg_bound_", "<new-bound-predicate>", "VALIDATE CONSTRAINT", "DETACH PARTITION", "ATTACH PARTITION", "onwardpg_catalog_bound_matches", "later fingerprint-bound onwardpg plan"} {
+		if !strings.Contains(boundRunbook, fragment) {
+			t.Fatalf("partition-bound runbook omitted %q:\n%s", fragment, boundRunbook)
+		}
+	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: needed.CurrentFingerprint, DesiredFingerprint: needed.DesiredFingerprint, Answers: []protocol.Answer{{
 		Kind: "partition_reconfiguration", Key: before.ObjectID().String(), Value: "provided",
 		Manual: &protocol.ManualWork{Summary: "move the partition window after checking data", ExecutionMode: "non_transactional", Statements: []string{
@@ -547,6 +556,132 @@ func TestBuildRequiresFingerprintBoundManualContractForPartitionReconfiguration(
 	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].Phase != protocol.PhaseContract || planned.Statements[0].Manual == nil || len(planned.Batches) != 1 || planned.Batches[0].Transactional {
 		t.Fatalf("expected a manual planned statement, got %#v", planned)
 	}
+}
+
+func TestBuildScaffoldsOrdinaryToPartitionedShadowHierarchy(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	root := pgschema.Table{Schema: "app", Name: "events"}
+	partitioned := root
+	partitioned.Partition = &pgschema.Partition{Strategy: "RANGE", Raw: "RANGE (occurred_at)", Parts: []pgschema.PartitionPart{{Column: "occurred_at"}}}
+	child := pgschema.Table{Schema: "archive", Name: "events_2026", PartitionOf: &pgschema.PartitionOf{Parent: root.ObjectID(), Bound: "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"}}
+	columns := []pgschema.Column{
+		{Table: root.ObjectID(), Name: "id", Position: 1, Type: "bigint", NotNull: true, Default: stringPointer(`nextval('app.events_id_seq'::regclass)`)},
+		{Table: root.ObjectID(), Name: "occurred_at", Position: 2, Type: "date", NotNull: true},
+	}
+	for _, object := range []pgschema.Object{pgschema.Schema{Name: "app"}, pgschema.Schema{Name: "archive"}, root} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, column := range columns {
+		if err := current.Add(column); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{pgschema.Schema{Name: "app"}, pgschema.Schema{Name: "archive"}, partitioned, child} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, column := range columns {
+		if err := desired.Add(column); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view := pgschema.View{Schema: "app", Name: "event_ids", Definition: `SELECT events.id FROM app.events`}
+	routine := pgschema.Routine{Schema: "app", Name: "audit_event", Signature: "", Kind: "function", ReturnType: "trigger", Definition: `CREATE FUNCTION app.audit_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;`}
+	trigger := pgschema.Trigger{Table: root.ObjectID(), Name: "events_audit", Routine: routine.ObjectID(), Definition: `CREATE TRIGGER events_audit AFTER INSERT ON app.events FOR EACH ROW EXECUTE FUNCTION app.audit_event()`, Enabled: "O"}
+	policyExpression := "id > 0"
+	policy := pgschema.Policy{Table: root.ObjectID(), Name: "events_read", Permissive: true, Command: "SELECT", Roles: []string{"PUBLIC"}, Using: &policyExpression}
+	rls := pgschema.RowSecurity{Table: root.ObjectID(), Enabled: true}
+	privilege := pgschema.TablePrivilege{Table: root.ObjectID(), Grantee: "PUBLIC", Grantor: "@owner", Privilege: "SELECT"}
+	sequence := pgschema.Sequence{Schema: "app", Name: "events_id_seq", Type: "bigint", Start: 1, Increment: 1, Min: 1, Max: 9223372036854775807, Cache: 1, OwnedBy: ptrID(columns[0].ObjectID())}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		for _, object := range []pgschema.Object{view, routine, trigger, policy, rls, privilege, sequence} {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := snapshot.AddDependency(view.ObjectID(), root.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := pgschema.Constraint{Table: root.ObjectID(), Name: "events_pkey", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id, occurred_at)"}
+	local := pgschema.Index{Table: child.ObjectID(), Name: "events_2026_id_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "id"}}}
+	for _, object := range []pgschema.Object{key, local} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.NeedsInput || len(result.Guidance) != 1 {
+		t.Fatalf("expected partition scaffold, got %#v", result)
+	}
+	runbook := guidanceSQL(result.Guidance[0])
+	for _, fragment := range []string{
+		"current partition tree", "desired partition tree", "PARTITION BY RANGE (occurred_at)",
+		"temporary_identity_preflight", "reserved partition handoff identity already exists",
+		"PARTITION OF \"app\".\"onwardpg_shadow_", "PRIMARY KEY (id, occurred_at)",
+		"PROVED: constraint:app:events:events_pkey includes partition columns (occurred_at)",
+		"CREATE INDEX \"onwardpg_idx_", "OVERRIDING SYSTEM VALUE", "EXCEPT ALL",
+		"onwardpg_catalog_bound_matches", "dual-write/capture behavior", `DROP VIEW "app"."event_ids"`,
+		`CREATE VIEW "app"."event_ids"`, `CREATE TRIGGER events_audit`, `CREATE POLICY "events_read"`,
+		`ENABLE ROW LEVEL SECURITY`, `GRANT SELECT ON TABLE "app"."events" TO PUBLIC`,
+		`ALTER SEQUENCE "app"."events_id_seq" OWNED BY "app"."events"."id"`,
+		"separate, current-catalog fingerprint authorization",
+	} {
+		if !strings.Contains(runbook, fragment) {
+			t.Fatalf("ordinary-to-partitioned runbook omitted %q:\n%s", fragment, runbook)
+		}
+	}
+	again, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || !reflect.DeepEqual(result.Guidance, again.Guidance) {
+		t.Fatalf("partition temporary identities are not deterministic: first=%#v second=%#v err=%v", result.Guidance, again.Guidance, err)
+	}
+}
+
+func TestBuildScaffoldsPartitionedToOrdinaryRetainedDataCutover(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	root := pgschema.Table{Schema: "app", Name: "events", Partition: &pgschema.Partition{Strategy: "RANGE", Raw: "RANGE (id)", Parts: []pgschema.PartitionPart{{Column: "id"}}}}
+	ordinary := root
+	ordinary.Partition = nil
+	child := pgschema.Table{Schema: "app", Name: "events_low", PartitionOf: &pgschema.PartitionOf{Parent: root.ObjectID(), Bound: "FOR VALUES FROM (0) TO (100)"}}
+	column := pgschema.Column{Table: root.ObjectID(), Name: "id", Position: 1, Type: "integer", NotNull: true}
+	for _, object := range []pgschema.Object{pgschema.Schema{Name: "app"}, root, child, column} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{pgschema.Schema{Name: "app"}, ordinary, column} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.NeedsInput || len(result.Guidance) != 1 {
+		t.Fatalf("expected partitioned-to-ordinary scaffold, got %#v", result)
+	}
+	runbook := guidanceSQL(result.Guidance[0])
+	for _, fragment := range []string{"table:app:events_low", "CREATE TABLE \"app\".\"onwardpg_shadow_", "INSERT INTO", "RENAME TO \"onwardpg_old_", "DROP TABLE \"app\".\"onwardpg_old_", "Never infer production copy duration"} {
+		if !strings.Contains(runbook, fragment) {
+			t.Fatalf("partitioned-to-ordinary runbook omitted %q:\n%s", fragment, runbook)
+		}
+	}
+}
+
+func guidanceSQL(guidance protocol.Guidance) string {
+	parts := make([]string, 0, len(guidance.Steps))
+	for _, step := range guidance.Steps {
+		parts = append(parts, step.Stage+"\n"+step.SQL)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func TestBuildRejectsPropagatedPartitionIndexAndConstraintAlteration(t *testing.T) {
