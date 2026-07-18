@@ -42,7 +42,12 @@ type Result struct {
 	// machine-readable evidence for an agent deciding whether to add an
 	// explicit upstream identity assertion; it never changes plan semantics.
 	Analysis []DecisionAnalysis `json:"analysis,omitempty"`
-	Ignored  []string           `json:"ignored,omitempty"`
+	// Guidance is non-executable planning help for a result which cannot safely
+	// become this feature's migration bundle. It is deliberately separate from
+	// Statements so an unsupported split-plan boundary cannot be mistaken for
+	// SQL that converges to the requested final schema in one deployment.
+	Guidance []Guidance `json:"guidance,omitempty"`
+	Ignored  []string   `json:"ignored,omitempty"`
 	// Preserved names catalog objects intentionally left in place by a
 	// workspace-compatible plan. They are not ignored: they are observed
 	// surplus state and must remain visible to the caller.
@@ -64,6 +69,21 @@ type DecisionAnalysis struct {
 	To      string `json:"to"`
 	Outcome string `json:"outcome"`
 	Reason  string `json:"reason"`
+}
+
+// Guidance describes a bounded follow-up shape without authorizing or
+// scheduling it. Steps may contain SQL scaffolds and comments, but are never
+// batched, rendered into a bundle, or executed by verification.
+type Guidance struct {
+	Kind    string         `json:"kind"`
+	Key     string         `json:"key"`
+	Summary string         `json:"summary"`
+	Steps   []GuidanceStep `json:"steps"`
+}
+
+type GuidanceStep struct {
+	Stage string `json:"stage"`
+	SQL   string `json:"sql"`
 }
 
 type Statement struct {

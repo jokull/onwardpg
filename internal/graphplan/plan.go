@@ -335,6 +335,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
+	result.Guidance = splitPlanGuidance(changes, choices)
 	// These statements must precede same-phase work that refers to the desired
 	// routine identity. Trigger definitions are reapplied after a confirmed
 	// routine rename, never before the new routine name exists.
@@ -373,6 +374,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	deferredIndexCreates := make([]change.Change, 0)
 	deferredPostConstraintStatements := make([]protocol.Statement, 0)
 	consumed := make(map[pgschema.ID]bool)
+	coordinatedForeignKeyChanges := coordinatedForeignKeyChangeIDs(changes, current, desired, options)
 	var dynamicUnsupported []string
 	scheduledChanges := change.Schedule(current, desired, changes)
 	if options.UnsortedDump {
@@ -384,6 +386,9 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 		for _, item := range scheduled.Changes {
 			if consumed[item.ID] {
+				continue
+			}
+			if coordinatedForeignKeyChanges[item.ID] {
 				continue
 			}
 			if implicitConstraintIndexDrop(item, changes) || propagatedPartitionChildDrop(item, changes) || propagatedPartitionChildModify(item, changes) || propagatedPartitionChildRebuild(item, changes) {
@@ -5262,12 +5267,12 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		}
 		if !reflect.DeepEqual(beforeNoComment, nextNoComment) {
 			if options.ConcurrentIndexes && (before.Type == pgschema.ConstraintPrimary || before.Type == pgschema.ConstraintUnique) && (next.Type == pgschema.ConstraintPrimary || next.Type == pgschema.ConstraintUnique) {
-				statements, unsupported, err := renderContinuousConstraintReplacement(before, next, current, desired)
+				statements, consumed, unsupported, err := renderContinuousConstraintReplacement(before, next, current, desired)
 				if err != nil {
 					return nil, nil, nil, err
 				}
 				if len(unsupported) == 0 {
-					return statements, nil, nil, nil
+					return statements, consumed, nil, nil
 				}
 				return nil, nil, unsupported, nil
 			}
@@ -5366,29 +5371,30 @@ func partitionConstraintAttachmentValid(constraint pgschema.Constraint, before, 
 	return reflect.DeepEqual(beforeComparable, afterComparable) && equivalentPartitionAttachmentIndex(after, parentIndex)
 }
 
-func renderContinuousConstraintReplacement(before, after pgschema.Constraint, current, desired *pgschema.Snapshot) ([]protocol.Statement, []string, error) {
+func renderContinuousConstraintReplacement(before, after pgschema.Constraint, current, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	if before.Parent != nil || after.Parent != nil || before.Table != after.Table || before.Name != after.Name || before.Type != after.Type {
-		return nil, []string{"continuous_constraint_replacement:" + after.ObjectID().String()}, nil
+		return nil, nil, []string{"continuous_constraint_replacement:" + after.ObjectID().String()}, nil
 	}
 	tableObject, exists := desired.Object(after.Table)
 	table, ok := tableObject.(pgschema.Table)
 	if !exists || !ok || table.Partition != nil || table.PartitionOf != nil {
-		return nil, []string{"continuous_partitioned_constraint_replacement:" + after.ObjectID().String()}, nil
+		return nil, nil, []string{"continuous_partitioned_constraint_replacement:" + after.ObjectID().String()}, nil
 	}
-	if hasChangedDependents(current, desired, before.ObjectID()) {
-		return nil, []string{"continuous_constraint_replacement_dependents:" + after.ObjectID().String()}, nil
+	foreignKeys, consumed, dependentUnsupported := coordinatedConstraintForeignKeys(before, after, current, desired)
+	if len(dependentUnsupported) > 0 {
+		return nil, nil, dependentUnsupported, nil
 	}
 	oldIndex, oldExists := backingIndexForConstraint(current, before)
 	newIndex, newExists := backingIndexForConstraint(desired, after)
 	if !oldExists || !newExists || oldIndex.Parent != nil || newIndex.Parent != nil || !oldIndex.Unique || !newIndex.Unique {
-		return nil, []string{"continuous_constraint_backing_index:" + after.ObjectID().String()}, nil
+		return nil, nil, []string{"continuous_constraint_backing_index:" + after.ObjectID().String()}, nil
 	}
 	temporaryName, err := replacementIndexName(oldIndex, newIndex)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if relationNameExists(current, oldIndex.Table.Schema, temporaryName) || relationNameExists(desired, newIndex.Table.Schema, temporaryName) {
-		return nil, []string{"continuous_index_temporary_name_collision:" + newIndex.ObjectID().String()}, nil
+		return nil, nil, []string{"continuous_index_temporary_name_collision:" + newIndex.ObjectID().String()}, nil
 	}
 	replacement := newIndex
 	replacement.Name = temporaryName
@@ -5397,7 +5403,7 @@ func renderContinuousConstraintReplacement(before, after pgschema.Constraint, cu
 	replacement.Comment = nil
 	createSQL, unsupported := renderIndex(replacement)
 	if unsupported != "" {
-		return nil, []string{unsupported}, nil
+		return nil, nil, []string{unsupported}, nil
 	}
 	createSQL = strings.Replace(createSQL, "CREATE INDEX", "CREATE INDEX CONCURRENTLY", 1)
 	createSQL = strings.Replace(createSQL, "CREATE UNIQUE INDEX", "CREATE UNIQUE INDEX CONCURRENTLY", 1)
@@ -5410,7 +5416,10 @@ func renderContinuousConstraintReplacement(before, after pgschema.Constraint, cu
 	dropSQL := "ALTER TABLE " + qualified(before.Table.Schema, before.Table.Name) + " DROP CONSTRAINT " + quote(before.Name) + ";"
 	addSQL, unsupported := renderConstraintUsingReplacementIndex(after, temporaryName)
 	if unsupported != "" {
-		return nil, []string{unsupported}, nil
+		return nil, nil, []string{unsupported}, nil
+	}
+	for _, foreignKey := range foreignKeys {
+		statements = append(statements, renderCoordinatedForeignKeyDrop(foreignKey.before))
 	}
 	statements = append(statements,
 		withTimeoutGuidance(statement(dropSQL, "contract", "review", true, "continuous_constraint_replacement", "brief_constraint_swap", "access_exclusive_lock"), 30000, 3000),
@@ -5419,7 +5428,13 @@ func renderContinuousConstraintReplacement(before, after pgschema.Constraint, cu
 	if after.Comment != nil {
 		statements = append(statements, withTimeoutGuidance(statement("COMMENT ON CONSTRAINT "+quote(after.Name)+" ON "+qualified(after.Table.Schema, after.Table.Name)+" IS "+literal(*after.Comment)+";", "contract", "safe", true, "continuous_constraint_replacement"), 30000, 3000))
 	}
-	return statements, nil, nil
+	for _, foreignKey := range foreignKeys {
+		if foreignKey.after == nil {
+			continue
+		}
+		statements = append(statements, renderCoordinatedForeignKeyAdd(*foreignKey.after)...)
+	}
+	return statements, consumed, nil, nil
 }
 
 func backingIndexForConstraint(snapshot *pgschema.Snapshot, constraint pgschema.Constraint) (pgschema.Index, bool) {
@@ -5433,6 +5448,105 @@ func backingIndexForConstraint(snapshot *pgschema.Snapshot, constraint pgschema.
 		}
 	}
 	return pgschema.Index{}, false
+}
+
+type coordinatedForeignKey struct {
+	before pgschema.Constraint
+	after  *pgschema.Constraint
+}
+
+func coordinatedConstraintForeignKeys(before, after pgschema.Constraint, current, desired *pgschema.Snapshot) ([]coordinatedForeignKey, []pgschema.ID, []string) {
+	if current == nil || desired == nil {
+		return nil, nil, []string{"continuous_constraint_replacement_snapshot:" + after.ObjectID().String()}
+	}
+	var foreignKeys []coordinatedForeignKey
+	var consumed []pgschema.ID
+	var unsupported []string
+	for _, id := range current.IDs() {
+		if id == before.ObjectID() || !containsID(current.Dependencies(id), before.ObjectID()) {
+			continue
+		}
+		object, exists := current.Object(id)
+		constraint, ok := object.(pgschema.Constraint)
+		if !exists || !ok || constraint.Type != pgschema.ConstraintForeign {
+			if id.Kind != pgschema.KindIndex {
+				unsupported = append(unsupported, "continuous_constraint_replacement_dependent:"+id.String())
+			}
+			continue
+		}
+		if constraint.Parent != nil || constraintUsesMatchPartial(constraint) {
+			unsupported = append(unsupported, "continuous_constraint_replacement_foreign_key:"+id.String())
+			continue
+		}
+		entry := coordinatedForeignKey{before: constraint}
+		if afterObject, desiredExists := desired.Object(id); desiredExists {
+			afterConstraint, afterOK := afterObject.(pgschema.Constraint)
+			if !afterOK || afterConstraint.Type != pgschema.ConstraintForeign || afterConstraint.Parent != nil || constraintUsesMatchPartial(afterConstraint) {
+				unsupported = append(unsupported, "continuous_constraint_replacement_foreign_key:"+id.String())
+				continue
+			}
+			entry.after = &afterConstraint
+		}
+		foreignKeys = append(foreignKeys, entry)
+		consumed = append(consumed, id)
+	}
+	sort.Slice(foreignKeys, func(i, j int) bool {
+		return foreignKeys[i].before.ObjectID().String() < foreignKeys[j].before.ObjectID().String()
+	})
+	sort.Slice(consumed, func(i, j int) bool { return consumed[i].String() < consumed[j].String() })
+	return foreignKeys, consumed, unionStrings(unsupported, nil)
+}
+
+func coordinatedForeignKeyChangeIDs(changes []change.Change, current, desired *pgschema.Snapshot, options Options) map[pgschema.ID]bool {
+	result := make(map[pgschema.ID]bool)
+	if !options.ConcurrentIndexes {
+		return result
+	}
+	for _, item := range changes {
+		if item.Kind != change.Modify || item.ID.Kind != pgschema.KindConstraint {
+			continue
+		}
+		before, beforeOK := item.Before.(pgschema.Constraint)
+		after, afterOK := item.After.(pgschema.Constraint)
+		if !beforeOK || !afterOK || before.Parent != nil || after.Parent != nil ||
+			(before.Type != pgschema.ConstraintPrimary && before.Type != pgschema.ConstraintUnique) ||
+			(after.Type != pgschema.ConstraintPrimary && after.Type != pgschema.ConstraintUnique) {
+			continue
+		}
+		foreignKeys, _, unsupported := coordinatedConstraintForeignKeys(before, after, current, desired)
+		if len(unsupported) > 0 {
+			continue
+		}
+		for _, foreignKey := range foreignKeys {
+			result[foreignKey.before.ObjectID()] = true
+		}
+	}
+	return result
+}
+
+func renderCoordinatedForeignKeyDrop(constraint pgschema.Constraint) protocol.Statement {
+	sql := "ALTER TABLE " + qualified(constraint.Table.Schema, constraint.Table.Name) + " DROP CONSTRAINT " + quote(constraint.Name) + ";"
+	return withTimeoutGuidance(statement(sql, "contract", "review", true, "continuous_constraint_replacement", "foreign_key_coordination", "brief_constraint_swap", "access_exclusive_lock"), 30000, 3000)
+}
+
+func renderCoordinatedForeignKeyAdd(constraint pgschema.Constraint) []protocol.Statement {
+	definition := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(constraint.Definition), ";"))
+	if strings.HasSuffix(strings.ToUpper(definition), " NOT VALID") {
+		definition = strings.TrimSpace(definition[:len(definition)-len(" NOT VALID")])
+	}
+	addSQL := "ALTER TABLE " + qualified(constraint.Table.Schema, constraint.Table.Name) + " ADD CONSTRAINT " + quote(constraint.Name) + " " + definition + " NOT VALID;"
+	statements := []protocol.Statement{
+		withTimeoutGuidance(statement(addSQL, "contract", "review", true, "continuous_constraint_replacement", "foreign_key_coordination", "share_row_exclusive_lock"), 30000, 3000),
+	}
+	if constraint.Comment != nil {
+		commentSQL := "COMMENT ON CONSTRAINT " + quote(constraint.Name) + " ON " + qualified(constraint.Table.Schema, constraint.Table.Name) + " IS " + literal(*constraint.Comment) + ";"
+		statements = append(statements, withTimeoutGuidance(statement(commentSQL, "contract", "safe", true, "continuous_constraint_replacement", "foreign_key_coordination"), 30000, 3000))
+	}
+	if constraint.Validated {
+		validateSQL := "ALTER TABLE " + qualified(constraint.Table.Schema, constraint.Table.Name) + " VALIDATE CONSTRAINT " + quote(constraint.Name) + ";"
+		statements = append(statements, withTimeoutGuidance(statement(validateSQL, "contract", "review", true, "continuous_constraint_replacement", "foreign_key_coordination", "table_scan", "share_update_exclusive_lock"), 1200000, 3000))
+	}
+	return statements
 }
 
 func hasChangedDependents(current, desired *pgschema.Snapshot, dependency pgschema.ID) bool {
@@ -6498,6 +6612,50 @@ func sortedManualWorkIDs(work map[pgschema.ID]protocol.ManualWork) []pgschema.ID
 	return ids
 }
 
+func splitPlanGuidance(changes []change.Change, choices decisions) []protocol.Guidance {
+	var guidance []protocol.Guidance
+	for _, item := range changes {
+		if item.Kind != change.Modify || item.ID.Kind != pgschema.KindColumn || choices.typeUsing[item.ID] != "split_plan" {
+			continue
+		}
+		before, beforeOK := item.Before.(pgschema.Column)
+		after, afterOK := item.After.(pgschema.Column)
+		if !beforeOK || !afterOK || before.Type == after.Type {
+			continue
+		}
+		table := qualified(after.Table.Schema, after.Table.Name)
+		shadow := splitPlanShadowColumnName(before, after)
+		guidance = append(guidance, protocol.Guidance{
+			Kind: "split_plan", Key: item.ID.String(),
+			Summary: "Revise this feature's desired DDL to retain the current column and add a separately named nullable shadow column. Deploy compatibility code and complete synchronization/backfill before a later feature removes the old contract.",
+			Steps: []protocol.GuidanceStep{
+				{
+					Stage: "plan_a_expand_scaffold",
+					SQL:   "ALTER TABLE " + table + " ADD COLUMN " + quote(shadow) + " " + after.Type + ";",
+				},
+				{
+					Stage: "plan_a_product_semantics",
+					SQL: "-- ONWARDPG TODO: choose the durable application-facing name for " + quote(shadow) + ".\n" +
+						"-- Install reviewed synchronization/conflict behavior and backfill " + quote(before.Name) + " -> " + quote(shadow) + ".\n" +
+						"-- Add boolean verification assertions; do not infer a reverse transform.",
+				},
+				{
+					Stage: "plan_b_boundary",
+					SQL: "-- Create a later onwardpg feature only after deploying code which no longer depends on " + table + "." + quote(before.Name) + ".\n" +
+						"-- That later desired DDL may remove the old column and compatibility objects.",
+				},
+			},
+		})
+	}
+	sort.Slice(guidance, func(i, j int) bool { return guidance[i].Key < guidance[j].Key })
+	return guidance
+}
+
+func splitPlanShadowColumnName(before, after pgschema.Column) string {
+	digest := sha256.Sum256([]byte(before.ObjectID().String() + "\x00" + before.Type + "\x00" + after.Type))
+	return "onwardpg_next_" + hex.EncodeToString(digest[:6])
+}
+
 func renderColumnModify(before, after pgschema.Column, choices decisions, current, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	var statements []protocol.Statement
 	table := qualified(after.Table.Schema, after.Table.Name)
@@ -6558,37 +6716,11 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 				identityHandledDefault = true
 			}
 			if !before.NotNull && after.NotNull {
-				strategy, exists := choices.notNullStrategy[after.ObjectID()]
-				if !exists {
-					return nil, nil, nil, fmt.Errorf("missing NOT NULL strategy for %s", after.ObjectID())
+				notNullStatements, err := renderSetNotNull(after, choices, current, desired)
+				if err != nil {
+					return nil, nil, nil, err
 				}
-				switch strategy {
-				case "direct":
-					statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "table_scan", "access_exclusive_lock"))
-				case "staged":
-					check := notNullCheckName(after.ObjectID())
-					statements = append(statements,
-						statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
-						statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
-						statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
-						statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
-					)
-				case "staged_with_backfill":
-					work, exists := choices.notNullBackfill[after.ObjectID()]
-					if !exists {
-						return nil, nil, nil, fmt.Errorf("missing NOT NULL backfill for %s", after.ObjectID())
-					}
-					check := notNullCheckName(after.ObjectID())
-					statements = append(statements,
-						statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
-						manualWorkStatement(work, "application_backfill", "data_movement"),
-						statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
-						statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
-						statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
-					)
-				default:
-					return nil, nil, nil, fmt.Errorf("invalid NOT NULL strategy %q", strategy)
-				}
+				statements = append(statements, notNullStatements...)
 				identityHandledNotNull = true
 			}
 			options, unsupported := renderIdentityOptions(*after.Identity, false)
@@ -6641,13 +6773,33 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 						"-- Do not use a direct ALTER TYPE here: this plan surrounds one rolling application deployment."+dependencyGuidance,
 					protocol.PhaseExpand, "manual", true, "manual_sql", "single_deployment_bridge_required", "product_semantics_required",
 				),
+			)
+			if before.Default != nil {
+				statements = append(statements, statement(
+					"ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP DEFAULT;",
+					protocol.PhaseContract, "review", true, "type_change_default_choreography", "access_exclusive_lock",
+				))
+			}
+			statements = append(statements,
 				statement(
 					"-- ONWARDPG TODO: replace this comment with reviewed CONTRACT SQL for "+after.ObjectID().String()+" ("+before.Type+" -> "+after.Type+").\n"+
 						"-- After pre-deployment writers drain, perform final catch-up/assertions, remove compatibility objects, and converge to PostgreSQL type "+after.Type+".\n"+
+						"-- Required mutation shape: convert "+table+"."+column+" to "+after.Type+" with a reviewed expression; do not rely on an inferred cast.\n"+
 						"-- Add boolean assertions to verify.sql for every data-dependent conversion assumption.",
 					protocol.PhaseContract, "manual", true, "manual_sql", "table_rewrite_possible", "access_exclusive_lock", "single_deployment_bridge_required",
 				),
+				statement(
+					"ANALYZE "+table+" ("+column+");",
+					protocol.PhaseContract, "review", true, "type_change_statistics_refresh", "database_performance_impact",
+				),
 			)
+			if after.Default != nil {
+				statements = append(statements, statement(
+					"ALTER TABLE "+table+" ALTER COLUMN "+column+" SET DEFAULT "+*after.Default+";",
+					protocol.PhaseContract, "safe", true, "type_change_default_choreography",
+				))
+			}
+			identityHandledDefault = true
 		} else if using == "split_plan" {
 			return nil, nil, []string{"two_application_deployments_required:" + after.ObjectID().String()}, nil
 		} else {
@@ -6680,41 +6832,148 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 			}
 			statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP NOT NULL;", phase, "safe", true, hazards...))
 		} else {
-			strategy, exists := choices.notNullStrategy[after.ObjectID()]
-			if !exists {
-				return nil, nil, nil, fmt.Errorf("missing NOT NULL strategy for %s", after.ObjectID())
+			notNullStatements, err := renderSetNotNull(after, choices, current, desired)
+			if err != nil {
+				return nil, nil, nil, err
 			}
-			switch strategy {
-			case "direct":
-				statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "table_scan", "access_exclusive_lock"))
-			case "staged":
-				check := notNullCheckName(after.ObjectID())
-				statements = append(statements,
-					statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
-					statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
-					statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
-					statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
-				)
-			case "staged_with_backfill":
-				work, exists := choices.notNullBackfill[after.ObjectID()]
-				if !exists {
-					return nil, nil, nil, fmt.Errorf("missing NOT NULL backfill for %s", after.ObjectID())
-				}
-				check := notNullCheckName(after.ObjectID())
-				statements = append(statements,
-					statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
-					manualWorkStatement(work, "application_backfill", "data_movement"),
-					statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
-					statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
-					statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
-				)
-			default:
-				return nil, nil, nil, fmt.Errorf("invalid NOT NULL strategy %q", strategy)
-			}
+			statements = append(statements, notNullStatements...)
 		}
 	}
 	statements = append(statements, commentModification("COLUMN", table+"."+column, before.Comment, after.Comment)...)
 	return statements, nil, nil, nil
+}
+
+func renderSetNotNull(after pgschema.Column, choices decisions, current, desired *pgschema.Snapshot) ([]protocol.Statement, error) {
+	table := qualified(after.Table.Schema, after.Table.Name)
+	column := quote(after.Name)
+	strategy, exists := choices.notNullStrategy[after.ObjectID()]
+	if !exists {
+		return nil, fmt.Errorf("missing NOT NULL strategy for %s", after.ObjectID())
+	}
+	switch strategy {
+	case "direct":
+		return []protocol.Statement{
+			statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "table_scan", "access_exclusive_lock"),
+		}, nil
+	case "staged":
+		if check, reusable := preservedValidatedNotNullCheck(current, desired, after); reusable {
+			return []protocol.Statement{
+				statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock", "validated_check_reuse:"+check),
+			}, nil
+		}
+		check := notNullCheckName(after.ObjectID())
+		return []protocol.Statement{
+			statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
+			statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
+			statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
+			statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
+		}, nil
+	case "staged_with_backfill":
+		work, exists := choices.notNullBackfill[after.ObjectID()]
+		if !exists {
+			return nil, fmt.Errorf("missing NOT NULL backfill for %s", after.ObjectID())
+		}
+		check := notNullCheckName(after.ObjectID())
+		return []protocol.Statement{
+			statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
+			manualWorkStatement(work, "application_backfill", "data_movement"),
+			statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
+			statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
+			statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
+		}, nil
+	default:
+		return nil, fmt.Errorf("invalid NOT NULL strategy %q", strategy)
+	}
+}
+
+// preservedValidatedNotNullCheck returns a catalog-proven check which already
+// establishes the desired column invariant and remains present after the
+// migration. PostgreSQL can use such a check to avoid rescanning the table
+// while SET NOT NULL holds its brief catalog lock. The recognizer is
+// deliberately narrow: compound predicates and checks which are dropped or
+// changed never qualify.
+func preservedValidatedNotNullCheck(current, desired *pgschema.Snapshot, column pgschema.Column) (string, bool) {
+	if current == nil || desired == nil {
+		return "", false
+	}
+	for _, object := range current.Objects() {
+		before, ok := object.(pgschema.Constraint)
+		if !ok || before.Table != column.Table || before.Type != pgschema.ConstraintCheck || !before.Validated || before.NoInherit || !isSimpleNotNullCheck(before.Definition, column.Name) {
+			continue
+		}
+		afterObject, exists := desired.Object(before.ObjectID())
+		after, ok := afterObject.(pgschema.Constraint)
+		if !exists || !ok || after.Type != pgschema.ConstraintCheck || !after.Validated || after.NoInherit || !isSimpleNotNullCheck(after.Definition, column.Name) {
+			continue
+		}
+		return before.Name, true
+	}
+	return "", false
+}
+
+func isSimpleNotNullCheck(definition, columnName string) bool {
+	definition = strings.TrimSpace(definition)
+	if len(definition) < len("CHECK") || !strings.EqualFold(definition[:len("CHECK")], "CHECK") {
+		return false
+	}
+	expression := strings.TrimSpace(definition[len("CHECK"):])
+	if strings.HasSuffix(strings.ToUpper(expression), " NOT VALID") {
+		expression = strings.TrimSpace(expression[:len(expression)-len(" NOT VALID")])
+	}
+	for {
+		stripped, ok := stripOuterSQLParentheses(expression)
+		if !ok {
+			break
+		}
+		expression = stripped
+	}
+	compact := strings.Join(strings.Fields(expression), "")
+	const predicate = "ISNOTNULL"
+	if len(compact) <= len(predicate) || !strings.EqualFold(compact[len(compact)-len(predicate):], predicate) {
+		return false
+	}
+	identifier := compact[:len(compact)-len(predicate)]
+	quotedIdentifier := strings.Join(strings.Fields(quote(columnName)), "")
+	return identifier == strings.Join(strings.Fields(columnName), "") || identifier == quotedIdentifier
+}
+
+func stripOuterSQLParentheses(expression string) (string, bool) {
+	expression = strings.TrimSpace(expression)
+	if len(expression) < 2 || expression[0] != '(' || expression[len(expression)-1] != ')' {
+		return expression, false
+	}
+	depth := 0
+	inQuote := false
+	for index := 0; index < len(expression); index++ {
+		character := expression[index]
+		if character == '\'' {
+			if inQuote && index+1 < len(expression) && expression[index+1] == '\'' {
+				index++
+				continue
+			}
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		switch character {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && index != len(expression)-1 {
+				return expression, false
+			}
+			if depth < 0 {
+				return expression, false
+			}
+		}
+	}
+	if depth != 0 || inQuote {
+		return expression, false
+	}
+	return strings.TrimSpace(expression[1 : len(expression)-1]), true
 }
 
 func droppingPrimaryKeyForColumn(current, desired *pgschema.Snapshot, column pgschema.ID) bool {

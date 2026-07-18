@@ -908,8 +908,87 @@ func TestBuildOrdersChangedDefaultAfterColumnType(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := joinSQL(plan)
-	if plan.Status != protocol.NeedsSQLEdits || strings.Count(joined, "ONWARDPG TODO") != 2 || strings.Index(joined, "ONWARDPG TODO") > strings.Index(joined, "SET DEFAULT 'abc'") {
+	contractTODO := strings.LastIndex(joined, "ONWARDPG TODO")
+	dropDefault := strings.Index(joined, `ALTER COLUMN "value" DROP DEFAULT`)
+	analyze := strings.Index(joined, `ANALYZE "app"."orders" ("value")`)
+	setDefault := strings.Index(joined, `ALTER COLUMN "value" SET DEFAULT 'abc'`)
+	if plan.Status != protocol.NeedsSQLEdits || strings.Count(joined, "ONWARDPG TODO") != 2 ||
+		dropDefault < 0 || contractTODO < dropDefault || analyze < contractTODO || setDefault < analyze {
 		t.Fatalf("editable type handoff must precede the new default: %#v\n%s", plan, joined)
+	}
+}
+
+func TestBuildReusesPreservedValidatedNotNullCheck(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "orders"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "amount", Position: 1, Type: "bigint"}
+	after := before
+	after.NotNull = true
+	check := pgschema.Constraint{
+		Table: table.ObjectID(), Name: "orders_amount_nn", Type: pgschema.ConstraintCheck,
+		Definition: `CHECK ((amount IS NOT NULL))`, Validated: true,
+	}
+	for index, snapshot := range []*pgschema.Snapshot{current, desired} {
+		column := before
+		if index == 1 {
+			column = after
+		}
+		for _, object := range []pgschema.Object{table, column, check} {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := snapshot.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.AddDependency(check.ObjectID(), column.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
+		t.Fatalf("NOT NULL reuse decision=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "set_not_null", Key: after.ObjectID().String(), Value: "staged", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
+	}
+	plan, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := joinSQL(plan)
+	if plan.Status != protocol.Planned || strings.Count(joined, "SET NOT NULL") != 1 || strings.Contains(joined, "ADD CONSTRAINT") || strings.Contains(joined, "VALIDATE CONSTRAINT") || strings.Contains(joined, "DROP CONSTRAINT") {
+		t.Fatalf("preserved validated check was not reused: %#v\n%s", plan, joined)
+	}
+	if len(plan.Statements) != 1 || !containsString(plan.Statements[0].Hazards, "validated_check_reuse:orders_amount_nn") || containsString(plan.Statements[0].Hazards, "table_scan") {
+		t.Fatalf("validated-check reuse hazards=%#v", plan.Statements)
+	}
+}
+
+func TestSimpleNotNullCheckRecognizerIsNarrow(t *testing.T) {
+	for _, definition := range []string{
+		`CHECK ((amount IS NOT NULL))`,
+		`check ("amount" is not null)`,
+		`CHECK ((("quoted amount" IS NOT NULL))) NOT VALID`,
+	} {
+		name := "amount"
+		if strings.Contains(definition, "quoted amount") {
+			name = "quoted amount"
+		}
+		if !isSimpleNotNullCheck(definition, name) {
+			t.Fatalf("did not recognize %q for %q", definition, name)
+		}
+	}
+	for _, definition := range []string{
+		`CHECK ((amount > 0))`,
+		`CHECK ((amount IS NOT NULL) AND (amount > 0))`,
+		`CHECK ((other IS NOT NULL))`,
+	} {
+		if isSimpleNotNullCheck(definition, "amount") {
+			t.Fatalf("recognized non-equivalent check %q", definition)
+		}
 	}
 }
 
@@ -1005,6 +1084,19 @@ func TestBuildRequiresAndRendersColumnMutationChoices(t *testing.T) {
 	}
 	if split.Status != protocol.Unsupported || !containsString(split.Unsupported, "two_application_deployments_required:"+after.ObjectID().String()) {
 		t.Fatalf("split-plan choice must produce an explicit two-deployment boundary: %#v", split)
+	}
+	if len(split.Guidance) != 1 || split.Guidance[0].Kind != "split_plan" || split.Guidance[0].Key != after.ObjectID().String() || len(split.Guidance[0].Steps) != 3 {
+		t.Fatalf("split-plan choice must include a bounded scaffold: %#v", split.Guidance)
+	}
+	if scaffold := split.Guidance[0].Steps[0]; scaffold.Stage != "plan_a_expand_scaffold" || !strings.Contains(scaffold.SQL, `ALTER TABLE "public"."orders" ADD COLUMN "onwardpg_next_`) || !strings.HasSuffix(scaffold.SQL, `" integer;`) {
+		t.Fatalf("split-plan expand scaffold=%#v", scaffold)
+	}
+	for _, guidance := range split.Guidance {
+		for _, step := range guidance.Steps {
+			if strings.Contains(step.SQL, `DROP COLUMN "age"`) {
+				t.Fatalf("split-plan guidance scheduled destructive work before a later desired schema: %#v", guidance)
+			}
+		}
 	}
 }
 

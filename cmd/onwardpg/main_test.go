@@ -99,6 +99,26 @@ func TestWriteDecisionEnvelopeIncludesPlannerAnalysis(t *testing.T) {
 	}
 }
 
+func TestWriteUnsupportedTextIncludesNonExecutableGuidance(t *testing.T) {
+	result := protocol.Result{
+		Status:      protocol.Unsupported,
+		Unsupported: []string{"two_application_deployments_required:column:app:orders:amount"},
+		Guidance: []protocol.Guidance{{
+			Kind: "split_plan", Key: "column:app:orders:amount", Summary: "Retain the old contract in Plan A.",
+			Steps: []protocol.GuidanceStep{{Stage: "plan_a_expand_scaffold", SQL: `ALTER TABLE "app"."orders" ADD COLUMN "onwardpg_next_1234" bigint;`}},
+		}},
+	}
+	var output bytes.Buffer
+	if err := writeUnsupportedText(&output, result); err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"unsupported", result.Unsupported[0], "split_plan guidance", "Retain the old contract", "plan_a_expand_scaffold", "ADD COLUMN"} {
+		if !strings.Contains(output.String(), fragment) {
+			t.Fatalf("unsupported guidance omitted %q:\n%s", fragment, output.String())
+		}
+	}
+}
+
 func TestWriteDecisionsTextProducesCopyableHints(t *testing.T) {
 	var output bytes.Buffer
 	err := writeDecisionsText(&output, "dev plan", []protocol.Decision{{Choices: []protocol.DecisionChoice{

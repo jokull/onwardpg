@@ -521,10 +521,7 @@ func runDevAt(arguments []string, start string) int {
 		}
 	} else if *output == "text" {
 		if result.Status == protocol.Unsupported {
-			_, _ = fmt.Fprintln(os.Stdout, "unsupported")
-			for _, reason := range result.Unsupported {
-				_, _ = fmt.Fprintln(os.Stdout, "  "+reason)
-			}
+			_ = writeUnsupportedText(os.Stdout, result)
 		} else if len(result.Statements) == 0 {
 			if len(result.Preserved) == 0 && len(result.Compatibility) == 0 {
 				_, _ = fmt.Fprintln(os.Stdout, "-- onwardpg: no changes")
@@ -1437,10 +1434,7 @@ func runLowLevelPlan(arguments []string) int {
 		}
 	} else if *output == "text" {
 		if result.Status == protocol.Unsupported {
-			_, _ = fmt.Fprintln(os.Stdout, "unsupported")
-			for _, reason := range result.Unsupported {
-				_, _ = fmt.Fprintln(os.Stdout, "  "+reason)
-			}
+			_ = writeUnsupportedText(os.Stdout, result)
 		} else {
 			_, _ = fmt.Fprintln(os.Stdout, protocol.RenderSQL(result, ""))
 		}
@@ -1707,6 +1701,31 @@ func analysisFromPlan(plan *protocol.Result) []protocol.DecisionAnalysis {
 		return nil
 	}
 	return plan.Analysis
+}
+
+func writeUnsupportedText(writer io.Writer, result protocol.Result) error {
+	if _, err := fmt.Fprintln(writer, "unsupported"); err != nil {
+		return err
+	}
+	for _, reason := range result.Unsupported {
+		if _, err := fmt.Fprintln(writer, "  "+reason); err != nil {
+			return err
+		}
+	}
+	for _, guidance := range result.Guidance {
+		if _, err := fmt.Fprintf(writer, "\n%s guidance for %s\n", guidance.Kind, guidance.Key); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(writer, guidance.Summary); err != nil {
+			return err
+		}
+		for _, step := range guidance.Steps {
+			if _, err := fmt.Fprintf(writer, "\n-- %s\n%s\n", step.Stage, step.SQL); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func writeDecisionsText(writer io.Writer, subject string, decisions []protocol.Decision) error {

@@ -352,6 +352,17 @@ func applyCaseOverrides(entry *caseEntry, family, name string) {
 			"cmd/onwardpg#TestDraftReportsUnreachableColumnOrderAsCompatibilityOnPostgreSQL",
 		}
 		entry.Notes = "PostgreSQL appends a new column and cannot reproduce a source file's visual insertion point without replacing the table. onwardpg emits the additive migration, records typed column_physical_order compatibility evidence, and treats the ordinal as non-semantic for convergence."
+	case family == "column" && name == "Change data type, nullability (NOT NULL), and default":
+		entry.Classification = "weaker"
+		entry.Dimensions.Mutation = "supported"
+		entry.Dimensions.OnlineStrategy = "intentionally_different"
+		entry.OnwardPGTests = []string{
+			"internal/graphplan#TestBuildOrdersChangedDefaultAfterColumnType",
+			"internal/graphplan#TestBuildReusesPreservedValidatedNotNullCheck",
+			"internal/differential#TestPinnedStripeColumnMutationRequiresOnwardBridgeWithCompleteChoreography",
+		}
+		entry.DifferentialTest = "internal/differential#TestPinnedStripeColumnMutationRequiresOnwardBridgeWithCompleteChoreography"
+		entry.Notes = "Stripe applies a direct type rewrite. onwardpg preserves its rolling-deployment bridge decision, then generates default removal/restoration, post-rewrite ANALYZE, and staged NOT NULL choreography around the editable conversion."
 	case family == "index" && name == "Alter index columns (index replacement and prioritized builds)":
 		entry.Classification = "supported"
 		entry.Dimensions.Mutation = "supported"

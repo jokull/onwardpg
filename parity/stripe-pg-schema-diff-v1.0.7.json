@@ -10,9 +10,9 @@
   "summary": {
     "total_cases": 415,
     "differential_parity": 30,
-    "differential_difference": 5,
+    "differential_difference": 6,
     "onward_evidence_only": 10,
-    "family_only_unverified": 368,
+    "family_only_unverified": 367,
     "confirmed_missing": 0,
     "out_of_scope": 2
   },
@@ -1556,20 +1556,22 @@
       "stripe_test": "migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/Change data type, nullability (NOT NULL), and default",
       "source_line": 921,
       "classification": "weaker",
-      "evidence_status": "family_only_unverified",
-      "gap_status": "evidence_gap",
+      "evidence_status": "differential_difference",
+      "gap_status": "deliberate_difference",
       "dimensions": {
         "catalog": "supported",
-        "mutation": "weaker",
-        "online_strategy": "weaker",
+        "mutation": "supported",
+        "online_strategy": "intentionally_different",
         "rejection": "intentionally_different",
         "workflow": "intentionally_different"
       },
       "onwardpg_tests": [
-        "internal/graphplan#TestMutationPlanConvergesOnPostgreSQL",
-        "internal/graphplan#TestIdentityGenerationStartAndIncrementConvergeOnPostgreSQL"
+        "internal/graphplan#TestBuildOrdersChangedDefaultAfterColumnType",
+        "internal/graphplan#TestBuildReusesPreservedValidatedNotNullCheck",
+        "internal/differential#TestPinnedStripeColumnMutationRequiresOnwardBridgeWithCompleteChoreography"
       ],
-      "notes": "Conservative family-level classification pending case-by-case differential verification."
+      "differential_test": "internal/differential#TestPinnedStripeColumnMutationRequiresOnwardBridgeWithCompleteChoreography",
+      "notes": "Stripe applies a direct type rewrite. onwardpg preserves its rolling-deployment bridge decision, then generates default removal/restoration, post-rewrite ANALYZE, and staged NOT NULL choreography around the editable conversion."
     },
     {
       "id": "column.change_data_type_and_collation_nullability_not_null_and_default_5b3ba00e3638",

@@ -1220,11 +1220,19 @@ func addForeignKeyKeyDependencies(snapshot *pgschema.Snapshot) error {
 		if foreignKey.Type != pgschema.ConstraintForeign || foreignKey.Reference == nil {
 			continue
 		}
+		var referencedKeys []pgschema.Constraint
 		for _, candidate := range constraints {
-			if candidate.Table != *foreignKey.Reference || (candidate.Type != pgschema.ConstraintPrimary && candidate.Type != pgschema.ConstraintUnique) {
+			if candidate.Table != *foreignKey.Reference || candidate.UsingIndex == "" || candidate.UsingIndex != foreignKey.UsingIndex ||
+				(candidate.Type != pgschema.ConstraintPrimary && candidate.Type != pgschema.ConstraintUnique) {
 				continue
 			}
-			if err := snapshot.AddDependency(foreignKey.ObjectID(), candidate.ObjectID()); err != nil {
+			referencedKeys = append(referencedKeys, candidate)
+		}
+		if len(referencedKeys) > 1 {
+			return fmt.Errorf("foreign key %s has ambiguous referenced key index %q", foreignKey.ObjectID(), foreignKey.UsingIndex)
+		}
+		if len(referencedKeys) == 1 {
+			if err := snapshot.AddDependency(foreignKey.ObjectID(), referencedKeys[0].ObjectID()); err != nil {
 				return err
 			}
 		}

@@ -40,6 +40,83 @@ type stripeHazard struct {
 	Message string `json:"message"`
 }
 
+// Stripe fixture receipt:
+// migration_acceptance_tests/column_cases_test.go#TestColumnTestCases/
+// Change data type, nullability (NOT NULL), and default.
+func TestPinnedStripeColumnMutationRequiresOnwardBridgeWithCompleteChoreography(t *testing.T) {
+	baseURL, stripeBinary := requireStripeReference(t)
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	if _, err := admin.Exec(ctx, "SELECT pg_advisory_lock($1)", integrationLock); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) }()
+
+	currentDDL := `CREATE TABLE public.foobar (
+    id integer PRIMARY KEY,
+    foobar text DEFAULT 'some default'
+);`
+	desiredDDL := `CREATE TABLE public.foobar (
+    id integer PRIMARY KEY,
+    foobar char NOT NULL DEFAULT 'A'
+);`
+	urls := createStripeDatabases(t, ctx, admin, baseURL, currentDDL, "source")
+	desiredDir, desiredPath := writeStripeDesiredDDL(t, desiredDDL)
+
+	stripe := runStripePlan(t, ctx, stripeBinary, urls["source"], desiredDir)
+	stripeSQL := stripeDDL(stripe)
+	for _, fragment := range []string{"SET DATA TYPE", "ANALYZE", "SET NOT NULL", "SET DEFAULT"} {
+		if !strings.Contains(stripeSQL, fragment) {
+			t.Fatalf("pinned Stripe column fixture omitted %q: %#v", fragment, stripe)
+		}
+	}
+
+	current, err := source.LoadGraph(ctx, source.Parse(urls["source"]), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+desiredPath), baseURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
+		t.Fatalf("onwardpg column decisions=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+	}
+	for _, question := range pending.Questions {
+		value := ""
+		switch question.Kind {
+		case "type_change":
+			value = "manual_sql"
+		case "set_not_null":
+			value = "staged"
+		default:
+			t.Fatalf("unexpected onwardpg column question: %#v", question)
+		}
+		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
+	}
+	onward, err := graphplan.Build(current, desired, answers, graphplan.Options{})
+	if err != nil || onward.Status != protocol.NeedsSQLEdits {
+		t.Fatalf("onwardpg column handoff=%#v err=%v", onward, err)
+	}
+	onwardSQL := joinOnwardSQL(onward)
+	contractTODO := strings.LastIndex(onwardSQL, "ONWARDPG TODO")
+	dropDefault := strings.Index(onwardSQL, `ALTER COLUMN "foobar" DROP DEFAULT`)
+	analyze := strings.Index(onwardSQL, `ANALYZE "public"."foobar" ("foobar")`)
+	setDefault := strings.Index(onwardSQL, `ALTER COLUMN "foobar" SET DEFAULT 'A'`)
+	setNotNull := strings.Index(onwardSQL, `ALTER COLUMN "foobar" SET NOT NULL`)
+	if dropDefault < 0 || contractTODO < dropDefault || analyze < contractTODO || setDefault < analyze || setNotNull < setDefault {
+		t.Fatalf("onwardpg column choreography is incomplete or unordered:\n%s", onwardSQL)
+	}
+}
+
 func TestPinnedStripeAndOnwardPGContinuousIndexReplacement(t *testing.T) {
 	baseURL, stripeBinary := requireStripeReference(t)
 	ctx := context.Background()
