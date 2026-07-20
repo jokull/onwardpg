@@ -61,14 +61,13 @@ application-owned cleanup pocket and an exact generated assertion:
 <!-- onwardpg-receipt: required-column-generated-contract-pocket -->
 ```sql
 -- contract.sql
--- onwardpg:edit begin stmt-sha256-7d55b725e4e5aeac8a2691e13518e9723c9a61598d40e49ed5890dea254005d4
--- PRODUCT-SPECIFIC SQL: ONWARDPG TODO: provide reconcile_contract_sql SQL for app.bookings.status
+-- onwardpg:edit begin stmt-sha256-1a5377b536479569445c7585eb95560c9e977f5d696557db5f28031f9789eec6
+-- PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status
 -- Verify: SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);
 -- ONWARDPG TODO: replace this comment with reviewed SQL for reconcile_contract_sql on app.bookings.status.
 -- Planner analysis: Supply reviewed post-drain cleanup/backfill SQL and at least one read-only Boolean verification query for column:app:bookings:status.
 -- Expected effect: complete the named operation and converge to the desired catalog state.
--- Add boolean assertions to verify.sql for every data-dependent assumption.
--- onwardpg:edit end stmt-sha256-7d55b725e4e5aeac8a2691e13518e9723c9a61598d40e49ed5890dea254005d4
+-- onwardpg:edit end stmt-sha256-1a5377b536479569445c7585eb95560c9e977f5d696557db5f28031f9789eec6
 
 -- onwardpg:batch transactional
 -- Batch batch-contract-002: transactional.

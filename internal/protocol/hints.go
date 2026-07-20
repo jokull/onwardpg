@@ -16,13 +16,14 @@ const DecisionsVersion = "onwardpg.decisions/v1"
 // the statement against the observed diff and adds state binding to its own
 // receipt after consumption.
 type Hint struct {
-	Kind     string   `json:"kind"`
-	Object   string   `json:"object,omitempty"`
-	Name     []string `json:"name,omitempty"`
-	From     []string `json:"from,omitempty"`
-	To       []string `json:"to,omitempty"`
-	Action   string   `json:"action,omitempty"`
-	Strategy string   `json:"strategy,omitempty"`
+	Kind     string      `json:"kind"`
+	Object   string      `json:"object,omitempty"`
+	Name     []string    `json:"name,omitempty"`
+	From     []string    `json:"from,omitempty"`
+	To       []string    `json:"to,omitempty"`
+	Action   string      `json:"action,omitempty"`
+	Strategy string      `json:"strategy,omitempty"`
+	Work     *ManualWork `json:"work,omitempty"`
 }
 
 // Decision is one irreducible ambiguity. Each choice contains the exact hint
@@ -34,6 +35,7 @@ type Decision struct {
 
 type DecisionChoice struct {
 	Hint    Hint     `json:"hint"`
+	Argv    []string `json:"argv,omitempty"`
 	Hazards []string `json:"hazards,omitempty"`
 }
 
@@ -49,6 +51,9 @@ type DecisionReceipt struct {
 func (h Hint) Validate() error {
 	if h.Kind == "" {
 		return fmt.Errorf("hint kind is required")
+	}
+	if h.Kind != "manual_sql" && h.Work != nil {
+		return fmt.Errorf("%s hint does not accept work", h.Kind)
 	}
 	switch h.Kind {
 	case "identity":
@@ -98,8 +103,8 @@ func (h Hint) Validate() error {
 		if err := validateIdentifier("column", h.Name, "name"); err != nil {
 			return err
 		}
-		if h.Strategy != "manual_sql" {
-			return fmt.Errorf("type_change hint strategy must be manual_sql")
+		if h.Strategy != "manual_sql" && h.Strategy != "split_plan" {
+			return fmt.Errorf("type_change hint strategy must be manual_sql or split_plan")
 		}
 		return h.reject("from", h.From, "to", h.To, "action", h.Action)
 	case "rollout":

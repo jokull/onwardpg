@@ -50,8 +50,16 @@ onwardpg plan
 
 Do not stack local fixup migrations. Git moves the feature; rerunning `plan` restacks the same feature bundle on the currently accepted history and carries forward only decisions whose scoped meaning still holds.
 
-Use JSON output, which is the default. Follow the high-level `status`, nested
-decision choices, named `edit_files`, and exit codes rather than guessing.
+Use JSON output, which is the default. Follow the high-level `status`, ordered
+`next_actions`, nested decision choices, named edit requirements, and exit
+codes rather than guessing. A `workspace_fast_forward` action contains direct
+D -> W SQL plus exact argv; it is never the durable H -> W bundle. Use
+`durable.status` as the effective bundle state. `durable.generated_plan` is
+the raw generator result before edit reconciliation and may retain
+`needs_sql_edits` as provenance after the edited artifact verifies.
+Inspect `next_actions` even when the top-level status is `ready`: that state
+means the durable artifact is ready, while caller-owned development SQL remains
+an explicit optional action.
 Lower-level `draft` reports additionally provide `next_action`:
 
 - `0`: review the report and SQL; continue or verify.
@@ -85,6 +93,14 @@ For product-specific transformations:
 ## Development databases and branches
 
 `onwardpg plan --output sql` emits only direct development reconciliation (`D -> W`). It is never the PR bundle. In workspace mode, preserve development-only objects that may belong to another branch.
+
+When ordinary plan output contains a `workspace_fast_forward` action, inspect
+its `preserved` objects and reason. `accepted_history_changed` means a rebase
+left D behind the new accepted head. The included SQL is available immediately;
+the argv renders the same stream for optional execution and repeats any
+consumed ephemeral dev hints. Never copy D-only
+objects into the durable plan, and stop if the development report asks a
+decision or reports an incompatibility.
 
 If a branch switch removes the active bundle from the checkout, name the returning or other plan explicitly. Let onwardpg park or restore worktree-local PlanIDs. If it reports an active-plan conflict, stop and resolve which feature is present instead of deleting anchors or fabricating another plan.
 

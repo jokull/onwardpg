@@ -123,6 +123,36 @@ func TestResolveRequiresBackfillStrategyAfterConfirmedColumnRename(t *testing.T)
 	if manual.Result.Status != protocol.NeedsSQLEdits || !strings.Contains(joinResolutionSQL(manual), "ONWARDPG TODO") {
 		t.Fatalf("manual backfill strategy must create an editable, unverifiable-until-edited handoff: %#v", manual)
 	}
+	for _, item := range manual.Result.Statements {
+		if item.Manual != nil && (len(item.Manual.VerificationSQL) != 0 || strings.Contains(item.SQL, "SELECT false")) {
+			t.Fatalf("rename backfill retained a hidden placeholder verifier: %#v", item)
+		}
+	}
+}
+
+func TestResolveDefersValidHintBehindEarlierQuestionWithoutReceiptingIt(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "display_name", Position: 1, Type: "text"}
+	after := pgschema.Column{Table: table.ObjectID(), Name: "full_name", Position: 1, Type: "text"}
+	for _, object := range []pgschema.Object{table, before} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{table, after} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later := protocol.Hint{Kind: "rename_backfill", Name: []string{"app", "accounts", "display_name"}, Strategy: "single_transaction"}
+	resolution, err := Resolve(current, desired, []protocol.Hint{later}, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.Result.Status != protocol.NeedsInput || len(resolution.Deferred) != 1 || len(resolution.Hints) != 0 || len(resolution.Answers.Answers) != 0 {
+		t.Fatalf("deferred resolution = %#v", resolution)
+	}
 }
 
 func TestResolveIdentityHintReachesTableCandidacyAndProducesManualBridge(t *testing.T) {

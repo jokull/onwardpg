@@ -8,6 +8,12 @@ Hints may be supplied proactively, but they must describe semantic intent only. 
 
 Use `--hint` or `--hints-file` for durable H -> W intent. Use `--dev-hint` only for an independent D -> W ambiguity. Contradictory, stale, invalid, impossible, and unused hints fail.
 
+Development hints are ephemeral. After one is consumed, the next response
+lists it in `applied_hints` and prepends it to every remaining choice argv.
+Always execute or compose from the newest response. These argv arrays assume
+the current repository, environment, and exporter runtime; they never contain
+database credentials.
+
 ## Product SQL handoff
 
 Some catalog transitions require application-aware data work. onwardpg writes a blocking `ONWARDPG TODO` into the relevant phase and reports the exact files to edit.
@@ -27,6 +33,14 @@ Preserve generated markers and edit boundaries. After edits, `onwardpg verify` e
 Git is responsible for rebasing. After accepted history changes, rerun `onwardpg plan` for the same active PlanID. onwardpg validates the remaining content-addressed chain, replays its current head, and rebuilds H(new) -> W.
 
 Still-valid scoped decisions survive. Decisions whose participating schema meaning changed become stale. Generated work already absorbed upstream disappears. Developer-owned SQL is never silently discarded or declared safe.
+
+If D lacks safe changes from the new accepted head, `next_actions` includes a
+`workspace_fast_forward` object with rendered D -> W SQL, statement count,
+preserved D-only objects, and `onwardpg plan --output sql` argv. The reason is
+`accepted_history_changed`. This is a local convenience handoff, not a bundle
+phase and not evidence that parallel-branch work belongs in H -> W. Any
+consumed ephemeral dev hints appear in `applied_hints` and are repeated in the
+argv.
 
 ## Branch switching
 

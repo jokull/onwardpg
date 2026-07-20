@@ -471,6 +471,9 @@ func markContractEnforcementDispositions(result *protocol.Result) []string {
 }
 
 func restoresContractEnforcement(upperSQL string) bool {
+	if strings.Contains(upperSQL, " NOT ENFORCED") {
+		return false
+	}
 	if strings.Contains(upperSQL, "VALIDATE CONSTRAINT") || strings.Contains(upperSQL, " SET NOT NULL") ||
 		strings.HasPrefix(strings.TrimSpace(upperSQL), "CREATE UNIQUE INDEX") {
 		return true

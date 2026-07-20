@@ -38,6 +38,12 @@ restoration. `onwardpg contract check` then compares production read-only with
 the receipted post-expand catalog, runs those data gates, and validates expiring
 writer evidence bound to this exact plan and history entry.
 
+Large data work is not disguised as a phase transaction. A typed
+`operator_batched` decision produces a separately receipted operation with its
+bounded template, progress key, idempotency notes, and read-only completion
+gate. Contract readiness points the release runner at that artifact until the
+gate is true.
+
 **Documentation:** [onwardpg.solberg.is](https://onwardpg.solberg.is)
 
 The [plan-command walkthrough](https://onwardpg.solberg.is/concepts/plan-command/)
@@ -114,7 +120,7 @@ onwardpg plan add-booking-status
 
 The required-column plan first asks whether contract should use the generated
 post-drain assertion alone, capture reviewed cleanup SQL, or remain loose for a
-later deployment. Answer with the printed fingerprinted hint and rerun.
+later deployment. Answer with the printed semantic hint and rerun.
 Editable product-specific SQL must pass clone verification before acceptance.
 
 After selecting reviewed cleanup for this exact example, the generated receipt
@@ -168,8 +174,9 @@ For an eligible same-type rename, onwardpg creates a temporary second column
 and deterministic dual-write trigger. It then asks how existing rows will be
 backfilled:
 
-- manual_sql is the default: provide reviewed SQL plus a boolean equality
-  query, using whatever batching strategy production volume requires;
+- manual_sql can provide a small receipted one-shot batch or a typed
+  `operator_batched` artifact for production volume; onwardpg supplies the
+  exact equality completion gate;
 - single_transaction explicitly accepts an unbounded UPDATE and surfaces table
   scan, long transaction, WAL, and replica-lag hazards; or
 - split_plan keeps both contracts until a later application deployment.

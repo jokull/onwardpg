@@ -491,9 +491,17 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		if choices.renameStrategy[rename.from.ObjectID()] == "split_plan" {
 			continue
 		}
-		for _, statement := range renderColumnRename(rename, choices.renameStrategy[rename.from.ObjectID()], choices.renameBackfill[rename.from.ObjectID()]) {
+		strategy := choices.renameStrategy[rename.from.ObjectID()]
+		work := choices.renameBackfill[rename.from.ObjectID()]
+		statements := renderColumnRename(rename, strategy, work)
+		transitionID := rename.from.ObjectID().String() + "->" + rename.to.ObjectID().String()
+		for index := range statements {
+			statements[index].TransitionID = transitionID
+		}
+		for _, statement := range statements {
 			appendStatement(&result, statement)
 		}
+		attachColumnRenameReadiness(&result, rename, strategy, work, currentFingerprint, desiredFingerprint)
 	}
 
 	createdTables := make(map[pgschema.ID]bool)
@@ -503,6 +511,10 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 	}
 	detachedIndexes := detachedConstraintIndexes(changes)
+	detachedIndexIDs := make(map[pgschema.ID]bool, len(detachedIndexes))
+	for _, index := range detachedIndexes {
+		detachedIndexIDs[index.ObjectID()] = true
+	}
 	deferredIndexCreates := make([]change.Change, 0)
 	deferredPostConstraintStatements := make([]protocol.Statement, 0)
 	deferredTableRenameDependents := make([]protocol.Statement, 0)
@@ -551,6 +563,13 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			}
 			reconciliationIDs := append([]pgschema.ID{item.ID}, consumedIDs...)
 			for _, reconciliationID := range reconciliationIDs {
+				// A constraint-backed index becoming standalone renders no SQL at
+				// its ordinary graph position: dropping the constraint removes the
+				// physical index, and the replacement is appended below. Bind its
+				// reconciliation to that real CREATE INDEX statement instead.
+				if detachedIndexIDs[reconciliationID] {
+					continue
+				}
 				decision, exists := choices.reconciliation[reconciliationID]
 				if !exists || appliedReconciliations[reconciliationID] {
 					continue
@@ -632,7 +651,16 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		if len(unsupported) > 0 {
 			return unsupportedResult(result, resolver, unsupported)
 		}
-		for _, statement := range withPhase(statements, "contract", "review", "constraint_index_detach") {
+		statements = withPhase(statements, "contract", "review", "constraint_index_detach")
+		if decision, exists := choices.reconciliation[index.ObjectID()]; exists && !appliedReconciliations[index.ObjectID()] {
+			statements = applyReconciliation(statements, decision, reconciliationGates[index.ObjectID()])
+			appliedReconciliations[index.ObjectID()] = true
+			result.ContractGates = append(result.ContractGates, reconciliationGates[index.ObjectID()]...)
+			result.Reconciliations = append(result.Reconciliations, protocol.Reconciliation{
+				TransitionID: decision.Spec.TransitionID, Strategy: decision.Strategy, Work: decision.Work, GateIDs: append([]string(nil), decision.GateIDs...),
+			})
+		}
+		for _, statement := range statements {
 			appendStatement(&result, statement)
 		}
 	}
@@ -2179,9 +2207,9 @@ func renderColumnRename(rename renameColumn, strategy string, work protocol.Manu
 			"expand", "review", true,
 			"column_overlap_bridge", "data_movement", "table_scan", "unbounded_update", "long_transaction", "wal_volume", "replica_lag",
 		))
-	} else {
+	} else if work.ExecutionMode != protocol.ManualOperatorBatched && work.ExecutionMode != protocol.ManualExternalAttestation {
 		statements = append(statements, manualWorkStatementPhase(work, protocol.PhaseExpand,
-			"column_overlap_bridge", "rename_backfill", "data_movement", "operator_batched"))
+			"column_overlap_bridge", "rename_backfill", "data_movement", "operator_authored"))
 	}
 	if strategy == "single_transaction" {
 		statements = append(statements, statement(
@@ -2208,6 +2236,73 @@ func renderColumnRename(rename renameColumn, strategy string, work protocol.Manu
 		statements = append(statements, statement("COMMENT ON COLUMN "+table+"."+quote(rename.to.Name)+" IS "+value+";", "contract", "safe", true))
 	}
 	return statements
+}
+
+func attachColumnRenameReadiness(result *protocol.Result, rename renameColumn, strategy string, work protocol.ManualWork, currentFingerprint, desiredFingerprint string) {
+	transitionID := rename.from.ObjectID().String() + "->" + rename.to.ObjectID().String()
+	table := qualified(rename.from.Table.Schema, rename.from.Table.Name)
+	equalitySQL := "SELECT NOT EXISTS (SELECT 1 FROM " + table + " WHERE " + quote(rename.to.Name) + " IS DISTINCT FROM " + quote(rename.from.Name) + ");"
+	scope := contractGateScope(currentFingerprint, desiredFingerprint, "column-rename-equality:"+transitionID)
+	gate := protocol.ContractGate{
+		ID: contractGateID("data", transitionID, scope, 0), Kind: "data_assertion", ScopeFingerprint: scope,
+		Reason:     "overlap columns must contain equal values before contract removes the compatibility bridge for " + transitionID,
+		BooleanSQL: equalitySQL,
+	}
+	reconciliation := protocol.Reconciliation{TransitionID: transitionID, Strategy: "assert_only", GateIDs: []string{gate.ID}}
+
+	switch {
+	case strategy == "single_transaction":
+		cleanupSQL := "UPDATE " + table + " SET " + quote(rename.to.Name) + " = " + quote(rename.from.Name) + " WHERE " + quote(rename.to.Name) + " IS DISTINCT FROM " + quote(rename.from.Name) + ";"
+		cleanup := protocol.ManualWork{Summary: "final overlap catch-up after legacy writers drain", ExecutionMode: protocol.ManualTransactionalOnce, Statements: []string{cleanupSQL}, VerificationSQL: []string{equalitySQL}}
+		gate.Kind = "manual_reconciliation"
+		reconciliation.Strategy = "generated_sql"
+		reconciliation.Work = &cleanup
+	case work.ExecutionMode == protocol.ManualOperatorBatched:
+		receipted := work
+		receipted.VerificationSQL = []string{equalitySQL}
+		gate.Kind = "manual_reconciliation"
+		reconciliation.Strategy = "manual_sql"
+		reconciliation.Work = &receipted
+		operationID := stableOperationID(transitionID, work)
+		result.Operations = append(result.Operations, protocol.Operation{
+			ID: operationID, TransitionID: transitionID, Timing: "after_expand_before_contract",
+			ExecutionMode: protocol.ManualOperatorBatched, Summary: work.Summary,
+			BatchTemplate: append([]string(nil), work.Statements...), ProgressKey: work.ProgressKey,
+			CompletionSQL: equalitySQL, IdempotencyNotes: work.IdempotencyNotes, CompletionGateIDs: []string{gate.ID},
+		})
+	case work.ExecutionMode == protocol.ManualExternalAttestation:
+		operationGate := protocol.ContractGate{
+			ID: contractGateID("operation", transitionID, scope, 1), Kind: "operation_attestation", ScopeFingerprint: scope,
+			Reason:           "external system must attest completion of the rename backfill for " + transitionID,
+			RequiredEvidence: append([]string(nil), work.RequiredEvidence...),
+		}
+		operationID := stableOperationID(transitionID, work)
+		result.ContractGates = append(result.ContractGates, operationGate)
+		result.Operations = append(result.Operations, protocol.Operation{
+			ID: operationID, TransitionID: transitionID, Timing: "after_expand_before_contract",
+			ExecutionMode: protocol.ManualExternalAttestation, Summary: work.Summary,
+			RequiredEvidence: append([]string(nil), work.RequiredEvidence...), CompletionGateIDs: []string{operationGate.ID},
+		})
+	}
+
+	result.ContractGates = append(result.ContractGates, gate)
+	result.Reconciliations = append(result.Reconciliations, reconciliation)
+	for index := range result.Statements {
+		statement := &result.Statements[index]
+		if statement.TransitionID != transitionID || statement.Phase != protocol.PhaseContract || stringIn(statement.Hazards, "final_overlap_catchup") {
+			continue
+		}
+		statement.RequiresGates = unionStrings(statement.RequiresGates, []string{gate.ID})
+	}
+}
+
+func stableOperationID(transitionID string, work protocol.ManualWork) string {
+	body, _ := json.Marshal(struct {
+		TransitionID string              `json:"transition_id"`
+		Work         protocol.ManualWork `json:"work"`
+	}{transitionID, work})
+	sum := sha256.Sum256(body)
+	return "operation-" + hex.EncodeToString(sum[:8])
 }
 
 func renderDirectColumnRename(rename renameColumn) []protocol.Statement {
@@ -2341,7 +2436,7 @@ func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []
 		}
 		backfillQuestion := protocol.Question{
 			ID: "rename_backfill:" + id.String(), Kind: "rename_backfill", Key: id.String(),
-			Message:            "Supply the reviewed column backfill and at least one boolean verification query proving the old and new values agree before contract removes the compatibility bridge.",
+			Message:            "Supply the reviewed column backfill. onwardpg generates the exact equality assertion before contract removes the compatibility bridge; optional synthetic conversion examples belong in verify.sql.",
 			Choices:            []string{"provided"},
 			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		}
@@ -2352,9 +2447,6 @@ func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []
 		if !provided {
 			questions = append(questions, backfillQuestion)
 			continue
-		}
-		if len(work.VerificationSQL) == 0 {
-			return nil, fmt.Errorf("rename backfill %s requires at least one boolean verification query", id)
 		}
 		choices.renameBackfill[id] = work
 	}
@@ -6793,9 +6885,13 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 					}
 					if !provided {
 						questions = append(questions, workQuestion)
-					} else if len(work.VerificationSQL) == 0 {
-						return nil, decisions, fmt.Errorf("contract reconciliation %s requires at least one boolean verification query", spec.TransitionID)
 					} else {
+						if len(work.VerificationSQL) == 0 && spec.BooleanSQL != "" {
+							work.VerificationSQL = []string{spec.BooleanSQL}
+						}
+						if len(work.VerificationSQL) == 0 {
+							return nil, decisions, fmt.Errorf("contract reconciliation %s requires one exact Boolean gate", spec.TransitionID)
+						}
 						// The agent-facing manual_sql hint deliberately contains no
 						// SQL. When the planner already has an exact postcondition,
 						// replace the generated TODO verifier with that expression so
@@ -7053,7 +7149,7 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 						questions = append(questions, backfillQuestion)
 					} else {
 						if len(work.VerificationSQL) == 0 {
-							return nil, decisions, fmt.Errorf("NOT NULL backfill %s requires at least one boolean verification query", item.ID)
+							work.VerificationSQL = []string{spec.BooleanSQL}
 						}
 						decisions.notNullBackfill[item.ID] = work
 						reconciliation.Strategy = "manual_sql"
@@ -9377,7 +9473,7 @@ func manualWorkStatementPhase(work protocol.ManualWork, phase string, hazards ..
 	lines = append(lines, work.Statements...)
 	return protocol.Statement{
 		SQL: strings.Join(lines, "\n"), Phase: phase, Safety: "manual",
-		Hazards: hazards, Manual: &work, NonTransactional: work.ExecutionMode == "non_transactional",
+		Hazards: hazards, Manual: &work, NonTransactional: work.ExecutionMode == "non_transactional" || work.ExecutionMode == protocol.ManualNontransactionalOnce,
 	}
 }
 

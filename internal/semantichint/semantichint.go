@@ -130,9 +130,17 @@ func choicesForQuestion(question protocol.Question, current, desired *pgschema.S
 			Hint: protocol.Hint{Kind: "drop", Object: object, Name: name}, Hazards: []string{"data_loss"},
 		}}, nil
 	case "type_change":
-		return []protocol.DecisionChoice{{
-			Hint: protocol.Hint{Kind: "type_change", Name: name, Strategy: "manual_sql"}, Hazards: []string{"manual_sql"},
-		}}, nil
+		result := make([]protocol.DecisionChoice, 0, len(question.Choices))
+		for _, strategy := range question.Choices {
+			hazards := []string{"manual_sql"}
+			if strategy == "split_plan" {
+				hazards = []string{"additional_deployment"}
+			}
+			result = append(result, protocol.DecisionChoice{Hint: protocol.Hint{
+				Kind: "type_change", Name: name, Strategy: strategy,
+			}, Hazards: hazards})
+		}
+		return result, nil
 	case "set_not_null":
 		result := make([]protocol.DecisionChoice, 0, len(question.Choices))
 		for _, strategy := range question.Choices {
@@ -277,18 +285,22 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 		if isManualQuestion(question.Kind) && hint.Kind == "manual_sql" && hint.Action == question.Kind {
 			displayName := strings.Join(name, ".")
 			answer.Value = "provided"
-			answer.Manual = &protocol.ManualWork{
-				Summary:       "ONWARDPG TODO: provide " + question.Kind + " SQL for " + displayName,
-				ExecutionMode: "transactional",
-				Statements: []string{
-					"-- ONWARDPG TODO: replace this comment with reviewed SQL for " + question.Kind + " on " + displayName + ".\n" +
-						"-- Planner analysis: " + question.Message + "\n" +
-						"-- Expected effect: complete the named operation and converge to the desired catalog state.\n" +
-						"-- Add boolean assertions to verify.sql for every data-dependent assumption.",
-				},
-			}
-			answer.Manual.VerificationSQL = []string{
-				"SELECT false; -- ONWARDPG TODO: replace with an exact boolean postcondition",
+			answer.Manual = hint.Work
+			if answer.Manual == nil {
+				answer.Manual = &protocol.ManualWork{
+					Summary:       "Provide reviewed " + question.Kind + " SQL for " + displayName,
+					ExecutionMode: protocol.ManualTransactionalOnce,
+					Statements: []string{
+						"-- ONWARDPG TODO: replace this comment with reviewed SQL for " + question.Kind + " on " + displayName + ".\n" +
+							"-- Planner analysis: " + question.Message + "\n" +
+							"-- Expected effect: complete the named operation and converge to the desired catalog state.",
+					},
+				}
+				if manualQuestionNeedsProductVerification(question.Kind) {
+					answer.Manual.VerificationSQL = []string{
+						"SELECT false /* ONWARDPG TODO: replace with an exact boolean postcondition */",
+					}
+				}
 			}
 			return answer, true, nil
 		}
@@ -298,6 +310,18 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 		}
 	}
 	return answer, false, nil
+}
+
+func manualQuestionNeedsProductVerification(kind string) bool {
+	switch kind {
+	case "rename_backfill", "backfill_not_null":
+		// These paths already render an exact generated equality/NULL assertion
+		// after the reviewed work. A second comment-encoded verifier only creates
+		// an undocumented editing contract and can contradict the real gate.
+		return false
+	default:
+		return true
+	}
 }
 
 func isManualQuestion(kind string) bool {

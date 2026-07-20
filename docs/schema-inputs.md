@@ -1,7 +1,7 @@
 # Schema DDL inputs
 
-onwardpg deliberately has no framework-adapter system. Its declarative input
-is PostgreSQL `CREATE`-statement DDL. A project can provide that DDL in either
+onwardpg keeps one narrow integration boundary: PostgreSQL `CREATE`-statement
+DDL. A project can provide that DDL in either
 of two ways:
 
 - `schema_file` points to a repository-relative SQL file; or
@@ -33,12 +33,12 @@ The PostgreSQL major is inferred from the configured scratch server and bound
 to generated history. It is not a user-maintained configuration value.
 
 Drizzle, Django, Prisma, SQLAlchemy, handwritten SQL, or any future code-schema
-source is usable only when the project has a reliable command that emits the
-complete PostgreSQL DDL. This is not uniformly built into those frameworks.
-For example, a Django project may need to replay its migrations in scratch
-PostgreSQL and dump the resulting schema. onwardpg does not import the
-framework's model format and does not read, write, or translate its migration
-journal.
+source is usable when the project has a reliable command that emits complete
+PostgreSQL DDL. The website publishes tested exporter recipes rather than
+embedding framework model parsers in the planner. For Django, the recipe asks
+`MigrationLoader` for final `ProjectState` and materializes it with
+`SchemaEditor`; it therefore includes state-only operations without executing
+historical `RunPython` or `RunSQL` work.
 
 ## Why DDL is the boundary
 
@@ -55,12 +55,13 @@ generated project files are not. Commands should write the schema only to
 stdout. Put credentials in the configured environment variable; URL-bearing
 command arguments are rejected, and receipts never record environment values.
 
-## Intentionally out of scope
+## Stable boundary, framework recipes
 
-There are no framework-specific plugins, migration-runner handoffs, or generic
-adapter SDK commitments in the current roadmap. The product surface remains
-the CLI loop: export DDL, diff, answer explicit questions, regenerate the
-bundle, and review the phase SQL.
+The product surface remains the CLI loop: export DDL, materialize and inspect
+it in PostgreSQL, answer explicit questions, regenerate the bundle, and review
+the phase SQL. Framework recipes may own hermetic export mechanics and document
+which production migration runner must stand down; they do not bypass the same
+DDL determinism, graph inspection, planning, or verification boundary.
 
 The Go implementation contains internal artifact types used to move DDL and
 catalog snapshots between packages. They are not a promise of an integration

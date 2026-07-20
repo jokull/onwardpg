@@ -98,7 +98,9 @@ Unrelated schema erosion preserves a scoped decision; changed meaning
 invalidates it.
 
 `manual_sql` contains no SQL. It returns this nonterminal envelope after writing
-a phase-local TODO:
+a phase-local TODO when `work` is omitted. Agents may instead attach a complete
+typed `work` object to the `manual_sql` hint so no prose-to-SQL handoff is
+required:
 
 ~~~json
 {
@@ -106,7 +108,14 @@ a phase-local TODO:
   "status": "needs_sql_edits",
   "next_action": "edit_files_then_verify",
   "path": "migrations/onward/app/event-date",
-  "edit": ["phases/contract.sql", "phases/expand.sql"]
+  "edit_requirements": [{
+    "path": "phases/contract.sql",
+    "pocket_id": "stmt-sha256-...",
+    "purpose": "normalize historical event dates",
+    "phase": "contract",
+    "execution_mode": "transactional_once",
+    "required_proof": "disposable verification must execute the edited plan to the desired catalog"
+  }]
 }
 ~~~
 
@@ -172,13 +181,21 @@ of:
 - `contract`: final catch-up, validation, enforcement, and compatibility
   cleanup after pre-deployment instances and writers have drained.
 
-Backfill and manual work are statement kinds inside one of these phases, not
-additional deployment phases. If one newly deployed version cannot work before
-and after contract, the change requires another plan.
+One-shot backfill and manual work are statement kinds inside one of these
+phases. Repeatable `operator_batched` work and `external_attestation` are
+separately receipted `operations`, not a third schema phase. If one newly
+deployed version cannot work before and after contract, the change requires
+another plan.
 
 `batches` are the execution boundary: a batch declares whether it is
 transactional and carries its statements. A non-transactional batch must not
 be wrapped in an explicit transaction by an executor.
+
+Manual execution modes are `transactional_once`, `nontransactional_once`,
+`operator_batched`, and `external_attestation`. An operator-batched operation
+contains a bounded batch template, progress key, idempotency notes, and exact
+completion query in `operations/<id>.json`; it is never smuggled into a phase
+batch. External attestation contains evidence categories and no invented SQL.
 
 `contract_gates` records exact read-only data assertions and external writer
 attestations. `reconciliations` binds `assert_only` or reviewed `manual_sql`
@@ -210,7 +227,7 @@ receipts it after validating semantic intent against the observed diff:
 
 ```json
 {
-  "protocol_version": "onwardpg.plan/v1",
+  "protocol_version": "onwardpg.plan/v3",
   "current_fingerprint": "sha256:...",
   "desired_fingerprint": "sha256:...",
   "answers": [
@@ -232,10 +249,11 @@ desired DDL moves. Its report lists carried and invalidated evidence. These
 documents are implementation receipts: editing or supplying one is not a
 supported way to express intent.
 
-Niche operator work uses a semantic `manual_sql` hint. The hint contains no
-SQL; onwardpg writes a blocking TODO into the relevant phase. The agent edits
-that SQL file and optional boolean assertions directly, then `verify` receipts
-the exact files after disposable clone convergence.
+Niche operator work uses a semantic `manual_sql` hint. Without `work`, onwardpg
+writes a blocking TODO into the relevant phase. A coding agent may instead
+supply typed `work` directly, including a bounded operator-batched template.
+One-shot edited SQL and Boolean gate pockets are receipted only after structural
+validation and disposable clone convergence.
 
 ## Exit codes and diagnostics
 
@@ -280,8 +298,39 @@ The preferred high-level `plan` command emits `onwardpg.plan/v5`. Its envelope
 contains a durable H → W `draft` report and a separate development D → W
 report, keyed by one worktree-local PlanID. Consumers must not treat the
 development statements as the durable bundle, and should branch independently
-on each nested report's status. `--output sql` writes only D → W statements to
-stdout and leaves incomplete-plan diagnostics on stderr.
+on each nested report's status. The top-level state is `ready`, `needs_action`,
+`blocked`, or `stale`, and ordered `next_actions` contain exact hints, argv,
+edit pockets, failed postcondition pointers, and a `workspace_fast_forward`
+handoff when D → W has safe statements. That handoff includes the rendered SQL,
+statement count, preserved D-only objects, and `plan --output sql` argv. Its
+reason is `accepted_history_changed` after a rebase and otherwise
+`development_database_behind_desired_schema`. It never changes the durable
+bundle. Any consumed ephemeral development hints appear in `applied_hints` and
+are repeated in the handoff argv, so rendering the SQL does not ask the same
+question again. Remaining development decision choices likewise prepend all
+`applied_hints`, making the newest argv cumulatively executable without
+enumerating every combination of independent choices. Argv is scoped to the
+same configured repository context; it does not embed environment secrets or
+recreate the framework runtime.
+Top-level `ready` describes the durable artifact and is intentionally
+non-mutating; consumers still inspect `next_actions` for an optional
+`workspace_fast_forward`. If no durable bundle remains active because H already
+equals W, the handoff argv names the plan explicitly and remains replayable.
+
+The nested durable report calls the raw graph result `generated_plan`. Its
+status describes generator-owned input before edit-pocket reconciliation; the
+authoritative effective state is `durable.status`, backed by bundle and
+verification receipts. Thus a verified edited artifact can be `planned` while
+its `generated_plan` records why it originally needed SQL edits.
+The durable report's `base_history_head` is the accepted H digest the feature
+was planned from. Its nested verification `history_head` is the finalized chain
+including the selected feature bundle; it must equal that installed manifest's
+entry digest.
+
+Durable H → W planning always runs. When the configured development database environment variable is absent,
+the nested development report is `not_available`; an explicit development hint
+requires that database. `--output sql` writes only D → W statements to stdout
+and leaves incomplete-plan diagnostics on stderr.
 
 When `development.status` is `needs_input`, its `next_action` is
 `rerun_plan_with_dev_hints`. Re-run `onwardpg plan` with one `--dev-hint` per
@@ -311,9 +360,9 @@ The `head_ref` is the only accepted `draft --after` value. It never reads Git
 or connects to PostgreSQL.
 
 `status` emits `onwardpg.status/v1`. It reads the local active-plan anchor and
-content-addressed repository history without Git or PostgreSQL access. A
-missing anchor is an explicit `no_active_plan` status rather than an inferred
-branch state.
+content-addressed repository history without Git or PostgreSQL access. Its
+authoring states are `absent`, `parked`, `active`, `stale_parent`, `blocked`,
+and `merge_ready`; verification is reported separately.
 
 `verify` emits `onwardpg.verify/v4` with the selected phase checkpoint, total
 and selected-bundle batch counts, assertion IDs, observed/full fingerprints,
@@ -333,8 +382,10 @@ environment application or installs edited-file receipts.
 
 `config check` emits `onwardpg.config-check/v3` with `status: "valid"`, the
 configuration version, and one materialized-DDL/database/history receipt per
-target. `version` emits `onwardpg.version/v1` with `status: "ok"` and the build
-version. These are normal versioned success documents, not protocol exceptions.
+target. `version` emits `onwardpg.version/v1` with `status: "ok"` and a build
+identity containing version, commit, dirty marker, build time, Go version, and
+supported PostgreSQL majors. These are normal versioned success documents, not
+protocol exceptions.
 
 Execution failures include a stable `failure.code`, the bundle, phase and batch
 or assertion identity, the execution mode when relevant, and an exact

@@ -13,7 +13,7 @@ onwardpg plan checkout-preferences
 onwardpg plan
 ```
 
-The first call creates one worktree-local `PlanID` and one durable bundle. Every later call revises that same logical migration. There is no trail of speculative fixups and no “finalize” command.
+The first call creates one worktree-local `PlanID` and one durable bundle. Every later call revises that same logical migration. There is no trail of speculative fixups. When accepted history absorbs the verified bundle, the next `plan` retires this checkout's authoring anchor automatically; it does not claim merge or deployment.
 
 ## Start easy. Keep the same command when it gets ugly.
 
@@ -50,7 +50,7 @@ With reviewed cleanup selected, it adds the nullable shape first, reports
 ALTER TABLE "app"."bookings" ADD COLUMN "status" text;
 
 -- contract.sql
--- PRODUCT-SPECIFIC SQL: ONWARDPG TODO: provide reconcile_contract_sql SQL for app.bookings.status
+-- PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status
 -- Verify: SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);
 DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:1c16b884027de910'; END IF; END $onwardpg$;
 ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
@@ -89,8 +89,11 @@ updates, and conflicting dual writes, while contract performs a final catch-up
 and equality assertion before cleanup. The
 [`rename` receipt](https://github.com/jokull/onwardpg/tree/main/docs/receipts/rename)
 contains every emitted byte and is clone-verified by the documentation test.
-For a large table, choose the manual backfill pocket instead; the dependency
-and lifecycle plan remains generated while batching becomes product-owned.
+For a large table, provide `operator_batched` work instead. onwardpg writes a
+separate receipted `operations/<id>.json` containing the bounded batch template,
+progress key, idempotency notes, and generated equality completion query. It is
+not rendered into a phase transaction. `contract check` reports that exact
+operation as `reconciliation_required` until the equality gate is true.
 
 ### Nightmare: change a type beneath views and indexes
 
@@ -191,6 +194,22 @@ onwardpg plan --output sql | psql "$ONWARDPG_DEV_DATABASE_URL"
 
 onwardpg itself still applies nothing to D, P, staging, or production.
 
+When D → W has safe statements, ordinary JSON output also adds a
+`workspace_fast_forward` next action containing the SQL and exact argv. After a
+rebase its reason is `accepted_history_changed`, so an agent can distinguish
+“bring my dev database across the new history head” from feature migration SQL.
+Any D-only objects that workspace mode preserved are named on the action; they
+are neither dropped nor absorbed into H → W. If generating that SQL consumed a
+local-only `--dev-hint`, the action repeats it so `--output sql` does not ask the
+same question again.
+
+`ready` means the durable migration is ready; onwardpg never mutates the
+caller-owned development database as part of that claim. Agents should inspect
+`next_actions` even on a successful response and may execute the optional
+fast-forward when they want D to catch up. If H already equals W and no durable
+bundle remains active, the emitted argv names the plan explicitly so it still
+replays successfully.
+
 ## What if I rename something before the feature merges?
 
 Suppose accepted history H has neither `quote_mode` nor `pricing_mode`.
@@ -229,6 +248,12 @@ onwardpg plan
 
 onwardpg does not use branch names or commit SHAs as schema proof. It validates the remaining accepted hash chain, replays its new head as H, and rebuilds the existing `PlanID` as **H(new) → W**.
 
+At the same time it recomputes D → W. If the rebase added a safe upstream
+change that the branch-worn dev database lacks, the response contains the
+small fast-forward SQL immediately. If parallel-branch state is merely surplus,
+it is preserved. If it conflicts with W, onwardpg asks or blocks instead of
+silently overwriting or importing it.
+
 The plan already knows the intent you captured:
 
 - decisions whose participating object scope is unchanged are carried forward;
@@ -252,9 +277,19 @@ onwardpg plan \
   --hint '{"kind":"rename","object":"column","from":["app","accounts","display_name"],"to":["app","accounts","full_name"]}'
 ```
 
-Consumed hints are written automatically to `decisions.json` with their fingerprint-bound evidence. You do not copy internal question IDs or fingerprints, and you do not need to resubmit accepted hints. An agent that already understands the feature may provide several hints on the first invocation; irrelevant or impossible intent is rejected rather than silently ignored.
+Consumed hints are written automatically to `decisions.json` with their fingerprint-bound evidence. You do not copy internal question IDs or fingerprints, and you do not need to resubmit accepted hints. An agent that already understands the feature may provide several hints on the first invocation. A valid hint hidden behind an earlier dependency-ordered question is returned as `deferred` and re-emitted in `next_actions` without being receipted; irrelevant or impossible intent is rejected.
 
-When product semantics require SQL, the answer selects `manual_sql`; the SQL itself goes into a stable edit pocket in `expand.sql` or `contract.sql`. This keeps intent, executable work, and verification evidence reviewable in ordinary files.
+When product semantics require SQL, the answer selects `manual_sql`. Small
+one-shot work can go into a stable phase edit pocket. Agents can instead attach
+typed work directly to the hint; large repeatable work becomes an operation
+artifact. This keeps intent, executable work, completion proof, and verification
+evidence distinct and reviewable.
+
+Durable H → W planning always runs. If the development database is unavailable,
+`plan` preserves and reports that durable result with development marked
+`not_available`; it does not make developers select a mode. Supplying a
+`--dev-hint` is an intentional request to reconcile D → W and therefore
+requires the development database.
 
 ## One plan, one merge, one deployment
 

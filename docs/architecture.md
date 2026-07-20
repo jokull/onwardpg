@@ -30,7 +30,7 @@ production ───────────────────────
   derives the unique remaining accepted head, preventing accidental stacking
   without teaching onwardpg about Git. The lower-level `draft --after` keeps an
   explicit name-and-digest assertion for diagnostics and compatibility. A
-  repository-scoped OS advisory lock serializes lifecycle commands; their
+  repository-scoped OS advisory lock serializes state-changing commands; their
   commit points reload configuration and revalidate DDL, history, and exact
   artifacts before writing.
 - PostgreSQL physical column positions are preserved catalog state and reported

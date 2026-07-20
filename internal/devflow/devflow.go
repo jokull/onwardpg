@@ -53,6 +53,8 @@ type Report struct {
 	NextAction      string                `json:"next_action,omitempty"`
 	Result          protocol.Result       `json:"result"`
 	Decisions       []protocol.Decision   `json:"decisions,omitempty"`
+	AppliedHints    []protocol.Hint       `json:"applied_hints,omitempty"`
+	DeferredHints   []protocol.Hint       `json:"deferred_hints,omitempty"`
 	Postconditions  []PostconditionResult `json:"accepted_postconditions,omitempty"`
 }
 
@@ -98,7 +100,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("plan development reconciliation: %w", err)
 	}
-	report := Report{ProtocolVersion: Version, Status: resolution.Result.Status, Result: resolution.Result}
+	report := Report{
+		ProtocolVersion: Version, Status: resolution.Result.Status, Result: resolution.Result,
+		AppliedHints: resolution.Hints, DeferredHints: resolution.Deferred,
+	}
 	if report.Status == protocol.NeedsInput {
 		report.NextAction = "rerun_same_command_with_hints"
 		report.Decisions, err = semantichint.Decisions(report.Result.Questions, current, desired)

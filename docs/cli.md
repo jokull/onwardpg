@@ -6,6 +6,7 @@ The preferred developer-preview surface is:
 onwardpg config check
 onwardpg init
 onwardpg plan NAME
+onwardpg plan
 onwardpg plan --output sql
 onwardpg status
 onwardpg verify
@@ -39,8 +40,12 @@ onwardpg plan [NAME] \
 ~~~
 
 `plan NAME` starts one evolving logical migration in the current worktree.
-Later `plan` calls resume it; there is no lock or finalize
-command. The bundle is always recalculated from replayed accepted history (H)
+Later `plan` calls revise it. When a branch switch makes the active bundle
+disappear, `plan OTHER-NAME` parks that identity and selects the bundle present
+in the new checkout; returning and naming the earlier plan restores its PlanID.
+When accepted history absorbs the bundle, the next `plan` retires its local
+anchor automatically. None of this claims merge or deployment. The bundle is
+always recalculated from replayed accepted history (H)
 to exported working DDL (W), so an incoming accepted migration becomes part of
 the ground beneath the same feature bundle rather than a second feature
 migration. `--bundle` selects the same anchor in a clean CI checkout.
@@ -50,7 +55,26 @@ direct development reconciliation (D → W) to stdout. It is deliberately not
 the cumulative PR bundle and it preserves surplus dev objects in workspace
 mode, preventing branch switches from suggesting destructive cleanup. JSON and
 text output contain the reviewable H → W bundle report plus that D → W report.
-No output is applied automatically.
+When safe statements exist, `next_actions` includes a
+`workspace_fast_forward` item with the SQL, statement count, preserved D-only
+objects, and exact `onwardpg plan --output sql` argv. After a rebase its reason
+is `accepted_history_changed`, making the upstream fast-forward distinguishable
+from the durable feature bundle. If D → W required an ephemeral `--dev-hint`,
+the action repeats every consumed hint in that argv. While several dev choices
+remain, each newly emitted choice argv also carries the hints consumed by prior
+iterations; follow the latest response rather than replaying an older fragment.
+All argv arrays assume the same repository working directory, configured
+environment variables, and exporter toolchain as the command that produced
+them.
+`ready` means the durable migration artifact is ready; it does not claim that
+an optional caller-owned development database was mutated. Agents should still
+inspect `next_actions` on successful responses and may apply a
+`workspace_fast_forward` when they want D to catch up. When H already equals W
+and there is no durable bundle to keep active, that action names the plan so
+its replay argv remains executable.
+No output is applied automatically. If the development database environment
+variable is absent, durable planning still succeeds and reports development as
+`not_available`; providing a dev hint makes that database required.
 
 `plan` exits `2` when either comparison needs a decision or editable SQL. A
 durable question is answered with the same strict `--hint` form as `draft`.
@@ -196,12 +220,17 @@ transaction, or a split plan after column identity is confirmed. `identity` is a
 table-only upstream assertion: it lets an agent state that two observed table
 names are the same relation before normal rename candidacy. It never guesses a
 transition; an unautomatable asserted identity becomes an editable compatibility
-bridge. Hints may be supplied on
-the first invocation; every hint must consume an actual graph decision.
+bridge. Hints may be supplied on the first invocation. A valid later hint
+hidden by an earlier dependency-ordered question is reported as deferred and
+re-emitted without being receipted. A hint that cannot occur for the current
+graph remains a strict error.
 
-`manual_sql` never contains SQL. It writes a `needs_sql_edits` bundle with a
-phase-local TODO. Replace the TODO directly in the phase file and run verify.
-The incomplete bundle exits 2 and cannot become immutable base history.
+Without a typed `work` object, `manual_sql` writes a `needs_sql_edits` bundle
+with a phase-local TODO. Replace the named pocket and run verify. An agent may
+instead supply `transactional_once`, `nontransactional_once`,
+`operator_batched`, or `external_attestation` work directly. Operator-batched
+work is receipted under `operations/` and never enters a phase transaction. An
+incomplete bundle exits 2 and cannot become immutable base history.
 
 A valid selected bundle remains replaceable because the bundle ID is explicit,
 including after local application or verification. Receipted agent edits are

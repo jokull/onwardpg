@@ -46,7 +46,7 @@ go build -trimpath -o ./bin/onwardpg ./cmd/onwardpg
 ```
 
 A source build reports
-`{"protocol_version":"onwardpg.version/v1","status":"ok","version":"dev"}`
+`{"protocol_version":"onwardpg.version/v1","status":"ok","build":{"version":"dev","commit":"...","dirty":true,"go_version":"...","supported_postgres_majors":[15,16,17,18]}}`
 unless the build supplies `-X main.buildVersion=...`.
 
 ## Preview archives

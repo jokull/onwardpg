@@ -72,10 +72,17 @@ Accepted hints are captured in the evolving bundle. On the next model edit or re
 
 - JSON is the default and every document has a protocol version.
 - Exit codes distinguish decisions, SQL edits, unsupported state, and broken evidence.
-- High-level `plan` reports status, exact decision choices, and `edit_files`; the lower-level `draft` protocol also supplies `next_action`.
+- High-level `plan` reports status, exact decision choices, edit requirements,
+  and safe `workspace_fast_forward` SQL; the lower-level `draft` protocol also
+  supplies `next_action`.
 - Hazards, phases, batches, dependencies, and exact object identities are structured.
 - Product SQL lives in stable edit pockets instead of being smuggled through JSON.
 - `verify` executes the exact edited artifact that will be reviewed.
+
+Choice argv is cumulative across ephemeral development decisions: always use
+the newest response, whose command carries earlier `applied_hints`. It assumes
+the same repository directory, environment, and framework toolchain as the
+planner invocation; it deliberately never embeds credentials.
 
 A good agent loop is deliberately boring:
 

@@ -121,7 +121,7 @@ function assertInOrder(body, fragments, label) {
 
 assertInOrder(planCommand, [
   expandStatement,
-  '-- PRODUCT-SPECIFIC SQL: ONWARDPG TODO: provide reconcile_contract_sql SQL for app.bookings.status',
+  '-- PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status',
   'onwardpg contract gate failed: data:1c16b884027de910',
   'ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;',
 ], 'plan-command easy/medium ladder');
@@ -193,7 +193,7 @@ assertInOrder(planCommand, dependencyFragments, 'plan-command nightmare ladder')
 const homepage = await readFile(path.join(repositoryRoot, 'website/src/pages/index.astro'), 'utf8');
 const requiredCleanup = generatedRequiredContract
   .split('\n')
-  .find((line) => line.includes('PRODUCT-SPECIFIC SQL: ONWARDPG TODO'));
+  .find((line) => line.includes('PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL'));
 const requiredGate = generatedRequiredContract
   .split('\n')
   .find((line) => line.includes('onwardpg contract gate failed'));

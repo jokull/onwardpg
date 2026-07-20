@@ -55,7 +55,21 @@ func TestContractReconciliationAssertOnlyCreatesOrderedGates(t *testing.T) {
 	}
 }
 
-func TestContractReconciliationManualRequiresBooleanVerification(t *testing.T) {
+func TestNotEnforcedConstraintIsNotClassifiedAsRestoredEnforcement(t *testing.T) {
+	for _, sql := range []string{
+		`ALTER TABLE "app"."people" ADD CONSTRAINT "age_check" CHECK (age > 0) NOT ENFORCED;`,
+		`ALTER TABLE "app"."people" ADD CONSTRAINT "team_fkey" FOREIGN KEY (team_id) REFERENCES "app"."teams" (id) NOT ENFORCED;`,
+	} {
+		if restoresContractEnforcement(strings.ToUpper(sql)) {
+			t.Fatalf("NOT ENFORCED constraint was classified as restored enforcement: %s", sql)
+		}
+	}
+	if !restoresContractEnforcement(`ALTER TABLE "APP"."PEOPLE" ADD CONSTRAINT "AGE_CHECK" CHECK (AGE > 0);`) {
+		t.Fatal("ordinary enforced CHECK was not classified as restored enforcement")
+	}
+}
+
+func TestContractReconciliationManualReusesExactGeneratedBoolean(t *testing.T) {
 	current, desired := checkReconciliationSnapshots(t)
 	pending, err := Build(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
@@ -78,8 +92,15 @@ func TestContractReconciliationManualRequiresBooleanVerification(t *testing.T) {
 		Kind: manual.Kind, Key: manual.Key, Value: "provided", QuestionFingerprint: manual.ScopeFingerprint,
 		Manual: &protocol.ManualWork{Summary: "normalize legacy tier", ExecutionMode: "transactional", Statements: []string{"UPDATE public.delivery SET tier = 'open' WHERE tier = 'legacy';"}},
 	})
-	if _, err := Build(current, desired, answers, Options{}); err == nil || !strings.Contains(err.Error(), "requires at least one boolean verification") {
-		t.Fatalf("missing reconciliation verification error=%v", err)
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned || len(planned.Reconciliations) != 1 || planned.Reconciliations[0].Work == nil || len(planned.Reconciliations[0].Work.VerificationSQL) != 1 {
+		t.Fatalf("manual reconciliation did not retain the generated gate: %#v", planned)
+	}
+	if strings.Contains(planned.Reconciliations[0].Work.VerificationSQL[0], "ONWARDPG TODO") {
+		t.Fatalf("exact catalog-derived gate remained an edit placeholder: %#v", planned.Reconciliations[0].Work)
 	}
 }
 

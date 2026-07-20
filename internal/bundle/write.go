@@ -466,6 +466,20 @@ func preserveDecisionHistory(previousArtifact Artifact, next Artifact) (Artifact
 	return next, nil
 }
 
+// WithDecisionHistory prepares a same-generation replacement exactly as Write
+// will install it. Callers that verify a candidate before writing must use this
+// form so verification binds to the final history entry digest rather than a
+// pre-merge digest that Write would later change.
+func WithDecisionHistory(previous, next Artifact) (Artifact, error) {
+	if previous.Manifest.Generation != next.Manifest.Generation {
+		return next, nil
+	}
+	if !sameManifestPlanningContract(previous.Manifest, next.Manifest) {
+		return Artifact{}, fmt.Errorf("same-generation replacement changed its source or planner contract")
+	}
+	return preserveDecisionHistory(previous, next)
+}
+
 func sortedReceiptPaths(receipts map[string]FileReceipt) []string {
 	names := make([]string, 0, len(receipts))
 	for name := range receipts {

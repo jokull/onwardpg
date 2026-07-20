@@ -5,17 +5,25 @@
 package activeplan
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
 const Version = 1
+
+type GitHygiene struct {
+	Status      string `json:"status"`
+	ExcludePath string `json:"exclude_path,omitempty"`
+	Pattern     string `json:"pattern,omitempty"`
+}
 
 // Anchor is scoped to one configured target and one local worktree. PlanID is
 // durable bundle identity; BundleID is the current, possibly resequenced,
@@ -75,6 +83,9 @@ func Store(root string, anchor Anchor) error {
 	if err := anchor.Validate(anchor.Target); err != nil {
 		return err
 	}
+	if _, err := EnsureGitExclude(root); err != nil {
+		return err
+	}
 	path, err := Path(root, anchor.Target)
 	if err != nil {
 		return err
@@ -114,6 +125,101 @@ func Store(root string, anchor Anchor) error {
 	return nil
 }
 
+// EnsureGitExclude keeps worktree-local authoring state out of ordinary Git
+// staging without changing the repository's committed .gitignore. It uses
+// Git's own path resolution so linked worktrees and gitdir indirection behave
+// the same as a normal checkout. Repositories that already track .onwardpg are
+// rejected rather than mixing durable history with local PlanID state.
+func EnsureGitExclude(root string) (GitHygiene, error) {
+	if !filepath.IsAbs(root) {
+		return GitHygiene{}, fmt.Errorf("git hygiene root must be absolute")
+	}
+	repositoryRoot, err := gitOutput(root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		if isNotGitRepository(err) {
+			return GitHygiene{Status: "outside_git"}, nil
+		}
+		return GitHygiene{}, fmt.Errorf("inspect Git repository: %w", err)
+	}
+	repositoryRoot = filepath.Clean(repositoryRoot)
+	resolvedRepositoryRoot, err := filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return GitHygiene{}, fmt.Errorf("resolve Git worktree root: %w", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return GitHygiene{}, fmt.Errorf("resolve project root: %w", err)
+	}
+	relativeRoot, err := filepath.Rel(resolvedRepositoryRoot, resolvedRoot)
+	if err != nil || relativeRoot == ".." || strings.HasPrefix(relativeRoot, ".."+string(filepath.Separator)) {
+		return GitHygiene{}, fmt.Errorf("project root %s is outside Git worktree %s", root, repositoryRoot)
+	}
+	localPath := ".onwardpg"
+	if relativeRoot != "." {
+		localPath = filepath.ToSlash(filepath.Join(relativeRoot, localPath))
+	}
+	tracked, err := gitOutput(root, "ls-files", "--", localPath, localPath+"/**")
+	if err != nil {
+		return GitHygiene{}, fmt.Errorf("inspect tracked local onward state: %w", err)
+	}
+	if strings.TrimSpace(tracked) != "" {
+		return GitHygiene{}, fmt.Errorf("Git already tracks local onward state at %s; move durable files elsewhere and remove it from the index before continuing", localPath)
+	}
+	excludePath, err := gitOutput(root, "rev-parse", "--git-path", "info/exclude")
+	if err != nil {
+		return GitHygiene{}, fmt.Errorf("resolve Git local exclude file: %w", err)
+	}
+	if !filepath.IsAbs(excludePath) {
+		excludePath = filepath.Join(repositoryRoot, excludePath)
+	}
+	excludePath = filepath.Clean(excludePath)
+	pattern := "/" + filepath.ToSlash(localPath) + "/"
+	body, err := os.ReadFile(excludePath)
+	if err != nil && !os.IsNotExist(err) {
+		return GitHygiene{}, fmt.Errorf("read Git local exclude file: %w", err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(line) == pattern {
+			return GitHygiene{Status: "present", ExcludePath: excludePath, Pattern: pattern}, nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return GitHygiene{}, fmt.Errorf("create Git info directory: %w", err)
+	}
+	updated := append([]byte(nil), body...)
+	if len(updated) > 0 && updated[len(updated)-1] != '\n' {
+		updated = append(updated, '\n')
+	}
+	updated = append(updated, []byte("# onwardpg worktree-local PlanID state\n"+pattern+"\n")...)
+	if err := os.WriteFile(excludePath, updated, 0o644); err != nil {
+		return GitHygiene{}, fmt.Errorf("write Git local exclude file: %w", err)
+	}
+	return GitHygiene{Status: "installed", ExcludePath: excludePath, Pattern: pattern}, nil
+}
+
+type gitCommandError struct {
+	output string
+	err    error
+}
+
+func (e gitCommandError) Error() string { return strings.TrimSpace(e.output) + ": " + e.err.Error() }
+func (e gitCommandError) Unwrap() error { return e.err }
+
+func gitOutput(root string, arguments ...string) (string, error) {
+	command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
+	if err != nil {
+		return "", gitCommandError{output: stderr.String(), err: err}
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func isNotGitRepository(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "not a git repository")
+}
+
 func Clear(root, target string) error {
 	path, err := Path(root, target)
 	if err != nil {
@@ -140,14 +246,20 @@ func (a Anchor) Validate(target string) error {
 	if a.Target != target || !safeName(a.Target) {
 		return fmt.Errorf("active-plan target %q is invalid for %q", a.Target, target)
 	}
-	if !safePlanID(a.PlanID) {
+	if (a.PlanID == "") != (a.BundleID == "") {
+		return fmt.Errorf("active-plan plan_id and bundle_id must both be present or absent")
+	}
+	if a.PlanID != "" && !safePlanID(a.PlanID) {
 		return fmt.Errorf("active-plan plan_id %q is invalid", a.PlanID)
 	}
-	if !safeName(a.BundleID) {
+	if a.BundleID != "" && !safeName(a.BundleID) {
 		return fmt.Errorf("active-plan bundle_id %q is invalid", a.BundleID)
 	}
-	seenBundles := map[string]bool{a.BundleID: true}
-	seenPlans := map[string]bool{a.PlanID: true}
+	seenBundles := make(map[string]bool)
+	seenPlans := make(map[string]bool)
+	if a.BundleID != "" {
+		seenBundles[a.BundleID], seenPlans[a.PlanID] = true, true
+	}
 	for _, saved := range a.Parked {
 		if !safePlanID(saved.PlanID) || !safeName(saved.BundleID) {
 			return fmt.Errorf("parked active plan is invalid")
@@ -161,6 +273,28 @@ func (a Anchor) Validate(target string) error {
 	return nil
 }
 
+func (a Anchor) HasActive() bool { return a.PlanID != "" && a.BundleID != "" }
+
+// ParkActive moves the current selector into local parked state without
+// claiming anything about Git, merge, or deployment. Durable identity remains
+// in the bundle manifest.
+func (a Anchor) ParkActive() Anchor {
+	if !a.HasActive() {
+		return a
+	}
+	parked := append([]SavedPlan(nil), a.Parked...)
+	parked = append(parked, SavedPlan{PlanID: a.PlanID, BundleID: a.BundleID, BranchHint: a.BranchHint})
+	sortSavedPlans(parked)
+	return Anchor{Version: Version, Target: a.Target, Parked: parked}
+}
+
+// WithoutActive retires only the current worktree selector. Unlike ParkActive,
+// it deliberately forgets that selector after the caller has proved authoring
+// is finished; previously parked plans remain available.
+func (a Anchor) WithoutActive() Anchor {
+	return Anchor{Version: Version, Target: a.Target, Parked: append([]SavedPlan(nil), a.Parked...)}
+}
+
 // WithActive returns a replacement active anchor while retaining the previous
 // active plan as parked local context. Selecting a parked plan removes it from
 // the parked set. The result is deterministic so an unchanged worktree does
@@ -172,7 +306,7 @@ func (a Anchor) WithActive(next SavedPlan) Anchor {
 			parked = append(parked, saved)
 		}
 	}
-	if a.BundleID != next.BundleID && a.PlanID != next.PlanID {
+	if a.HasActive() && a.BundleID != next.BundleID && a.PlanID != next.PlanID {
 		parked = append(parked, SavedPlan{PlanID: a.PlanID, BundleID: a.BundleID, BranchHint: a.BranchHint})
 	}
 	sortSavedPlans(parked)

@@ -240,8 +240,9 @@ func renderUnknownKeyConstraintReplacement(before, after pgschema.Constraint, cu
 
 func renderUnknownExclusionConstraintReplacement(before, after pgschema.Constraint, current *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	oldIndex, exists := backingIndexForConstraint(current, before)
-	if !exists || hasExternalDependentExcept(current, before.ObjectID(), oldIndex.ObjectID()) ||
-		hasExternalDependentExcept(current, oldIndex.ObjectID(), before.ObjectID()) {
+	partitioned := tableIsPartitioned(current, before.Table)
+	if !exists || (!partitioned && (hasExternalDependentExcept(current, before.ObjectID(), oldIndex.ObjectID()) ||
+		hasExternalDependentExcept(current, oldIndex.ObjectID(), before.ObjectID()))) {
 		return nil, nil, []string{"exclusion_constraint_acceptance_dependent:" + before.ObjectID().String()}, nil
 	}
 	table := qualified(after.Table.Schema, after.Table.Name)

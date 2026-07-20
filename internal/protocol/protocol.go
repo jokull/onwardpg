@@ -43,7 +43,11 @@ type Result struct {
 	// work is considered ready.
 	ContractGates   []ContractGate   `json:"contract_gates,omitempty"`
 	Reconciliations []Reconciliation `json:"reconciliations,omitempty"`
-	Questions       []Question       `json:"questions,omitempty"`
+	// Operations are receipted, repeatable work dependencies which are not
+	// executable phase batches. A deployment runner may drive them separately,
+	// then use their read-only completion gate before contract.
+	Operations []Operation `json:"operations,omitempty"`
+	Questions  []Question  `json:"questions,omitempty"`
 	// Analysis records planner reasoning that did not become a decision. It is
 	// machine-readable evidence for an agent deciding whether to add an
 	// explicit upstream identity assertion; it never changes plan semantics.
@@ -202,12 +206,40 @@ type Reconciliation struct {
 // concrete postcondition to run before it proceeds to a contract phase.
 type ManualWork struct {
 	Summary string `json:"summary"`
-	// ExecutionMode is required because onwardpg cannot infer whether
-	// operator-supplied SQL may run inside a transaction. It is either
-	// "transactional" or "non_transactional".
-	ExecutionMode   string   `json:"execution_mode"`
-	Statements      []string `json:"statements"`
-	VerificationSQL []string `json:"verification_sql,omitempty"`
+	// ExecutionMode distinguishes one-shot phase SQL from separately driven
+	// operations. Legacy transactional/non_transactional spellings are accepted
+	// at the answer boundary and normalized before they enter a plan receipt.
+	ExecutionMode    string   `json:"execution_mode"`
+	Statements       []string `json:"statements"`
+	VerificationSQL  []string `json:"verification_sql,omitempty"`
+	ProgressKey      string   `json:"progress_key,omitempty"`
+	IdempotencyNotes string   `json:"idempotency_notes,omitempty"`
+	RequiredEvidence []string `json:"required_evidence,omitempty"`
+}
+
+const (
+	ManualTransactionalOnce    = "transactional_once"
+	ManualNontransactionalOnce = "nontransactional_once"
+	ManualOperatorBatched      = "operator_batched"
+	ManualExternalAttestation  = "external_attestation"
+)
+
+// Operation is work inside an expand/contract timing contract without being a
+// third schema phase. The artifact is deliberately runner-neutral: onwardpg
+// receipts the bounded template, cursor contract, idempotency claim and final
+// Boolean proof, but never loops against production itself.
+type Operation struct {
+	ID                string   `json:"id"`
+	TransitionID      string   `json:"transition_id"`
+	Timing            string   `json:"timing"`
+	ExecutionMode     string   `json:"execution_mode"`
+	Summary           string   `json:"summary"`
+	BatchTemplate     []string `json:"batch_template,omitempty"`
+	ProgressKey       string   `json:"progress_key,omitempty"`
+	CompletionSQL     string   `json:"completion_sql,omitempty"`
+	IdempotencyNotes  string   `json:"idempotency_notes,omitempty"`
+	RequiredEvidence  []string `json:"required_evidence,omitempty"`
+	CompletionGateIDs []string `json:"completion_gate_ids,omitempty"`
 }
 
 type Batch struct {
@@ -326,14 +358,23 @@ func (r *Resolver) ResolveManual(question Question) (ManualWork, bool, error) {
 		return ManualWork{}, false, fmt.Errorf("manual answer %s must use value %q and include manual work", id, "provided")
 	}
 	work := *answer.Manual
-	if strings.TrimSpace(work.Summary) == "" || len(work.Statements) == 0 {
-		return ManualWork{}, false, fmt.Errorf("manual answer %s requires summary and statements", id)
+	switch work.ExecutionMode {
+	case "transactional":
+		work.ExecutionMode = ManualTransactionalOnce
+	case "non_transactional":
+		work.ExecutionMode = ManualNontransactionalOnce
+	}
+	if strings.TrimSpace(work.Summary) == "" {
+		return ManualWork{}, false, fmt.Errorf("manual answer %s requires a summary", id)
+	}
+	if len(work.Statements) == 0 && work.ExecutionMode != ManualExternalAttestation {
+		return ManualWork{}, false, fmt.Errorf("manual answer %s requires statements", id)
 	}
 	if strings.ContainsAny(work.Summary, "\r\n") {
 		return ManualWork{}, false, fmt.Errorf("manual answer %s summary must be one line", id)
 	}
-	if work.ExecutionMode != "transactional" && work.ExecutionMode != "non_transactional" {
-		return ManualWork{}, false, fmt.Errorf("manual answer %s execution_mode must be transactional or non_transactional", id)
+	if work.ExecutionMode != ManualTransactionalOnce && work.ExecutionMode != ManualNontransactionalOnce && work.ExecutionMode != ManualOperatorBatched && work.ExecutionMode != ManualExternalAttestation {
+		return ManualWork{}, false, fmt.Errorf("manual answer %s execution_mode must be transactional_once, nontransactional_once, operator_batched, or external_attestation", id)
 	}
 	for _, sql := range work.Statements {
 		if strings.TrimSpace(sql) == "" {
@@ -343,6 +384,27 @@ func (r *Resolver) ResolveManual(question Question) (ManualWork, bool, error) {
 	for _, sql := range work.VerificationSQL {
 		if strings.TrimSpace(sql) == "" || strings.ContainsAny(sql, "\r\n") {
 			return ManualWork{}, false, fmt.Errorf("manual answer %s verification SQL must be non-empty and one line", id)
+		}
+	}
+	switch work.ExecutionMode {
+	case ManualTransactionalOnce, ManualNontransactionalOnce:
+		if work.ProgressKey != "" || work.IdempotencyNotes != "" || len(work.RequiredEvidence) > 0 {
+			return ManualWork{}, false, fmt.Errorf("manual answer %s one-shot work cannot include operation-only fields", id)
+		}
+	case ManualOperatorBatched:
+		if strings.TrimSpace(work.ProgressKey) == "" || strings.TrimSpace(work.IdempotencyNotes) == "" || len(work.VerificationSQL) != 1 || len(work.RequiredEvidence) > 0 {
+			return ManualWork{}, false, fmt.Errorf("manual answer %s operator_batched work requires progress_key, idempotency_notes, and exactly one completion query", id)
+		}
+	case ManualExternalAttestation:
+		if len(work.Statements) > 0 || len(work.VerificationSQL) > 0 || work.ProgressKey != "" || work.IdempotencyNotes != "" || len(work.RequiredEvidence) == 0 {
+			return ManualWork{}, false, fmt.Errorf("manual answer %s external_attestation requires evidence categories and no SQL operation fields", id)
+		}
+		previous := ""
+		for _, category := range work.RequiredEvidence {
+			if strings.TrimSpace(category) == "" || previous != "" && category <= previous {
+				return ManualWork{}, false, fmt.Errorf("manual answer %s evidence categories must be sorted and unique", id)
+			}
+			previous = category
 		}
 	}
 	r.used[id] = true

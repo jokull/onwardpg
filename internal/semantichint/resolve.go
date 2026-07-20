@@ -1,6 +1,7 @@
 package semantichint
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ type Resolution struct {
 	Answers   protocol.Answers
 	Questions []protocol.Question
 	Hints     []protocol.Hint
+	Deferred  []protocol.Hint
 }
 
 // Resolve plans from snapshots using only semantic hints. It is shared by
@@ -51,10 +53,12 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 			return Resolution{}, err
 		}
 		if len(matched.Answers) == 0 {
-			if err := rejectUnused(hints, used); err != nil {
+			deferred, err := classifyDeferredHints(current, desired, hints, used, options)
+			if err != nil {
 				return Resolution{}, err
 			}
 			resolution.Hints = usedHints(hints, used)
+			resolution.Deferred = deferred
 			return resolution, nil
 		}
 		for index := range matched.Used {
@@ -67,6 +71,95 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 		}
 	}
 	return Resolution{}, fmt.Errorf("semantic hint planning did not converge")
+}
+
+func classifyDeferredHints(current, desired *pgschema.Snapshot, hints []protocol.Hint, used map[int]bool, options graphplan.Options) ([]protocol.Hint, error) {
+	var deferred []protocol.Hint
+	var impossible []string
+	for index, hint := range hints {
+		if used[index] {
+			continue
+		}
+		reachable, err := hintReachable(current, desired, hint, options)
+		if err != nil {
+			return nil, err
+		}
+		if reachable {
+			deferred = append(deferred, hint)
+			continue
+		}
+		key, _ := hint.CanonicalKey()
+		impossible = append(impossible, key)
+	}
+	if len(impossible) > 0 {
+		sort.Strings(impossible)
+		return nil, fmt.Errorf("unused semantic hints: %s", strings.Join(impossible, ", "))
+	}
+	deferred, _ = protocol.CanonicalHints(deferred)
+	return deferred, nil
+}
+
+// DeferredHints validates that each supplied hint can be reached after one or
+// more currently unanswered dependency-ordered questions. It never consumes or
+// receipts those hints.
+func DeferredHints(current, desired *pgschema.Snapshot, hints []protocol.Hint, options graphplan.Options) ([]protocol.Hint, error) {
+	return classifyDeferredHints(current, desired, hints, map[int]bool{}, options)
+}
+
+// hintReachable explores dependency-ordered public choices without accepting
+// any of them. It is used only to distinguish a valid later hint from an
+// impossible one; deferred hints are not added to the answer receipt.
+func hintReachable(current, desired *pgschema.Snapshot, target protocol.Hint, options graphplan.Options) (bool, error) {
+	type state struct{ answers protocol.Answers }
+	initial, err := graphplan.Build(current, desired, protocol.Answers{}, options)
+	if err != nil {
+		return false, err
+	}
+	queue := []state{{answers: protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: initial.CurrentFingerprint, DesiredFingerprint: initial.DesiredFingerprint}}}
+	seen := make(map[string]bool)
+	for len(queue) > 0 {
+		if len(seen) > 1024 {
+			return false, fmt.Errorf("semantic hint reachability exceeded 1024 decision states")
+		}
+		currentState := queue[0]
+		queue = queue[1:]
+		keyBytes, _ := json.Marshal(currentState.answers.Answers)
+		key := string(keyBytes)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		plan, err := graphplan.Build(current, desired, currentState.answers, options)
+		if err != nil {
+			return false, err
+		}
+		if plan.Status != protocol.NeedsInput {
+			continue
+		}
+		matched, err := MatchQuestions(plan.Questions, []protocol.Hint{target}, current, desired)
+		if err != nil {
+			return false, err
+		}
+		if len(matched.Answers) > 0 {
+			return true, nil
+		}
+		for _, question := range plan.Questions {
+			choices, err := choicesForQuestion(question, current, desired)
+			if err != nil {
+				return false, err
+			}
+			for _, choice := range choices {
+				answer, err := MatchQuestions([]protocol.Question{question}, []protocol.Hint{choice.Hint}, current, desired)
+				if err != nil || len(answer.Answers) != 1 {
+					continue
+				}
+				next := currentState.answers
+				next.Answers = append(append([]protocol.Answer(nil), currentState.answers.Answers...), answer.Answers[0])
+				queue = append(queue, state{answers: next})
+			}
+		}
+	}
+	return false, nil
 }
 
 // ApplyIdentityHints validates the source and desired endpoints of explicit

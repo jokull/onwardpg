@@ -157,7 +157,7 @@ const features = [
 <span class="deploy">—— deploy application, then drain old traffic ——</span>
 
 <span class="phase">CONTRACT</span>
-  -- PRODUCT-SPECIFIC SQL: ONWARDPG TODO: provide reconcile_contract_sql SQL for app.bookings.status
+  -- PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status
   -- Verify: SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);
   DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:1c16b884027de910'; END IF; END $onwardpg$;
   ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;

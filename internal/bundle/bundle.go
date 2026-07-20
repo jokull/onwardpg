@@ -48,8 +48,18 @@ type PlannerOptions struct {
 	IgnoreExtensionVersions []string `json:"ignore_extension_versions,omitempty"`
 }
 
+type BuildIdentity struct {
+	Version                 string `json:"version"`
+	Commit                  string `json:"commit"`
+	Dirty                   bool   `json:"dirty"`
+	BuildTime               string `json:"build_time,omitempty"`
+	GoVersion               string `json:"go_version"`
+	SupportedPostgresMajors []int  `json:"supported_postgres_majors"`
+}
+
 type PlannerReceipt struct {
 	Version         string         `json:"version"`
+	Build           *BuildIdentity `json:"build,omitempty"`
 	Options         PlannerOptions `json:"options"`
 	IgnoreSelectors []string       `json:"ignore_selectors,omitempty"`
 }
@@ -110,6 +120,7 @@ type Manifest struct {
 	ContractGatesDigest         string                   `json:"contract_gates_digest,omitempty"`
 	ContractGateOverridesDigest string                   `json:"contract_gate_overrides_digest,omitempty"`
 	ExpandCheckpointDigest      string                   `json:"expand_checkpoint_digest,omitempty"`
+	Operations                  []FileReceipt            `json:"operations,omitempty"`
 	PhaseSource                 string                   `json:"phase_source,omitempty"`
 	VerificationDigest          string                   `json:"verification_digest,omitempty"`
 	Phases                      map[string]PhaseArtifact `json:"phases,omitempty"`
@@ -165,6 +176,28 @@ func (a Artifact) Validate() error {
 		}
 		if err := validatePlanStatements(result); err != nil {
 			return fmt.Errorf("validate plan.json: %w", err)
+		}
+		if len(result.Operations) != len(a.Manifest.Operations) {
+			return fmt.Errorf("operation receipts do not match plan.json")
+		}
+		operationReceipts := make(map[string]FileReceipt, len(a.Manifest.Operations))
+		for _, receipt := range a.Manifest.Operations {
+			if _, duplicate := operationReceipts[receipt.Path]; duplicate {
+				return fmt.Errorf("operation receipt path %q is duplicated", receipt.Path)
+			}
+			operationReceipts[receipt.Path] = receipt
+			required[receipt.Path] = receipt.Digest
+		}
+		for _, operation := range result.Operations {
+			operationPath := path.Join("operations", operation.ID+".json")
+			receipt, exists := operationReceipts[operationPath]
+			if !exists {
+				return fmt.Errorf("operation %q has no receipt", operation.ID)
+			}
+			body, err := jsonDocument(operation)
+			if err != nil || receipt.Digest != Digest(body) || string(a.Files[operationPath]) != string(body) {
+				return fmt.Errorf("operation artifact %s does not match plan.json", operationPath)
+			}
 		}
 		if len(result.ContractGates) > 0 {
 			required["contract-gates.json"] = a.Manifest.ContractGatesDigest
@@ -391,6 +424,15 @@ func Build(input Input) (Artifact, error) {
 			files["contract-gates.json"] = gateBytes
 			manifest.ContractGatesDigest = Digest(gateBytes)
 		}
+		for _, operation := range input.Result.Operations {
+			body, err := jsonDocument(operation)
+			if err != nil {
+				return Artifact{}, fmt.Errorf("encode operation %q: %w", operation.ID, err)
+			}
+			name := path.Join("operations", operation.ID+".json")
+			files[name] = body
+			manifest.Operations = append(manifest.Operations, FileReceipt{Path: name, Digest: Digest(body)})
+		}
 	}
 	if input.Answers != nil {
 		if input.Answers.ProtocolVersion != protocol.Version || input.Answers.CurrentFingerprint != input.Result.CurrentFingerprint || input.Answers.DesiredFingerprint != input.Result.DesiredFingerprint {
@@ -586,6 +628,9 @@ func validatePlanStatements(result protocol.Result) error {
 	if err := validateContractGates(result); err != nil {
 		return err
 	}
+	if err := validateOperations(result); err != nil {
+		return err
+	}
 	ids := make(map[string]protocol.Statement, len(result.Statements))
 	for _, statement := range result.Statements {
 		if !protocol.ValidPhase(statement.Phase) {
@@ -630,6 +675,51 @@ func validatePlanStatements(result protocol.Result) error {
 	return nil
 }
 
+func validateOperations(result protocol.Result) error {
+	gates := make(map[string]protocol.ContractGate, len(result.ContractGates))
+	for _, gate := range result.ContractGates {
+		gates[gate.ID] = gate
+	}
+	seen := make(map[string]bool, len(result.Operations))
+	for _, operation := range result.Operations {
+		if !gateIDPattern.MatchString(operation.ID) || seen[operation.ID] {
+			return fmt.Errorf("operation id %q is invalid or duplicated", operation.ID)
+		}
+		seen[operation.ID] = true
+		if strings.TrimSpace(operation.TransitionID) == "" || strings.TrimSpace(operation.Summary) == "" {
+			return fmt.Errorf("operation %q requires transition_id and summary", operation.ID)
+		}
+		if operation.Timing != "after_expand_before_contract" && operation.Timing != "post_drain_before_contract_enforcement" {
+			return fmt.Errorf("operation %q has invalid timing %q", operation.ID, operation.Timing)
+		}
+		switch operation.ExecutionMode {
+		case protocol.ManualOperatorBatched:
+			if len(operation.BatchTemplate) == 0 || strings.TrimSpace(operation.ProgressKey) == "" || strings.TrimSpace(operation.CompletionSQL) == "" || strings.TrimSpace(operation.IdempotencyNotes) == "" || len(operation.RequiredEvidence) > 0 || len(operation.CompletionGateIDs) != 1 {
+				return fmt.Errorf("operator_batched operation %q is incomplete", operation.ID)
+			}
+		case protocol.ManualExternalAttestation:
+			if len(operation.BatchTemplate) > 0 || operation.ProgressKey != "" || operation.CompletionSQL != "" || operation.IdempotencyNotes != "" || len(operation.RequiredEvidence) == 0 || len(operation.CompletionGateIDs) != 1 {
+				return fmt.Errorf("external_attestation operation %q is invalid", operation.ID)
+			}
+		default:
+			return fmt.Errorf("operation %q has invalid execution mode %q", operation.ID, operation.ExecutionMode)
+		}
+		for _, gateID := range operation.CompletionGateIDs {
+			gate, exists := gates[gateID]
+			if !exists {
+				return fmt.Errorf("operation %q references missing gate %q", operation.ID, gateID)
+			}
+			if operation.ExecutionMode == protocol.ManualOperatorBatched && (gate.Kind != "manual_reconciliation" || strings.TrimSpace(gate.BooleanSQL) != strings.TrimSpace(operation.CompletionSQL)) {
+				return fmt.Errorf("operator_batched operation %q completion SQL does not match its manual reconciliation gate", operation.ID)
+			}
+			if operation.ExecutionMode == protocol.ManualExternalAttestation && (gate.Kind != "operation_attestation" || !reflect.DeepEqual(gate.RequiredEvidence, operation.RequiredEvidence)) {
+				return fmt.Errorf("external_attestation operation %q evidence does not match its attestation gate", operation.ID)
+			}
+		}
+	}
+	return nil
+}
+
 func bundleRestoresEnforcement(statement protocol.Statement) bool {
 	if statement.Phase != protocol.PhaseContract {
 		return false
@@ -665,7 +755,7 @@ func validateContractGates(result protocol.Result) error {
 			if !strings.HasPrefix(upper, "SELECT ") && !strings.HasPrefix(upper, "WITH ") {
 				return fmt.Errorf("contract gate %q boolean_sql must be a read-only SELECT", gate.ID)
 			}
-		case "writer_attestation":
+		case "writer_attestation", "operation_attestation":
 			if strings.TrimSpace(gate.BooleanSQL) != "" || len(gate.RequiredEvidence) == 0 {
 				return fmt.Errorf("writer attestation gate %q requires external evidence and no boolean_sql", gate.ID)
 			}
@@ -705,7 +795,7 @@ func validateContractGates(result protocol.Result) error {
 			if reconciliation.Work != nil {
 				return fmt.Errorf("assert-only reconciliation %q cannot include manual work", reconciliation.TransitionID)
 			}
-		case "manual_sql":
+		case "manual_sql", "generated_sql":
 			if reconciliation.Work == nil || len(reconciliation.Work.Statements) == 0 || len(reconciliation.Work.VerificationSQL) == 0 {
 				return fmt.Errorf("manual reconciliation %q requires statements and boolean verification", reconciliation.TransitionID)
 			}
@@ -718,6 +808,14 @@ func validateContractGates(result protocol.Result) error {
 		for _, id := range reconciliation.GateIDs {
 			if _, exists := gates[id]; !exists {
 				return fmt.Errorf("reconciliation %q references missing gate %q", reconciliation.TransitionID, id)
+			}
+			referenced[id] = true
+		}
+	}
+	for _, operation := range result.Operations {
+		for _, id := range operation.CompletionGateIDs {
+			if _, exists := gates[id]; !exists {
+				return fmt.Errorf("operation %q references missing gate %q", operation.ID, id)
 			}
 			referenced[id] = true
 		}
@@ -819,14 +917,11 @@ func (m Manifest) Validate() error {
 	if m.PhaseSource != "" && m.PhaseSource != "generated" && m.PhaseSource != "edited" {
 		return fmt.Errorf("phase_source %q is invalid", m.PhaseSource)
 	}
-	if m.State != string(protocol.Planned) && m.State != string(protocol.NeedsSQLEdits) && (m.PhaseSource != "" || m.VerificationDigest != "" || m.ExpandCheckpointDigest != "" || m.ContractGateOverridesDigest != "") {
+	if m.State != string(protocol.Planned) && m.State != string(protocol.NeedsSQLEdits) && (m.PhaseSource != "" || m.VerificationDigest != "" || m.ExpandCheckpointDigest != "" || m.ContractGateOverridesDigest != "" || len(m.Operations) > 0) {
 		return fmt.Errorf("only planned or needs_sql_edits bundles may contain phase receipts")
 	}
 	if m.ContractGateOverridesDigest != "" && (m.State != string(protocol.Planned) || m.PhaseSource != "edited") {
 		return fmt.Errorf("contract gate overrides require a planned bundle with edited phase SQL")
-	}
-	if m.State == string(protocol.NeedsSQLEdits) && m.VerificationDigest != "" {
-		return fmt.Errorf("needs_sql_edits bundle cannot contain a verification receipt")
 	}
 	if err := m.BaselineSource.Validate(); err != nil {
 		return fmt.Errorf("baseline source: %w", err)
@@ -836,6 +931,19 @@ func (m Manifest) Validate() error {
 	}
 	if strings.TrimSpace(m.Planner.Version) == "" {
 		return fmt.Errorf("planner version is required")
+	}
+	if m.Planner.Build != nil {
+		identity := m.Planner.Build
+		if identity.Version != m.Planner.Version || strings.TrimSpace(identity.Commit) == "" || strings.TrimSpace(identity.GoVersion) == "" || len(identity.SupportedPostgresMajors) == 0 {
+			return fmt.Errorf("planner build identity must match planner version and include commit, Go version, and PostgreSQL majors")
+		}
+		previousMajor := 0
+		for _, major := range identity.SupportedPostgresMajors {
+			if major <= previousMajor {
+				return fmt.Errorf("planner build PostgreSQL majors must be sorted and unique")
+			}
+			previousMajor = major
+		}
 	}
 	previousIgnore := ""
 	for _, selector := range m.Planner.IgnoreSelectors {
@@ -893,6 +1001,13 @@ func (m Manifest) Validate() error {
 		if artifact.Path != path.Join("phases", phase+".sql") || !fingerprintPattern.MatchString(artifact.Digest) {
 			return fmt.Errorf("phase %q has invalid path or digest", phase)
 		}
+	}
+	seenOperations := make(map[string]bool, len(m.Operations))
+	for _, operation := range m.Operations {
+		if !strings.HasPrefix(operation.Path, "operations/") || !strings.HasSuffix(operation.Path, ".json") || path.Clean(operation.Path) != operation.Path || !fingerprintPattern.MatchString(operation.Digest) || seenOperations[operation.Path] {
+			return fmt.Errorf("invalid or duplicate operation receipt %q", operation.Path)
+		}
+		seenOperations[operation.Path] = true
 	}
 	return nil
 }

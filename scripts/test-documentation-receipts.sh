@@ -67,7 +67,8 @@ if grep -q 'UPDATE .*bookings' "$expand"; then
   echo "required-column backfill unexpectedly runs while legacy writers remain" >&2
   exit 1
 fi
-grep -q 'ONWARDPG TODO: provide reconcile_contract_sql SQL for app.bookings.status' "$contract"
+grep -q 'PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status' "$contract"
+test "$(grep -c 'ONWARDPG TODO' "$contract")" -eq 1
 grep -q 'SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);' "$contract"
 grep -q 'onwardpg contract gate failed:' "$contract"
 grep -q 'ALTER COLUMN "status" SET NOT NULL;' "$contract"

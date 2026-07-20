@@ -33,7 +33,7 @@ func CompileDDL(ctx context.Context, root, targetName string, target Target) (Co
 		return CompiledDDL{}, err
 	}
 	if first.Provenance != second.Provenance || !bytes.Equal(first.DDL, second.DDL) {
-		return CompiledDDL{}, fmt.Errorf("DDL export is nondeterministic")
+		return CompiledDDL{}, fmt.Errorf("DDL export is nondeterministic: two consecutive schema_command runs produced different bytes (first %s, second %s); remove timestamps, random identifiers, environment-dependent ordering, and tool chatter from stdout", ddlDigest(first.DDL), ddlDigest(second.DDL))
 	}
 	return CompiledDDL{DDL: append([]byte(nil), first.DDL...), Provenance: first.Provenance}, nil
 }
@@ -84,10 +84,15 @@ func compileDDLOnce(ctx context.Context, root, targetName string, target Target)
 	}
 	if commandErr != nil {
 		message := strings.TrimSpace(stderr.String())
-		if message == "" {
-			message = commandErr.Error()
+		context := "check the exporter command, its runtime dependencies, and disposable database connectivity"
+		lower := strings.ToLower(message)
+		if strings.Contains(lower, "server version") && strings.Contains(lower, "pg_dump version") || strings.Contains(lower, "major") && strings.Contains(lower, "pg_dump") {
+			context = "the pg_dump client and disposable PostgreSQL server likely use different major versions"
 		}
-		return CompiledDDL{}, fmt.Errorf("DDL export command failed: %s", message)
+		if message == "" {
+			return CompiledDDL{}, fmt.Errorf("DDL export command %q failed (%s): %w", strings.Join(target.SchemaCommand, " "), context, commandErr)
+		}
+		return CompiledDDL{}, fmt.Errorf("DDL export command %q failed (%s): %w; stderr: %s", strings.Join(target.SchemaCommand, " "), context, commandErr, message)
 	}
 	if closeErr != nil {
 		return CompiledDDL{}, fmt.Errorf("close DDL export capture: %w", closeErr)
@@ -104,6 +109,11 @@ func compileDDLOnce(ctx context.Context, root, targetName string, target Target)
 		return CompiledDDL{}, fmt.Errorf("read DDL export capture: %w", err)
 	}
 	return CompiledDDL{DDL: ddl, Provenance: "schema_command"}, nil
+}
+
+func ddlDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 type limitedBuffer struct {

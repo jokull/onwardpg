@@ -2,6 +2,7 @@ package pgschema
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -100,6 +101,93 @@ func TestSnapshotRejectsDanglingDependencies(t *testing.T) {
 	}
 	if err := snapshot.AddDependency(table.ObjectID(), ID{Kind: KindSchema, Name: "missing"}); err == nil {
 		t.Fatal("expected a dangling dependency error")
+	}
+}
+
+func TestProjectRemovesLeafNormalizesObjectAndFiltersUnsupported(t *testing.T) {
+	snapshot := New()
+	table := Table{Schema: "public", Name: "orders", Owner: "app_owner"}
+	privilege := TablePrivilege{Table: table.ObjectID(), Grantee: "onwardpg_observer", Grantor: "@owner", Privilege: "SELECT"}
+	for _, object := range []Object{table, privilege} {
+		if err := snapshot.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := snapshot.AddDependency(privilege.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.AddUnsupported("ownership:schema:app=app_owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.AddUnsupported("publication:events"); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.AddIgnored("comment:table:public.orders"); err != nil {
+		t.Fatal(err)
+	}
+
+	projected, err := snapshot.Project(func(object Object) (Object, bool) {
+		switch value := object.(type) {
+		case Table:
+			value.Owner = ""
+			return value, true
+		case TablePrivilege:
+			return nil, false
+		default:
+			return object, true
+		}
+	}, func(selector string) bool { return selector != "ownership:schema:app=app_owner" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, exists := projected.Object(table.ObjectID())
+	if !exists || object.(Table).Owner != "" {
+		t.Fatalf("projected table = %#v, exists=%t", object, exists)
+	}
+	if _, exists := projected.Object(privilege.ObjectID()); exists {
+		t.Fatal("projected observer privilege was retained")
+	}
+	if got := projected.Unsupported(); !reflect.DeepEqual(got, []string{"publication:events"}) {
+		t.Fatalf("unsupported = %#v", got)
+	}
+	if got := projected.Ignored(); !reflect.DeepEqual(got, []string{"comment:table:public.orders"}) {
+		t.Fatalf("ignored = %#v", got)
+	}
+	if _, exists := snapshot.Object(privilege.ObjectID()); !exists {
+		t.Fatal("projection mutated the source snapshot")
+	}
+}
+
+func TestProjectRejectsRetainedDependentOfRemovedObject(t *testing.T) {
+	snapshot := New()
+	table := Table{Schema: "public", Name: "orders"}
+	column := Column{Table: table.ObjectID(), Name: "id", Type: "bigint"}
+	for _, object := range []Object{table, column} {
+		if err := snapshot.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := snapshot.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := snapshot.Project(func(object Object) (Object, bool) {
+		return object, object.ObjectID() != table.ObjectID()
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "depends on removed object") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestProjectRejectsChangedObjectIdentity(t *testing.T) {
+	snapshot := New()
+	if err := snapshot.Add(Table{Schema: "public", Name: "orders"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := snapshot.Project(func(Object) (Object, bool) {
+		return Table{Schema: "public", Name: "renamed"}, true
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "changed object identity") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

@@ -2652,7 +2652,34 @@ func TestPartitionedParentExclusionRebuildConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "reconcile_contract" {
+		t.Fatalf("expected exclusion reconciliation decision, got %#v", pending)
+	}
+	question := pending.Questions[0]
+	answers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "manual_sql", QuestionFingerprint: question.ScopeFingerprint}},
+	}
+	manualPending, err := buildIntegration(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualPending.Status != protocol.NeedsInput || len(manualPending.Questions) != 1 || manualPending.Questions[0].Kind != "reconcile_contract_sql" {
+		t.Fatalf("expected exclusion reconciliation SQL, got %#v", manualPending)
+	}
+	manual := manualPending.Questions[0]
+	comparison := `a.id = b.id AND a.occurred_at = b.occurred_at AND a.shard = b.shard`
+	answers.Answers = append(answers.Answers, protocol.Answer{
+		Kind: manual.Kind, Key: manual.Key, Value: "provided", QuestionFingerprint: manual.ScopeFingerprint,
+		Manual: &protocol.ManualWork{Summary: "remove duplicate partition event keys", ExecutionMode: "transactional",
+			Statements:      []string{`DELETE FROM ` + quote(schemaName) + `.events a USING ` + quote(schemaName) + `.events b WHERE a.tableoid = b.tableoid AND a.ctid < b.ctid AND ` + comparison + `;`},
+			VerificationSQL: []string{`SELECT NOT EXISTS (SELECT 1 FROM ` + quote(schemaName) + `.events a JOIN ` + quote(schemaName) + `.events b ON a.tableoid = b.tableoid AND a.ctid < b.ctid AND ` + comparison + `);`}},
+	})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9654,6 +9681,57 @@ ALTER TABLE "` + schemaName + `".person ADD CONSTRAINT person_team_fkey FOREIGN 
 		}
 		return snapshot
 	}
+	planTemporal := func(current, desired *pgschema.Snapshot, includeCode bool) protocol.Result {
+		t.Helper()
+		answers := protocol.Answers{}
+		for attempt := 0; attempt < 6; attempt++ {
+			result, buildErr := buildIntegration(current, desired, answers, Options{})
+			if buildErr != nil {
+				t.Fatal(buildErr)
+			}
+			if result.Status == protocol.Planned {
+				return result
+			}
+			if result.Status != protocol.NeedsInput || len(result.Questions) == 0 {
+				t.Fatalf("temporal reconciliation stopped without executable questions: %#v", result)
+			}
+			if answers.CurrentFingerprint == "" {
+				answers.ProtocolVersion = protocol.Version
+				answers.CurrentFingerprint = result.CurrentFingerprint
+				answers.DesiredFingerprint = result.DesiredFingerprint
+			}
+			before := len(answers.Answers)
+			for _, question := range result.Questions {
+				switch question.Kind {
+				case "reconcile_contract":
+					answers.Answers = append(answers.Answers, protocol.Answer{
+						Kind: question.Kind, Key: question.Key, Value: "manual_sql", QuestionFingerprint: question.ScopeFingerprint,
+					})
+				case "reconcile_contract_sql":
+					comparison := `a.id = b.id AND a.valid_at && b.valid_at`
+					if includeCode && strings.Contains(question.Key, "room_uq_new") {
+						comparison = `a.id = b.id AND a.code = b.code AND a.valid_at && b.valid_at`
+					}
+					answers.Answers = append(answers.Answers, protocol.Answer{
+						Kind: question.Kind, Key: question.Key, Value: "provided", QuestionFingerprint: question.ScopeFingerprint,
+						Manual: &protocol.ManualWork{
+							Summary:         "remove overlapping temporal room keys",
+							ExecutionMode:   "transactional",
+							Statements:      []string{`DELETE FROM ` + quote(schemaName) + `.room a USING ` + quote(schemaName) + `.room b WHERE a.ctid < b.ctid AND ` + comparison + `;`},
+							VerificationSQL: []string{`SELECT NOT EXISTS (SELECT 1 FROM ` + quote(schemaName) + `.room a JOIN ` + quote(schemaName) + `.room b ON a.ctid < b.ctid AND ` + comparison + `);`},
+						},
+					})
+				default:
+					t.Fatalf("unexpected temporal reconciliation question: %#v", question)
+				}
+			}
+			if len(answers.Answers) == before {
+				t.Fatalf("temporal reconciliation made no progress: %#v", result)
+			}
+		}
+		t.Fatal("temporal reconciliation did not converge after six decision rounds")
+		return protocol.Result{}
+	}
 	temporal := `
 ALTER TABLE "` + schemaName + `".room ADD CONSTRAINT room_pkey PRIMARY KEY (id, valid_at WITHOUT OVERLAPS);
 ALTER TABLE "` + schemaName + `".room ADD CONSTRAINT room_uq UNIQUE (id, valid_at WITHOUT OVERLAPS);
@@ -9670,9 +9748,9 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 		t.Fatal(err)
 	}
 	current := loadCurrent()
-	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
-	if err != nil || plan.Status != protocol.Planned {
-		t.Fatalf("temporal/enforcement add plan=%#v err=%v", plan, err)
+	plan := planTemporal(current, desired, false)
+	if plan.Status != protocol.Planned || len(plan.Reconciliations) != 3 {
+		t.Fatalf("temporal/enforcement add plan=%#v", plan)
 	}
 	joined := joinPlan(plan)
 	if !strings.Contains(joined, "WITHOUT OVERLAPS") || !strings.Contains(joined, "PERIOD valid_at") || !strings.Contains(joined, "NOT ENFORCED") || strings.Index(joined, `ADD CONSTRAINT "room_pkey"`) > strings.Index(joined, `ADD CONSTRAINT "booking_room_fkey"`) {
@@ -9710,9 +9788,9 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 	changedTemporal := strings.Replace(temporal, "CONSTRAINT room_uq UNIQUE (id, valid_at", "CONSTRAINT room_uq_new UNIQUE (id, code, valid_at", 1)
 	desired = loadDesired(changedTemporal)
 	current = loadCurrent()
-	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
-	if err != nil || plan.Status != protocol.Planned {
-		t.Fatalf("temporal definition/enforcement reversal plan=%#v err=%v", plan, err)
+	plan = planTemporal(current, desired, true)
+	if plan.Status != protocol.Planned {
+		t.Fatalf("temporal definition/enforcement reversal plan=%#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
 	assertGraphConverges(t, ctx, url, desired)

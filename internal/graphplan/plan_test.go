@@ -2917,6 +2917,39 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 			t.Fatalf("manual strategy emitted an implicit full-table update: %#v", statement)
 		}
 	}
+	equalityGate := gateByKind(t, manualPlan.ContractGates, "data_assertion")
+	if !strings.Contains(equalityGate.BooleanSQL, `"new_name" IS DISTINCT FROM "old_name"`) {
+		t.Fatalf("rename equality gate = %#v", equalityGate)
+	}
+	for _, statement := range manualPlan.Statements {
+		if statement.Phase == protocol.PhaseContract && !containsString(statement.Hazards, "final_overlap_catchup") && !containsString(statement.RequiresGates, equalityGate.ID) {
+			t.Fatalf("rename contract statement lacks equality gate: %#v", statement)
+		}
+	}
+
+	batchedAnswers := manualAnswers
+	batchedAnswers.Answers = append([]protocol.Answer(nil), manualAnswers.Answers...)
+	batchedAnswers.Answers[len(batchedAnswers.Answers)-1].Manual = &protocol.ManualWork{
+		Summary: "backfill bounded primary-key windows", ExecutionMode: protocol.ManualOperatorBatched,
+		Statements:      []string{`UPDATE "public"."orders" SET "new_name" = "old_name" WHERE id > :after_id AND id <= :through_id AND "new_name" IS DISTINCT FROM "old_name";`},
+		VerificationSQL: []string{`SELECT count(*) = 0 FROM "public"."orders" WHERE "new_name" IS DISTINCT FROM "old_name";`},
+		ProgressKey:     "orders.id", IdempotencyNotes: "rerunning a window writes the same source value",
+	}
+	batchedPlan, err := Build(current, desired, batchedAnswers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batchedPlan.Operations) != 1 || batchedPlan.Operations[0].ExecutionMode != protocol.ManualOperatorBatched {
+		t.Fatalf("operator-batched rename operation = %#v", batchedPlan.Operations)
+	}
+	if len(batchedPlan.Reconciliations) != 1 || batchedPlan.Reconciliations[0].Strategy != "manual_sql" {
+		t.Fatalf("operator-batched rename reconciliation = %#v", batchedPlan.Reconciliations)
+	}
+	for _, statement := range batchedPlan.Statements {
+		if statement.Manual != nil && statement.Manual.ExecutionMode == protocol.ManualOperatorBatched {
+			t.Fatalf("operator-batched work leaked into phase SQL: %#v", statement)
+		}
+	}
 
 	splitAnswers := protocol.Answers{
 		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,

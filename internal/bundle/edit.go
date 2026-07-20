@@ -25,12 +25,13 @@ type Assertion struct {
 }
 
 type EditConflict struct {
-	Path            string  `json:"path"`
-	Reason          string  `json:"reason"`
-	OldGeneratedSQL *string `json:"old_generated_sql,omitempty"`
-	CurrentSQL      *string `json:"current_sql,omitempty"`
-	NewGeneratedSQL *string `json:"new_generated_sql,omitempty"`
-	Resolution      string  `json:"resolution"`
+	Path              string  `json:"path"`
+	Reason            string  `json:"reason"`
+	OldGeneratedSQL   *string `json:"old_generated_sql,omitempty"`
+	CurrentSQL        *string `json:"current_sql,omitempty"`
+	NewGeneratedSQL   *string `json:"new_generated_sql,omitempty"`
+	AttemptedMergeSQL *string `json:"attempted_merge_sql,omitempty"`
+	Resolution        string  `json:"resolution"`
 }
 
 // EditReconciliation describes the conservative three-way reconciliation used
@@ -104,6 +105,83 @@ func PrepareEditedFiles(base Artifact, editable map[string][]byte) (Artifact, er
 		files[name] = append([]byte(nil), body...)
 	}
 	return prepareEditedArtifact(base.Manifest, files)
+}
+
+// preparePendingEditedFiles preserves already reviewed developer-owned bytes in
+// a newly generated needs_sql_edits candidate. Unlike PrepareEditedFiles it
+// deliberately leaves new TODO pockets unresolved and does not claim that the
+// resulting SQL has passed disposable verification. This gives the developer a
+// real candidate to edit instead of failing reconciliation before the named
+// pocket is written.
+func preparePendingEditedFiles(base Artifact, editable map[string][]byte) (Artifact, error) {
+	if err := base.Validate(); err != nil {
+		return Artifact{}, fmt.Errorf("validate generated pending bundle: %w", err)
+	}
+	if base.Manifest.State != string(protocol.NeedsSQLEdits) || base.Manifest.PhaseSource != "generated" {
+		return Artifact{}, fmt.Errorf("pending edit candidate must be a generated needs_sql_edits bundle")
+	}
+	files := make(map[string][]byte, len(base.Files)+len(editable))
+	for name, body := range base.Files {
+		files[name] = append([]byte(nil), body...)
+	}
+	for _, phase := range editablePhases {
+		delete(files, filepath.ToSlash(filepath.Join("phases", phase+".sql")))
+	}
+	delete(files, "verify.sql")
+	delete(files, contractGateOverridesPath)
+	delete(files, "expand-checkpoint.json")
+	for name, body := range editable {
+		if name != "verify.sql" && !isEditablePhasePath(name) {
+			return Artifact{}, fmt.Errorf("editable artifact path %q is invalid", name)
+		}
+		files[name] = append([]byte(nil), body...)
+	}
+	manifest := base.Manifest
+	manifest.PhaseSource = "edited"
+	manifest.State = string(protocol.NeedsSQLEdits)
+	manifest.Phases = make(map[string]PhaseArtifact)
+	manifest.VerificationDigest = ""
+	manifest.ContractGateOverridesDigest = ""
+	manifest.ExpandCheckpointDigest = ""
+	for _, phase := range editablePhases {
+		name := filepath.ToSlash(filepath.Join("phases", phase+".sql"))
+		body, exists := files[name]
+		if !exists {
+			continue
+		}
+		batches, err := ParsePhaseSQL(body, nil)
+		if err != nil {
+			return Artifact{}, fmt.Errorf("parse pending %s: %w", name, err)
+		}
+		receipt := PhaseArtifact{Path: name, Digest: Digest(body)}
+		if mode, uniform := uniformTransactionMode(batches); uniform {
+			receipt.Transactional = &mode
+		}
+		manifest.Phases[phase] = receipt
+	}
+	if verification, exists := files["verify.sql"]; exists {
+		if _, err := ParseAssertions(verification); err != nil {
+			return Artifact{}, fmt.Errorf("parse pending verify.sql: %w", err)
+		}
+		manifest.VerificationDigest = Digest(verification)
+	}
+	if manifest.History != nil {
+		digest, err := HistoryEntryDigest(manifest)
+		if err != nil {
+			return Artifact{}, err
+		}
+		manifest.History.EntryDigest = digest
+	}
+	manifestData, err := jsonDocument(manifest)
+	if err != nil {
+		return Artifact{}, err
+	}
+	files["manifest.json"] = manifestData
+	artifact := Artifact{Manifest: manifest, Files: files}
+	if err := artifact.Validate(); err != nil {
+		return Artifact{}, fmt.Errorf("validate pending edited bundle: %w", err)
+	}
+	return artifact, nil
 }
 
 // ReconcileEditedDraft carries developer-owned SQL from previous into a newly
@@ -182,24 +260,42 @@ func ReconcileEditedDraft(previous, generated Artifact) (Artifact, EditReconcili
 			}
 			report.Preserved = append(report.Preserved, name)
 		default:
+			attempted := optionalSQL(previousBody, previousExists)
 			report.Conflicts = append(report.Conflicts, EditConflict{
-				Path:            name,
-				Reason:          "developer and generator both changed this phase from the previous generated version",
-				OldGeneratedSQL: optionalSQL(oldGeneratedBody, oldGeneratedExists),
-				CurrentSQL:      optionalSQL(previousBody, previousExists),
-				NewGeneratedSQL: optionalSQL(newGeneratedBody, newGeneratedExists),
-				Resolution:      "edit this path to preserve the intended current SQL and incorporate the new generated structural work, then run onwardpg verify",
+				Path:              name,
+				Reason:            "developer and generator both changed this phase from the previous generated version",
+				OldGeneratedSQL:   optionalSQL(oldGeneratedBody, oldGeneratedExists),
+				CurrentSQL:        optionalSQL(previousBody, previousExists),
+				NewGeneratedSQL:   optionalSQL(newGeneratedBody, newGeneratedExists),
+				AttemptedMergeSQL: attempted,
+				Resolution:        "edit this path to preserve the intended current SQL and incorporate the new generated structural work, then run onwardpg verify",
 			})
 		}
 	}
 	if len(report.Conflicts) > 0 {
 		return Artifact{}, report, nil
 	}
-	artifact, err := PrepareEditedFiles(generated, merged)
+	var artifact Artifact
+	pending := false
+	for name, body := range merged {
+		if isEditablePhasePath(name) && bytes.Contains(body, []byte("ONWARDPG TODO")) {
+			pending = true
+			break
+		}
+	}
+	if generated.Manifest.State == string(protocol.NeedsSQLEdits) && pending {
+		artifact, err = preparePendingEditedFiles(generated, merged)
+	} else {
+		artifact, err = PrepareEditedFiles(generated, merged)
+	}
 	if err != nil {
 		return Artifact{}, report, err
 	}
-	report.Outcome = "reconciled"
+	if artifact.Manifest.State == string(protocol.NeedsSQLEdits) {
+		report.Outcome = "needs_sql_edits"
+	} else {
+		report.Outcome = "reconciled"
+	}
 	return artifact, report, nil
 }
 
@@ -367,8 +463,8 @@ func prepareEditedArtifact(manifest Manifest, files map[string][]byte) (Artifact
 		if !exists {
 			continue
 		}
-		if bytes.Contains(body, []byte("ONWARDPG TODO")) {
-			return Artifact{}, fmt.Errorf("%s contains an unresolved ONWARDPG TODO", name)
+		if lines := todoLines(body); len(lines) > 0 {
+			return Artifact{}, fmt.Errorf("%s contains an unresolved ONWARDPG TODO at %s", name, formatLineLocations(lines))
 		}
 		var fallback *bool
 		if receipt, ok := previous[phase]; ok {
@@ -428,6 +524,28 @@ func prepareEditedArtifact(manifest Manifest, files map[string][]byte) (Artifact
 		return Artifact{}, fmt.Errorf("validate edited bundle: %w", err)
 	}
 	return artifact, nil
+}
+
+func todoLines(body []byte) []int {
+	var result []int
+	for index, line := range bytes.Split(body, []byte("\n")) {
+		if bytes.Contains(line, []byte("ONWARDPG TODO")) {
+			result = append(result, index+1)
+		}
+	}
+	return result
+}
+
+func formatLineLocations(lines []int) string {
+	label := "line"
+	if len(lines) != 1 {
+		label = "lines"
+	}
+	values := make([]string, len(lines))
+	for index, line := range lines {
+		values[index] = fmt.Sprintf("%d", line)
+	}
+	return label + " " + strings.Join(values, ", ")
 }
 
 func editedContractGateOverrides(result protocol.Result, contractSQL []byte) ([]protocol.ContractGate, error) {
@@ -497,6 +615,11 @@ func InstallReceipts(directory string, expected Artifact) error {
 	}
 	if checkpoint, exists := expected.Files["expand-checkpoint.json"]; exists {
 		if err := installReceiptFile(directory, "expand-checkpoint.json", checkpoint); err != nil {
+			return err
+		}
+	}
+	if overrides, exists := expected.Files[contractGateOverridesPath]; exists {
+		if err := installReceiptFile(directory, contractGateOverridesPath, overrides); err != nil {
 			return err
 		}
 	}

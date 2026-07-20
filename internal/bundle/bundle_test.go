@@ -93,6 +93,41 @@ func TestBuildReceiptsAndValidatesContractGates(t *testing.T) {
 	}
 }
 
+func TestBuildReceiptsOperatorBatchedOperationSeparatelyFromPhaseSQL(t *testing.T) {
+	gate := protocol.ContractGate{ID: "data:rename_equal", Kind: "manual_reconciliation", ScopeFingerprint: currentFingerprint, Reason: "overlap columns must be equal", BooleanSQL: "SELECT true;"}
+	work := protocol.ManualWork{
+		Summary: "backfill bounded windows", ExecutionMode: protocol.ManualOperatorBatched,
+		Statements:      []string{"UPDATE app.orders SET new_name = old_name WHERE id > :after_id AND id <= :through_id;"},
+		VerificationSQL: []string{"SELECT true;"}, ProgressKey: "orders.id", IdempotencyNotes: "same window may be retried",
+	}
+	result := plannedResult()
+	result.ContractGates = []protocol.ContractGate{gate}
+	result.Reconciliations = []protocol.Reconciliation{{TransitionID: "column:app:orders:old_name->column:app:orders:new_name", Strategy: "manual_sql", Work: &work, GateIDs: []string{gate.ID}}}
+	result.Operations = []protocol.Operation{{
+		ID: "operation-0123456789abcdef", TransitionID: result.Reconciliations[0].TransitionID,
+		Timing: "after_expand_before_contract", ExecutionMode: protocol.ManualOperatorBatched, Summary: work.Summary,
+		BatchTemplate: work.Statements, ProgressKey: work.ProgressKey, CompletionSQL: gate.BooleanSQL,
+		IdempotencyNotes: work.IdempotencyNotes, CompletionGateIDs: []string{gate.ID},
+	}}
+	artifact, err := Build(Input{Metadata: metadata(), Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "operations/operation-0123456789abcdef.json"
+	if len(artifact.Manifest.Operations) != 1 || artifact.Files[path] == nil || artifact.Manifest.Phases[protocol.PhaseExpand].Path != "" {
+		t.Fatalf("operation was not isolated from phases: manifest=%#v files=%v", artifact.Manifest, artifact.Files)
+	}
+	tampered := artifact
+	tampered.Files = make(map[string][]byte, len(artifact.Files))
+	for name, body := range artifact.Files {
+		tampered.Files[name] = append([]byte(nil), body...)
+	}
+	tampered.Files[path][0] ^= 1
+	if err := tampered.Validate(); err == nil || !strings.Contains(err.Error(), "operation artifact") {
+		t.Fatalf("tampered operation validation = %v", err)
+	}
+}
+
 func TestWithExpandCheckpointReceiptsObservedGraphAndHistory(t *testing.T) {
 	inputMetadata := metadata()
 	inputMetadata.PlanID = "plan_0123456789abcdef0123456789abcdef"
@@ -228,11 +263,13 @@ func TestNeedsSQLEditsBundleBecomesPlannedOnlyAfterTODOIsReplaced(t *testing.T) 
 }
 
 func TestWritePreservesDecisionHistoryAcrossDraftReplacement(t *testing.T) {
+	meta := metadata()
+	meta.HistoryParentDigest = HistoryRootDigest()
 	decisionResult := protocol.Result{
 		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		Status: protocol.NeedsInput, Questions: []protocol.Question{{ID: "rename", Kind: "rename_table", Key: "table:app:old", Choices: []string{"table:app:new"}}},
 	}
-	decision, err := Build(Input{Metadata: metadata(), Result: decisionResult, Attempt: 1})
+	decision, err := Build(Input{Metadata: meta, Result: decisionResult, Attempt: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,10 +277,15 @@ func TestWritePreservesDecisionHistoryAcrossDraftReplacement(t *testing.T) {
 	if err := Write(destination, decision, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	ready, err := Build(Input{Metadata: metadata(), Result: plannedResult()})
+	ready, err := Build(Input{Metadata: meta, Result: plannedResult()})
 	if err != nil {
 		t.Fatal(err)
 	}
+	ready, err = WithDecisionHistory(decision, ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedDigest := ready.Manifest.History.EntryDigest
 	if err := Write(destination, ready, WriteOptions{ReplaceDraft: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -258,14 +300,17 @@ func TestWritePreservesDecisionHistoryAcrossDraftReplacement(t *testing.T) {
 	if manifest.State != "planned" || len(manifest.Decisions) != 1 || manifest.Decisions[0].Path != "decisions/attempt-001.json" {
 		t.Fatalf("decision history was not preserved: %#v", manifest)
 	}
-	generation, attempt, err := NextCoordinates(destination, metadata(), plannedResult())
+	if manifest.History.EntryDigest != preparedDigest {
+		t.Fatalf("write changed prepared history digest: %s != %s", manifest.History.EntryDigest, preparedDigest)
+	}
+	generation, attempt, err := NextCoordinates(destination, meta, plannedResult())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if generation != 1 || attempt != 2 {
 		t.Fatalf("next coordinates = (%d, %d), want (1, 2)", generation, attempt)
 	}
-	generation, attempt, err = NextCoordinates(destination, metadata(), decisionResult)
+	generation, attempt, err = NextCoordinates(destination, meta, decisionResult)
 	if err != nil || generation != 1 || attempt != 1 {
 		t.Fatalf("repeated decision coordinates = (%d, %d, %v), want (1, 1, nil)", generation, attempt, err)
 	}

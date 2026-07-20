@@ -167,6 +167,31 @@ func TestPrepareEditedReceiptsResolvedManualContractGate(t *testing.T) {
 	if len(gates) != 1 || gates[0].BooleanSQL != resolved {
 		t.Fatalf("effective gates = %#v", gates)
 	}
+	destination := filepath.Join(t.TempDir(), "resolved-gate")
+	if err := Write(destination, artifact, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "phases", "contract.sql"), []byte(editedContract), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installable, err := PrepareEdited(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installable, err = WithExpandCheckpoint(installable, installable.Manifest.BaselineSource.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallReceipts(destination, installable); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := Read(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installed.Files[contractGateOverridesPath]) == 0 {
+		t.Fatal("installed manifest refers to a missing contract gate override")
+	}
 
 	tampered := edited
 	tampered.Files = make(map[string][]byte, len(edited.Files))
@@ -320,6 +345,53 @@ func TestReconcileEditedDraftCarriesResolvedTODOAcrossNewHistoryParent(t *testin
 	}
 }
 
+func TestReconcileEditedDraftWritesNewTODOBesidePriorResolvedPocket(t *testing.T) {
+	meta := metadata()
+	meta.HistoryParentDigest = HistoryRootDigest()
+	oldTODO := statement("-- ONWARDPG TODO: backfill app.accounts.status", protocol.PhaseContract, true)
+	oldResult := plannedResult(oldTODO)
+	oldResult.Status = protocol.NeedsSQLEdits
+	oldGenerated, err := Build(Input{Metadata: meta, Result: oldResult})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBody := string(oldGenerated.Files["phases/contract.sql"])
+	resolvedBody := strings.Replace(oldBody, oldTODO.SQL, "UPDATE app.accounts SET status = 'ready' WHERE status IS NULL;", 1)
+	previous, err := PrepareEditedFiles(oldGenerated, map[string][]byte{
+		"phases/contract.sql": []byte(resolvedBody),
+		"verify.sql":          []byte("-- onwardpg:assert status_ready\nSELECT true;\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	meta.Generation = 2
+	newTODO := statement("-- ONWARDPG TODO: backfill app.accounts.full_name", protocol.PhaseExpand, true)
+	newResult := plannedResult(newTODO, oldTODO)
+	newResult.Status = protocol.NeedsSQLEdits
+	newGenerated, err := Build(Input{Metadata: meta, Result: newResult})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, report, err := ReconcileEditedDraft(previous, newGenerated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "needs_sql_edits" || reconciled.Manifest.State != string(protocol.NeedsSQLEdits) || reconciled.Manifest.PhaseSource != "edited" {
+		t.Fatalf("pending reconciliation = %#v manifest=%#v", report, reconciled.Manifest)
+	}
+	if !strings.Contains(string(reconciled.Files["phases/expand.sql"]), "ONWARDPG TODO: backfill app.accounts.full_name") {
+		t.Fatalf("new edit pocket was not written: %s", reconciled.Files["phases/expand.sql"])
+	}
+	contract := string(reconciled.Files["phases/contract.sql"])
+	if !strings.Contains(contract, "UPDATE app.accounts SET status = 'ready'") || strings.Contains(contract, "TODO: backfill app.accounts.status") {
+		t.Fatalf("prior reviewed pocket was not preserved: %s", contract)
+	}
+	if !strings.Contains(string(reconciled.Files["verify.sql"]), "status_ready") || reconciled.Manifest.VerificationDigest == "" {
+		t.Fatalf("pending candidate lost developer verification: %#v", reconciled.Manifest)
+	}
+}
+
 func TestReconcileEditedDraftReportsSamePhaseConflict(t *testing.T) {
 	meta := metadata()
 	meta.HistoryParentDigest = HistoryRootDigest()
@@ -394,7 +466,7 @@ func TestPrepareEditedRejectsUnresolvedTODO(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(destination, "phases", "contract.sql"), []byte("-- ONWARDPG TODO: add the reviewed backfill\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PrepareEdited(destination); err == nil || !strings.Contains(err.Error(), "unresolved") {
+	if _, err := PrepareEdited(destination); err == nil || !strings.Contains(err.Error(), "unresolved") || !strings.Contains(err.Error(), "contract.sql") || !strings.Contains(err.Error(), "line 1") {
 		t.Fatalf("expected unresolved TODO rejection, got %v", err)
 	}
 }

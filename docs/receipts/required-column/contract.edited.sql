@@ -8,11 +8,11 @@
 -- onwardpg:batch transactional
 -- Batch batch-contract-001: transactional.
 -- Review: safety=manual; hazards=contract_reconciliation,data_movement,post_drain_writers_required; requires_gates=writers:legacy.
--- onwardpg:edit begin stmt-sha256-7d55b725e4e5aeac8a2691e13518e9723c9a61598d40e49ed5890dea254005d4
+-- onwardpg:edit begin stmt-sha256-1a5377b536479569445c7585eb95560c9e977f5d696557db5f28031f9789eec6
 UPDATE "app"."bookings"
 SET "status" = 'pending'
 WHERE "status" IS NULL;
--- onwardpg:edit end stmt-sha256-7d55b725e4e5aeac8a2691e13518e9723c9a61598d40e49ed5890dea254005d4
+-- onwardpg:edit end stmt-sha256-1a5377b536479569445c7585eb95560c9e977f5d696557db5f28031f9789eec6
 
 -- onwardpg:batch transactional
 -- Batch batch-contract-002: transactional.

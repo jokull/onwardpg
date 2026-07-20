@@ -1,4 +1,4 @@
-// Package targetlock serializes lifecycle commands for one repository config.
+// Package targetlock serializes state-changing commands for one repository config.
 // It locks the existing config file itself, so aliases, cache settings, users,
 // and process crashes cannot create separate pathname locks or stale lock
 // artifacts in the checkout.

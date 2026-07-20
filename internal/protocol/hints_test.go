@@ -37,6 +37,10 @@ func TestDecodeHintInfersColumnAndNotNullFromKinds(t *testing.T) {
 	if typeChange.Object != "" || rollout.Object != "" || typeChange.Name[2] != "occurred_on" || rollout.Strategy != "staged_with_backfill" {
 		t.Fatalf("type_change=%#v rollout=%#v", typeChange, rollout)
 	}
+	typeSplit, err := DecodeHint([]byte(`{"kind":"type_change","name":["public","events","occurred_on"],"strategy":"split_plan"}`))
+	if err != nil || typeSplit.Strategy != "split_plan" {
+		t.Fatalf("type split=%#v err=%v", typeSplit, err)
+	}
 	renameBackfill, err := DecodeHint([]byte(`{"kind":"rename_backfill","name":["public","events","old_name"],"strategy":"single_transaction"}`))
 	if err != nil || renameBackfill.Strategy != "single_transaction" {
 		t.Fatalf("rename backfill=%#v err=%v", renameBackfill, err)

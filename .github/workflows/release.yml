@@ -34,7 +34,11 @@ jobs:
           mkdir -p /tmp/onwardpg-release-check
           tar -xzf "dist/onwardpg_${GITHUB_REF_NAME#v}_linux_amd64.tar.gz" -C /tmp/onwardpg-release-check
           binary=$(find /tmp/onwardpg-release-check -type f -name onwardpg -print -quit)
-          test "$("$binary" version)" = "{\"protocol_version\":\"onwardpg.version/v1\",\"status\":\"ok\",\"version\":\"$GITHUB_REF_NAME\"}"
+          version_json=$("$binary" version)
+          test "$(jq -r '.protocol_version' <<<"$version_json")" = "onwardpg.version/v1"
+          test "$(jq -r '.build.version' <<<"$version_json")" = "$GITHUB_REF_NAME"
+          test "$(jq -r '.build.commit' <<<"$version_json")" = "$GITHUB_SHA"
+          test "$(jq -r '.build.dirty' <<<"$version_json")" = "false"
       - name: Attest release artifacts
         uses: actions/attest@v4
         with:

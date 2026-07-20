@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/jokull/onwardpg/internal/activeplan"
 	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
@@ -29,16 +30,17 @@ type Finding struct {
 }
 
 type Report struct {
-	ProtocolVersion    string           `json:"protocol_version"`
-	Outcome            string           `json:"status"`
-	Target             string           `json:"target"`
-	BundleID           string           `json:"bundle_id"`
-	Path               string           `json:"path,omitempty"`
-	HistoryHead        string           `json:"history_head,omitempty"`
-	DesiredFingerprint string           `json:"desired_fingerprint,omitempty"`
-	Plan               *protocol.Result `json:"plan,omitempty"`
-	Verification       *verify.Report   `json:"verification,omitempty"`
-	Findings           []Finding        `json:"findings,omitempty"`
+	ProtocolVersion    string                `json:"protocol_version"`
+	Outcome            string                `json:"status"`
+	Target             string                `json:"target"`
+	BundleID           string                `json:"bundle_id"`
+	Path               string                `json:"path,omitempty"`
+	HistoryHead        string                `json:"history_head,omitempty"`
+	DesiredFingerprint string                `json:"desired_fingerprint,omitempty"`
+	Plan               *protocol.Result      `json:"plan,omitempty"`
+	Verification       *verify.Report        `json:"verification,omitempty"`
+	LocalState         activeplan.GitHygiene `json:"local_state"`
+	Findings           []Finding             `json:"findings,omitempty"`
 }
 
 type Input struct {
@@ -50,6 +52,7 @@ type Input struct {
 	AdminURL        string
 	BundleID        string
 	BuildVersion    string
+	BuildIdentity   *bundle.BuildIdentity
 	Ignores         []string
 	RequiredIgnores []string
 	PlannerOptions  graphplan.Options
@@ -79,6 +82,16 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	if input.BuildVersion == "" {
 		return report, fmt.Errorf("planner build version is required")
+	}
+	localState, err := activeplan.EnsureGitExclude(input.Root)
+	report.LocalState = localState
+	if err != nil {
+		report.Outcome = "blocked"
+		report.Findings = []Finding{{
+			Code: "local_state_git_collision", Message: err.Error(),
+			Remediation: "keep .onwardpg as untracked worktree-local state; durable migration bundles belong under the configured bundle root",
+		}}
+		return report, nil
 	}
 	postgresMajor, err := source.PostgresMajor(ctx, input.AdminURL)
 	if err != nil {
@@ -148,6 +161,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		},
 		Planner: bundle.PlannerReceipt{
 			Version: input.BuildVersion,
+			Build:   input.BuildIdentity,
 			Options: bundle.PlannerOptions{
 				ConcurrentIndexes:       input.PlannerOptions.ConcurrentIndexes,
 				IfNotExists:             input.PlannerOptions.IfNotExists,

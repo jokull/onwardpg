@@ -8,6 +8,9 @@ if [[ ! $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
   exit 2
 fi
 
+commit=$(git rev-parse HEAD)
+build_time=$(git show -s --format=%cI HEAD)
+
 rm -rf "$output"
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
@@ -36,7 +39,7 @@ for target in "${targets[@]}"; do
   fi
   CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build \
     -trimpath \
-    -ldflags "-s -w -X main.buildVersion=$version" \
+    -ldflags "-s -w -X main.buildVersion=$version -X main.buildCommit=$commit -X main.buildTime=$build_time" \
     -o "$directory/$binary" ./cmd/onwardpg
   cp README.md CHANGELOG.md THIRD_PARTY_NOTICES.md "$directory/"
   if [[ -f LICENSE ]]; then

@@ -634,6 +634,71 @@ func (s *Snapshot) Objects() []Object {
 	return objects
 }
 
+// Project returns a validated copy of the snapshot after applying a narrow
+// contextual projection. It exists for callers that must remove environmental
+// catalog state (for example, a dedicated read-only inspection role) without
+// weakening the graph's dependency checks or mutating the inspected snapshot.
+// A transform may replace an object only when its stable identity is unchanged;
+// returning keep=false removes the object. Unsupported selectors may be
+// filtered independently. Ignored selectors are always retained because they
+// are part of the caller's declared comparison policy.
+func (s *Snapshot) Project(transform func(Object) (Object, bool), keepUnsupported func(string) bool) (*Snapshot, error) {
+	if s == nil {
+		return nil, fmt.Errorf("project snapshot: snapshot is nil")
+	}
+	if transform == nil {
+		transform = func(object Object) (Object, bool) { return object, true }
+	}
+	if keepUnsupported == nil {
+		keepUnsupported = func(string) bool { return true }
+	}
+
+	projected := New()
+	retained := make(map[ID]struct{}, len(s.objects))
+	for _, id := range s.IDs() {
+		object, keep := transform(s.objects[id])
+		if !keep {
+			continue
+		}
+		if object == nil {
+			return nil, fmt.Errorf("project snapshot: transform retained nil object %s", id)
+		}
+		if object.ObjectID() != id {
+			return nil, fmt.Errorf("project snapshot: transform changed object identity %s to %s", id, object.ObjectID())
+		}
+		if err := projected.Add(object); err != nil {
+			return nil, fmt.Errorf("project snapshot: %w", err)
+		}
+		retained[id] = struct{}{}
+	}
+	for _, id := range s.IDs() {
+		if _, keep := retained[id]; !keep {
+			continue
+		}
+		for _, dependency := range s.Dependencies(id) {
+			if _, keep := retained[dependency]; !keep {
+				return nil, fmt.Errorf("project snapshot: retained object %s depends on removed object %s", id, dependency)
+			}
+			if err := projected.AddDependency(id, dependency); err != nil {
+				return nil, fmt.Errorf("project snapshot: %w", err)
+			}
+		}
+	}
+	for _, selector := range s.Unsupported() {
+		if keepUnsupported(selector) {
+			if err := projected.AddUnsupported(selector); err != nil {
+				return nil, fmt.Errorf("project snapshot: %w", err)
+			}
+		}
+	}
+	for _, selector := range s.Ignored() {
+		if err := projected.AddIgnored(selector); err != nil {
+			return nil, fmt.Errorf("project snapshot: %w", err)
+		}
+	}
+	return projected, nil
+}
+
 func (s *Snapshot) IDs() []ID {
 	ids := make([]ID, 0, len(s.objects))
 	for id := range s.objects {

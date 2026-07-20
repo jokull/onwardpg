@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -36,7 +37,20 @@ import (
 
 // buildVersion must remain a plain string initializer so release builds can
 // set it with the Go linker's -X flag.
-var buildVersion = "dev"
+var (
+	buildVersion = "dev"
+	buildCommit  = ""
+	buildTime    = ""
+)
+
+type buildIdentity struct {
+	Version                 string `json:"version"`
+	Commit                  string `json:"commit"`
+	Dirty                   bool   `json:"dirty"`
+	BuildTime               string `json:"build_time,omitempty"`
+	GoVersion               string `json:"go_version"`
+	SupportedPostgresMajors []int  `json:"supported_postgres_majors"`
+}
 
 var pseudoVersionPattern = regexp.MustCompile(`[.-][0-9]{14}-[0-9a-f]{7,}(?:\+.*)?$`)
 
@@ -50,6 +64,42 @@ func moduleBuildVersion() string {
 		return ""
 	}
 	return info.Main.Version
+}
+
+func currentBuildIdentity() buildIdentity {
+	identity := buildIdentity{
+		Version: currentBuildVersion(), Commit: buildCommit, BuildTime: buildTime,
+		GoVersion: runtime.Version(), SupportedPostgresMajors: []int{15, 16, 17, 18},
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if identity.Commit == "" {
+					identity.Commit = setting.Value
+				}
+			case "vcs.time":
+				if identity.BuildTime == "" {
+					identity.BuildTime = setting.Value
+				}
+			case "vcs.modified":
+				identity.Dirty = setting.Value == "true"
+			}
+		}
+	}
+	if identity.Commit == "" {
+		identity.Commit = "unknown"
+	}
+	return identity
+}
+
+func currentBundleBuildIdentity() *bundle.BuildIdentity {
+	identity := currentBuildIdentity()
+	return &bundle.BuildIdentity{
+		Version: identity.Version, Commit: identity.Commit, Dirty: identity.Dirty,
+		BuildTime: identity.BuildTime, GoVersion: identity.GoVersion,
+		SupportedPostgresMajors: append([]int(nil), identity.SupportedPostgresMajors...),
+	}
 }
 
 func selectBuildVersion(linkerVersion, moduleVersion string) string {
@@ -94,10 +144,10 @@ func run() int {
 		return 0
 	case "version", "--version":
 		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			ProtocolVersion string `json:"protocol_version"`
-			Status          string `json:"status"`
-			Version         string `json:"version"`
-		}{ProtocolVersion: "onwardpg.version/v1", Status: "ok", Version: currentBuildVersion()})
+			ProtocolVersion string        `json:"protocol_version"`
+			Status          string        `json:"status"`
+			Build           buildIdentity `json:"build"`
+		}{ProtocolVersion: "onwardpg.version/v1", Status: "ok", Build: currentBuildIdentity()})
 		return 0
 	case "init":
 		return runInit(os.Args[2:])
@@ -178,12 +228,17 @@ func runStatusAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("active_plan_error", err)
 	}
-	if !found {
+	if !found || !anchor.HasActive() {
+		status := "absent"
+		if found && len(anchor.Parked) > 0 {
+			status = "parked"
+		}
 		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			ProtocolVersion string `json:"protocol_version"`
-			Status          string `json:"status"`
-			Target          string `json:"target"`
-		}{ProtocolVersion: "onwardpg.status/v1", Status: "no_active_plan", Target: *targetName})
+			ProtocolVersion string                 `json:"protocol_version"`
+			Status          string                 `json:"status"`
+			Target          string                 `json:"target"`
+			Parked          []activeplan.SavedPlan `json:"parked,omitempty"`
+		}{ProtocolVersion: "onwardpg.status/v1", Status: status, Target: *targetName, Parked: anchor.Parked})
 		return 0
 	}
 	historyStatus, err := history.Inspect(root, config.BundleRoot, *targetName, anchor.BundleID)
@@ -200,16 +255,35 @@ func runStatusAt(arguments []string, start string) int {
 		})
 		return 4
 	}
+	authoringState := "active"
+	verificationState := "unverified"
+	if historyStatus.Status == "stale" {
+		authoringState = "stale_parent"
+	} else if historyStatus.Status == "blocked" {
+		authoringState = "blocked"
+	} else if historyStatus.Status == "missing" {
+		authoringState = "absent"
+	} else if historyStatus.Selected != nil && historyStatus.Selected.Relationship == "current" {
+		destination, pathErr := config.BundlePath(root, *targetName, anchor.BundleID)
+		if pathErr == nil {
+			artifact, readErr := bundle.Read(destination)
+			if readErr == nil && artifact.Manifest.State == string(protocol.Planned) && artifact.Manifest.ExpandCheckpointDigest != "" {
+				verificationState = "verified"
+				authoringState = "merge_ready"
+			}
+		}
+	}
 	_ = json.NewEncoder(os.Stdout).Encode(struct {
 		ProtocolVersion string               `json:"protocol_version"`
 		Status          string               `json:"status"`
+		Verification    string               `json:"verification"`
 		Target          string               `json:"target"`
 		Plan            activeplan.Anchor    `json:"plan"`
 		History         history.StatusReport `json:"history"`
 	}{
-		ProtocolVersion: "onwardpg.status/v1", Status: historyStatus.Status, Target: *targetName, Plan: anchor, History: historyStatus,
+		ProtocolVersion: "onwardpg.status/v1", Status: authoringState, Verification: verificationState, Target: *targetName, Plan: anchor, History: historyStatus,
 	})
-	if historyStatus.Status == "valid" || historyStatus.Status == "missing" {
+	if authoringState == "active" || authoringState == "merge_ready" || authoringState == "absent" {
 		return 0
 	}
 	return 4
@@ -352,7 +426,7 @@ func runContractAt(arguments []string, start string) int {
 	if report.Status == "ready" {
 		return 0
 	}
-	if report.Status == "needs_evidence" {
+	if report.Status == "needs_evidence" || report.Status == "reconciliation_required" {
 		return 2
 	}
 	return 4
@@ -402,7 +476,7 @@ func runDriftAt(arguments []string, start string) int {
 	scratchEnv := target.ScratchEnv()
 	scratchURL := os.Getenv(scratchEnv)
 	if scratchURL == "" {
-		return writeError("source_error", fmt.Errorf("environment variable %s is required", scratchEnv))
+		return writeError("source_error", fmt.Errorf("environment variable %s is required: drift check replays accepted history into disposable PostgreSQL before comparing that reconstructed catalog with the live database; it never replays history against the live connection", scratchEnv))
 	}
 	root := filepath.Dir(configPath)
 	chain, err := history.Load(root, config.BundleRoot, *targetName)
@@ -492,6 +566,7 @@ func runHistoryAt(arguments []string, start string) int {
 		AdminURL:        adminURL,
 		BundleID:        *bundleID,
 		BuildVersion:    currentBuildVersion(),
+		BuildIdentity:   currentBundleBuildIdentity(),
 		Ignores:         selectors,
 		RequiredIgnores: sortedUniqueStrings(ignores),
 		PlannerOptions: graphplan.Options{
@@ -610,7 +685,7 @@ func runDevAt(arguments []string, start string) int {
 				outputErr = writeGuidanceText(os.Stdout, result.Guidance)
 			}
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, devflow.Version, report.Decisions, result.Analysis, result.Guidance)
+			outputErr = writeDecisionEnvelope(os.Stdout, devflow.Version, []string{"onwardpg", "dev", "plan"}, "--hint", report.Decisions, result.Analysis, result.Guidance)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -747,6 +822,7 @@ func runDraftAt(arguments []string, start string) int {
 		AfterRef:        *afterRef,
 		Create:          *create,
 		BuildVersion:    currentBuildVersion(),
+		BuildIdentity:   currentBundleBuildIdentity(),
 		Purpose:         *purpose,
 		Hints:           hints,
 		HintsGiven:      len(inlineHints) > 0 || *hintsFile != "",
@@ -817,7 +893,7 @@ func runBundleAt(arguments []string, start string) int {
 		if anchorErr != nil {
 			return writeError("active_plan_error", anchorErr)
 		}
-		if !found {
+		if !found || !anchor.HasActive() {
 			return writeError("active_plan_required", errors.New("verify needs --bundle outside a workspace with an active onwardpg plan"))
 		}
 		*bundleID = anchor.BundleID
@@ -844,12 +920,14 @@ func runBundleAt(arguments []string, start string) int {
 		base, selected, prepareErr := history.LoadEditedDraft(root, config.BundleRoot, *targetName, *bundleID)
 		if prepareErr != nil {
 			code, remediation := "invalid_history", "restore the receipted history chain, then rerun onwardpg verify --check"
+			message := fmt.Sprintf("strict history validation failed: %v; editable bundle preparation failed: %v", strictErr, prepareErr)
 			if strings.Contains(prepareErr.Error(), "ONWARDPG TODO") {
 				code = "unresolved_sql_todo"
-				remediation = "replace every ONWARDPG TODO in the reported phase file, then run onwardpg verify --target " + *targetName + " --bundle " + *bundleID
+				message = prepareErr.Error()
+				remediation = "replace the remaining TODO at the reported phase line, then run onwardpg verify --target " + *targetName + " --bundle " + *bundleID
 			}
 			return writeVerifyFinding(*targetName, *bundleID, "", *through, "blocked", code,
-				fmt.Sprintf("strict history validation failed: %v; editable bundle preparation failed: %v", strictErr, prepareErr), remediation)
+				message, remediation)
 		}
 		if selected == nil {
 			return writeVerifyFinding(*targetName, *bundleID, base.HeadDigest, *through, "blocked", "invalid_history",
@@ -1067,7 +1145,7 @@ func writeVerifyFinding(target, bundleID, historyHead, through, outcome, code, m
 	return 4
 }
 
-// runPlan is the ergonomic lifecycle command. The old explicit --from/--to
+// runPlan is the ergonomic planning command. The old explicit --from/--to
 // spelling remains accepted here for one preview transition and is available
 // permanently as `onwardpg diff`.
 func runPlan(arguments []string) int {
@@ -1142,14 +1220,34 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 		return writeError("invalid_config", err)
 	}
 	root := filepath.Dir(configPath)
-	anchor, anchored, err := activeplan.Load(root, *targetName)
+	adminURL := os.Getenv(target.ScratchEnv())
+	hints, err := readHints(inlineHints, *hintsFile)
+	if err != nil {
+		return writeError("invalid_hints", err)
+	}
+	devHints, err := readHints(inlineDevHints, *devHintsFile)
+	if err != nil {
+		return writeError("invalid_development_hints", err)
+	}
+	options := graphplan.Options{
+		ConcurrentIndexes:       *concurrentIndexes,
+		IfNotExists:             *ifNotExists,
+		IfExists:                *ifExists,
+		CascadeDrops:            *cascadeDrops,
+		IgnoreExtensionVersions: sortedUniqueStrings(ignoreExtensionVersions),
+	}
+	if schemaQualifier.set {
+		options.SchemaQualifier = &schemaQualifier.value
+	}
+	anchor, stored, err := activeplan.Load(root, *targetName)
 	if err != nil {
 		return writeError("active_plan_error", err)
 	}
+	anchored := stored && anchor.HasActive()
 	var planID string
 	createBundle := false
 	parked := []activeplan.SavedPlan(nil)
-	if anchored {
+	if stored {
 		parked = append(parked, anchor.Parked...)
 	}
 	switch {
@@ -1179,11 +1277,16 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 			*bundleID, planID = anchor.BundleID, anchor.PlanID
 		} else {
 			*bundleID = name
-			planID, err = activeplan.NewID()
-			if err != nil {
-				return writeError("active_plan_error", err)
+			if saved, exists := anchor.FindParked(name); exists {
+				planID = saved.PlanID
+				parked = anchor.WithActive(saved).Parked
+			} else {
+				planID, err = activeplan.NewID()
+				if err != nil {
+					return writeError("active_plan_error", err)
+				}
+				createBundle = true
 			}
-			createBundle = true
 		}
 	case *bundleID != "":
 		if anchored && anchor.BundleID == *bundleID {
@@ -1214,7 +1317,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 					"selected bundle predates active-plan identity", "continue it with onwardpg draft, or start a new onwardpg plan NAME")
 			}
 			planID = artifact.Manifest.PlanID
-			if anchored {
+			if stored {
 				parked = anchor.WithActive(activeplan.SavedPlan{PlanID: planID, BundleID: *bundleID}).Parked
 			}
 		}
@@ -1224,36 +1327,13 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 		return writeWorkflowPlanFinding(*targetName, "", "blocked", "active_plan_required",
 			"this workspace has no active plan", "start one with onwardpg plan NAME")
 	}
-	adminURL := os.Getenv(target.ScratchEnv())
 	if adminURL == "" {
 		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.ScratchEnv()))
-	}
-	hints, err := readHints(inlineHints, *hintsFile)
-	if err != nil {
-		return writeError("invalid_hints", err)
-	}
-	devHints, err := readHints(inlineDevHints, *devHintsFile)
-	if err != nil {
-		return writeError("invalid_development_hints", err)
-	}
-	options := graphplan.Options{
-		ConcurrentIndexes:       *concurrentIndexes,
-		IfNotExists:             *ifNotExists,
-		IfExists:                *ifExists,
-		CascadeDrops:            *cascadeDrops,
-		IgnoreExtensionVersions: sortedUniqueStrings(ignoreExtensionVersions),
-	}
-	if schemaQualifier.set {
-		options.SchemaQualifier = &schemaQualifier.value
-	}
-	devURL := os.Getenv(target.DevDatabaseEnv)
-	if devURL == "" {
-		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.DevDatabaseEnv))
 	}
 	report, err := draftflow.Run(context.Background(), draftflow.Input{
 		Root: root, ConfigPath: configPath, Config: config, TargetName: *targetName, Target: target,
 		AdminURL: adminURL, BundleID: *bundleID, PlanID: planID, InferBase: true,
-		Create: createBundle, BuildVersion: currentBuildVersion(), Purpose: *purpose,
+		Create: createBundle, BuildVersion: currentBuildVersion(), BuildIdentity: currentBundleBuildIdentity(), Purpose: *purpose,
 		Hints: hints, HintsGiven: len(inlineHints) > 0 || *hintsFile != "", Ignores: targetIgnoreSelectors(target, ignores), RequiredIgnores: sortedUniqueStrings(ignores), PlannerOptions: options,
 	})
 	if err != nil {
@@ -1264,13 +1344,24 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	// unavailable development database cannot strand a written bundle without
 	// an active PlanID.
 	if report.RemovedBundle {
-		if err := activeplan.Clear(root, *targetName); err != nil {
+		if err := storeInactivePlan(root, anchor.WithoutActive()); err != nil {
 			return writeError("active_plan_error", err)
 		}
 	} else if report.Path != "" {
 		if err := activeplan.Store(root, activeplan.Anchor{Version: activeplan.Version, Target: *targetName, PlanID: planID, BundleID: *bundleID, Parked: parked}); err != nil {
 			return writeError("active_plan_error", err)
 		}
+	}
+	devURL := os.Getenv(target.DevDatabaseEnv)
+	if devURL == "" {
+		if len(inlineDevHints) > 0 || *devHintsFile != "" {
+			return writeError("invalid_development_hints", fmt.Errorf("environment variable %s is required when supplying development hints", target.DevDatabaseEnv))
+		}
+		development := devflow.Report{ProtocolVersion: devflow.Version, Status: protocol.Status("not_available")}
+		if err := writeWorkflowPlanReport(os.Stdout, *output, report, development); err != nil {
+			return writeError("output_error", err)
+		}
+		return workflowPlanExitCode(report.Outcome, development)
 	}
 	// Durable semantic hints are intentionally not forwarded blindly to D -> W.
 	// The source graph can differ from H, so an otherwise valid durable rename
@@ -1292,6 +1383,13 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	return workflowPlanExitCode(report.Outcome, development)
 }
 
+func storeInactivePlan(root string, anchor activeplan.Anchor) error {
+	if len(anchor.Parked) == 0 {
+		return activeplan.Clear(root, anchor.Target)
+	}
+	return activeplan.Store(root, anchor)
+}
+
 func developmentPostconditions(checks []draftflow.DevelopmentPostcondition) []devflow.Postcondition {
 	result := make([]devflow.Postcondition, 0, len(checks))
 	for _, check := range checks {
@@ -1301,15 +1399,168 @@ func developmentPostconditions(checks []draftflow.DevelopmentPostcondition) []de
 }
 
 type workflowPlanReport struct {
-	ProtocolVersion string           `json:"protocol_version"`
-	Status          string           `json:"status"`
-	Durable         draftflow.Report `json:"durable"`
-	Development     devflow.Report   `json:"development"`
+	ProtocolVersion string               `json:"protocol_version"`
+	Status          string               `json:"status"`
+	Durable         draftflow.Report     `json:"durable"`
+	Development     devflow.Report       `json:"development"`
+	NextActions     []workflowNextAction `json:"next_actions,omitempty"`
+}
+
+type workflowNextAction struct {
+	Scope          string                 `json:"scope"`
+	Kind           string                 `json:"kind"`
+	Reason         string                 `json:"reason,omitempty"`
+	Argv           []string               `json:"argv,omitempty"`
+	SQL            string                 `json:"sql,omitempty"`
+	StatementCount int                    `json:"statement_count,omitempty"`
+	Preserved      []string               `json:"preserved,omitempty"`
+	Choices        []workflowActionChoice `json:"choices,omitempty"`
+	Path           string                 `json:"path,omitempty"`
+	JSONPointer    string                 `json:"json_pointer,omitempty"`
+	PocketID       string                 `json:"pocket_id,omitempty"`
+	Purpose        string                 `json:"purpose,omitempty"`
+	Phase          string                 `json:"phase,omitempty"`
+	ExecutionMode  string                 `json:"execution_mode,omitempty"`
+	RequiredProof  string                 `json:"required_proof,omitempty"`
+}
+
+type workflowActionChoice struct {
+	Hint    protocol.Hint `json:"hint"`
+	Argv    []string      `json:"argv"`
+	Hazards []string      `json:"hazards,omitempty"`
+}
+
+func newWorkflowPlanReport(durable draftflow.Report, development devflow.Report) workflowPlanReport {
+	return workflowPlanReport{
+		ProtocolVersion: "onwardpg.plan/v5",
+		Status:          workflowPlanStatus(durable.Outcome, development),
+		Durable:         durable,
+		Development:     development,
+		NextActions:     workflowNextActions(durable, development),
+	}
+}
+
+func workflowNextActions(durable draftflow.Report, development devflow.Report) []workflowNextAction {
+	var result []workflowNextAction
+	appendDecisions := func(scope, flag string, carried []protocol.Hint, decisions []protocol.Decision) {
+		for _, decision := range decisions {
+			action := workflowNextAction{Scope: scope, Kind: "semantic_hint"}
+			for _, choice := range decision.Choices {
+				argv := []string{"onwardpg", "plan"}
+				valid := true
+				for _, hint := range append(append([]protocol.Hint(nil), carried...), choice.Hint) {
+					encoded, err := json.Marshal(hint)
+					if err != nil {
+						valid = false
+						break
+					}
+					argv = append(argv, flag, string(encoded))
+				}
+				if !valid {
+					continue
+				}
+				action.Choices = append(action.Choices, workflowActionChoice{
+					Hint: choice.Hint, Argv: argv,
+					Hazards: append([]string(nil), choice.Hazards...),
+				})
+			}
+			if len(action.Choices) > 0 {
+				result = append(result, action)
+			}
+		}
+	}
+	appendDecisions("durable", "--hint", nil, durable.Decisions)
+	for _, hint := range durable.DeferredHints {
+		encoded, err := json.Marshal(hint)
+		if err != nil {
+			continue
+		}
+		result = append(result, workflowNextAction{
+			Scope: "durable", Kind: "deferred_hint",
+			Choices: []workflowActionChoice{{Hint: hint, Argv: []string{"onwardpg", "plan", "--hint", string(encoded)}}},
+		})
+	}
+	if durable.Outcome == string(protocol.NeedsSQLEdits) {
+		for _, edit := range durable.EditRequirements {
+			result = append(result, workflowNextAction{
+				Scope: "durable", Kind: "edit_file", Path: filepath.ToSlash(filepath.Join(durable.Path, edit.Path)),
+				PocketID: edit.PocketID, Purpose: edit.Purpose, Phase: edit.Phase,
+				ExecutionMode: edit.ExecutionMode, RequiredProof: edit.RequiredProof,
+			})
+		}
+		if len(durable.EditRequirements) == 0 {
+			for _, path := range durable.EditFiles {
+				result = append(result, workflowNextAction{Scope: "durable", Kind: "edit_file", Path: filepath.ToSlash(filepath.Join(durable.Path, path))})
+			}
+		}
+	}
+	appendDecisions("development", "--dev-hint", development.AppliedHints, development.Decisions)
+	for _, hint := range development.DeferredHints {
+		argv := []string{"onwardpg", "plan"}
+		for _, carried := range append(append([]protocol.Hint(nil), development.AppliedHints...), hint) {
+			encoded, err := json.Marshal(carried)
+			if err != nil {
+				continue
+			}
+			argv = append(argv, "--dev-hint", string(encoded))
+		}
+		result = append(result, workflowNextAction{
+			Scope: "development", Kind: "deferred_hint",
+			Choices: []workflowActionChoice{{Hint: hint, Argv: argv}},
+		})
+	}
+	for index, check := range development.Postconditions {
+		if check.Status != "passed" {
+			result = append(result, workflowNextAction{
+				Scope: "development", Kind: "review_postcondition",
+				JSONPointer: fmt.Sprintf("/development/accepted_postconditions/%d", index),
+			})
+		}
+	}
+	if durablePlanReady(durable.Outcome) && development.Status == protocol.Planned && len(development.Result.Statements) > 0 {
+		reason := "development_database_behind_desired_schema"
+		if durable.ParentChanged {
+			reason = "accepted_history_changed"
+		}
+		argv := []string{"onwardpg", "plan"}
+		// A no-change plan has no durable bundle to keep active, and an
+		// absorbed generated bundle has just been removed. Naming the plan in
+		// those two cases makes this emitted replay command self-contained:
+		// it may rebuild the same empty H -> W comparison while rendering the
+		// still-useful D -> W reconciliation.
+		if (durable.Outcome == "no_changes" && durable.Path == "") || durable.RemovedBundle {
+			argv = append(argv, durable.BundleID)
+		}
+		for _, hint := range development.AppliedHints {
+			encoded, err := json.Marshal(hint)
+			if err != nil {
+				continue
+			}
+			argv = append(argv, "--dev-hint", string(encoded))
+		}
+		argv = append(argv, "--output", "sql")
+		result = append(result, workflowNextAction{
+			Scope: "development", Kind: "workspace_fast_forward", Reason: reason,
+			Argv: argv,
+			SQL:  protocol.RenderSQL(development.Result, ""), StatementCount: len(development.Result.Statements),
+			Preserved: append([]string(nil), development.Result.Preserved...),
+		})
+	}
+	return result
+}
+
+func durablePlanReady(outcome string) bool {
+	return outcome == string(protocol.Planned) || outcome == "no_changes" || outcome == "absorbed"
 }
 
 func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.Report, development devflow.Report) error {
 	if output == "sql" {
-		if durable.Outcome == string(protocol.Planned) && development.Status == protocol.Planned {
+		if development.Status == protocol.Status("not_available") {
+			_, err := fmt.Fprintln(writer, "-- onwardpg: durable plan stored; development database is not available, so no workspace reconciliation was attempted")
+			return err
+		}
+		durableReady := durable.Outcome == string(protocol.Planned) || durable.Outcome == "no_changes" || durable.Outcome == "absorbed"
+		if durableReady && development.Status == protocol.Planned {
 			if len(development.Result.Statements) == 0 {
 				if len(development.Result.Preserved) == 0 && len(development.Result.Compatibility) == 0 {
 					if _, err := fmt.Fprintln(writer, "-- onwardpg: development workspace already satisfies the desired schema"); err != nil {
@@ -1342,23 +1593,41 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 			return err
 		}
 		// Never mix an incomplete executable stream with human or JSON data.
-		return json.NewEncoder(os.Stderr).Encode(workflowPlanReport{
-			ProtocolVersion: "onwardpg.plan/v5", Status: workflowPlanStatus(durable.Outcome, development), Durable: durable, Development: development,
-		})
+		return json.NewEncoder(os.Stderr).Encode(newWorkflowPlanReport(durable, development))
 	}
 	if output == "text" {
-		if err := writeDraftReport(writer, durable, "text"); err != nil {
+		envelope := newWorkflowPlanReport(durable, development)
+		if _, err := fmt.Fprintf(writer, "status: %s\ndurable: %s\ndevelopment: %s\n", envelope.Status, durable.Outcome, development.Status); err != nil {
 			return err
 		}
-		if development.Status == protocol.NeedsInput {
-			_, _ = fmt.Fprintln(writer, "\ndevelopment workspace decisions:")
-			return writeDecisionsTextWithFlag(writer, "development workspace", "--dev-hint", development.Decisions)
+		if durable.Path != "" {
+			_, _ = fmt.Fprintln(writer, "bundle: "+durable.Path)
+		}
+		if len(envelope.NextActions) > 0 {
+			_, _ = fmt.Fprintln(writer, "next actions:")
+			for _, action := range envelope.NextActions {
+				switch action.Kind {
+				case "semantic_hint", "deferred_hint":
+					for _, choice := range action.Choices {
+						_, _ = fmt.Fprintf(writer, "  %s %s: %s\n", action.Scope, action.Kind, renderArgv(choice.Argv))
+					}
+				case "edit_file":
+					_, _ = fmt.Fprintf(writer, "  durable edit: %s (%s; proof: %s)\n", action.Path, action.Purpose, action.RequiredProof)
+				case "review_postcondition":
+					_, _ = fmt.Fprintf(writer, "  development review: %s\n", action.JSONPointer)
+				case "workspace_fast_forward":
+					_, _ = fmt.Fprintf(writer, "  development fast-forward: %s (%d statement(s); %s)\n", renderArgv(action.Argv), action.StatementCount, action.Reason)
+				}
+			}
 		}
 		if development.Status == protocol.Planned && len(development.Result.Statements) > 0 {
 			_, _ = fmt.Fprintln(writer, "\ndevelopment workspace SQL:")
 			if _, err := fmt.Fprintln(writer, protocol.RenderSQL(development.Result, "")); err != nil {
 				return err
 			}
+		}
+		for _, finding := range durable.Findings {
+			_, _ = fmt.Fprintf(writer, "finding %s: %s\n", finding.Code, finding.Message)
 		}
 		if len(development.Postconditions) > 0 {
 			_, _ = fmt.Fprintln(writer, "\naccepted development postconditions:")
@@ -1374,9 +1643,15 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 		}
 		return nil
 	}
-	return json.NewEncoder(writer).Encode(workflowPlanReport{
-		ProtocolVersion: "onwardpg.plan/v5", Status: workflowPlanStatus(durable.Outcome, development), Durable: durable, Development: development,
-	})
+	return json.NewEncoder(writer).Encode(newWorkflowPlanReport(durable, development))
+}
+
+func renderArgv(argv []string) string {
+	parts := make([]string, len(argv))
+	for index, argument := range argv {
+		parts[index] = shellQuote(argument)
+	}
+	return strings.Join(parts, " ")
 }
 
 func writeDevelopmentEvidenceComments(writer io.Writer, steps []draftflow.AcceptedStep, checks []devflow.PostconditionResult) error {
@@ -1401,22 +1676,30 @@ func writeDevelopmentEvidenceComments(writer io.Writer, steps []draftflow.Accept
 }
 
 func workflowPlanStatus(durable string, development devflow.Report) string {
-	if durable != string(protocol.Planned) && durable != "no_changes" && durable != "absorbed" {
-		return durable
+	switch durable {
+	case "stale":
+		return "stale"
+	case "blocked", string(protocol.Unsupported):
+		return "blocked"
+	case string(protocol.NeedsInput), string(protocol.NeedsSQLEdits):
+		return "needs_action"
+	case string(protocol.Planned), "no_changes", "absorbed":
+	default:
+		return "blocked"
+	}
+	if development.Status == protocol.Status("not_available") {
+		return "ready"
 	}
 	if development.Status == protocol.NeedsInput {
-		return "needs_development_decisions"
+		return "needs_action"
 	}
 	if development.Status == protocol.Unsupported {
-		return "development_unsupported"
+		return "blocked"
 	}
 	if failedDevelopmentPostconditions(development.Postconditions) {
-		return "needs_development_review"
+		return "needs_action"
 	}
-	if development.Status == protocol.Planned && len(development.Result.Statements) == 0 && (len(development.Result.Preserved) > 0 || len(development.Result.Compatibility) > 0) {
-		return "workspace_compatible"
-	}
-	return durable
+	return "ready"
 }
 
 func workflowPlanExitCode(durable string, development devflow.Report) int {
@@ -1428,6 +1711,9 @@ func workflowPlanExitCode(durable string, development devflow.Report) int {
 	case string(protocol.NeedsInput), string(protocol.NeedsSQLEdits):
 		return 2
 	case string(protocol.Planned), "no_changes", "absorbed":
+		if development.Status == protocol.Status("not_available") {
+			return 0
+		}
 		if failedDevelopmentPostconditions(development.Postconditions) {
 			return 2
 		}
@@ -1565,7 +1851,7 @@ func runLowLevelPlan(arguments []string) int {
 				outputErr = writeGuidanceText(os.Stdout, result.Guidance)
 			}
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v4", decisions, result.Analysis, result.Guidance)
+			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v4", []string{"onwardpg", "diff"}, "--hint", decisions, result.Analysis, result.Guidance)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -1825,8 +2111,9 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 			Guidance        []protocol.Guidance         `json:"guidance,omitempty"`
 		}{
 			ProtocolVersion: draftflow.Version, Status: "needs_decisions", NextAction: nextAction,
-			Path: report.Path, WrittenReceipts: report.WrittenReceipts, Decisions: report.Decisions,
-			Analysis: analysisFromPlan(report.Plan), Guidance: guidanceFromPlan(report.Plan),
+			Path: report.Path, WrittenReceipts: report.WrittenReceipts,
+			Decisions: decisionsWithArgv(report.Decisions, []string{"onwardpg", "draft"}, "--hint"),
+			Analysis:  analysisFromPlan(report.Plan), Guidance: guidanceFromPlan(report.Plan),
 		})
 	}
 	if report.Outcome == string(protocol.NeedsSQLEdits) {
@@ -1922,7 +2209,7 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func writeDecisionEnvelope(writer io.Writer, version string, decisions []protocol.Decision, analysis []protocol.DecisionAnalysis, guidance []protocol.Guidance) error {
+func writeDecisionEnvelope(writer io.Writer, version string, command []string, flagName string, decisions []protocol.Decision, analysis []protocol.DecisionAnalysis, guidance []protocol.Guidance) error {
 	return json.NewEncoder(writer).Encode(struct {
 		ProtocolVersion string                      `json:"protocol_version"`
 		Status          string                      `json:"status"`
@@ -1930,7 +2217,23 @@ func writeDecisionEnvelope(writer io.Writer, version string, decisions []protoco
 		Decisions       []protocol.Decision         `json:"decisions"`
 		Analysis        []protocol.DecisionAnalysis `json:"analysis,omitempty"`
 		Guidance        []protocol.Guidance         `json:"guidance,omitempty"`
-	}{ProtocolVersion: version, Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisions, Analysis: analysis, Guidance: guidance})
+	}{ProtocolVersion: version, Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisionsWithArgv(decisions, command, flagName), Analysis: analysis, Guidance: guidance})
+}
+
+func decisionsWithArgv(decisions []protocol.Decision, command []string, flagName string) []protocol.Decision {
+	result := make([]protocol.Decision, len(decisions))
+	for decisionIndex, decision := range decisions {
+		result[decisionIndex].Choices = make([]protocol.DecisionChoice, len(decision.Choices))
+		for choiceIndex, choice := range decision.Choices {
+			choice.Hazards = append([]string(nil), choice.Hazards...)
+			encoded, err := json.Marshal(choice.Hint)
+			if err == nil {
+				choice.Argv = append(append(append([]string(nil), command...), flagName), string(encoded))
+			}
+			result[decisionIndex].Choices[choiceIndex] = choice
+		}
+	}
+	return result
 }
 
 func writeError(code string, err error) int {

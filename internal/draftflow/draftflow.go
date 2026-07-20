@@ -65,7 +65,7 @@ type Report struct {
 	PlanID                    string                     `json:"plan_id,omitempty"`
 	Path                      string                     `json:"path,omitempty"`
 	Generation                int                        `json:"generation,omitempty"`
-	HistoryHead               string                     `json:"history_head,omitempty"`
+	HistoryHead               string                     `json:"base_history_head,omitempty"`
 	BaseBundle                string                     `json:"base_bundle,omitempty"`
 	BaseRef                   string                     `json:"base_ref,omitempty"`
 	AssertedBaseRef           string                     `json:"asserted_base_ref,omitempty"`
@@ -75,9 +75,11 @@ type Report struct {
 	DevelopmentPostconditions []DevelopmentPostcondition `json:"-"`
 	CurrentFingerprint        string                     `json:"current_fingerprint,omitempty"`
 	DesiredFingerprint        string                     `json:"desired_fingerprint,omitempty"`
-	Plan                      *protocol.Result           `json:"plan,omitempty"`
+	Plan                      *protocol.Result           `json:"generated_plan,omitempty"`
 	Decisions                 []protocol.Decision        `json:"decisions,omitempty"`
+	DeferredHints             []protocol.Hint            `json:"deferred_hints,omitempty"`
 	EditFiles                 []string                   `json:"edit_files,omitempty"`
+	EditRequirements          []EditRequirement          `json:"edit_requirements,omitempty"`
 	AnswerRebind              *protocol.RebindReport     `json:"answer_rebind,omitempty"`
 	EditReconciliation        *bundle.EditReconciliation `json:"edit_reconciliation,omitempty"`
 	Verification              *verify.Report             `json:"verification,omitempty"`
@@ -85,6 +87,15 @@ type Report struct {
 	RemovedBundle             bool                       `json:"removed_bundle,omitempty"`
 	CreatedBundle             bool                       `json:"created_bundle,omitempty"`
 	WrittenReceipts           []string                   `json:"written_receipts,omitempty"`
+}
+
+type EditRequirement struct {
+	Path          string `json:"path"`
+	PocketID      string `json:"pocket_id"`
+	Purpose       string `json:"purpose"`
+	Phase         string `json:"phase"`
+	ExecutionMode string `json:"execution_mode"`
+	RequiredProof string `json:"required_proof"`
 }
 
 type Input struct {
@@ -100,6 +111,7 @@ type Input struct {
 	InferBase       bool
 	Create          bool
 	BuildVersion    string
+	BuildIdentity   *bundle.BuildIdentity
 	Purpose         string
 	Hints           []protocol.Hint
 	HintsGiven      bool
@@ -215,11 +227,17 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		strictErr := err
 		chain, selected, err = history.LoadEditedDraft(input.Root, input.Config.BundleRoot, input.TargetName, input.BundleID)
 		if err != nil {
+			code := "invalid_history"
+			message := fmt.Sprintf("strict history validation failed: %v; editable bundle preparation failed: %v", strictErr, err)
+			remediation := "restore one complete hash-chained base and keep only the PR-owned bundle selected for replacement"
+			if strings.Contains(err.Error(), "ONWARDPG TODO") {
+				code = "unresolved_sql_todo"
+				message = err.Error()
+				remediation = "replace the remaining TODO at the reported phase line, then rerun onwardpg plan"
+			}
 			report.Outcome = "blocked"
 			report.Findings = []Finding{{
-				Code:        "invalid_history",
-				Message:     fmt.Sprintf("strict history validation failed: %v; editable bundle preparation failed: %v", strictErr, err),
-				Remediation: "restore one complete hash-chained base and keep only the PR-owned bundle selected for replacement",
+				Code: code, Message: message, Remediation: remediation,
 			}}
 			return report, nil
 		}
@@ -333,6 +351,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return report, err
 	}
 	if plan.Status == protocol.NeedsInput {
+		report.DeferredHints = suppliedHintsNotReceipted(input.Hints, hints)
 		report.Decisions, err = semantichint.Decisions(plan.Questions, current, desired)
 		if err != nil {
 			return report, fmt.Errorf("render semantic decisions: %w", err)
@@ -412,6 +431,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		},
 		Planner: bundle.PlannerReceipt{
 			Version: input.BuildVersion,
+			Build:   input.BuildIdentity,
 			Options: bundle.PlannerOptions{
 				ConcurrentIndexes:       input.PlannerOptions.ConcurrentIndexes,
 				IfNotExists:             input.PlannerOptions.IfNotExists,
@@ -440,6 +460,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return report, fmt.Errorf("build draft bundle: %w", err)
 	}
 	if plan.Status == protocol.NeedsSQLEdits {
+		report.EditRequirements = pendingEditRequirements(plan)
 		for name, body := range artifact.Files {
 			if strings.HasPrefix(name, "phases/") && strings.Contains(string(body), "ONWARDPG TODO") {
 				report.EditFiles = append(report.EditFiles, name)
@@ -496,6 +517,13 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Outcome = artifact.Manifest.State
 		if artifact.Manifest.State == string(protocol.Planned) {
 			report.EditFiles = nil
+			report.EditRequirements = nil
+		}
+	}
+	if selected != nil && artifact.Manifest.Generation == selected.Artifact.Manifest.Generation {
+		artifact, err = bundle.WithDecisionHistory(selected.Artifact, artifact)
+		if err != nil {
+			return report, fmt.Errorf("prepare retained decision history: %w", err)
 		}
 	}
 
@@ -570,6 +598,44 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.WrittenReceipts = bundle.SortedFiles(artifact.Files)
 	}
 	return report, nil
+}
+
+func pendingEditRequirements(plan protocol.Result) []EditRequirement {
+	gateByID := make(map[string]protocol.ContractGate, len(plan.ContractGates))
+	for _, gate := range plan.ContractGates {
+		gateByID[gate.ID] = gate
+	}
+	var result []EditRequirement
+	for _, statement := range plan.Statements {
+		if !strings.Contains(statement.SQL, "ONWARDPG TODO") {
+			continue
+		}
+		requirement := EditRequirement{
+			Path: filepath.ToSlash(filepath.Join("phases", statement.Phase+".sql")), PocketID: statement.ID,
+			Purpose: "replace operator-owned SQL placeholder", Phase: statement.Phase,
+			ExecutionMode: protocol.ManualTransactionalOnce,
+			RequiredProof: "replace every TODO in this pocket; disposable verification must execute the edited plan to the desired catalog",
+		}
+		if statement.Manual != nil {
+			requirement.Purpose = statement.Manual.Summary
+			requirement.ExecutionMode = statement.Manual.ExecutionMode
+		}
+		for gateID, gate := range gateByID {
+			if strings.Contains(statement.SQL, gateID) && strings.Contains(gate.BooleanSQL, "ONWARDPG TODO") {
+				requirement.Purpose = "define the exact contract invariant: " + gate.Reason
+				requirement.ExecutionMode = "read_only_boolean"
+				requirement.RequiredProof = "one resolved read-only SELECT returning exactly one Boolean row; verify.sql cannot satisfy this contract gate"
+			}
+		}
+		result = append(result, requirement)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Path != result[j].Path {
+			return result[i].Path < result[j].Path
+		}
+		return result[i].PocketID < result[j].PocketID
+	})
+	return result
 }
 
 func acceptedStepsSince(chain history.Chain, previousParent string) []AcceptedStep {
@@ -865,7 +931,13 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 			return protocol.Result{}, nil, nil, nil, nil, err
 		}
 		if len(matched.Answers) == 0 {
-			if err := rejectUnusedSuppliedHints(allHints, used, len(previous)); err != nil {
+			var unused []protocol.Hint
+			for index := len(previous); index < len(allHints); index++ {
+				if !used[index] {
+					unused = append(unused, allHints[index])
+				}
+			}
+			if _, err := semantichint.DeferredHints(current, desired, unused, options); err != nil {
 				return protocol.Result{}, nil, nil, nil, nil, err
 			}
 			refreshRebindAfterHints(rebind, answers, plan)
@@ -882,6 +954,23 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 		questions = mergeQuestions(questions, plan.Questions)
 	}
 	return protocol.Result{}, nil, nil, nil, nil, fmt.Errorf("semantic hint planning did not converge")
+}
+
+func suppliedHintsNotReceipted(supplied, receipted []protocol.Hint) []protocol.Hint {
+	used := make(map[string]bool, len(receipted))
+	for _, hint := range receipted {
+		key, _ := hint.CanonicalKey()
+		used[key] = true
+	}
+	var result []protocol.Hint
+	for _, hint := range supplied {
+		key, _ := hint.CanonicalKey()
+		if !used[key] {
+			result = append(result, hint)
+		}
+	}
+	result, _ = protocol.CanonicalHints(result)
+	return result
 }
 
 func refreshRebindAfterHints(report *protocol.RebindReport, answers protocol.Answers, plan protocol.Result) {

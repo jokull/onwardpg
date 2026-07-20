@@ -60,16 +60,16 @@ func TestWriteDraftDecisionJSONContainsOnlyIrreducibleExchange(t *testing.T) {
 	if err := writeDraftReport(&output, report, "json"); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"protocol_version\":\"onwardpg.draft/v5\",\"status\":\"needs_decisions\",\"next_action\":\"rerun_same_command_with_hints\",\"decisions\":[{\"choices\":[{\"hint\":{\"kind\":\"drop\",\"object\":\"column\",\"name\":[\"public\",\"users\",\"legacy\"]},\"hazards\":[\"data_loss\"]}]}]}\n"
-	if output.String() != want {
-		t.Fatalf("decision protocol bytes changed:\n got: %s\nwant: %s", output.String(), want)
-	}
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
 		t.Fatal(err)
 	}
 	if len(document) != 4 || string(document["protocol_version"]) != `"onwardpg.draft/v5"` || string(document["status"]) != `"needs_decisions"` || string(document["next_action"]) != `"rerun_same_command_with_hints"` {
 		t.Fatalf("document = %s", output.String())
+	}
+	var decisions []protocol.Decision
+	if err := json.Unmarshal(document["decisions"], &decisions); err != nil || len(decisions) != 1 || len(decisions[0].Choices) != 1 || len(decisions[0].Choices[0].Argv) != 4 || !reflect.DeepEqual(decisions[0].Choices[0].Argv[:3], []string{"onwardpg", "draft", "--hint"}) {
+		t.Fatalf("decision argv = %#v, err=%v", decisions, err)
 	}
 	if _, exists := document["target"]; exists {
 		t.Fatalf("decision exchange echoed inferable target: %s", output.String())
@@ -86,7 +86,7 @@ func TestWriteDecisionEnvelopeIncludesPlannerAnalysis(t *testing.T) {
 		Outcome: "rejected", Reason: "child_identity_mismatch:constraint:public.accounts_pkey",
 	}}
 	guidance := []protocol.Guidance{{Kind: "partition_reconfiguration", Key: "table:app:events", Summary: "Build a shadow hierarchy."}}
-	if err := writeDecisionEnvelope(&output, "onwardpg.plan/v4", nil, analysis, guidance); err != nil {
+	if err := writeDecisionEnvelope(&output, "onwardpg.plan/v4", []string{"onwardpg", "diff"}, "--hint", nil, analysis, guidance); err != nil {
 		t.Fatal(err)
 	}
 	var document struct {
@@ -155,6 +155,118 @@ func TestWriteDecisionsTextWithFlagScopesDevelopmentHints(t *testing.T) {
 	}
 }
 
+func TestWorkflowPlanReportSeparatesDurableSuccessAndExecutableDevelopmentChoice(t *testing.T) {
+	hint := protocol.Hint{Kind: "rename", Object: "table", From: []string{"app", "accounts"}, To: []string{"app", "customers"}}
+	durable := draftflow.Report{Outcome: string(protocol.Planned), BundleID: "rename-accounts", Path: "onward-bundles/primary/rename-accounts"}
+	development := devflow.Report{
+		Status: protocol.NeedsInput,
+		Decisions: []protocol.Decision{{
+			Choices: []protocol.DecisionChoice{{Hint: hint, Hazards: []string{"table_lock"}}},
+		}},
+	}
+	report := newWorkflowPlanReport(durable, development)
+	if report.ProtocolVersion != "onwardpg.plan/v5" || report.Status != "needs_action" || report.Durable.Outcome != string(protocol.Planned) {
+		t.Fatalf("workflow report = %#v", report)
+	}
+	if len(report.NextActions) != 1 || report.NextActions[0].Scope != "development" || len(report.NextActions[0].Choices) != 1 {
+		t.Fatalf("next actions = %#v", report.NextActions)
+	}
+	choice := report.NextActions[0].Choices[0]
+	if !reflect.DeepEqual(choice.Hint, hint) || !reflect.DeepEqual(choice.Argv[:3], []string{"onwardpg", "plan", "--dev-hint"}) {
+		t.Fatalf("choice = %#v", choice)
+	}
+	var decoded protocol.Hint
+	if err := json.Unmarshal([]byte(choice.Argv[3]), &decoded); err != nil || !reflect.DeepEqual(decoded, hint) {
+		t.Fatalf("argv hint = %#v, err=%v", decoded, err)
+	}
+}
+
+func TestWorkflowPlanDevelopmentChoiceArgvCarriesAppliedHints(t *testing.T) {
+	carried := protocol.Hint{Kind: "preserve", Object: "column", Name: []string{"app", "accounts", "branch_note"}}
+	choice := protocol.Hint{Kind: "rename", Object: "column", From: []string{"app", "accounts", "display_name"}, To: []string{"app", "accounts", "full_name"}}
+	report := newWorkflowPlanReport(
+		draftflow.Report{Outcome: string(protocol.Planned)},
+		devflow.Report{Status: protocol.NeedsInput, AppliedHints: []protocol.Hint{carried}, Decisions: []protocol.Decision{{Choices: []protocol.DecisionChoice{{Hint: choice}}}}},
+	)
+	if len(report.NextActions) != 1 || len(report.NextActions[0].Choices) != 1 {
+		t.Fatalf("next actions = %#v", report.NextActions)
+	}
+	argv := report.NextActions[0].Choices[0].Argv
+	if len(argv) != 6 || !reflect.DeepEqual(argv[:3], []string{"onwardpg", "plan", "--dev-hint"}) || argv[4] != "--dev-hint" {
+		t.Fatalf("cumulative argv = %#v", argv)
+	}
+	var first, second protocol.Hint
+	if err := json.Unmarshal([]byte(argv[3]), &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(argv[5]), &second); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, carried) || !reflect.DeepEqual(second, choice) {
+		t.Fatalf("cumulative hints = %#v, %#v", first, second)
+	}
+}
+
+func TestWorkflowPlanLabelsPreEditPlannerResultAsGeneratedPlan(t *testing.T) {
+	generated := protocol.Result{Status: protocol.NeedsSQLEdits}
+	durable := draftflow.Report{Outcome: string(protocol.Planned), Plan: &generated}
+	development := devflow.Report{Status: protocol.Status("not_available")}
+	var output bytes.Buffer
+	if err := writeWorkflowPlanReport(&output, "json", durable, development); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"generated_plan":{"status":"needs_sql_edits"`) || strings.Contains(output.String(), `"plan":{"status"`) {
+		t.Fatalf("ambiguous generated plan JSON = %s", output.String())
+	}
+}
+
+func TestWorkflowPlanReportExposesRebaseWorkspaceFastForward(t *testing.T) {
+	durable := draftflow.Report{Outcome: string(protocol.Planned), BundleID: "booking-dates", ParentChanged: true}
+	devHint := protocol.Hint{Kind: "preserve", Object: "column", Name: []string{"app", "accounts", "parallel_branch_note"}}
+	development := devflow.Report{Status: protocol.Planned, Result: protocol.Result{
+		Statements: []protocol.Statement{{SQL: `ALTER TABLE "app"."accounts" ADD COLUMN "timezone" text;`, Phase: protocol.PhaseExpand}},
+		Preserved:  []string{"column:app:accounts:parallel_branch_note"},
+	}, AppliedHints: []protocol.Hint{devHint}}
+	report := newWorkflowPlanReport(durable, development)
+	if len(report.NextActions) != 1 {
+		t.Fatalf("next actions = %#v", report.NextActions)
+	}
+	action := report.NextActions[0]
+	if action.Kind != "workspace_fast_forward" || action.Scope != "development" || action.Reason != "accepted_history_changed" || action.StatementCount != 1 {
+		t.Fatalf("fast-forward action = %#v", action)
+	}
+	if len(action.Argv) != 6 || !reflect.DeepEqual(action.Argv[:3], []string{"onwardpg", "plan", "--dev-hint"}) || !reflect.DeepEqual(action.Argv[4:], []string{"--output", "sql"}) || !strings.Contains(action.SQL, `ADD COLUMN "timezone"`) {
+		t.Fatalf("fast-forward handoff = %#v", action)
+	}
+	var replayed protocol.Hint
+	if err := json.Unmarshal([]byte(action.Argv[3]), &replayed); err != nil || !reflect.DeepEqual(replayed, devHint) {
+		t.Fatalf("fast-forward dev hint = %#v, err=%v", replayed, err)
+	}
+	if !reflect.DeepEqual(action.Preserved, development.Result.Preserved) {
+		t.Fatalf("preserved parallel work = %#v", action.Preserved)
+	}
+}
+
+func TestWorkspaceFastForwardReplayNamesPlanWithoutDurableBundle(t *testing.T) {
+	development := devflow.Report{Status: protocol.Planned, Result: protocol.Result{
+		Statements: []protocol.Statement{{SQL: `CREATE SCHEMA "app";`, Phase: protocol.PhaseExpand}},
+	}}
+
+	for _, durable := range []draftflow.Report{
+		{Outcome: "no_changes", BundleID: "bootstrap"},
+		{Outcome: "absorbed", BundleID: "booking-dates", Path: "onward-bundles/primary/booking-dates", RemovedBundle: true},
+	} {
+		report := newWorkflowPlanReport(durable, development)
+		if len(report.NextActions) != 1 {
+			t.Fatalf("next actions for %s = %#v", durable.Outcome, report.NextActions)
+		}
+		want := []string{"onwardpg", "plan", durable.BundleID, "--output", "sql"}
+		if !reflect.DeepEqual(report.NextActions[0].Argv, want) {
+			t.Fatalf("replay argv for %s = %#v, want %#v", durable.Outcome, report.NextActions[0].Argv, want)
+		}
+	}
+}
+
 func TestWorkflowSQLWarnsOnlyForUnprovableAcceptedWork(t *testing.T) {
 	durable := draftflow.Report{
 		Outcome: string(protocol.Planned),
@@ -196,7 +308,7 @@ func TestWorkflowPostconditionFailureNeedsDevelopmentReview(t *testing.T) {
 	development := devflow.Report{Status: protocol.Planned, Postconditions: []devflow.PostconditionResult{{
 		BundleID: "upstream", Path: "upstream/verify.sql", ID: "backfill", Status: "failed", Message: "assertion returned false",
 	}}}
-	if status := workflowPlanStatus(string(protocol.Planned), development); status != "needs_development_review" {
+	if status := workflowPlanStatus(string(protocol.Planned), development); status != "needs_action" {
 		t.Fatalf("status = %q", status)
 	}
 	if code := workflowPlanExitCode(string(protocol.Planned), development); code != 2 {
@@ -327,7 +439,7 @@ scratch_database_env = "ONWARDPG_UNUSED_SCRATCH_DATABASE_URL"
 	output := captureStdout(t, func() int {
 		return runStatusAt([]string{"--target", "primary"}, repository)
 	})
-	if output.code != 0 || !strings.Contains(output.stdout, `"status":"no_active_plan"`) {
+	if output.code != 0 || !strings.Contains(output.stdout, `"status":"absent"`) {
 		t.Fatalf("status without active anchor = %d, %s", output.code, output.stdout)
 	}
 }
@@ -353,13 +465,25 @@ scratch_database_env = "ONWARDPG_MISSING_SCRATCH_URL"
 }
 
 func TestVersionCommandReportsEmbeddedBuildVersion(t *testing.T) {
-	previousArgs, previousVersion := os.Args, buildVersion
-	defer func() { os.Args, buildVersion = previousArgs, previousVersion }()
+	previousArgs, previousVersion, previousCommit, previousTime := os.Args, buildVersion, buildCommit, buildTime
+	defer func() {
+		os.Args, buildVersion, buildCommit, buildTime = previousArgs, previousVersion, previousCommit, previousTime
+	}()
 	os.Args = []string{"onwardpg", "version"}
 	buildVersion = "v0.1.0-preview.1"
+	buildCommit = strings.Repeat("a", 40)
+	buildTime = "2026-07-20T12:00:00Z"
 	output := captureStdout(t, run)
-	if output.code != 0 || strings.TrimSpace(output.stdout) != `{"protocol_version":"onwardpg.version/v1","status":"ok","version":"v0.1.0-preview.1"}` {
+	var document struct {
+		ProtocolVersion string        `json:"protocol_version"`
+		Status          string        `json:"status"`
+		Build           buildIdentity `json:"build"`
+	}
+	if err := json.Unmarshal([]byte(output.stdout), &document); output.code != 0 || err != nil {
 		t.Fatalf("version output = %#v", output)
+	}
+	if document.ProtocolVersion != "onwardpg.version/v1" || document.Status != "ok" || document.Build.Version != buildVersion || document.Build.Commit != buildCommit || document.Build.BuildTime != buildTime || document.Build.GoVersion == "" || !reflect.DeepEqual(document.Build.SupportedPostgresMajors, []int{15, 16, 17, 18}) {
+		t.Fatalf("version document = %#v", document)
 	}
 }
 

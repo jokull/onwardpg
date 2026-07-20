@@ -411,6 +411,16 @@ dev_mode = "workspace"
 	if len(restackedReport.Development.Postconditions) != 1 || restackedReport.Development.Postconditions[0].Status != "passed" || restackedReport.Development.Postconditions[0].ID != "accepted_history_is_reviewed" {
 		t.Fatalf("restacked development evidence = %#v", restackedReport.Development.Postconditions)
 	}
+	var fastForward *workflowNextAction
+	for index := range restackedReport.NextActions {
+		if restackedReport.NextActions[index].Kind == "workspace_fast_forward" {
+			fastForward = &restackedReport.NextActions[index]
+			break
+		}
+	}
+	if fastForward == nil || fastForward.Reason != "accepted_history_changed" || !strings.Contains(fastForward.SQL, `ADD COLUMN "timezone"`) || strings.Contains(fastForward.SQL, `ADD COLUMN "booking_date"`) {
+		t.Fatalf("restack fast-forward action = %#v", fastForward)
+	}
 	chain, err := history.Load(repository, "onward-bundles", "primary")
 	if err != nil {
 		t.Fatal(err)
@@ -528,6 +538,19 @@ dev_mode = "workspace"
 	if planned.Durable.Outcome != string(protocol.Planned) || planned.Development.Status != protocol.Planned || planned.Development.NextAction != "" {
 		t.Fatalf("scoped planned report = %#v", planned)
 	}
+	if len(planned.Development.AppliedHints) != 1 || !reflect.DeepEqual(planned.Development.AppliedHints[0], *renameHint) {
+		t.Fatalf("applied development hints = %#v", planned.Development.AppliedHints)
+	}
+	var replayAction *workflowNextAction
+	for index := range planned.NextActions {
+		if planned.NextActions[index].Kind == "workspace_fast_forward" {
+			replayAction = &planned.NextActions[index]
+			break
+		}
+	}
+	if replayAction == nil || len(replayAction.Argv) < 6 || replayAction.Argv[2] != "--dev-hint" || replayAction.Argv[len(replayAction.Argv)-2] != "--output" || replayAction.Argv[len(replayAction.Argv)-1] != "sql" {
+		t.Fatalf("development SQL replay action = %#v", replayAction)
+	}
 	statements := protocol.RenderSQL(planned.Development.Result, "")
 	if !strings.Contains(statements, `RENAME TO "customers"`) ||
 		!strings.Contains(statements, `CREATE VIEW "app"."customers" WITH (security_invoker = true)`) ||
@@ -640,6 +663,84 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	artifact, err := bundle.Read(filepath.Join(repository, "onward-bundles", "primary", "booking-note"))
 	if err != nil || artifact.Manifest.PlanID != anchor.PlanID {
 		t.Fatalf("durable plan bundle = %#v, %v", artifact.Manifest, err)
+	}
+}
+
+func TestPlanSucceedsWithoutDevelopmentDatabaseAfterStoringDurablePlanOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	t.Setenv("ONWARDPG_OPTIONAL_DEV_DATABASE_URL", adminURL)
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_OPTIONAL_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n")
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+	t.Setenv("ONWARDPG_OPTIONAL_DEV_DATABASE_URL", "")
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, note text);\n")
+	output := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"booking-note", "--target", "primary"}, repository) })
+	if output.code != 0 || !strings.Contains(output.stdout, `"status":"ready"`) || !strings.Contains(output.stdout, `"status":"not_available"`) {
+		t.Fatalf("optional development database = %d, %s", output.code, output.stdout)
+	}
+	anchor, found, err := activeplan.Load(repository, "primary")
+	if err != nil || !found || anchor.BundleID != "booking-note" {
+		t.Fatalf("durable plan anchor = %#v, %v, %v", anchor, found, err)
+	}
+}
+
+func TestNoChangePlanKeepsWorkspaceFastForwardReplayableOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	devURL, cleanupDev := createTestDatabase(t, adminURL)
+	defer cleanupDev()
+	t.Setenv("ONWARDPG_NO_CHANGE_DEV_DATABASE_URL", devURL)
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_NO_CHANGE_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n")
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+
+	planned := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"bootstrap", "--target", "primary"}, repository) })
+	if planned.code != 0 {
+		t.Fatalf("no-change plan = %d, %s", planned.code, planned.stdout)
+	}
+	var report workflowPlanReport
+	if err := json.Unmarshal([]byte(planned.stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Durable.Outcome != "no_changes" || len(report.NextActions) != 1 || report.NextActions[0].Kind != "workspace_fast_forward" {
+		t.Fatalf("no-change workspace report = %#v", report)
+	}
+	wantArgv := []string{"onwardpg", "plan", "bootstrap", "--output", "sql"}
+	if !reflect.DeepEqual(report.NextActions[0].Argv, wantArgv) {
+		t.Fatalf("workspace replay argv = %#v, want %#v", report.NextActions[0].Argv, wantArgv)
+	}
+	if _, found, err := activeplan.Load(repository, "primary"); err != nil || found {
+		t.Fatalf("empty durable plan should not leave an anchor: found=%v err=%v", found, err)
+	}
+
+	replay := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"bootstrap", "--target", "primary", "--output", "sql"}, repository)
+	})
+	if replay.code != 0 || !strings.Contains(replay.stdout, "development workspace reconciliation") || !strings.Contains(replay.stdout, "CREATE SCHEMA") {
+		t.Fatalf("no-change workspace replay = %d, %s", replay.code, replay.stdout)
 	}
 }
 
@@ -998,6 +1099,60 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	}
 	if len(chain.Entries) != 2 || chain.Entries[1].Directory != "upstream-timezone" {
 		t.Fatalf("absorbed chain = %#v", chain)
+	}
+}
+
+func TestPlanRerunRetiresLocalAnchorWhenAcceptedHistoryAbsorbsFeatureOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	devURL, cleanupDev := createTestDatabase(t, adminURL)
+	defer cleanupDev()
+	t.Setenv("ONWARDPG_ABSORBED_DEV_DATABASE_URL", devURL)
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_ABSORBED_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+`)
+	baseDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint);\n"
+	desiredDDL := "CREATE SCHEMA app; CREATE TABLE app.accounts (id bigint, timezone text);\n"
+	writeTestFile(t, repository, "schema.sql", baseDDL)
+	if initialized := captureStdout(t, func() int { return runInitAt([]string{"--target", "primary"}, repository) }); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+	writeTestFile(t, repository, "schema.sql", desiredDDL)
+	if planned := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"account-timezone", "--target", "primary"}, repository) }); planned.code != 0 {
+		t.Fatalf("feature plan = %d, %s", planned.code, planned.stdout)
+	}
+	featurePath := filepath.Join(repository, "onward-bundles", "primary", "account-timezone")
+	parkedPath := filepath.Join(repository, "account-timezone.parked")
+	if err := os.Rename(featurePath, parkedPath); err != nil {
+		t.Fatal(err)
+	}
+	writeHistoryTransitionFixture(t, repository, adminURL, "upstream-timezone", desiredDDL)
+	if err := os.Rename(parkedPath, featurePath); err != nil {
+		t.Fatal(err)
+	}
+	absorbed := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"--target", "primary"}, repository) })
+	if absorbed.code != 0 {
+		t.Fatalf("absorbed plan rerun = %d, %s", absorbed.code, absorbed.stdout)
+	}
+	var report workflowPlanReport
+	if err := json.Unmarshal([]byte(absorbed.stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Durable.Outcome != "absorbed" || !report.Durable.RemovedBundle {
+		t.Fatalf("absorbed workflow report = %#v", report)
+	}
+	if _, found, err := activeplan.Load(repository, "primary"); err != nil || found {
+		t.Fatalf("absorbed local anchor still present: found=%v err=%v", found, err)
+	}
+	if _, err := os.Stat(featurePath); !os.IsNotExist(err) {
+		t.Fatalf("absorbed feature bundle still exists: %v", err)
 	}
 }
 
@@ -1467,6 +1622,12 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	}
 	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.events (id bigint, occurred_on date);\n")
 	hint := `{"kind":"type_change","name":["app","events","occurred_on"],"strategy":"manual_sql"}`
+	decision := captureStdout(t, func() int {
+		return runTestDraftAt(t, []string{"--target", "primary", "--bundle", "event-date", "--after", "baseline"}, repository)
+	})
+	if decision.code != 2 || !strings.Contains(decision.stdout, `"status":"needs_decisions"`) {
+		t.Fatalf("manual decision exit = %d, stdout = %s", decision.code, decision.stdout)
+	}
 	drafted := captureStdout(t, func() int {
 		return runTestDraftAt(t, []string{"--target", "primary", "--bundle", "event-date", "--after", "baseline", "--hint", hint}, repository)
 	})
@@ -1513,6 +1674,23 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	}
 	if receipted.Manifest.State != string(protocol.Planned) || receipted.Manifest.PhaseSource != "edited" {
 		t.Fatalf("receipted bundle = %#v", receipted.Manifest)
+	}
+	replannedOutput := captureStdout(t, func() int {
+		return runTestDraftAt(t, []string{"--target", "primary", "--bundle", "event-date", "--after", "baseline", "--hint", hint}, repository)
+	})
+	if replannedOutput.code != 0 {
+		t.Fatalf("edited replan exit = %d, stdout = %s", replannedOutput.code, replannedOutput.stdout)
+	}
+	var replanned draftflow.Report
+	if err := json.Unmarshal([]byte(replannedOutput.stdout), &replanned); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := bundle.Read(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replanned.Verification == nil || replanned.Verification.HistoryHead != installed.Manifest.History.EntryDigest {
+		t.Fatalf("embedded verification history head %v does not match installed entry %s", replanned.Verification, installed.Manifest.History.EntryDigest)
 	}
 }
 
