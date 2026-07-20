@@ -24,6 +24,7 @@ export default defineConfig({
         label: "Start here",
         items: [
           "/start/introduction",
+          "/start/comparison",
           "/start/installation",
           "/start/first-plan",
         ],

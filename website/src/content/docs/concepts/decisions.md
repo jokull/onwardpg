@@ -48,9 +48,11 @@ SELECT NOT EXISTS (
 );
 ```
 
-`manual_sql` hints never carry SQL. The editable file is the reviewed artifact, and its exact bytes become receipted only after clone verification succeeds.
-The complete generated phase files are black-box CLI receipts under
-[`docs/receipts/type-change`](https://github.com/jokull/onwardpg/tree/main/docs/receipts/type-change).
+A minimal `manual_sql` hint carries only the decision and lets onwardpg create
+a marked pocket in the phase file. A coding agent may instead attach complete
+typed `work`, including reviewed statements and Boolean verification SQL. In
+either form, onwardpg accepts the resulting artifact only after clone
+verification succeeds.
 
 ## Why decisions expire
 

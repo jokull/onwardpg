@@ -19,9 +19,8 @@ The first call creates one worktree-local `PlanID` and one durable bundle. Every
 
 The useful test of a planner is not whether it can print `ALTER TABLE`. It is
 whether the same workflow continues to help as compatibility, product meaning,
-and PostgreSQL dependencies accumulate. These four examples are generated from
-checked-in DDL fixtures by the current CLI; the displayed statements are
-selected directly from those phase files.
+and PostgreSQL dependencies accumulate. Here is how that same workflow grows
+from an ordinary column addition to a change beneath dependent views.
 
 ### Easy: add a nullable column
 
@@ -59,16 +58,14 @@ ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
 Now the output answers the question a raw diff cannot: *when is each operation
 compatible?* The application deploy and drain sit between those files. The
 developer supplies the historical value; onwardpg keeps that edit ahead of its
-receipted data assertion and the constraint. The complete generated and edited
-files live in the
-[`required-column` receipt](https://github.com/jokull/onwardpg/tree/main/docs/receipts/required-column).
+generated data assertion and the constraint.
 
 ### Hard: rename a column while both releases are alive
 
 Two snapshots cannot prove that `display_name` and `full_name` are one product
 field, so `plan` first asks for a semantic rename decision. It then asks how to
 backfill existing rows. With `single_transaction` explicitly selected for a
-known-small table, the current receipt contains this choreography:
+known-small table, onwardpg produces this choreography:
 
 ```sql
 -- expand.sql, selected statements in emitted order
@@ -86,14 +83,12 @@ ALTER TABLE "app"."accounts" RENAME COLUMN "display_name" TO "full_name";
 
 The omitted generated function is not hand-waved: it handles inserts, one-sided
 updates, and conflicting dual writes, while contract performs a final catch-up
-and equality assertion before cleanup. The
-[`rename` receipt](https://github.com/jokull/onwardpg/tree/main/docs/receipts/rename)
-contains every emitted byte and is clone-verified by the documentation test.
-For a large table, provide `operator_batched` work instead. onwardpg writes a
-separate receipted `operations/<id>.json` containing the bounded batch template,
-progress key, idempotency notes, and generated equality completion query. It is
-not rendered into a phase transaction. `contract check` reports that exact
-operation as `reconciliation_required` until the equality gate is true.
+and equality assertion before cleanup. For a large table, provide
+`operator_batched` work instead. onwardpg writes a separate reviewed
+`operations/<id>.json` containing the bounded batch template, progress key,
+idempotency notes, and generated equality completion query. It is not rendered
+into a phase transaction. `contract check` reports that exact operation as
+`reconciliation_required` until the equality gate is true.
 
 ### Nightmare: change a type beneath views and indexes
 
@@ -129,18 +124,10 @@ catalog-proven closure: reverse dependency order for destruction, desired
 dependency order for recreation, materialized-view population state, index
 definition, transaction boundary, hazards, and the final empty residual diff.
 
-The proof is executable. The
-[`dependency-type-change` receipt](https://github.com/jokull/onwardpg/tree/main/docs/receipts/dependency-type-change)
-is regenerated through the CLI. In
-`TestPinnedStripeRejectsDerivedViewTypeClosureOnwardGeneratesIt`, the repository
-also edits the conversion pocket, executes the whole plan on PostgreSQL, compares
-the final typed fingerprint, and requires no residual. The pinned Stripe
-reference fails that same combined view/materialized-view case, while onwardpg
-converges. Independent PostgreSQL integration tests
-`TestViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL` and
-`TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL`
-prove the ordinary-view and materialized-view closures, including retained
-privileges, population state, comments, indexes, and transitive output types.
+`verify` executes the edited conversion on disposable PostgreSQL, rebuilds the
+dependent objects, and compares the result with the schema the application
+requested. Missing privileges, comments, indexes, population state, or
+transitive type changes cause verification to fail.
 
 The fourth rung is the payoff: onwardpg does not become less useful when an
 agent enters the loop. The agent supplies facts PostgreSQL cannot know; the
@@ -172,7 +159,7 @@ These states are not interchangeable:
 | **W — working** | What schema does this checkout declare now? | Framework DDL is executed in disposable PostgreSQL and catalog-inspected. |
 | **H — history** | What will a clean environment have before this feature? | Accepted onwardpg bundles are replayed from their content-addressed chain. |
 | **D — development** | What has this developer already applied locally? | Inspected read-only and reconciled separately for convenience. |
-| **E — expand checkpoint** | What catalog did verified expand produce? | Receipted by `verify` as the expected live catalog before contract. |
+| **E — expand checkpoint** | What catalog did verified expand produce? | Recorded by `verify` as the expected live catalog before contract. |
 | **P — production** | Does deployed reality match its declared stage? | Explicit `drift check` compares P with H; `contract check` compares P with E and evaluates gates. Neither authorizes migration generation. |
 | **V — verification** | Do the exact bundle bytes replay and converge? | Independent disposable clones execute the prefix and full continuation. |
 
@@ -284,7 +271,7 @@ onwardpg plan \
   --hint '{"kind":"rename","object":"column","from":["app","accounts","display_name"],"to":["app","accounts","full_name"]}'
 ```
 
-Consumed hints are written automatically to `decisions.json` with their fingerprint-bound evidence. You do not copy internal question IDs or fingerprints, and you do not need to resubmit accepted hints. An agent that already understands the feature may provide several hints on the first invocation. A valid hint hidden behind an earlier dependency-ordered question is returned as `deferred` and re-emitted in `next_actions` without being receipted; irrelevant or impossible intent is rejected.
+Consumed hints are written automatically to `decisions.json` with their fingerprint-bound evidence. You do not copy internal question IDs or fingerprints, and you do not need to resubmit accepted hints. An agent that already understands the feature may provide several hints on the first invocation. A valid hint hidden behind an earlier dependency-ordered question is returned as `deferred` and re-emitted in `next_actions` without being recorded as accepted; irrelevant or impossible intent is rejected.
 
 When product semantics require SQL, the answer selects `manual_sql`. Small
 one-shot work can go into a stable phase edit pocket. Agents can instead attach

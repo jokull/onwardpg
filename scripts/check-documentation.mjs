@@ -77,6 +77,12 @@ const expandContract = documents.get(expandContractPath);
 const planCommand = documents.get(
   path.join(repositoryRoot, 'website/src/content/docs/concepts/plan-command.md'),
 );
+const comparison = documents.get(
+  path.join(repositoryRoot, 'website/src/content/docs/start/comparison.md'),
+);
+const introduction = documents.get(
+  path.join(repositoryRoot, 'website/src/content/docs/start/introduction.mdx'),
+);
 const protocolDoc = documents.get(path.join(repositoryRoot, 'docs/protocol.md'));
 
 function markedFence(markdown, marker) {
@@ -92,16 +98,20 @@ function markedFence(markdown, marker) {
   return markdown.slice(contentStart, fenceEnd);
 }
 
+function hasSQLFence(markdown, body) {
+  return markdown.includes(`\`\`\`sql\n${body.trimEnd()}\n\`\`\``);
+}
+
 const expandStatement = requiredExpand.match(/ALTER TABLE[^\n]+;/)?.[0];
 if (!expandStatement) fail('required-column expand receipt has no ALTER TABLE statement');
-if (markedFence(expandContract, 'required-column-expand-statement') !== expandStatement) {
+if (!hasSQLFence(expandContract, expandStatement)) {
   fail('required-column expand documentation differs from actual onwardpg output');
 }
 
 const generatedPocketStart = generatedRequiredContract.indexOf('-- onwardpg:edit begin ');
 const generatedEnforcementEnd = generatedRequiredContract.indexOf(' SET NOT NULL;') + ' SET NOT NULL;'.length;
 const generatedPocket = `-- contract.sql\n${generatedRequiredContract.slice(generatedPocketStart, generatedEnforcementEnd)}`;
-if (markedFence(expandContract, 'required-column-generated-contract-pocket') !== generatedPocket) {
+if (!hasSQLFence(expandContract, generatedPocket)) {
   fail('required-column generated contract documentation differs from actual onwardpg output');
 }
 
@@ -111,16 +121,86 @@ function editPocket(body) {
   return body.slice(begin, end).trimEnd();
 }
 
-if (
-  markedFence(expandContract, 'required-column-edited-contract-pocket') !==
-  editPocket(editedRequiredContract)
-) {
+if (!hasSQLFence(expandContract, editPocket(editedRequiredContract))) {
   fail('required-column application edit documentation differs from its verified fixture');
 }
-if (
-  markedFence(expandContract, 'required-column-verification') !== requiredVerify.trimEnd()
-) {
+if (!hasSQLFence(expandContract, requiredVerify)) {
   fail('required-column verification documentation differs from its verified fixture');
+}
+if (!hasSQLFence(comparison, expandStatement)) {
+  fail('comparison required-column expand differs from actual onwardpg output');
+}
+if (!hasSQLFence(comparison, editPocket(editedRequiredContract))) {
+  fail('comparison required-column cleanup differs from its verified fixture');
+}
+const requiredEnforcement = generatedRequiredContract
+  .split('\n')
+  .find((line) => line.includes('ALTER COLUMN "status" SET NOT NULL;'));
+if (!hasSQLFence(comparison, requiredEnforcement)) {
+  fail('comparison required-column enforcement differs from actual onwardpg output');
+}
+for (const fragment of [
+  'Reviewed 20 July 2026',
+  'APPLY EXPAND — before the pull request merges',
+  'temporarily makes the database **more permissive than both the old and',
+  'Why this almost never breaks locally',
+  'one branch, one merge, and one application deploy',
+  'Online DDL is not application compatibility',
+  'Compatibility lands before code',
+  'What onwardpg plans—and when it asks for help',
+  'Required columns',
+  'Check constraints',
+  'Column and table renames',
+  'onwardpg is deliberately designed for a developer or coding agent',
+  'Unresolved TODOs fail verification',
+  'it knows what old code writes, but it cannot know what those rows mean to the',
+  '`assert_only` if application code or an earlier operation will fill every row',
+  '`manual_sql` if a developer or agent can supply the rule now',
+  '`split_plan` if the honest answer is “not in this release.”',
+  'onwardpg then stops with `needs_sql_edits`',
+  'An agent can also attach the reviewed SQL and',
+  'One production operation, one DDL executor',
+  'Their SQL output tells onwardpg',
+  'These tools write **SQL that moves the database from A to B**',
+  'https://orm.drizzle.team/docs/kit-overview',
+  'https://docs.djangoproject.com/en/6.0/topics/migrations/',
+  'https://alembic.sqlalchemy.org/en/latest/autogenerate.html',
+  'https://www.prisma.io/docs/orm/prisma-migrate/workflows/development-and-production',
+  'https://atlasgo.io/versioned/lint',
+  'https://atlasgo.io/declarative/diff',
+  'https://github.com/stripe/pg-schema-diff',
+  'https://github.com/djrobstep/migra',
+  'https://github.com/xataio/pgroll#how-pgroll-works',
+  'https://github.com/xataio/pgroll/blob/main/docs/guides/orms.mdx',
+  'https://github.com/xataio/pgroll/blob/main/docs/guides/clientapps.mdx',
+]) {
+  if (!comparison.includes(fragment)) {
+    fail(`comparison page is missing maintained evidence: ${fragment}`);
+  }
+}
+for (const fragment of [
+  'how can the code\nrunning now and the code about to deploy both use the database',
+  'Two jobs, one plan',
+  'more permissive than both the old and new\nschema',
+  'Either half on its own is incomplete',
+  'APPLY EXPAND — before the pull request merges',
+  'one feature one branch, one merge, and one application deployment',
+  'onwardpg does **not** invent what those legacy `NULL` rows mean',
+  'treats it as temporarily nullable when reading',
+  'The plan command is the core product',
+  'Rebase the branch; restack the migration',
+  'git rebase origin/main',
+  'rebuilds the **same PlanID** from that new base',
+  'Generated work that is now supplied upstream disappears',
+  'fast-forward SQL needed locally',
+  'restacking at the schema level',
+  'The durable migration is always accepted history → working DDL',
+  'Developers and agents supply the meaning PostgreSQL lacks',
+  'An unresolved TODO cannot pass verification',
+]) {
+  if (!introduction.includes(fragment)) {
+    fail(`introduction is missing its core product explanation: ${fragment}`);
+  }
 }
 if (
   markedFence(protocolDoc, 'draft-needs-sql-edits') !== draftNeedsSQLEdits.trimEnd()
@@ -235,7 +315,6 @@ assertInOrder(homepage, [
   requiredCleanup.trim(),
   requiredGate.trim(),
   'ALTER COLUMN "status" SET NOT NULL;',
-  'abridged projections from the checked black-box CLI receipt',
 ], 'homepage required-column receipt');
 
 const supportedFeatures = documents.get(path.join(repositoryRoot, 'docs/supported-features.md'));

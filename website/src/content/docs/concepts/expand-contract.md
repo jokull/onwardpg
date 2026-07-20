@@ -38,13 +38,9 @@ CREATE TABLE app.bookings (
 );
 ```
 
-Adding it as required in one operation can break old inserts. A compatible route is:
+Adding it as required in one operation can break old inserts. A compatible
+route starts with the loose shape:
 
-The blocks below are excerpts from the checked-in black-box CLI receipt for
-this exact schema. The full generated files are regenerated on disposable
-PostgreSQL in CI.
-
-<!-- onwardpg-receipt: required-column-expand-statement -->
 ```sql
 ALTER TABLE "app"."bookings" ADD COLUMN "status" text;
 ```
@@ -58,7 +54,6 @@ The first plan asks whether contract should merely assert, run reviewed cleanup,
 or stay loose for another deployment. Choosing `manual_sql` creates one
 application-owned cleanup pocket and an exact generated assertion:
 
-<!-- onwardpg-receipt: required-column-generated-contract-pocket -->
 ```sql
 -- contract.sql
 -- onwardpg:edit begin stmt-sha256-1a5377b536479569445c7585eb95560c9e977f5d696557db5f28031f9789eec6
@@ -81,7 +76,6 @@ ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
 For a product whose correct historical value is `pending`, the developer can
 replace only that pocket:
 
-<!-- onwardpg-receipt: required-column-edited-contract-pocket -->
 ```sql
 UPDATE "app"."bookings"
 SET "status" = 'pending'
@@ -89,10 +83,9 @@ WHERE "status" IS NULL;
 ```
 
 The generated contract assertion remains between that cleanup and enforcement.
-The fixture also adds the same postcondition to `verify.sql`, so clone proof
+The same postcondition can also live in `verify.sql`, so disposable verification
 names the product assumption independently:
 
-<!-- onwardpg-receipt: required-column-verification -->
 ```sql
 -- onwardpg:assert booking_status_present
 SELECT NOT EXISTS (
@@ -104,13 +97,12 @@ SELECT NOT EXISTS (
 
 Deploy code that writes and reads `status`, then drain every legacy writer.
 `onwardpg verify` executes those exact edited bytes on disposable PostgreSQL,
-receipts them only after convergence, and `verify --check` proves the receipt
-has not drifted. It also receipts the graph observed after expand. After the
-application deploy, `onwardpg contract check` can compare production with that
-checkpoint and require live data plus writer evidence. The deployment system
-still owns execution and approval. See [contract readiness](/concepts/contract-readiness/)
-and the source fixtures in
-[`docs/receipts/required-column`](https://github.com/jokull/onwardpg/tree/main/docs/receipts/required-column).
+accepts them only after they reach the requested schema, and `verify --check`
+proves the verified files have not drifted. It also records the graph observed
+after expand. After the application deploy, `onwardpg contract check` can
+compare production with that checkpoint and require live data plus writer
+evidence. The deployment system still owns execution and approval. See
+[contract readiness](/concepts/contract-readiness/).
 
 ## The one-deployment rule
 

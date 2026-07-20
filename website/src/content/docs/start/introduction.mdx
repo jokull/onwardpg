@@ -1,14 +1,125 @@
 ---
 title: Introduction
-description: Plan the PostgreSQL compatibility window around an application deployment.
+description: Plan the PostgreSQL schema that old and new application code can safely share through one rolling deployment.
 ---
 
-onwardpg is a PostgreSQL migration planner built around two facts most diff tools leave to the developer:
+Most migration tools answer one question: **how do I move the database to the
+schema my code declares?**
 
-1. Old and new application code overlap, so the migration needs a compatibility window—not only a final schema.
-2. A feature and its accepted migration base keep changing, so intent must survive inside one evolving plan—not a growing stack of draft fixups.
+onwardpg answers the production question hiding behind it: **how can the code
+running now and the code about to deploy both use the database while that move
+happens?**
 
-The core loop is one command:
+That distinction barely shows up locally. Development often looks atomic: stop
+one process, change the schema, start the new process. Production still has old
+instances, workers, queues, connection pools, rollback candidates, and preview
+deployments using yesterday's shape. The application and database do not change
+at the same instant.
+
+onwardpg exists for that overlap.
+
+## Two jobs, one plan
+
+First, onwardpg is a compatibility-aware migration planner. It takes the final
+PostgreSQL DDL produced by Drizzle, Django, Alembic, Prisma, or your own schema
+source and works out a safe route to it. For a breaking change, the temporary
+database can be deliberately **more permissive than both the old and new
+schema**, so both application versions remain valid during rollout.
+
+Second, onwardpg keeps that route alive while the feature is still being built.
+Models change. Another migration lands on `main`. A developer switches branches
+and their local database gets ahead. A backfill rule is decided halfway through
+the work. `onwardpg plan` captures those decisions in one migration, revises it,
+and restacks it on the newly accepted history instead of accumulating draft
+fixups.
+
+Either half on its own is incomplete. Safe SQL that forgets why it was chosen is
+fragile during development. A durable plan that only describes the final schema
+still leaves old and new code fighting over the rollout.
+
+## One application release, with compatibility on both sides
+
+The normal release shape is:
+
+```text
+change the schema in your feature branch
+        ↓
+onwardpg works out how old and new code can share the database
+        ↓
+APPLY EXPAND — before the pull request merges
+        ↓
+merge and deploy one application version
+        ↓
+wait until old instances, workers, pools, and queues are gone
+        ↓
+APPLY CONTRACT — only when there is cleanup to perform
+```
+
+**Expand** runs while the old application is still live. It may add columns,
+loosen constraints, build indexes, or install synchronization needed by both
+versions. Applying it before merge is safe only because current production code
+must remain valid after every expand batch.
+
+The new application then deploys against that shared schema. It must work both
+before and after contract.
+
+**Drain** is evidence, not a timer. Contract waits until the delivery system can
+show that old writers and readers are actually gone.
+
+**Contract** performs final catch-up, checks the data, tightens constraints, and
+removes compatibility scaffolding. A purely additive change often has no
+contract at all; onwardpg does not invent a second phase for ceremony.
+
+This gives one feature one branch, one merge, and one application deployment.
+Cleanup follows the drain of that deployment instead of requiring a second
+feature release.
+
+## A small example reveals the whole model
+
+Suppose the application now requires:
+
+```sql
+status text NOT NULL
+```
+
+Adding that column with `NOT NULL` immediately would break the old application,
+because it still inserts rows without `status`. PostgreSQL turns the omitted
+value into `NULL`.
+
+onwardpg therefore expands with the shape both versions can tolerate:
+
+```sql
+ALTER TABLE "app"."bookings" ADD COLUMN "status" text;
+```
+
+The new code writes `status` and treats it as temporarily nullable when reading
+rows created during the overlap; the old code can continue omitting it until it
+drains. Only then can the database become strict.
+
+onwardpg does **not** invent what those legacy `NULL` rows mean. The next plan
+offers three honest choices: assert that another operation has already filled
+them, ask a developer or agent for reviewed cleanup SQL, or leave the column
+loose and finish the change in a later plan. If the product says old bookings
+should become `pending`, that decision comes from the product—not from the
+schema diff.
+
+onwardpg places that cleanup in contract, checks that no `NULL` values remain,
+and only then emits:
+
+```sql
+ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
+```
+
+That division of responsibility scales. onwardpg can plan widening and
+narrowing checks, default changes, required columns, indexes, coordinated
+constraints, rename bridges, and dependency-aware work around views and
+materialized views. It asks for help when PostgreSQL cannot know whether two
+names mean the same thing, which duplicate should win, how malformed values
+should convert, or whether a large backfill needs application-specific batching.
+
+## The plan command is the core product
+
+Start a feature plan once, then run the same command as the work changes:
 
 ```sh
 onwardpg plan checkout-preferences
@@ -16,6 +127,68 @@ onwardpg plan checkout-preferences
 # Repeat after model edits, decisions, and rebases.
 onwardpg plan
 ```
+
+The first call creates one `PlanID` and one forward-only migration bundle.
+Later calls revise that same logical migration. Decisions whose meaning still
+holds move forward; decisions invalidated by a schema change are rejected and
+asked again. Developer- or agent-written SQL is kept only while its surrounding
+schema still supports it.
+
+## Rebase the branch; restack the migration
+
+A Git rebase can insert a new chain of accepted migrations underneath a feature
+that is already halfway built. That should not force the developer to keep a
+stale migration and append a correction—or throw away reviewed decisions and
+start again.
+
+```sh
+git rebase origin/main
+onwardpg plan
+```
+
+Git moves the commits. The next `plan` validates and replays the new accepted
+migration head, then rebuilds the **same PlanID** from that new base to the
+feature's current DDL. Generated work that is now supplied upstream disappears.
+A rename, backfill, or destructive decision moves forward only if it still
+describes the same schema change; if the rebase changed its meaning, onwardpg
+asks again.
+
+The development database remains a separate concern. If it is merely missing a
+safe change introduced by the new history, `plan` can return the small
+fast-forward SQL needed locally. Objects left behind by another branch are not
+silently folded into the feature migration.
+
+This is restacking at the schema level: one carefully reviewed migration keeps
+climbing with the feature instead of leaving a trail of rebase fixups.
+
+The planner also keeps different database states in their proper roles:
+
+- **Accepted history** is replayed to establish the real base for the feature.
+- **Working DDL** says what the application wants when the feature is complete.
+- **The development database** is reconciled separately, so another branch's
+  objects cannot accidentally become production migration history.
+- **Production** is read only by explicit drift and contract-readiness checks;
+  it never silently authorizes generated repair SQL.
+- **Verification** uses independent disposable PostgreSQL databases to execute
+  the exact edited files and compare the result with the requested schema.
+
+The durable migration is always accepted history → working DDL. Everything else
+helps author, verify, or operate that route without changing what the route
+means.
+
+## Developers and agents supply the meaning PostgreSQL lacks
+
+When onwardpg reaches a rename, destructive change, data cleanup, or conversion,
+it asks a scoped question instead of guessing. A developer can answer it; a
+coding agent can often answer earlier because it has read the feature code,
+application write paths, and tests.
+
+Agents are especially useful for composing backfills and conversions. With
+carefully restricted read-only access, an agent can inspect counts and value
+shapes in production, turn those observations into synthetic verification
+cases, and fill only the SQL pocket onwardpg named. onwardpg then checks phase,
+dependency order, transaction boundaries, hazards, data gates, and final schema.
+An unresolved TODO cannot pass verification.
 
 :::tip[Using a coding agent?]
 Point it at [`https://onwardpg.solberg.is/skill.md`](https://onwardpg.solberg.is/skill.md) before it changes the schema. The skill contains the operating loop, evidence boundaries, stop conditions, and required review handoff.
@@ -29,50 +202,32 @@ verify, and report the operational gates verification cannot prove.
 ```
 :::
 
-It turns replayed accepted history and exported working DDL into one reviewable, forward-only bundle around one application deployment:
+## What onwardpg proves—and what it cannot
 
-```text
-compare -> expand -> deploy -> drain -> contract -> prove convergence
-```
+`onwardpg verify` executes the exact reviewed bundle on disposable PostgreSQL.
+It proves that the phases run under their declared transaction rules, that
+required assertions pass in verification, and that the resulting catalog
+matches the schema the application requested.
 
-The first call creates one `PlanID`; later calls revise and restack that same logical migration. Decisions whose meaning still holds are carried forward. Decisions invalidated by schema erosion are rejected and asked again.
-
-It is built for the awkward truth behind “simple” schema changes: a column rename can break an old reader, a new `NOT NULL` column can break an old writer, and a cast from `text` to `integer` needs a product rule for malformed values.
-
-The [plan-command walkthrough](/concepts/plan-command/) follows that complexity
-curve from easy to nightmare. At the far end, an agent supplies product-aware
-conversion SQL while onwardpg still discovers, orders, recreates, and verifies
-the PostgreSQL dependency closure around it. The examples are backed by current
-CLI phase files and executable integration tests.
-
-## The operating model
-
-**Expand** changes the database while old code is still running. It adds compatible shape, synchronization, indexes, and explicitly reviewed data work.
-
-**Deploy** rolls out code that understands both the expanded and contracted schemas.
-
-**Drain** is an operational fact, not a timer: old instances, workers, queues, connection pools, and stale write paths are gone.
-
-**Contract** validates assumptions, tightens constraints, and removes compatibility scaffolding.
-
-**Verify** replays the exact bundle in disposable PostgreSQL and proves that the final catalog converges on the declared schema.
+It cannot prove that a business mapping is correct, that a production table is
+small enough for a lock, that replicas have enough WAL headroom, or that every
+old process has drained. Those remain explicit review and delivery inputs.
 
 :::caution[Planner, not deployer]
-onwardpg never applies SQL to production or to another caller-owned database. Your deployment system runs the reviewed phase files because it is the system that can observe rollout and drain state.
+onwardpg never applies SQL to production or to another caller-owned database.
+Your delivery system runs the reviewed phase files because it is the system that
+can observe rollout, capacity, and drain state.
 :::
-
-## What makes it different
-
-onwardpg knows which schemas are playing which role. The durable migration is replayed history → working intent. A separate development reconciliation handles a branch-worn local database without contaminating the production bundle. Production appears only in explicit read-only operations: drift against accepted history, contract readiness against the verified post-expand checkpoint, or bounded evidence gathered by an authorized agent. Verification uses independent disposable replays.
-
-Desired DDL is materialized in real PostgreSQL, then inspected as typed catalog objects and dependencies. When schema state cannot prove intent—a rename, destructive change, backfill, or cast—onwardpg asks for a semantic decision, captures it in the plan, and binds it to the exact participating schema scope instead of guessing.
-
-The proof is deliberately narrow. Catalog convergence does not prove safe lock duration, application compatibility, valid production data, WAL budget, replica health, or rollback readiness. Those remain operational review inputs.
 
 ## Where to begin
 
 1. [Install and configure onwardpg](/start/installation/).
-2. Understand [the plan command](/concepts/plan-command/).
+2. Follow [the plan command](/concepts/plan-command/) from an additive column to
+   an agent-authored conversion beneath PostgreSQL dependencies.
 3. [Create your first plan](/start/first-plan/).
-4. Read the [expand/contract contract](/concepts/expand-contract/) before wiring deployment automation.
-5. If a coding agent authors migrations, use the [agent-assisted planning workflow](/agents/agent-assisted-planning/).
+4. Read the [expand/contract contract](/concepts/expand-contract/) before wiring
+   delivery automation.
+5. If a coding agent authors migrations, use the
+   [agent-assisted planning workflow](/agents/agent-assisted-planning/).
+6. When choosing between adjacent tools, read the
+   [operating-model comparison](/start/comparison/).

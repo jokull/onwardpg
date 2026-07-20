@@ -96,10 +96,10 @@ file is idempotent; a newly irrelevant entry still fails as unused intent.
 Unrelated schema erosion preserves a scoped decision; changed meaning
 invalidates it.
 
-`manual_sql` contains no SQL. It returns this nonterminal envelope after writing
-a phase-local TODO when `work` is omitted. Agents may instead attach a complete
-typed `work` object to the `manual_sql` hint so no prose-to-SQL handoff is
-required:
+A minimal `manual_sql` hint contains no SQL. It returns this nonterminal
+envelope after writing a phase-local TODO when `work` is omitted. Agents may
+instead attach a complete typed `work` object to the `manual_sql` hint so no
+prose-to-SQL handoff is required:
 
 <!-- onwardpg-receipt: draft-needs-sql-edits -->
 ```json

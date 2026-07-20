@@ -19,6 +19,7 @@ const sectionLabels = {
 
 const docOrder = [
   'start/introduction',
+  'start/comparison',
   'start/installation',
   'start/first-plan',
   'concepts/plan-command',

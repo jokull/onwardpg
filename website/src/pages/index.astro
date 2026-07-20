@@ -96,7 +96,7 @@ const features = [
             <article><span>H</span><div><strong>Accepted history</strong><small>Replayed bundle chain</small></div><b>→ W</b></article>
             <article><span>W</span><div><strong>Working intent</strong><small>Exported DDL, ingested by PostgreSQL</small></div><b>durable</b></article>
             <article><span>D</span><div><strong>Development reality</strong><small>Read-only local catalog</small></div><b>→ W</b></article>
-            <article><span>E</span><div><strong>Expand checkpoint</strong><small>Receipted by verification</small></div><b>P → E</b></article>
+            <article><span>E</span><div><strong>Expand checkpoint</strong><small>Recorded by verification</small></div><b>P → E</b></article>
             <article><span>P</span><div><strong>Production reality</strong><small>Drift against H; readiness against E</small></div><b>read only</b></article>
             <article><span>V</span><div><strong>Verification</strong><small>Independent disposable replays</small></div><b>evidence</b></article>
           </div>
@@ -126,7 +126,7 @@ const features = [
           <article><p>“My dev DB is ahead.”</p><strong>Keep D → W separate.</strong><span>Preserve other-branch objects and local-only history.</span></article>
         </div>
 
-        <a class="text-link" href="/concepts/plan-command/">Climb from easy to nightmare—with receipts <span>→</span></a>
+        <a class="text-link" href="/concepts/plan-command/">Climb from easy to nightmare <span>→</span></a>
       </section>
 
       <section class="journey shell" aria-labelledby="journey-title">
@@ -172,7 +172,7 @@ const features = [
   DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:1c16b884027de910'; END IF; END $onwardpg$;
   ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
 
-<span class="muted">abridged projections from the checked black-box CLI receipt</span></code></pre>
+</code></pre>
           </div>
           <div class="proof-copy">
             <p class="section-label">Trust the evolving artifact</p>
