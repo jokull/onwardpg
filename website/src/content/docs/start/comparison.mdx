@@ -316,7 +316,7 @@ expand SQL before merge/deploy and contract SQL after drain. onwardpg does not
 need production write access, and your deployment scripts do not have to work
 out the safe order themselves.
 
-:::caution[One production operation, one DDL executor]
+:::warning[One production operation, one DDL executor]
 Do not let a framework migration runner, `drizzle-kit push`, Atlas apply, and
 onwardpg phase files independently own the same schema operation. Choose one
 production execution path.

@@ -30,6 +30,13 @@ function fail(message) {
 
 for (const [documentPath, body] of documents) {
   const relative = path.relative(repositoryRoot, documentPath);
+  if (
+    relative.startsWith(path.join('website', 'src', 'content', 'docs')) &&
+    documentPath.endsWith('.md') &&
+    /^:::[a-z]/m.test(body)
+  ) {
+    fail(`${relative} uses an MDX-only Blume directive but has a .md extension`);
+  }
   if (/onwardpg verify \[(?:name|NAME)\]/.test(body)) {
     fail(`${relative} documents the rejected positional verify syntax`);
   }
@@ -78,7 +85,7 @@ const planCommand = documents.get(
   path.join(repositoryRoot, 'website/src/content/docs/concepts/plan-command.md'),
 );
 const comparison = documents.get(
-  path.join(repositoryRoot, 'website/src/content/docs/start/comparison.md'),
+  path.join(repositoryRoot, 'website/src/content/docs/start/comparison.mdx'),
 );
 const introduction = documents.get(
   path.join(repositoryRoot, 'website/src/content/docs/start/introduction.mdx'),
@@ -160,6 +167,7 @@ for (const fragment of [
   'onwardpg then stops with `needs_sql_edits`',
   'An agent can also attach the reviewed SQL and',
   'One production operation, one DDL executor',
+  ':::warning[One production operation, one DDL executor]',
   'Their SQL output tells onwardpg',
   'These tools write **SQL that moves the database from A to B**',
   'https://orm.drizzle.team/docs/kit-overview',
