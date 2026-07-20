@@ -37,7 +37,7 @@ func TestBuildCreatesDependencyOrderedGraphPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != protocol.Planned || result.ProtocolVersion != protocol.Version || result.CurrentFingerprint == "" || result.DesiredFingerprint == "" {
+	if result.Status != protocol.Planned || result.CurrentFingerprint == "" || result.DesiredFingerprint == "" {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 	joined := joinSQL(result)
@@ -355,7 +355,6 @@ func TestBuildOrdersExistingPolicyChangeBeforeRowSecurityTighteningInContract(t 
 		t.Fatalf("policy tightening question = %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    pending.ProtocolVersion,
 		CurrentFingerprint: pending.CurrentFingerprint,
 		DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{
@@ -444,7 +443,7 @@ func TestBuildBlocksSemanticRoutineRenameWithRetainedMaterializedView(t *testing
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_routine" {
 		t.Fatalf("semantic rename question=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
 	result, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -618,7 +617,7 @@ func TestBuildOrdersReplicaIdentityAfterIndexRename(t *testing.T) {
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_index" {
 		t.Fatalf("index rename question=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_index", Key: oldIndex.ObjectID().String(), Value: newIndex.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_index", Key: oldIndex.ObjectID().String(), Value: newIndex.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil || planned.Status != protocol.Planned {
 		t.Fatalf("index rename plan=%#v err=%v", planned, err)
@@ -654,7 +653,7 @@ func TestBuildOrdersNewIndexAfterColumnRenameBridge(t *testing.T) {
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_column" {
 		t.Fatalf("column rename question=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
 		{Kind: "rename_column", Key: oldColumn.ObjectID().String(), Value: newColumn.ObjectID().String()},
 		{Kind: "rename_backfill_strategy", Key: oldColumn.ObjectID().String(), Value: "single_transaction"},
 	}}
@@ -701,7 +700,7 @@ func TestBuildOrdersTableRenameBeforeNewDependentAndOldSchemaDrop(t *testing.T) 
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
 		t.Fatalf("table rename question=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
 		{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()},
 		{Kind: "drop", Key: oldSchema.ObjectID().String(), Value: "drop"},
 	}}
@@ -754,7 +753,7 @@ func TestBuildRequiresAuthorizationAnswersForPolicyAndGrantOptionContractions(t 
 		t.Fatalf("expected three authorization questions: %#v", pending)
 	}
 	values := map[string]string{"alter_policy": "alter", "relax_row_security": "relax", "revoke_grant_option": "revoke"}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: values[question.Kind], QuestionFingerprint: question.ScopeFingerprint})
 	}
@@ -792,7 +791,7 @@ func TestBuildRequiresPolicyReplacementIntentAndRejectsInvalidExpressions(t *tes
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "replace_policy" {
 		t.Fatalf("policy replacement must ask: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "replace_policy", Key: pending.Questions[0].Key, Value: "replace", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "replace_policy", Key: pending.Questions[0].Key, Value: "replace", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil || planned.Status != protocol.Planned || strings.Index(joinSQL(planned), "DROP POLICY") > strings.Index(joinSQL(planned), "CREATE POLICY") {
 		t.Fatalf("policy replacement plan=%#v err=%v", planned, err)
@@ -827,7 +826,6 @@ func TestBuildRequiresFingerprintBoundDestructiveAnswer(t *testing.T) {
 		t.Fatalf("expected destructive question, got %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "drop", Key: table.ObjectID().String(), Value: "drop"}},
 	}
@@ -853,7 +851,7 @@ func TestBuildRendersApprovedExtensionDrop(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
 		t.Fatalf("expected extension drop confirmation, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: extension.ObjectID().String(), Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: extension.ObjectID().String(), Value: "drop"}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -1061,7 +1059,7 @@ func TestBuildRequiresFingerprintBoundManualContractForPartitionReconfiguration(
 			t.Fatalf("partition-bound runbook omitted %q:\n%s", fragment, boundRunbook)
 		}
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: needed.CurrentFingerprint, DesiredFingerprint: needed.DesiredFingerprint, Answers: []protocol.Answer{{
+	answers := protocol.Answers{CurrentFingerprint: needed.CurrentFingerprint, DesiredFingerprint: needed.DesiredFingerprint, Answers: []protocol.Answer{{
 		Kind: "partition_reconfiguration", Key: before.ObjectID().String(), Value: "provided",
 		Manual: &protocol.ManualWork{Summary: "move the partition window after checking data", ExecutionMode: "non_transactional", Statements: []string{
 			`ALTER TABLE "app"."events" DETACH PARTITION "app"."events_2026";`,
@@ -1306,7 +1304,7 @@ func TestBuildSeparatesConcurrentMaterializedViewRebuildIndex(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rebuild_materialized_view" {
 		t.Fatalf("expected rebuild question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rebuild_materialized_view", Key: after.ObjectID().String(), Value: "rebuild"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rebuild_materialized_view", Key: after.ObjectID().String(), Value: "rebuild"}}}
 	planned, err := Build(current, desired, answers, Options{ConcurrentIndexes: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1352,7 +1350,6 @@ func TestBuildDefaultsToTransactionalQualifiedBatchesAndStructuredUnsupported(t 
 		t.Fatalf("expected structured unsupported result %#v", result)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: result.CurrentFingerprint,
 		DesiredFingerprint: result.DesiredFingerprint,
 		Answers: []protocol.Answer{{
@@ -1556,7 +1553,7 @@ func TestBuildOrdersChangedDefaultAfterColumnType(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || !reflect.DeepEqual(pending.Questions[0].Choices, []string{"manual_sql", "split_plan"}) || pending.Questions[0].AllowsFreeform {
 		t.Fatalf("type change must expose the one-deployment handoff or split-plan boundary: %#v", pending)
 	}
-	answer := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: after.ObjectID().String(), Value: "manual_sql"}}}
+	answer := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: after.ObjectID().String(), Value: "manual_sql"}}}
 	plan, err := Build(current, desired, answer, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -1605,7 +1602,7 @@ func TestBuildReusesPreservedValidatedNotNullCheck(t *testing.T) {
 		t.Fatalf("NOT NULL reuse decision=%#v err=%v", pending, err)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "set_not_null", Key: after.ObjectID().String(), Value: "staged", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
 	}
 	plan, err := Build(current, desired, answers, Options{})
@@ -1670,7 +1667,6 @@ func TestApprovedSchemaDropConsumesDescendants(t *testing.T) {
 		t.Fatalf("expected only schema question, got %#v", pending.Questions)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "drop", Key: schema.ObjectID().String(), Value: "drop"}},
 	}
@@ -1715,7 +1711,6 @@ func TestBuildRequiresAndRendersColumnMutationChoices(t *testing.T) {
 		t.Fatalf("type-change choices contain an unusable shortcut: %#v", pending.Questions[0])
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
 			{Kind: "type_change", Key: after.ObjectID().String(), Value: "manual_sql"},
@@ -1865,7 +1860,7 @@ func TestBuildStagesApplicationBackfillBeforeNotNullContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	strategyAnswers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "set_not_null", Key: after.ObjectID().String(), Value: "staged_with_backfill"}},
 	}
 	manualPending, err := Build(current, desired, strategyAnswers, Options{})
@@ -1933,7 +1928,6 @@ func TestBuildRequiresFingerprintBoundIndexRenameAnswer(t *testing.T) {
 		t.Fatalf("expected index rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_index", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
 	}
@@ -1963,7 +1957,7 @@ func TestBuildRequiresFingerprintBoundViewRenameAnswer(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_view" {
 		t.Fatalf("expected view rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2002,7 +1996,7 @@ func TestBuildPlansFingerprintBoundViewRenameWithDependentRewrite(t *testing.T) 
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_view" {
 		t.Fatalf("dependent view must require a rename answer: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: oldView.ObjectID().String(), Value: newView.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: oldView.ObjectID().String(), Value: newView.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2076,7 +2070,7 @@ func TestBuildRequiresFingerprintBoundRoutineRenameAnswer(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_routine" {
 		t.Fatalf("expected routine rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2108,7 +2102,7 @@ func TestBuildPlansRoutineRenameWithDependentTriggerRewrite(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_routine" {
 		t.Fatalf("trigger-dependent routine rename must require an answer: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: oldRoutine.ObjectID().String(), Value: newRoutine.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: oldRoutine.ObjectID().String(), Value: newRoutine.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2166,7 +2160,7 @@ func TestBuildRequiresFingerprintBoundTriggerRenameAnswer(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_trigger" {
 		t.Fatalf("expected trigger rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_trigger", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_trigger", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2280,7 +2274,6 @@ func TestBuildRequiresFingerprintBoundTableRenameAnswer(t *testing.T) {
 		t.Fatalf("expected table rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()}},
 	}
@@ -2348,7 +2341,7 @@ func TestTableRenameOffersDeclarativeDerivedChildNames(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
 		t.Fatalf("declarative derived names must retain table rename candidacy: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: from.ObjectID().String(), Value: to.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: from.ObjectID().String(), Value: to.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2428,7 +2421,7 @@ func TestTableRenameCompatibilityViewCarriesRuntimePrivileges(t *testing.T) {
 		t.Fatal(err)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_table", Key: from.ObjectID().String(), Value: to.ObjectID().String()}},
 	}
 	planned, err := Build(current, desired, answers, Options{})
@@ -2464,7 +2457,7 @@ func TestTableRenameRejectsTableOnlyPrivilegeThatAViewCannotPreserve(t *testing.
 		t.Fatal(err)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_table", Key: from.ObjectID().String(), Value: to.ObjectID().String()}},
 	}
 	result, err := Build(current, desired, answers, Options{})
@@ -2518,7 +2511,7 @@ func TestBuildOffersEveryCredibleTableRenameCandidate(t *testing.T) {
 		t.Fatalf("rename choices = %#v, want %#v", pending.Questions, wantChoices)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: prospects.ObjectID().String(), QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
 	}
 	planned, err := Build(current, desired, answers, Options{})
@@ -2585,7 +2578,7 @@ func TestBuildKeepsTableRenameIntentStableWhileAddingColumn(t *testing.T) {
 		t.Fatalf("additive column invalidated rename intent: before=%s after=%s", pendingBefore.Questions[0].ScopeFingerprint, pendingAfter.Questions[0].ScopeFingerprint)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pendingAfter.CurrentFingerprint, DesiredFingerprint: pendingAfter.DesiredFingerprint,
+		CurrentFingerprint: pendingAfter.CurrentFingerprint, DesiredFingerprint: pendingAfter.DesiredFingerprint,
 		Answers: []protocol.Answer{{
 			Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String(),
 			QuestionFingerprint: pendingAfter.Questions[0].ScopeFingerprint,
@@ -2637,7 +2630,7 @@ func TestBuildRejectsTableRenameWhenOldColumnShapeCannotRemainCompatible(t *test
 		t.Fatalf("rename stage = %#v", renamePending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: renamePending.CurrentFingerprint, DesiredFingerprint: renamePending.DesiredFingerprint,
+		CurrentFingerprint: renamePending.CurrentFingerprint, DesiredFingerprint: renamePending.DesiredFingerprint,
 		Answers: []protocol.Answer{{
 			Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String(),
 			QuestionFingerprint: renamePending.Questions[0].ScopeFingerprint,
@@ -2682,7 +2675,7 @@ func TestBuildAllowsConfirmedTableRenameReferencedByForeignKey(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
 		t.Fatalf("expected rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2734,7 +2727,7 @@ func TestBuildAllowsConfirmedTableRenameWithRetainedTrigger(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
 		t.Fatalf("expected table-rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2773,7 +2766,7 @@ func TestTableRenameRejectsUnprovenDependentViewTransition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()}}}
 	result, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2845,7 +2838,6 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 		t.Fatalf("expected column rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
 	}
@@ -2884,7 +2876,7 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 	}
 
 	manualAnswers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
 			{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()},
 			{Kind: "rename_backfill_strategy", Key: before.ObjectID().String(), Value: "manual_sql"},
@@ -2952,7 +2944,7 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 	}
 
 	splitAnswers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
 			{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()},
 			{Kind: "rename_backfill_strategy", Key: before.ObjectID().String(), Value: "split_plan"},
@@ -3003,7 +2995,7 @@ func TestBuildDevelopmentColumnRenameIgnoresPositionAndRendersDirectDDL(t *testi
 		t.Fatalf("workspace rename fallback = %#v", pending.Questions[0].Choices)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
 	}
 	planned, err := Build(current, desired, answers, options)
@@ -3046,7 +3038,7 @@ func TestBuildDevelopmentColumnRenamePreservesPostgres18NotNullConstraintName(t 
 		t.Fatal(err)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
 	}
 	planned, err := Build(current, desired, answers, Options{DirectColumnRenames: true})
@@ -3112,7 +3104,6 @@ func TestBuildRequiresFingerprintBoundEnumRenameAnswer(t *testing.T) {
 		t.Fatalf("expected enum rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_enum", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
 	}
@@ -3446,7 +3437,7 @@ func TestBuildRendersIdempotentSchemaAndTableOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: schema.ObjectID().String(), Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: schema.ObjectID().String(), Value: "drop"}}}
 	result, err = Build(current, desired, answers, Options{IfExists: true, CascadeDrops: true})
 	if err != nil {
 		t.Fatal(err)
@@ -3471,7 +3462,7 @@ func TestBuildRendersIdempotentSchemaAndTableOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers = protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: table.ObjectID().String(), Value: "drop"}}}
+	answers = protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: table.ObjectID().String(), Value: "drop"}}}
 	result, err = Build(current, desired, answers, Options{IfExists: true, CascadeDrops: true})
 	if err != nil {
 		t.Fatal(err)
@@ -3500,7 +3491,7 @@ func TestBuildRendersIfExistsForConstraintDrop(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || !strings.Contains(pending.Questions[0].Message, "expand schema may stop enforcing") {
 		t.Fatalf("constraint removal did not ask the enforcement-specific question: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraint.ObjectID().String(), Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraint.ObjectID().String(), Value: "drop"}}}
 	plan, err := Build(current, desired, answers, Options{IfExists: true})
 	if err != nil {
 		t.Fatal(err)
@@ -3535,7 +3526,7 @@ func TestBuildSeparatesConcurrentIndexDropIntoNonTransactionalBatch(t *testing.T
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
 		t.Fatalf("expected destructive index-drop question: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: index.ObjectID().String(), Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: index.ObjectID().String(), Value: "drop"}}}
 	result, err := Build(current, desired, answers, Options{ConcurrentIndexes: true})
 	if err != nil {
 		t.Fatal(err)
@@ -3802,7 +3793,6 @@ func TestBuildRequiresConfirmedEnumLabelRewrite(t *testing.T) {
 			}
 			question := pending.Questions[0]
 			answers := protocol.Answers{
-				ProtocolVersion:    pending.ProtocolVersion,
 				CurrentFingerprint: pending.CurrentFingerprint,
 				DesiredFingerprint: pending.DesiredFingerprint,
 				Answers:            []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "rewrite", QuestionFingerprint: question.ScopeFingerprint}},
@@ -3881,7 +3871,7 @@ func TestBuildRequiresFingerprintBoundConstraintRenameAnswer(t *testing.T) {
 		t.Fatalf("constraint rename must require confirmation: %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_constraint", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
 	}
 	result, err := Build(current, desired, answers, Options{})
@@ -3945,7 +3935,7 @@ func TestBuildDropsSameNamedIndexBeforeMovingItToAnotherTable(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
 		t.Fatalf("expected destructive index question: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: oldIndex.ObjectID().String(), Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: oldIndex.ObjectID().String(), Value: "drop"}}}
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -4055,7 +4045,7 @@ func TestColumnRenamePreservesAutomaticallyRewrittenConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
 		{Kind: "rename_column", Key: oldColumn.ObjectID().String(), Value: newColumn.ObjectID().String()},
 		{Kind: "rename_backfill_strategy", Key: oldColumn.ObjectID().String(), Value: "single_transaction"},
 	}}
@@ -4136,7 +4126,7 @@ func TestColumnRenameRejectsUnprovenDependentViewRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_column", Key: oldColumn.ObjectID().String(), Value: newColumn.ObjectID().String()}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_column", Key: oldColumn.ObjectID().String(), Value: newColumn.ObjectID().String()}}}
 	result, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)

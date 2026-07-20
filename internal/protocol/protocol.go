@@ -10,8 +10,6 @@ import (
 	"strings"
 )
 
-const Version = "onwardpg.plan/v3"
-
 const (
 	PhaseExpand   = "expand"
 	PhaseContract = "contract"
@@ -31,7 +29,6 @@ const (
 )
 
 type Result struct {
-	ProtocolVersion    string      `json:"protocol_version,omitempty"`
 	CurrentFingerprint string      `json:"current_fingerprint,omitempty"`
 	DesiredFingerprint string      `json:"desired_fingerprint,omitempty"`
 	Status             Status      `json:"status"`
@@ -269,7 +266,6 @@ type Question struct {
 }
 
 type Answers struct {
-	ProtocolVersion    string   `json:"protocol_version,omitempty"`
 	CurrentFingerprint string   `json:"current_fingerprint,omitempty"`
 	DesiredFingerprint string   `json:"desired_fingerprint,omitempty"`
 	Answers            []Answer `json:"answers"`
@@ -292,9 +288,6 @@ type Resolver struct {
 }
 
 func (a Answers) Resolver(currentFingerprint, desiredFingerprint string) (*Resolver, error) {
-	if a.ProtocolVersion != Version {
-		return nil, fmt.Errorf("answer protocol_version is %q, want %q", a.ProtocolVersion, Version)
-	}
 	if a.CurrentFingerprint != currentFingerprint || a.DesiredFingerprint != desiredFingerprint {
 		return nil, fmt.Errorf("answer fingerprints are stale: current=%q desired=%q", a.CurrentFingerprint, a.DesiredFingerprint)
 	}

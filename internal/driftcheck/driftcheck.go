@@ -11,8 +11,6 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg.drift-check/v2"
-
 type Difference struct {
 	Kind     string          `json:"kind"`
 	ObjectID string          `json:"object_id"`
@@ -21,7 +19,6 @@ type Difference struct {
 }
 
 type Report struct {
-	ProtocolVersion     string       `json:"protocol_version"`
 	Outcome             string       `json:"status"`
 	Target              string       `json:"target"`
 	HistoryHead         string       `json:"history_head"`
@@ -44,7 +41,7 @@ func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (R
 		return Report{}, err
 	}
 	report := Report{
-		ProtocolVersion: Version, Outcome: "drift_free", Target: target,
+		Outcome: "drift_free", Target: target,
 		HistoryHead: historyHead, ExpectedFingerprint: expectedFingerprint, ActualFingerprint: actualFingerprint,
 		Ignored: mergeIgnored(expected.Ignored(), actual.Ignored()),
 	}

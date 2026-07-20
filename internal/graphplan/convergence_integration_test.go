@@ -42,8 +42,8 @@ func buildIntegration(current, desired *pgschema.Snapshot, answers protocol.Answ
 		if len(additions) == 0 {
 			return result, nil
 		}
-		if answers.ProtocolVersion == "" {
-			answers.ProtocolVersion, answers.CurrentFingerprint, answers.DesiredFingerprint = protocol.Version, result.CurrentFingerprint, result.DesiredFingerprint
+		if answers.CurrentFingerprint == "" {
+			answers.CurrentFingerprint, answers.DesiredFingerprint = result.CurrentFingerprint, result.DesiredFingerprint
 		}
 		answers.Answers = append(answers.Answers, additions...)
 	}
@@ -193,7 +193,7 @@ CREATE TABLE ` + qualified + `items (
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("dependency drop questions=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		if question.Kind != "drop" {
 			t.Fatalf("unexpected dependency drop question: %#v", question)
@@ -269,7 +269,7 @@ func TestSchemaAndSearchPathConvergeOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				if question.Kind != "drop" {
 					t.Fatalf("%s unexpected question: %#v", label, question)
@@ -395,7 +395,7 @@ func TestViewCreateAndReplaceConvergeOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_view" {
 		t.Fatalf("expected view rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -488,7 +488,7 @@ func TestViewOptionsAndDependencyChainsConvergeOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				if question.Kind != "drop" {
 					t.Fatalf("%s unexpected question: %#v", label, question)
@@ -619,7 +619,7 @@ CREATE VIEW "` + apiSchema + `".keep_view AS SELECT keep FROM "` + dataSchema + 
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
 		t.Fatalf("view-column type change must enter the reviewed handoff: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.NeedsSQLEdits {
 		t.Fatalf("view-column type change handoff plan=%#v err=%v", plan, err)
@@ -706,7 +706,7 @@ func TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgr
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
 		t.Fatalf("materialized-view column type change must enter the reviewed handoff: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.NeedsSQLEdits {
 		t.Fatalf("materialized-view type-change handoff plan=%#v err=%v", plan, err)
@@ -794,7 +794,7 @@ func TestChangedViewRequiresManualDependentMaterializedViewRefresh(t *testing.T)
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "refresh_materialized_view" {
 		t.Fatalf("expected dependent materialized-view refresh contract, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
 		Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "provided",
 		Manual: &protocol.ManualWork{Summary: "refresh order cache after replacing its source view", ExecutionMode: "transactional", Statements: []string{
 			"REFRESH MATERIALIZED VIEW " + quote(schemaName) + ".order_cache;",
@@ -862,7 +862,7 @@ func TestDependentViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_view" {
 		t.Fatalf("expected dependent view rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -980,7 +980,7 @@ func TestManualPartitionReconfigurationContractConvergesOnPostgreSQL(t *testing.
 		t.Fatalf("expected manual-contract question, got %#v", pending)
 	}
 	childID := pgschema.Table{Schema: schemaName, Name: "events_2026"}.ObjectID().String()
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
 		Kind: "partition_reconfiguration", Key: childID, Value: "provided",
 		Manual: &protocol.ManualWork{Summary: "move the empty partition window", ExecutionMode: "transactional", Statements: []string{
 			"ALTER TABLE " + quote(schemaName) + ".events DETACH PARTITION " + quote(schemaName) + ".events_2026;",
@@ -1041,7 +1041,7 @@ func TestManualPartitionStrategyChangePreservesPrimaryKeyOnPostgreSQL(t *testing
 		t.Fatalf("expected partition-strategy manual contract, got %#v", pending)
 	}
 	tableID := pgschema.Table{Schema: schemaName, Name: "events"}.ObjectID().String()
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
 		Kind: "partition_reconfiguration", Key: tableID, Value: "provided", QuestionFingerprint: pending.Questions[0].ScopeFingerprint,
 		Manual: &protocol.ManualWork{Summary: "replace the empty partitioned parent while preserving its primary key", ExecutionMode: "transactional", Statements: []string{
 			"DROP TABLE " + qualified(schemaName, "events") + ";",
@@ -1190,7 +1190,7 @@ func TestManualDefaultPartitionReconfigurationContractConvergesOnPostgreSQL(t *t
 		t.Fatalf("expected default-partition manual question, got %#v", pending)
 	}
 	childID := pgschema.Table{Schema: schemaName, Name: "events_other"}.ObjectID().String()
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
 		Kind: "partition_reconfiguration", Key: childID, Value: "provided",
 		Manual: &protocol.ManualWork{Summary: "validate the default partition is empty, then narrow its bound", ExecutionMode: "transactional", Statements: []string{
 			"ALTER TABLE " + quote(schemaName) + ".events DETACH PARTITION " + quote(schemaName) + ".events_other;",
@@ -1292,7 +1292,7 @@ func TestPartitionedIndexAndConstraintDropConvergesOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
 		t.Fatalf("expected exactly parent destructive questions, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop"})
 	}
@@ -1346,7 +1346,7 @@ func TestPartitionedInheritedCheckDropConvergesOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
 		t.Fatalf("expected exactly the parent destructive question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "drop"}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -2100,7 +2100,7 @@ CREATE TABLE "` + schemaName + `".orders (account_id bigint);`
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("foreign-key drop should ask before strategy rejection: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		if question.Kind != "drop" {
 			t.Fatalf("unexpected dependent-constraint question: %#v", question)
@@ -2661,7 +2661,7 @@ func TestPartitionedParentExclusionRebuildConvergesOnPostgreSQL(t *testing.T) {
 	}
 	question := pending.Questions[0]
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "manual_sql", QuestionFingerprint: question.ScopeFingerprint}},
 	}
 	manualPending, err := buildIntegration(current, desired, answers, Options{})
@@ -2876,7 +2876,7 @@ func TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
 		t.Fatalf("expected routine and trigger drop confirmations, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop"})
 	}
@@ -3064,7 +3064,7 @@ func TestRoutineDependenciesAndReturnTypeChangesConvergeOnPostgreSQL(t *testing.
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) == 0 {
 		t.Fatalf("routine and dependent drops must require confirmation: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 	}
@@ -3174,7 +3174,7 @@ func TestRoutineDependencyChangesRejectUnsafeShapesOnPostgreSQL(t *testing.T) {
 				t.Fatal(err)
 			}
 			if plan.Status == protocol.NeedsInput {
-				answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+				answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 				for _, question := range plan.Questions {
 					answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: question.Choices[0], QuestionFingerprint: question.ScopeFingerprint})
 				}
@@ -3251,7 +3251,7 @@ func TestRoutineViewDependencyOrderingConvergesOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 3 {
 		t.Fatalf("expected destructive confirmations for views and routine, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop"})
 	}
@@ -3305,7 +3305,7 @@ func TestEnumViewDependencyDropOrderingConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop"})
 	}
@@ -3361,7 +3361,7 @@ func TestRoutineRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_routine" {
 		t.Fatalf("expected routine rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -3413,7 +3413,7 @@ func TestRoutineRenameWithMaterializedViewRequiresCompatibilityBridgeOnPostgreSQ
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_routine" {
 		t.Fatalf("expected only routine-rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -3463,7 +3463,7 @@ func TestRoutineReplacementRequiresMaterializedViewRefreshContract(t *testing.T)
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "refresh_materialized_view" {
 		t.Fatalf("expected routine-dependent refresh contract, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{
 		Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "provided",
 		Manual: &protocol.ManualWork{Summary: "refresh cache after changing double_value", ExecutionMode: "transactional", Statements: []string{
 			"REFRESH MATERIALIZED VIEW " + quote(schemaName) + ".doubled_cache;",
@@ -3626,7 +3626,7 @@ func TestRoutineRenameWithDependentTriggerRequiresCompatibilityBridgeOnPostgreSQ
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_routine" {
 		t.Fatalf("expected routine rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -3681,7 +3681,7 @@ func TestTriggerRenameConvergesOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_trigger" {
 		t.Fatalf("expected trigger rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_trigger", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_trigger", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -3769,7 +3769,7 @@ func TestConstraintTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected constraint-trigger rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_trigger", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}},
 	}
 	plan = build(desired, answers)
@@ -3785,7 +3785,7 @@ func TestConstraintTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected constraint-trigger drop confirmation, got %#v", pending)
 	}
 	answers = protocol.Answers{
-		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "drop", Key: pending.Questions[0].Key, Value: "drop"}},
 	}
 	plan = build(desired, answers)
@@ -3929,7 +3929,7 @@ func TestRoutineOverloadsProceduresAndPartitionTriggersConvergeOnPostgreSQL(t *t
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				if question.Kind != "drop" {
 					t.Fatalf("%s unexpected question: %#v", label, question)
@@ -4069,7 +4069,7 @@ func TestViewTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected view-trigger rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_trigger", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}},
 	}
 	plan = build(desired, answers)
@@ -4094,7 +4094,7 @@ func TestViewTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected view-trigger drop confirmation, got %#v", pending)
 	}
 	answers = protocol.Answers{
-		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "drop", Key: pending.Questions[0].Key, Value: "drop"}},
 	}
 	plan = build(desired, answers)
@@ -4190,7 +4190,7 @@ func TestMaterializedViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testin
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_view" {
 		t.Fatalf("expected materialized-view rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -4242,7 +4242,7 @@ func TestMaterializedViewRenameWithDependentRequiresCompatibilityBridgeOnPostgre
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_view" {
 		t.Fatalf("expected direct materialized-view rename question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -4348,7 +4348,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rebuild_materialized_view" {
 		t.Fatalf("expected materialized-view rebuild question, got %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rebuild_materialized_view", Key: pending.Questions[0].Key, Value: "rebuild"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rebuild_materialized_view", Key: pending.Questions[0].Key, Value: "rebuild"}}}
 	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -4377,7 +4377,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "drop" {
 		t.Fatalf("expected materialized-view drop confirmation, got %#v", pending)
 	}
-	answers = protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: pending.Questions[0].Key, Value: "drop"}}}
+	answers = protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: pending.Questions[0].Key, Value: "drop"}}}
 	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -4476,7 +4476,7 @@ func TestMaterializedViewIndexLifecycleConvergesOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				value := ""
 				switch question.Kind {
@@ -4587,7 +4587,7 @@ func TestMaterializedViewDependencyChainsConvergeOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				value := ""
 				switch question.Kind {
@@ -4745,7 +4745,7 @@ func TestExtensionDropConvergesOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
 		t.Fatalf("expected extension-drop confirmation: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: pending.Questions[0].Key, Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: pending.Questions[0].Key, Value: "drop"}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -4840,7 +4840,7 @@ ALTER EXTENSION pg_trgm ADD SCHEMA ext_schema;`
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("dependent extension/table drops must ask: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		if question.Kind != "drop" {
 			t.Fatalf("unexpected extension dependency question: %#v", question)
@@ -5026,7 +5026,7 @@ func TestSequenceParameterUpdateConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatalf("sequence drop must ask: plan=%#v err=%v", pending, err)
 	}
 	question := pending.Questions[0]
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned || !strings.Contains(joinPlan(plan), "DROP SEQUENCE") {
 		t.Fatalf("sequence drop plan=%#v err=%v", plan, err)
@@ -5335,7 +5335,7 @@ func TestTableLifecycleAndPersistenceConvergeOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				if question.Kind != "drop" {
 					t.Fatalf("%s unexpected question: %#v", label, question)
@@ -5445,7 +5445,6 @@ CREATE INDEX orders_age_idx ON "` + schemaName + `".orders (age);`
 	}
 	idID := (pgschema.Column{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "id"}).ObjectID().String()
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
 			{Kind: "set_not_null", Key: idID, Value: "staged"},
@@ -5547,8 +5546,8 @@ func TestTableColumnLifecycleMatrixConvergesOnPostgreSQL(t *testing.T) {
 			if plan.Status != protocol.NeedsInput {
 				break
 			}
-			if answers.ProtocolVersion == "" {
-				answers = protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			if answers.CurrentFingerprint == "" {
+				answers = protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			}
 			for _, question := range plan.Questions {
 				value := ""
@@ -5647,7 +5646,7 @@ func TestTypeMutationProducesEditableExpandContractHandoffOnPostgreSQL(t *testin
 		t.Fatalf("expected type-change decision: %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql"}},
 	}
 	plan, err := buildIntegration(current, desired, answers, Options{})
@@ -5804,7 +5803,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigserial);`
 			t.Fatal(err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				if question.Kind != "set_not_null" {
 					t.Fatalf("unexpected serial transition question: %#v", question)
@@ -6311,7 +6310,7 @@ CREATE UNIQUE INDEX orders_id_key ON "` + schemaName + `".orders (id);`
 		t.Fatalf("expected constraint-drop confirmation: %#v", pending)
 	}
 	constraintID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_id_key"}).ObjectID()
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -6390,7 +6389,7 @@ CREATE TABLE "` + schemaName + `".orders (
 				t.Fatalf("expected primary-key drop confirmation: %#v", pending)
 			}
 			constraintID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_pkey"}).ObjectID()
-			answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
+			answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
 			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
@@ -6544,7 +6543,7 @@ func TestNullsNotDistinctScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 	}
 	oldIndex := pgschema.Index{Table: (pgschema.Table{Schema: schemaName, Name: "person"}).ObjectID(), Name: "person_fourth_idx"}.ObjectID().String()
 	newIndex := pgschema.Index{Table: (pgschema.Table{Schema: schemaName, Name: "person"}).ObjectID(), Name: "person_fourth_renamed"}.ObjectID().String()
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_index", Key: oldIndex, Value: newIndex, QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_index", Key: oldIndex, Value: newIndex, QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
 	plan, err = buildIntegration(current, renamedDesired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned || !strings.Contains(joinPlan(plan), "ALTER INDEX") {
 		t.Fatalf("NULLS NOT DISTINCT index rename plan=%#v err=%v", plan, err)
@@ -6561,7 +6560,7 @@ func TestNullsNotDistinctScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers = protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers = protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		if question.Kind != "drop" {
 			t.Fatalf("unexpected NULLS NOT DISTINCT removal question: %#v", question)
@@ -6809,7 +6808,6 @@ CREATE INDEX orders_new_idx ON "` + schemaName + `".orders (id);`
 	oldID := (pgschema.Index{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_old_idx"}).ObjectID().String()
 	newID := (pgschema.Index{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_new_idx"}).ObjectID().String()
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_index", Key: oldID, Value: newID}},
 	}
@@ -6933,7 +6931,6 @@ CREATE TABLE "` + schemaName + `".keep (id bigint, retained_column text);`
 	oldColumn := (pgschema.Column{Table: keepTable, Name: "old_column"}).ObjectID()
 	oldIndex := (pgschema.Index{Table: keepTable, Name: "keep_old_column_idx"}).ObjectID()
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
 			{Kind: "drop", Key: removeTable.String(), Value: "drop"},
@@ -7007,7 +7004,7 @@ func TestPartitionedTableScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				if question.Kind != "drop" {
 					t.Fatalf("%s unexpected question: %#v", label, question)
@@ -7190,7 +7187,6 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_names_cache AS SELECT name F
 	oldID := (pgschema.Table{Schema: schemaName, Name: "orders_old"}).ObjectID().String()
 	newID := (pgschema.Table{Schema: schemaName, Name: "orders_new"}).ObjectID().String()
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_table", Key: oldID, Value: newID}},
 	}
@@ -7286,7 +7282,7 @@ CREATE INDEX customers_email_idx ON "` + schemaName + `".customers (email);`
 	}
 	from := (pgschema.Table{Schema: schemaName, Name: "accounts"}).ObjectID().String()
 	to := (pgschema.Table{Schema: schemaName, Name: "customers"}).ObjectID().String()
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: from, Value: to}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: from, Value: to}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -7362,7 +7358,6 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_cache AS SELECT new_name AS 
 	oldID := (pgschema.Column{Table: tableID, Name: "old_name"}).ObjectID().String()
 	newID := (pgschema.Column{Table: tableID, Name: "new_name"}).ObjectID().String()
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: oldID, Value: newID}},
 	}
@@ -7418,7 +7413,6 @@ CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, new_name text);
 	oldID := (pgschema.Column{Table: tableID, Name: "old_name"}).ObjectID().String()
 	newID := (pgschema.Column{Table: tableID, Name: "new_name"}).ObjectID().String()
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: oldID, Value: newID}},
 	}
@@ -7563,7 +7557,7 @@ func TestConstraintRenamesConvergeOnPostgreSQL(t *testing.T) {
 				t.Fatalf("expected constraint rename question: %#v", pending)
 			}
 			answers := protocol.Answers{
-				ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+				CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 				Answers: []protocol.Answer{{Kind: "rename_constraint", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}},
 			}
 			plan, err := buildIntegration(current, desired, answers, Options{})
@@ -7652,7 +7646,7 @@ func TestDomainLifecycleConvergesOnPostgreSQL(t *testing.T) {
 					t.Fatalf("expected domain drop confirmation: %#v", plan)
 				}
 				answers := protocol.Answers{
-					ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint,
+					CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint,
 					Answers: []protocol.Answer{{Kind: "drop", Key: plan.Questions[0].Key, Value: "drop"}},
 				}
 				plan, err = buildIntegration(current, desired, answers, Options{})
@@ -7832,7 +7826,7 @@ func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 				t.Fatal(err)
 			}
 			if plan.Status == protocol.NeedsInput {
-				answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+				answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 				for _, question := range plan.Questions {
 					if question.Kind != "composite_cascade" {
 						t.Fatalf("unexpected composite question: %#v", question)
@@ -7891,7 +7885,7 @@ func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: "drop", Key: question.Key, Value: "drop"})
 	}
@@ -7974,7 +7968,7 @@ func TestCompositeTypeDependenciesConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: "drop", Key: question.Key, Value: "drop"})
 	}
@@ -8055,7 +8049,7 @@ func TestTableOwnershipChangesConvergeOnPostgreSQL(t *testing.T) {
 		t.Fatalf("table owner transfer must require authorization: %#v", pending)
 	}
 	question := pending.Questions[0]
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "authorize", QuestionFingerprint: question.ScopeFingerprint}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "authorize", QuestionFingerprint: question.ScopeFingerprint}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -8203,7 +8197,7 @@ func TestGeneratedColumnExpressionChangesConvergeOnPostgreSQL(t *testing.T) {
 			t.Fatal(err)
 		}
 		if approveDrops && plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 			}
@@ -8369,7 +8363,7 @@ func TestRangeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: "drop", Key: question.Key, Value: "drop"})
 	}
@@ -8432,7 +8426,7 @@ CREATE TYPE "` + schemaName + `".state AS ENUM ('open', 'closed');`
 				t.Fatalf("expected enum-drop confirmation: %#v", pending)
 			}
 			enumID := (pgschema.Enum{Schema: schemaName, Name: "state"}).ObjectID()
-			answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: enumID.String(), Value: "drop"}}}
+			answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: enumID.String(), Value: "drop"}}}
 			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
@@ -8643,7 +8637,7 @@ func TestEnumRewriteConvergesOnPostgreSQL(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 3 {
 		t.Fatalf("enum rewrites must require three confirmations: %#v", pending)
 	}
-	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "rewrite", QuestionFingerprint: question.ScopeFingerprint})
 	}
@@ -8727,7 +8721,7 @@ func TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL(t *testing.T) {
 				t.Fatalf("enum rewrite did not request confirmation: %#v", pending)
 			}
 			question := pending.Questions[0]
-			answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "rewrite", QuestionFingerprint: question.ScopeFingerprint}}}
+			answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "rewrite", QuestionFingerprint: question.ScopeFingerprint}}}
 			plan, err := buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
@@ -8941,7 +8935,6 @@ CREATE TABLE "` + schemaName + `".orders (state "` + schemaName + `".new_state N
 	oldID := (pgschema.Enum{Schema: schemaName, Name: "old_state"}).ObjectID().String()
 	newID := (pgschema.Enum{Schema: schemaName, Name: "new_state"}).ObjectID().String()
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_enum", Key: oldID, Value: newID}},
 	}
@@ -9027,7 +9020,7 @@ ALTER TABLE "` + schemaName + `".orders ADD CONSTRAINT orders_value_positive CHE
 		t.Fatalf("expected check-drop confirmation: %#v", pending)
 	}
 	constraintID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_value_positive"}).ObjectID()
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -9257,7 +9250,7 @@ ALTER TABLE "` + schemaName + `".bookings ADD CONSTRAINT bookings_period_excl EX
 			}
 			question := pending.Questions[0]
 			answers := protocol.Answers{
-				ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+				CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 				Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "manual_sql", QuestionFingerprint: question.ScopeFingerprint}},
 			}
 			manualPending, buildErr := buildIntegration(current, desired, answers, Options{})
@@ -9285,7 +9278,7 @@ ALTER TABLE "` + schemaName + `".bookings ADD CONSTRAINT bookings_period_excl EX
 				t.Fatalf("expected exclusion-drop confirmation: %#v", pending)
 			}
 			constraintID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "bookings"}).ObjectID(), Name: "bookings_period_excl"}).ObjectID()
-			answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
+			answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
 			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
@@ -9395,7 +9388,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, account_id bigi
 		t.Fatalf("expected foreign-key drop confirmation: %#v", pending)
 	}
 	foreignKeyID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_account_id_fkey"}).ObjectID()
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: foreignKeyID.String(), Value: "drop"}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: foreignKeyID.String(), Value: "drop"}}}
 	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -9516,7 +9509,7 @@ func TestForeignKeyDropOrderingScenarioMatrixConvergesOnPostgreSQL(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+		answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 		for _, question := range pending.Questions {
 			if question.Kind != "drop" {
 				t.Fatalf("%s unexpected question: %#v", label, question)
@@ -9696,7 +9689,6 @@ ALTER TABLE "` + schemaName + `".person ADD CONSTRAINT person_team_fkey FOREIGN 
 				t.Fatalf("temporal reconciliation stopped without executable questions: %#v", result)
 			}
 			if answers.CurrentFingerprint == "" {
-				answers.ProtocolVersion = protocol.Version
 				answers.CurrentFingerprint = result.CurrentFingerprint
 				answers.DesiredFingerprint = result.DesiredFingerprint
 			}
@@ -9777,7 +9769,7 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_constraint" {
 		t.Fatalf("temporal unique rename must ask: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_constraint", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_constraint", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
 	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("temporal unique rename plan=%#v err=%v", plan, err)
@@ -9801,7 +9793,7 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("temporal drops must ask: plan=%#v err=%v", pending, err)
 	}
-	answers = protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers = protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		if question.Kind != "drop" {
 			t.Fatalf("unexpected temporal-drop question: %#v", question)
@@ -9866,7 +9858,7 @@ func TestSequenceOwnedByTransitionsConvergeOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				value := ""
 				switch question.Kind {
@@ -10028,7 +10020,7 @@ CREATE TABLE "` + schemaName + `".items (
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "drop_identity" {
 		t.Fatalf("identity drop must ask explicit intent: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop_identity", Key: pending.Questions[0].Key, Value: "drop", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop_identity", Key: pending.Questions[0].Key, Value: "drop", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
 	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned || strings.Index(joinPlan(plan), "DROP IDENTITY") > strings.Index(joinPlan(plan), "SET DEFAULT 9") {
 		t.Fatalf("identity-drop plan=%#v err=%v", plan, err)
@@ -10084,7 +10076,7 @@ func TestIdentityAndSerialScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
 		if plan.Status == protocol.NeedsInput {
-			answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+			answers := protocol.Answers{CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
 			for _, question := range plan.Questions {
 				value := ""
 				switch question.Kind {
@@ -10246,7 +10238,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("authorization contraction must ask: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	answerValues := map[string]string{"alter_policy": "alter", "relax_row_security": "relax", "revoke_grant_option": "revoke", "drop": "drop"}
 	for _, question := range pending.Questions {
 		value, exists := answerValues[question.Kind]
@@ -10281,7 +10273,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 		t.Fatalf("authorization tightening must ask for policy intent: plan=%#v err=%v", pending, err)
 	}
 	answers = protocol.Answers{
-		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "alter", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
 	}
 	plan, err = buildIntegration(current, desired, answers, Options{})
@@ -10309,7 +10301,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("RLS removal must ask: plan=%#v err=%v", pending, err)
 	}
-	answers = protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers = protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		if question.Kind != "drop" {
 			t.Fatalf("unexpected RLS-removal question: %#v", question)

@@ -158,7 +158,9 @@ accepted bundles ── replay in PostgreSQL ───────────�
 
 developer database ── read-only catalog inspection ───────── D (local reality)
 
-production ── explicit read-only drift audit only ────────── P (deployed reality)
+verified selected bundle through expand ─────────────────── E (post-expand checkpoint)
+
+production ── explicit read-only observation ────────────── P (deployed reality)
 
 accepted history + selected bundle ── disposable replay ──── V (verification)
 ```
@@ -170,7 +172,8 @@ These states are not interchangeable:
 | **W — working** | What schema does this checkout declare now? | Framework DDL is executed in disposable PostgreSQL and catalog-inspected. |
 | **H — history** | What will a clean environment have before this feature? | Accepted onwardpg bundles are replayed from their content-addressed chain. |
 | **D — development** | What has this developer already applied locally? | Inspected read-only and reconciled separately for convenience. |
-| **P — production** | Did deployed reality drift from accepted history? | Consulted only by explicit `drift check`, never as permission to generate a PR migration. |
+| **E — expand checkpoint** | What catalog did verified expand produce? | Receipted by `verify` as the expected live catalog before contract. |
+| **P — production** | Does deployed reality match its declared stage? | Explicit `drift check` compares P with H; `contract check` compares P with E and evaluates gates. Neither authorizes migration generation. |
 | **V — verification** | Do the exact bundle bytes replay and converge? | Independent disposable clones execute the prefix and full continuation. |
 
 Here is the first “a-ha”: the durable PR migration is always **H → W**. A developer database cannot accidentally become migration history, and production state cannot silently authorize a repair.
@@ -189,10 +192,14 @@ D → W   direct local reconciliation printed for the developer
 JSON output keeps both reports in separate fields. `onwardpg plan --output sql` prints only the D → W SQL so you may choose to pipe it to your local database:
 
 ```sh
-onwardpg plan --output sql | psql "$ONWARDPG_DEV_DATABASE_URL"
+onwardpg plan --output sql | psql "$ONWARDPG_DEV_WRITE_URL"
 ```
 
-onwardpg itself still applies nothing to D, P, staging, or production.
+`ONWARDPG_DEV_DATABASE_URL`, the inspection credential configured by
+`dev_database_env`, may remain read-only. The separate
+`ONWARDPG_DEV_WRITE_URL` is an optional developer-controlled credential for
+applying reviewed local SQL. onwardpg itself still applies nothing to D, P,
+staging, or production.
 
 When D → W has safe statements, ordinary JSON output also adds a
 `workspace_fast_forward` next action containing the SQL and exact argv. After a

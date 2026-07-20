@@ -28,7 +28,7 @@ worktree-local active-plan anchor and a durable bundle. Subsequent `plan`
 calls replace that same bundle: there is no finalize state and no accumulating
 series of speculative feature migrations.
 
-## Four states, two comparisons
+## Schema authorities and their comparisons
 
 An agent should keep these states separate:
 
@@ -37,7 +37,9 @@ An agent should keep these states separate:
 | H | accepted onwardpg history replayed in a disposable database | strict | the PR migration, H → W |
 | W | DDL exported from the working declarative schema | intended | migration destination |
 | D | a long-lived developer database | convenience only | direct local reconciliation, D → W |
-| P | production | optional observed evidence | periodic drift check |
+| E | verified post-expand checkpoint for the selected bundle | receipted artifact evidence | contract-readiness expectation, P → E |
+| P | production | optional observed evidence | drift against H and contract readiness against E |
+| V | independent disposable verification replays | artifact evidence | exact bundle convergence to W |
 
 The durable bundle is always H → W. This is the SQL reviewed and applied by
 the team’s existing deployment process before compatible application code.
@@ -60,8 +62,9 @@ inherits a development-only rename.
 
 Production is deliberately outside planning and clone verification. Run
 `onwardpg drift check --database "$PROD_URL"` periodically or
-after an incident; resolve a finding with a reviewed forward migration. After
-expand and deployment, use `onwardpg contract check` for the separate live
+after an incident to compare P with H; resolve a finding with a reviewed forward
+migration. After expand and deployment, use `onwardpg contract check` to compare
+P with the verified post-expand checkpoint E and enforce the separate live
 catalog, data-gate, and writer-evidence boundary before contract.
 
 ## Decision loop
@@ -191,7 +194,7 @@ still present. This is filesystem-local ergonomics, not Git-derived proof.
 | 4 | history, receipt, stale-parent, residual, or clone blocker | repair the evidence before proceeding |
 | 1 | invocation/environment error | fix configuration, DDL, or credentials |
 
-All machine output is versioned JSON by default. `--output sql` is intentionally
+All machine output is status-oriented JSON by default. `--output sql` is intentionally
 reserved for copyable D → W development SQL; diagnostic JSON remains on stderr
 when planning is incomplete. See [CLI reference](cli.md) and
 [migration workflow](migration-workflow.md) for command details.

@@ -89,7 +89,7 @@ func TestPinnedStripeColumnMutationRequiresOnwardBridgeWithCompleteChoreography(
 		t.Fatalf("onwardpg column decisions=%#v err=%v", pending, err)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 	}
 	for _, question := range pending.Questions {
 		value := ""
@@ -164,7 +164,7 @@ CREATE UNIQUE INDEX fact_cache_val_idx ON app.fact_cache (val);`
 		t.Fatalf("onwardpg derived closure decision=%#v err=%v", pending, err)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
 	}
 	onward, err := graphplan.Build(current, desired, answers, graphplan.Options{ConcurrentIndexes: true})
@@ -819,7 +819,7 @@ ALTER TABLE public.foobar ADD CONSTRAINT non_default_primary_key PRIMARY KEY USI
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
 		t.Fatalf("onwardpg must ask for the absent cast: plan=%#v err=%v", pending, err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
 	onward, err := graphplan.Build(current, desired, answers, graphplan.Options{ConcurrentIndexes: true})
 	if err != nil || onward.Status != protocol.NeedsSQLEdits ||
 		!hasPhaseTODO(onward, protocol.PhaseExpand) || !hasPhaseTODO(onward, protocol.PhaseContract) {
@@ -1174,7 +1174,7 @@ GRANT SELECT ON TABLE app.orders TO "` + roleName + `";`
 		t.Fatalf("onwardpg authorization plan must require intent: plan=%#v err=%v", pending, err)
 	}
 	values := map[string]string{"alter_policy": "alter", "relax_row_security": "relax", "revoke_grant_option": "revoke", "drop": "drop"}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
 		value, exists := values[question.Kind]
 		if !exists {
@@ -1400,8 +1400,7 @@ func buildOnwardWithAssertions(current, desired *pgschema.Snapshot, options grap
 		if err != nil || result.Status != protocol.NeedsInput {
 			return result, err
 		}
-		if answers.ProtocolVersion == "" {
-			answers.ProtocolVersion = protocol.Version
+		if answers.CurrentFingerprint == "" {
 			answers.CurrentFingerprint = result.CurrentFingerprint
 			answers.DesiredFingerprint = result.DesiredFingerprint
 		}

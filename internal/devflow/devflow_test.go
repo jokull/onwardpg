@@ -11,12 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func TestVersionIsDistinctFromDurableBundleProtocol(t *testing.T) {
-	if Version == "" || Version == "onwardpg.draft/v5" {
-		t.Fatalf("development protocol version = %q", Version)
-	}
-}
-
 func TestValidatePostgresMajors(t *testing.T) {
 	if err := validatePostgresMajors(17, 17); err != nil {
 		t.Fatal(err)

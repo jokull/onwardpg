@@ -1,5 +1,12 @@
 node_modules/
-dist/
 .astro/
+.blume/
+.blume-verify/
+dist/
 .wrangler/
-
+public/.well-known/
+public/agent-readability.json
+public/llms.txt
+public/llms-full.txt
+public/references/
+public/skill.md

@@ -8,8 +8,7 @@ import (
 
 func TestAuthoritativeBaselinePlanDropsStagedContractEvidence(t *testing.T) {
 	inventory := protocol.Result{
-		ProtocolVersion: protocol.Version,
-		Status:          protocol.Planned,
+		Status: protocol.Planned,
 		Statements: []protocol.Statement{{
 			ID: "contract-step", SQL: "SELECT 1;", Safety: "review", Phase: protocol.PhaseContract,
 			RequiresGates: []string{"writers:legacy"},

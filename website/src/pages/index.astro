@@ -1,5 +1,9 @@
 ---
+import PageLayout from 'blume/components/layout/PageLayout.astro';
+import data from 'blume:data';
 import heroImage from '../../../docs/assets/onwardpg.png';
+
+const pageDescription = 'One evolving PostgreSQL migration for one compatibility-safe application deployment.';
 
 const steps = [
   { number: '01', label: 'Expand', detail: 'Add the compatible surface while old code is still live.' },
@@ -15,16 +19,25 @@ const features = [
 ];
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width" />
-    <meta name="description" content="One evolving PostgreSQL migration for one compatibility-safe application deployment." />
-    <link rel="icon" href="/favicon.svg" />
-    <title>onwardpg — one evolving migration</title>
-  </head>
-  <body>
+<PageLayout
+  site={{ title: data.config.title, description: data.config.description }}
+  logo={data.config.logo}
+  favicon={data.config.favicon}
+  appleIcon={data.config.appleIcon}
+  banner={data.config.banner}
+  analytics={data.config.analytics}
+  navigation={data.navigation}
+  themeMode={data.config.theme.mode}
+  fontCssVars={data.fontCssVars}
+  searchEnabled={data.config.search.enabled}
+  siteUrl={data.config.site}
+  ogEnabled={data.config.og.enabled}
+  page={{
+    title: 'onwardpg — one evolving migration',
+    description: pageDescription,
+    route: '/',
+  }}
+>
     <header class="nav shell">
       <a class="brand" href="/" aria-label="onwardpg home">
         <span class="trail" aria-hidden="true"></span>
@@ -39,7 +52,7 @@ const features = [
       </nav>
     </header>
 
-    <main>
+    <div class="home-content">
       <section class="hero shell">
         <div class="hero-copy">
           <div class="kicker"><span></span> One evolving migration for one rolling deployment</div>
@@ -83,7 +96,8 @@ const features = [
             <article><span>H</span><div><strong>Accepted history</strong><small>Replayed bundle chain</small></div><b>→ W</b></article>
             <article><span>W</span><div><strong>Working intent</strong><small>Exported DDL, ingested by PostgreSQL</small></div><b>durable</b></article>
             <article><span>D</span><div><strong>Development reality</strong><small>Read-only local catalog</small></div><b>→ W</b></article>
-            <article><span>P</span><div><strong>Production reality</strong><small>Explicit drift and data evidence</small></div><b>read only</b></article>
+            <article><span>E</span><div><strong>Expand checkpoint</strong><small>Receipted by verification</small></div><b>P → E</b></article>
+            <article><span>P</span><div><strong>Production reality</strong><small>Drift against H; readiness against E</small></div><b>read only</b></article>
             <article><span>V</span><div><strong>Verification</strong><small>Independent disposable replays</small></div><b>evidence</b></article>
           </div>
 
@@ -135,21 +149,17 @@ const features = [
 
       <section class="proof">
         <div class="shell proof-grid">
-          <div class="terminal" aria-label="Abridged actual onwardpg plan output">
+          <div class="terminal" aria-label="Abridged projections of actual onwardpg plan output">
             <div class="terminal-bar"><span></span><span></span><span></span><small>add-booking-status / plan</small></div>
             <pre><code><span class="muted">$</span> onwardpg plan add-booking-status
 
-<span class="muted">&#123;"protocol_version":"onwardpg.plan/v5",</span>
-<span class="warn"> "status":"needs_input",</span>
-<span class="muted"> "choices":["assert_only","manual_sql","split_plan"]&#125;</span>
+<span class="warn">&#123;"status":"needs_action","durable":&#123;"status":"needs_input","generated_plan":&#123;"questions":[&#123;"choices":["assert_only","manual_sql","split_plan"]&#125;]&#125;&#125;&#125;</span>
 
 <span class="muted">$</span> onwardpg plan add-booking-status \
   --hint '&#123;"kind":"reconcile","object":"column","name":["app","bookings","status"],"strategy":"manual_sql"&#125;' \
   --hint '&#123;"kind":"manual_sql","action":"reconcile_contract_sql","object":"column","name":["app","bookings","status"]&#125;'
 
-<span class="muted">&#123;"protocol_version":"onwardpg.plan/v5",</span>
-<span class="warn"> "status":"needs_sql_edits",</span>
-<span class="muted"> "durable":&#123;"edit_files":["phases/contract.sql"]&#125;&#125;</span>
+<span class="warn">&#123;"status":"needs_action","durable":&#123;"status":"needs_sql_edits","edit_files":["phases/contract.sql"]&#125;&#125;</span>
 
 <span class="phase">EXPAND</span>
   ALTER TABLE "app"."bookings" ADD COLUMN "status" text;
@@ -162,7 +172,7 @@ const features = [
   DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:1c16b884027de910'; END IF; END $onwardpg$;
   ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
 
-<span class="muted">abridged from the checked black-box CLI receipt</span></code></pre>
+<span class="muted">abridged projections from the checked black-box CLI receipt</span></code></pre>
           </div>
           <div class="proof-copy">
             <p class="section-label">Trust the evolving artifact</p>
@@ -241,9 +251,9 @@ const features = [
           </div>
         </div>
       </section>
-    </main>
+    </div>
 
-    <footer class="shell">
+    <footer class="shell" slot="footer">
       <a class="brand" href="/"><span class="trail" aria-hidden="true"></span><span>onwardpg</span></a>
       <p>Plan the compatibility window. PostgreSQL 15–18.</p>
       <div><a href="/reference/safety/">Safety</a><a href="https://github.com/jokull/onwardpg">GitHub</a></div>
@@ -259,23 +269,23 @@ const features = [
         });
       });
     </script>
-  </body>
-</html>
+</PageLayout>
 
 <style>
   :global(*) { box-sizing: border-box; }
   :global(html) { scroll-behavior: smooth; }
   :global(body) { margin: 0; overflow-x: clip; color: #26312c; background: #f8f3e7; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  :global([data-blume-header]) { display: none; }
   :global(a) { color: inherit; }
   .shell { width: min(1180px, calc(100% - 48px)); margin-inline: auto; }
   .nav { height: 82px; display: flex; align-items: center; justify-content: space-between; }
   .brand { display: inline-flex; align-items: center; gap: 10px; font: 700 20px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: -1px; text-decoration: none; }
   .trail { width: 27px; height: 24px; display: inline-block; border: solid #63705f; border-width: 0 0 3px 3px; border-radius: 0 0 0 16px; transform: skew(-24deg); position: relative; }
   .trail::after { content: ''; position: absolute; width: 17px; height: 13px; border: solid #63705f; border-width: 0 0 2px 2px; border-radius: 0 0 0 12px; left: 6px; top: 4px; }
-  nav { display: flex; align-items: center; gap: 28px; font-size: 14px; }
-  nav a { text-decoration: none; color: #4f5852; }
-  nav a:hover { color: #17201b; }
-  nav .github { padding-left: 27px; border-left: 1px solid #d6cdb9; color: #26312c; font-weight: 650; }
+  .nav nav { display: flex; align-items: center; gap: 28px; font-size: 14px; }
+  .nav nav a { text-decoration: none; color: #4f5852; }
+  .nav nav a:hover { color: #17201b; }
+  .nav nav .github { padding-left: 27px; border-left: 1px solid #d6cdb9; color: #26312c; font-weight: 650; }
   .hero { min-height: 690px; display: grid; grid-template-columns: .92fr 1.08fr; gap: 58px; align-items: center; padding-block: 52px 80px; }
   .hero-copy { min-width: 0; padding-top: 8px; position: relative; z-index: 1; }
   .kicker, .section-label, .eyebrow { color: #66705f; font: 700 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; }

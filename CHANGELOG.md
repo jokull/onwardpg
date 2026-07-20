@@ -131,8 +131,8 @@ development, staging, or production database.
   operating model.
 - Generated-only bundles fully absorbed by incoming accepted history are
   removed with an explicit `absorbed` result instead of leaving empty entries.
-- All command envelopes use consistently named `protocol_version` and `status`
-  values; decision handoffs include a stable `next_action`, written paths and
+- All command envelopes use status-oriented JSON without speculative protocol
+  versions; decision handoffs include a stable `next_action`, written paths and
   shell-safe grouped choices. Help exits successfully, invocation errors are
   machine-clean, and history-chain blockers consistently exit 4.
 - `dev plan` reports an explicit `no_changes` result. Partial clone verification

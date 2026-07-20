@@ -13,10 +13,6 @@ import (
 	"github.com/jokull/onwardpg/internal/bundle"
 )
 
-const Version = "onwardpg.history/v1"
-
-const StatusVersion = "onwardpg.history-status/v2"
-
 var phaseOrder = []string{"expand", "contract"}
 
 type Entry struct {
@@ -61,15 +57,14 @@ type StatusFinding struct {
 }
 
 type StatusReport struct {
-	ProtocolVersion string          `json:"protocol_version"`
-	Status          string          `json:"status"`
-	Target          string          `json:"target"`
-	HistoryHead     string          `json:"history_head"`
-	HeadBundle      string          `json:"head_bundle,omitempty"`
-	HeadRef         string          `json:"head_ref,omitempty"`
-	Entries         []StatusEntry   `json:"entries,omitempty"`
-	Selected        *SelectedStatus `json:"selected,omitempty"`
-	Findings        []StatusFinding `json:"findings,omitempty"`
+	Status      string          `json:"status"`
+	Target      string          `json:"target"`
+	HistoryHead string          `json:"history_head"`
+	HeadBundle  string          `json:"head_bundle,omitempty"`
+	HeadRef     string          `json:"head_ref,omitempty"`
+	Entries     []StatusEntry   `json:"entries,omitempty"`
+	Selected    *SelectedStatus `json:"selected,omitempty"`
+	Findings    []StatusFinding `json:"findings,omitempty"`
 }
 
 // Inspect returns the repository-local hash-chain state without consulting
@@ -81,7 +76,7 @@ type StatusReport struct {
 // recovery path when the complete history is invalid because the selected
 // mutable bundle forms a stale fork.
 func Inspect(root, bundleRoot, target, selectedBundle string) (StatusReport, error) {
-	report := StatusReport{ProtocolVersion: StatusVersion, Status: "valid", Target: target}
+	report := StatusReport{Status: "valid", Target: target}
 	var (
 		chain           Chain
 		selected        *Entry

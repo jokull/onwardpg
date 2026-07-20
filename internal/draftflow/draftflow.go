@@ -25,8 +25,6 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg.draft/v5"
-
 type Finding struct {
 	Code        string `json:"code"`
 	Message     string `json:"message"`
@@ -58,7 +56,6 @@ type DevelopmentPostcondition struct {
 }
 
 type Report struct {
-	ProtocolVersion           string                     `json:"protocol_version"`
 	Outcome                   string                     `json:"status"`
 	Target                    string                     `json:"target"`
 	BundleID                  string                     `json:"bundle_id"`
@@ -126,11 +123,10 @@ type Input struct {
 // in disposable databases created through AdminURL.
 func Run(ctx context.Context, input Input) (Report, error) {
 	report := Report{
-		ProtocolVersion: Version,
-		Outcome:         "error",
-		Target:          input.TargetName,
-		BundleID:        input.BundleID,
-		PlanID:          input.PlanID,
+		Outcome:  "error",
+		Target:   input.TargetName,
+		BundleID: input.BundleID,
+		PlanID:   input.PlanID,
 	}
 	if input.Root == "" || !filepath.IsAbs(input.Root) {
 		return report, fmt.Errorf("draft root must be absolute")
@@ -912,7 +908,7 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 		used[index] = true
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint,
+		CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint,
 	}
 	if receipt != nil {
 		answers = *receipt
@@ -1078,7 +1074,7 @@ func buildWithReboundAnswers(current, desired *pgschema.Snapshot, previous proto
 		}
 		remaining[id] = answer
 	}
-	report := protocol.RebindReport{ProtocolVersion: protocol.RebindVersion}
+	report := protocol.RebindReport{}
 	var carried protocol.Answers
 	var questions []protocol.Question
 	for iteration := 0; iteration <= len(previous.Answers); iteration++ {
@@ -1086,7 +1082,6 @@ func buildWithReboundAnswers(current, desired *pgschema.Snapshot, previous proto
 		if err != nil {
 			return protocol.Result{}, nil, nil, nil, err
 		}
-		carried.ProtocolVersion = protocol.Version
 		carried.CurrentFingerprint = plan.CurrentFingerprint
 		carried.DesiredFingerprint = plan.DesiredFingerprint
 		questions = mergeQuestions(questions, plan.Questions)
@@ -1097,7 +1092,6 @@ func buildWithReboundAnswers(current, desired *pgschema.Snapshot, previous proto
 		}
 
 		candidates := protocol.Answers{
-			ProtocolVersion:    previous.ProtocolVersion,
 			CurrentFingerprint: previous.CurrentFingerprint,
 			DesiredFingerprint: previous.DesiredFingerprint,
 		}

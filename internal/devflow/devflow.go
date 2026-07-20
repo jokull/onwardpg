@@ -48,17 +48,14 @@ type PostconditionResult struct {
 }
 
 type Report struct {
-	ProtocolVersion string                `json:"protocol_version"`
-	Status          protocol.Status       `json:"status"`
-	NextAction      string                `json:"next_action,omitempty"`
-	Result          protocol.Result       `json:"result"`
-	Decisions       []protocol.Decision   `json:"decisions,omitempty"`
-	AppliedHints    []protocol.Hint       `json:"applied_hints,omitempty"`
-	DeferredHints   []protocol.Hint       `json:"deferred_hints,omitempty"`
-	Postconditions  []PostconditionResult `json:"accepted_postconditions,omitempty"`
+	Status         protocol.Status       `json:"status"`
+	NextAction     string                `json:"next_action,omitempty"`
+	Result         protocol.Result       `json:"result"`
+	Decisions      []protocol.Decision   `json:"decisions,omitempty"`
+	AppliedHints   []protocol.Hint       `json:"applied_hints,omitempty"`
+	DeferredHints  []protocol.Hint       `json:"deferred_hints,omitempty"`
+	Postconditions []PostconditionResult `json:"accepted_postconditions,omitempty"`
 }
-
-const Version = "onwardpg.dev-plan/v5"
 
 func Run(ctx context.Context, input Input) (Report, error) {
 	if input.Root == "" {
@@ -101,7 +98,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return Report{}, fmt.Errorf("plan development reconciliation: %w", err)
 	}
 	report := Report{
-		ProtocolVersion: Version, Status: resolution.Result.Status, Result: resolution.Result,
+		Status: resolution.Result.Status, Result: resolution.Result,
 		AppliedHints: resolution.Hints, DeferredHints: resolution.Deferred,
 	}
 	if report.Status == protocol.NeedsInput {

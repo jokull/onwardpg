@@ -1194,7 +1194,6 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		t.Fatalf("pending draft exit = %d, stdout = %s", pendingOutput.code, pendingOutput.stdout)
 	}
 	var pending struct {
-		ProtocolVersion string              `json:"protocol_version"`
 		Status          string              `json:"status"`
 		NextAction      string              `json:"next_action"`
 		Path            string              `json:"path"`
@@ -1204,7 +1203,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending.ProtocolVersion != draftflow.Version || pending.Status != "needs_decisions" || pending.NextAction != "rerun_without_create_with_hints" || pending.Path == "" || len(pending.WrittenReceipts) == 0 || len(pending.Decisions) == 0 {
+	if pending.Status != "needs_decisions" || pending.NextAction != "rerun_without_create_with_hints" || pending.Path == "" || len(pending.WrittenReceipts) == 0 || len(pending.Decisions) == 0 {
 		t.Fatalf("pending draft = %#v", pending)
 	}
 	var renameHint *protocol.Hint
@@ -1635,15 +1634,14 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		t.Fatalf("manual draft exit = %d, stdout = %s", drafted.code, drafted.stdout)
 	}
 	var handoff struct {
-		ProtocolVersion string   `json:"protocol_version"`
-		Status          string   `json:"status"`
-		Path            string   `json:"path"`
-		Edit            []string `json:"edit"`
+		Status string   `json:"status"`
+		Path   string   `json:"path"`
+		Edit   []string `json:"edit"`
 	}
 	if err := json.Unmarshal([]byte(drafted.stdout), &handoff); err != nil {
 		t.Fatal(err)
 	}
-	if handoff.ProtocolVersion != draftflow.Version || handoff.Status != string(protocol.NeedsSQLEdits) || !reflect.DeepEqual(handoff.Edit, []string{"phases/contract.sql", "phases/expand.sql"}) {
+	if handoff.Status != string(protocol.NeedsSQLEdits) || !reflect.DeepEqual(handoff.Edit, []string{"phases/contract.sql", "phases/expand.sql"}) {
 		t.Fatalf("handoff = %#v", handoff)
 	}
 	bundlePath := filepath.Join(repository, filepath.FromSlash(handoff.Path))
@@ -1732,7 +1730,7 @@ dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := json.Unmarshal([]byte(output.stdout), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.ProtocolVersion != historyinit.Version || report.Outcome != "initialized" || report.BundleID != "ground-floor" || report.Verification == nil || report.Verification.Outcome != "verified" {
+	if report.Outcome != "initialized" || report.BundleID != "ground-floor" || report.Verification == nil || report.Verification.Outcome != "verified" {
 		t.Fatalf("history init report = %#v", report)
 	}
 	chain, err := history.Load(repository, "onward-bundles", "primary")
@@ -1841,9 +1839,8 @@ scratch_database_env = "ONWARDPG_CONFIG_CHECK_URL"
 		t.Fatalf("config check exit = %d, stdout = %s", output.code, output.stdout)
 	}
 	var report struct {
-		ProtocolVersion string `json:"protocol_version"`
-		Status          string `json:"status"`
-		Targets         []struct {
+		Status  string `json:"status"`
+		Targets []struct {
 			Name                 string `json:"name"`
 			Provenance           string `json:"provenance"`
 			Fingerprint          string `json:"fingerprint"`
@@ -1855,7 +1852,7 @@ scratch_database_env = "ONWARDPG_CONFIG_CHECK_URL"
 	if err := json.Unmarshal([]byte(output.stdout), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.ProtocolVersion != "onwardpg.config-check/v3" || report.Status != "valid" || len(report.Targets) != 1 {
+	if report.Status != "valid" || len(report.Targets) != 1 {
 		t.Fatalf("config check report = %#v", report)
 	}
 	target := report.Targets[0]
@@ -1919,14 +1916,13 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 		t.Fatalf("pending exit = %d, stdout = %s", pendingOutput.code, pendingOutput.stdout)
 	}
 	var pending struct {
-		ProtocolVersion string              `json:"protocol_version"`
-		Status          string              `json:"status"`
-		Decisions       []protocol.Decision `json:"decisions"`
+		Status    string              `json:"status"`
+		Decisions []protocol.Decision `json:"decisions"`
 	}
 	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending.ProtocolVersion != "onwardpg.dev-plan/v5" || pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
+	if pending.Status != "needs_decisions" || len(pending.Decisions) != 1 {
 		t.Fatalf("pending = %#v", pending)
 	}
 	var renameHint *protocol.Hint
@@ -1953,7 +1949,7 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 	if err := json.Unmarshal([]byte(plannedOutput.stdout), &planned); err != nil {
 		t.Fatal(err)
 	}
-	if planned.ProtocolVersion != "onwardpg.dev-plan/v5" || planned.Status != protocol.Planned || len(planned.Statements) != 3 || planned.Statements[0].Phase != protocol.PhaseExpand || planned.Statements[1].Phase != protocol.PhaseContract {
+	if planned.Status != protocol.Planned || len(planned.Statements) != 3 || planned.Statements[0].Phase != protocol.PhaseExpand || planned.Statements[1].Phase != protocol.PhaseContract {
 		t.Fatalf("planned = %#v", planned)
 	}
 	var oldExists, newExists bool
@@ -1975,7 +1971,6 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 		t.Fatalf("residual exit = %d, stdout = %s", residualOutput.code, residualOutput.stdout)
 	}
 	var residual struct {
-		ProtocolVersion    string `json:"protocol_version"`
 		Status             string `json:"status"`
 		Changed            bool   `json:"changed"`
 		CurrentFingerprint string `json:"current_fingerprint"`
@@ -1984,7 +1979,7 @@ dev_database_env = "ONWARDPG_DEV_TEST_URL"
 	if err := json.Unmarshal([]byte(residualOutput.stdout), &residual); err != nil {
 		t.Fatal(err)
 	}
-	if residual.ProtocolVersion != "onwardpg.dev-plan/v5" || residual.Status != "no_changes" || residual.Changed || residual.CurrentFingerprint != residual.DesiredFingerprint {
+	if residual.Status != "no_changes" || residual.Changed || residual.CurrentFingerprint != residual.DesiredFingerprint {
 		t.Fatalf("residual = %#v", residual)
 	}
 }
@@ -2040,7 +2035,7 @@ dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := json.Unmarshal([]byte(full.stdout), &fullReport); err != nil {
 		t.Fatal(err)
 	}
-	if fullReport.ProtocolVersion != verify.Version || fullReport.Outcome != "verified" || fullReport.ObservedFingerprint != fullReport.DesiredFingerprint || fullReport.Residual == nil || len(fullReport.Residual.Statements) != 0 || !reflect.DeepEqual(fullReport.VerifiedAssertions, []string{"obsolete_removed"}) || len(fullReport.ContinuationAssertions) != 0 {
+	if fullReport.Outcome != "verified" || fullReport.ObservedFingerprint != fullReport.DesiredFingerprint || fullReport.Residual == nil || len(fullReport.Residual.Statements) != 0 || !reflect.DeepEqual(fullReport.VerifiedAssertions, []string{"obsolete_removed"}) || len(fullReport.ContinuationAssertions) != 0 {
 		t.Fatalf("full report = %#v", fullReport)
 	}
 	if after := disposableDatabaseCount(t, url); after != before {
@@ -2273,7 +2268,7 @@ func writeHistoryContractDropFixture(t *testing.T, root, devURL, id string) {
 		t.Fatalf("drop planning did not ask for destructive intent: %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint,
 		DesiredFingerprint: pending.DesiredFingerprint,
 	}
 	for _, question := range pending.Questions {

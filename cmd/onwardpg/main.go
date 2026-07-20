@@ -143,11 +143,17 @@ func run() int {
 		_, _ = fmt.Fprintln(os.Stdout, rootUsage)
 		return 0
 	case "version", "--version":
+		if os.Args[1] == "version" && helpRequested(os.Args[2:]) {
+			_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg version")
+			return 0
+		}
+		if os.Args[1] == "version" && len(os.Args) > 2 {
+			return writeError("invalid_invocation", errors.New("version does not accept arguments"))
+		}
 		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			ProtocolVersion string        `json:"protocol_version"`
-			Status          string        `json:"status"`
-			Build           buildIdentity `json:"build"`
-		}{ProtocolVersion: "onwardpg.version/v1", Status: "ok", Build: currentBuildIdentity()})
+			Status string        `json:"status"`
+			Build  buildIdentity `json:"build"`
+		}{Status: "ok", Build: currentBuildIdentity()})
 		return 0
 	case "init":
 		return runInit(os.Args[2:])
@@ -158,7 +164,7 @@ func run() int {
 	case "plan":
 		return runPlan(os.Args[2:])
 	case "diff":
-		return runLowLevelPlan(os.Args[2:])
+		return runLowLevelPlan("diff", os.Args[2:])
 	case "dev":
 		return runDev(os.Args[2:])
 	case "draft":
@@ -193,11 +199,12 @@ func runVerifyAt(arguments []string, start string) int {
 func runHistoryStatus(arguments []string) int { return runHistoryStatusAt(arguments, ".") }
 
 func runStatusAt(arguments []string, start string) int {
-	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg status [--target NAME]")
-		return 0
-	}
+	arguments = normalizeHelpAlias(arguments)
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+	flags.Usage = func() {
+		_, _ = fmt.Fprintln(flags.Output(), "Usage: onwardpg status [options]")
+		flags.PrintDefaults()
+	}
 	targetName := flags.String("target", "", "configured database target name")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
 	if help, err := parseFlagSet(flags, arguments); help {
@@ -234,23 +241,21 @@ func runStatusAt(arguments []string, start string) int {
 			status = "parked"
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			ProtocolVersion string                 `json:"protocol_version"`
-			Status          string                 `json:"status"`
-			Target          string                 `json:"target"`
-			Parked          []activeplan.SavedPlan `json:"parked,omitempty"`
-		}{ProtocolVersion: "onwardpg.status/v1", Status: status, Target: *targetName, Parked: anchor.Parked})
+			Status string                 `json:"status"`
+			Target string                 `json:"target"`
+			Parked []activeplan.SavedPlan `json:"parked,omitempty"`
+		}{Status: status, Target: *targetName, Parked: anchor.Parked})
 		return 0
 	}
 	historyStatus, err := history.Inspect(root, config.BundleRoot, *targetName, anchor.BundleID)
 	if err != nil {
 		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			ProtocolVersion string                  `json:"protocol_version"`
-			Status          string                  `json:"status"`
-			Target          string                  `json:"target"`
-			Plan            activeplan.Anchor       `json:"plan"`
-			Findings        []history.StatusFinding `json:"findings"`
+			Status   string                  `json:"status"`
+			Target   string                  `json:"target"`
+			Plan     activeplan.Anchor       `json:"plan"`
+			Findings []history.StatusFinding `json:"findings"`
 		}{
-			ProtocolVersion: "onwardpg.status/v1", Status: "blocked", Target: *targetName, Plan: anchor,
+			Status: "blocked", Target: *targetName, Plan: anchor,
 			Findings: []history.StatusFinding{{Code: "invalid_history", Message: err.Error(), Remediation: "restore one replayable accepted chain, then run onwardpg plan"}},
 		})
 		return 4
@@ -274,14 +279,13 @@ func runStatusAt(arguments []string, start string) int {
 		}
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(struct {
-		ProtocolVersion string               `json:"protocol_version"`
-		Status          string               `json:"status"`
-		Verification    string               `json:"verification"`
-		Target          string               `json:"target"`
-		Plan            activeplan.Anchor    `json:"plan"`
-		History         history.StatusReport `json:"history"`
+		Status       string               `json:"status"`
+		Verification string               `json:"verification"`
+		Target       string               `json:"target"`
+		Plan         activeplan.Anchor    `json:"plan"`
+		History      history.StatusReport `json:"history"`
 	}{
-		ProtocolVersion: "onwardpg.status/v1", Status: authoringState, Verification: verificationState, Target: *targetName, Plan: anchor, History: historyStatus,
+		Status: authoringState, Verification: verificationState, Target: *targetName, Plan: anchor, History: historyStatus,
 	})
 	if authoringState == "active" || authoringState == "merge_ready" || authoringState == "absent" {
 		return 0
@@ -327,7 +331,7 @@ func runHistoryStatusAt(arguments []string, start string) int {
 	report, err := history.Inspect(filepath.Dir(configPath), config.BundleRoot, *targetName, *bundleID)
 	if err != nil {
 		_ = json.NewEncoder(os.Stdout).Encode(history.StatusReport{
-			ProtocolVersion: history.StatusVersion, Status: "blocked", Target: *targetName,
+			Status: "blocked", Target: *targetName,
 			Findings: []history.StatusFinding{{
 				Code: "invalid_history", Message: err.Error(),
 				Remediation: "restore one complete hash-chained target history before drafting or verifying",
@@ -685,7 +689,7 @@ func runDevAt(arguments []string, start string) int {
 				outputErr = writeGuidanceText(os.Stdout, result.Guidance)
 			}
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, devflow.Version, []string{"onwardpg", "dev", "plan"}, "--hint", report.Decisions, result.Analysis, result.Guidance)
+			outputErr = writeDecisionEnvelope(os.Stdout, []string{"onwardpg", "dev", "plan"}, "--hint", report.Decisions, result.Analysis, result.Guidance)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -711,21 +715,18 @@ func runDevAt(arguments []string, start string) int {
 	} else {
 		if result.Status == protocol.Planned && len(result.Statements) == 0 {
 			_ = json.NewEncoder(os.Stdout).Encode(struct {
-				ProtocolVersion    string   `json:"protocol_version"`
 				Status             string   `json:"status"`
 				Changed            bool     `json:"changed"`
 				CurrentFingerprint string   `json:"current_fingerprint"`
 				DesiredFingerprint string   `json:"desired_fingerprint"`
 				Preserved          []string `json:"preserved,omitempty"`
 			}{
-				ProtocolVersion: devflow.Version, Status: devNoChangeStatus(result), Changed: false,
+				Status: devNoChangeStatus(result), Changed: false,
 				CurrentFingerprint: result.CurrentFingerprint, DesiredFingerprint: result.DesiredFingerprint,
 				Preserved: result.Preserved,
 			})
 		} else {
-			publicResult := result
-			publicResult.ProtocolVersion = devflow.Version
-			_ = json.NewEncoder(os.Stdout).Encode(publicResult)
+			_ = json.NewEncoder(os.Stdout).Encode(result)
 		}
 	}
 	return resultExitCode(result.Status)
@@ -954,12 +955,11 @@ func runBundleAt(arguments []string, start string) int {
 			head = chain.Entries[len(chain.Entries)-1].Artifact.Manifest.BundleID
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(verify.Report{
-			ProtocolVersion: verify.Version,
-			Outcome:         "blocked",
-			Target:          *targetName,
-			BundleID:        *bundleID,
-			HistoryHead:     chain.HeadDigest,
-			ThroughPhase:    *through,
+			Outcome:      "blocked",
+			Target:       *targetName,
+			BundleID:     *bundleID,
+			HistoryHead:  chain.HeadDigest,
+			ThroughPhase: *through,
 			Findings: []verify.Finding{{
 				Code:        "bundle_not_history_head",
 				Message:     fmt.Sprintf("bundle %q is not the target history head; current head is %q", *bundleID, head),
@@ -1006,7 +1006,6 @@ func runBundleAt(arguments []string, start string) int {
 	}
 	if workingFingerprint != manifest.DesiredSource.Fingerprint {
 		_ = json.NewEncoder(os.Stdout).Encode(verify.Report{
-			ProtocolVersion:    verify.Version,
 			Outcome:            "stale",
 			Target:             *targetName,
 			BundleID:           *bundleID,
@@ -1132,12 +1131,11 @@ func runBundleAt(arguments []string, start string) int {
 
 func writeVerifyFinding(target, bundleID, historyHead, through, outcome, code, message, remediation string) int {
 	_ = json.NewEncoder(os.Stdout).Encode(verify.Report{
-		ProtocolVersion: verify.Version,
-		Outcome:         outcome,
-		Target:          target,
-		BundleID:        bundleID,
-		HistoryHead:     historyHead,
-		ThroughPhase:    through,
+		Outcome:      outcome,
+		Target:       target,
+		BundleID:     bundleID,
+		HistoryHead:  historyHead,
+		ThroughPhase: through,
 		Findings: []verify.Finding{{
 			Code: code, Message: message, Remediation: remediation,
 		}},
@@ -1151,23 +1149,24 @@ func writeVerifyFinding(target, bundleID, historyHead, through, outcome, code, m
 func runPlan(arguments []string) int {
 	for _, argument := range arguments {
 		if argument == "--from" || argument == "--to" || strings.HasPrefix(argument, "--from=") || strings.HasPrefix(argument, "--to=") {
-			return runLowLevelPlan(arguments)
+			return runLowLevelPlan("plan", arguments)
 		}
 	}
 	return runWorkflowPlanAt(arguments, ".")
 }
 
 func runWorkflowPlanAt(arguments []string, start string) int {
-	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg plan [NAME] [--target NAME] [--bundle ID] [--hint JSON] [--dev-hint JSON] [--output sql|text|json]")
-		return 0
-	}
+	arguments = normalizeHelpAlias(arguments)
 	name := ""
 	if len(arguments) > 0 && !strings.HasPrefix(arguments[0], "-") {
 		name = arguments[0]
 		arguments = arguments[1:]
 	}
 	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
+	flags.Usage = func() {
+		_, _ = fmt.Fprintln(flags.Output(), "Usage: onwardpg plan [NAME] [options]")
+		flags.PrintDefaults()
+	}
 	targetName := flags.String("target", "", "configured database target name")
 	bundleID := flags.String("bundle", "", "explicit existing feature bundle identifier")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
@@ -1357,7 +1356,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 		if len(inlineDevHints) > 0 || *devHintsFile != "" {
 			return writeError("invalid_development_hints", fmt.Errorf("environment variable %s is required when supplying development hints", target.DevDatabaseEnv))
 		}
-		development := devflow.Report{ProtocolVersion: devflow.Version, Status: protocol.Status("not_available")}
+		development := devflow.Report{Status: protocol.Status("not_available")}
 		if err := writeWorkflowPlanReport(os.Stdout, *output, report, development); err != nil {
 			return writeError("output_error", err)
 		}
@@ -1399,11 +1398,10 @@ func developmentPostconditions(checks []draftflow.DevelopmentPostcondition) []de
 }
 
 type workflowPlanReport struct {
-	ProtocolVersion string               `json:"protocol_version"`
-	Status          string               `json:"status"`
-	Durable         draftflow.Report     `json:"durable"`
-	Development     devflow.Report       `json:"development"`
-	NextActions     []workflowNextAction `json:"next_actions,omitempty"`
+	Status      string               `json:"status"`
+	Durable     draftflow.Report     `json:"durable"`
+	Development devflow.Report       `json:"development"`
+	NextActions []workflowNextAction `json:"next_actions,omitempty"`
 }
 
 type workflowNextAction struct {
@@ -1432,11 +1430,10 @@ type workflowActionChoice struct {
 
 func newWorkflowPlanReport(durable draftflow.Report, development devflow.Report) workflowPlanReport {
 	return workflowPlanReport{
-		ProtocolVersion: "onwardpg.plan/v5",
-		Status:          workflowPlanStatus(durable.Outcome, development),
-		Durable:         durable,
-		Development:     development,
-		NextActions:     workflowNextActions(durable, development),
+		Status:      workflowPlanStatus(durable.Outcome, development),
+		Durable:     durable,
+		Development: development,
+		NextActions: workflowNextActions(durable, development),
 	}
 }
 
@@ -1734,13 +1731,12 @@ func failedDevelopmentPostconditions(checks []devflow.PostconditionResult) bool 
 
 func writeWorkflowPlanFinding(target, bundleID, outcome, code, message, remediation string) int {
 	_ = json.NewEncoder(os.Stdout).Encode(struct {
-		ProtocolVersion string              `json:"protocol_version"`
-		Status          string              `json:"status"`
-		Target          string              `json:"target"`
-		BundleID        string              `json:"bundle_id,omitempty"`
-		Findings        []draftflow.Finding `json:"findings"`
+		Status   string              `json:"status"`
+		Target   string              `json:"target"`
+		BundleID string              `json:"bundle_id,omitempty"`
+		Findings []draftflow.Finding `json:"findings"`
 	}{
-		ProtocolVersion: "onwardpg.plan/v5", Status: outcome, Target: target, BundleID: bundleID,
+		Status: outcome, Target: target, BundleID: bundleID,
 		Findings: []draftflow.Finding{{Code: code, Message: message, Remediation: remediation}},
 	})
 	return 4
@@ -1766,8 +1762,13 @@ func bundleDirectoryPresent(config workspace.Config, root, target, bundleID stri
 	return info.IsDir(), nil
 }
 
-func runLowLevelPlan(arguments []string) int {
-	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
+func runLowLevelPlan(command string, arguments []string) int {
+	arguments = normalizeHelpAlias(arguments)
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags.Usage = func() {
+		_, _ = fmt.Fprintf(flags.Output(), "Usage: onwardpg %s --from SOURCE --to SOURCE [options]\n", command)
+		flags.PrintDefaults()
+	}
 	from := flags.String("from", "", "current PostgreSQL URL or CREATE-statement SQL file")
 	to := flags.String("to", "", "desired PostgreSQL URL or CREATE-statement SQL file")
 	devURL := flags.String("dev-url", "", "PostgreSQL admin URL for disposable materialization databases")
@@ -1790,14 +1791,14 @@ func runLowLevelPlan(arguments []string) int {
 	} else if err != nil {
 		return writeError("invalid_invocation", err)
 	}
-	if code := rejectPositionals(flags, "plan"); code != 0 {
+	if code := rejectPositionals(flags, command); code != 0 {
 		return code
 	}
 	if *from == "" || *to == "" {
-		return writeError("invalid_invocation", errors.New("plan requires --from and --to"))
+		return writeError("invalid_invocation", fmt.Errorf("%s requires --from and --to", command))
 	}
 	if *output != "json" && *output != "text" {
-		return writeError("invalid_invocation", errors.New("plan --output must be text or json"))
+		return writeError("invalid_invocation", fmt.Errorf("%s --output must be text or json", command))
 	}
 	hints, err := readHints(inlineHints, *hintsFile)
 	if err != nil {
@@ -1846,12 +1847,12 @@ func runLowLevelPlan(arguments []string) int {
 		}
 		var outputErr error
 		if *output == "text" {
-			outputErr = writeDecisionsText(os.Stdout, "plan", decisions)
+			outputErr = writeDecisionsText(os.Stdout, command, decisions)
 			if outputErr == nil {
 				outputErr = writeGuidanceText(os.Stdout, result.Guidance)
 			}
 		} else {
-			outputErr = writeDecisionEnvelope(os.Stdout, "onwardpg.plan/v4", []string{"onwardpg", "diff"}, "--hint", decisions, result.Analysis, result.Guidance)
+			outputErr = writeDecisionEnvelope(os.Stdout, []string{"onwardpg", command}, "--hint", decisions, result.Analysis, result.Guidance)
 		}
 		if outputErr != nil {
 			return writeError("output_error", outputErr)
@@ -1863,9 +1864,7 @@ func runLowLevelPlan(arguments []string) int {
 			_, _ = fmt.Fprintln(os.Stdout, protocol.RenderSQL(result, ""))
 		}
 	} else {
-		publicResult := result
-		publicResult.ProtocolVersion = "onwardpg.plan/v4"
-		if err := json.NewEncoder(os.Stdout).Encode(publicResult); err != nil {
+		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 			return writeError("output_error", err)
 		}
 	}
@@ -1996,16 +1995,22 @@ func runConfig(arguments []string) int {
 		})
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(struct {
-		ProtocolVersion string          `json:"protocol_version"`
-		Status          string          `json:"status"`
-		ConfigVersion   int             `json:"config_version"`
-		Targets         []checkedTarget `json:"targets"`
-	}{ProtocolVersion: "onwardpg.config-check/v3", Status: "valid", ConfigVersion: config.Version, Targets: checked})
+		Status        string          `json:"status"`
+		ConfigVersion int             `json:"config_version"`
+		Targets       []checkedTarget `json:"targets"`
+	}{Status: "valid", ConfigVersion: config.Version, Targets: checked})
 	return 0
 }
 
 func helpRequested(arguments []string) bool {
 	return len(arguments) == 1 && (arguments[0] == "help" || arguments[0] == "-h" || arguments[0] == "--help")
+}
+
+func normalizeHelpAlias(arguments []string) []string {
+	if len(arguments) == 1 && arguments[0] == "help" {
+		return []string{"--help"}
+	}
+	return arguments
 }
 
 // parseFlagSet keeps successful help human-readable while ensuring ordinary
@@ -2101,7 +2106,6 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 			nextAction = "rerun_without_create_with_hints"
 		}
 		return json.NewEncoder(writer).Encode(struct {
-			ProtocolVersion string                      `json:"protocol_version"`
 			Status          string                      `json:"status"`
 			NextAction      string                      `json:"next_action"`
 			Path            string                      `json:"path,omitempty"`
@@ -2110,7 +2114,7 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 			Analysis        []protocol.DecisionAnalysis `json:"analysis,omitempty"`
 			Guidance        []protocol.Guidance         `json:"guidance,omitempty"`
 		}{
-			ProtocolVersion: draftflow.Version, Status: "needs_decisions", NextAction: nextAction,
+			Status: "needs_decisions", NextAction: nextAction,
 			Path: report.Path, WrittenReceipts: report.WrittenReceipts,
 			Decisions: decisionsWithArgv(report.Decisions, []string{"onwardpg", "draft"}, "--hint"),
 			Analysis:  analysisFromPlan(report.Plan), Guidance: guidanceFromPlan(report.Plan),
@@ -2118,12 +2122,11 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 	}
 	if report.Outcome == string(protocol.NeedsSQLEdits) {
 		return json.NewEncoder(writer).Encode(struct {
-			ProtocolVersion string   `json:"protocol_version"`
-			Status          string   `json:"status"`
-			NextAction      string   `json:"next_action"`
-			Path            string   `json:"path"`
-			Edit            []string `json:"edit"`
-		}{ProtocolVersion: draftflow.Version, Status: string(protocol.NeedsSQLEdits), NextAction: "edit_files_then_verify", Path: report.Path, Edit: report.EditFiles})
+			Status     string   `json:"status"`
+			NextAction string   `json:"next_action"`
+			Path       string   `json:"path"`
+			Edit       []string `json:"edit"`
+		}{Status: string(protocol.NeedsSQLEdits), NextAction: "edit_files_then_verify", Path: report.Path, Edit: report.EditFiles})
 	}
 	return json.NewEncoder(writer).Encode(report)
 }
@@ -2209,15 +2212,14 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func writeDecisionEnvelope(writer io.Writer, version string, command []string, flagName string, decisions []protocol.Decision, analysis []protocol.DecisionAnalysis, guidance []protocol.Guidance) error {
+func writeDecisionEnvelope(writer io.Writer, command []string, flagName string, decisions []protocol.Decision, analysis []protocol.DecisionAnalysis, guidance []protocol.Guidance) error {
 	return json.NewEncoder(writer).Encode(struct {
-		ProtocolVersion string                      `json:"protocol_version"`
-		Status          string                      `json:"status"`
-		NextAction      string                      `json:"next_action"`
-		Decisions       []protocol.Decision         `json:"decisions"`
-		Analysis        []protocol.DecisionAnalysis `json:"analysis,omitempty"`
-		Guidance        []protocol.Guidance         `json:"guidance,omitempty"`
-	}{ProtocolVersion: version, Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisionsWithArgv(decisions, command, flagName), Analysis: analysis, Guidance: guidance})
+		Status     string                      `json:"status"`
+		NextAction string                      `json:"next_action"`
+		Decisions  []protocol.Decision         `json:"decisions"`
+		Analysis   []protocol.DecisionAnalysis `json:"analysis,omitempty"`
+		Guidance   []protocol.Guidance         `json:"guidance,omitempty"`
+	}{Status: "needs_decisions", NextAction: "rerun_same_command_with_hints", Decisions: decisionsWithArgv(decisions, command, flagName), Analysis: analysis, Guidance: guidance})
 }
 
 func decisionsWithArgv(decisions []protocol.Decision, command []string, flagName string) []protocol.Decision {

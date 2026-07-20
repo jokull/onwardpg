@@ -25,6 +25,10 @@ Commands select the sole configured target automatically. In a multi-target
 repository, pass `--target NAME`; an omitted ambiguous target is an error that
 lists the available names.
 
+The website's [generated CLI help](https://onwardpg.solberg.is/reference/generated-cli-help)
+is dumped from the current binary and is the exhaustive source for registered
+flags and defaults. This guide focuses on semantics and workflow.
+
 `draft`, `dev plan`, `history status`, and source-to-source `plan --from --to`
 remain lower-level compatibility interfaces. New integrations should use
 `plan`, `status`, and `diff` above. They are documented below because their
@@ -34,7 +38,9 @@ receipts and protocols remain supported during the developer preview.
 
 ~~~sh
 onwardpg plan [NAME] \
-  [--bundle ID] [--hint JSON] [--hints-file FILE] \
+  [--target NAME] [--bundle ID] [--config FILE] \
+  [--purpose feature|repair|contract] \
+  [--hint JSON] [--hints-file FILE] \
   [--dev-hint JSON] [--dev-hints-file FILE] \
   [--output json|text|sql]
 ~~~
@@ -75,6 +81,8 @@ its replay argv remains executable.
 No output is applied automatically. If the development database environment
 variable is absent, durable planning still succeeds and reports development as
 `not_available`; providing a dev hint makes that database required.
+`plan` also accepts the planner and ignore flags listed under `dev plan`; the
+generated help page is authoritative for their exact spelling and defaults.
 
 `plan` exits `2` when either comparison needs a decision or editable SQL. A
 durable question is answered with the same strict `--hint` form as `draft`.
@@ -88,7 +96,7 @@ strict/disposable databases or an actual incompatible D → W transition.
 ## status
 
 ~~~sh
-onwardpg status
+onwardpg status [--target NAME] [--config FILE]
 ~~~
 
 Reads the worktree-local active-plan anchor and repository history only. It
@@ -240,7 +248,7 @@ unreceipted basis, and return all three SQL versions plus the `verify` next
 step.
 
 draft supports the same planner flags as dev plan.
-Its decision output protocol is `onwardpg.draft/v5`: `needs_decisions` contains
+Its decision output uses `status: "needs_decisions"` and contains
 semantic choice sets plus the path and receipts it wrote, while
 `needs_sql_edits` names the bundle path and files the agent must edit.
 Fingerprint-bound answers are generated receipts, not an agent-facing
@@ -320,8 +328,8 @@ caller database in one repeatable-read/read-only transaction, compares its
 typed graph, runs receipted Boolean data gates, and validates expiring writer
 evidence bound to the exact plan and environment.
 
-The report uses `onwardpg.contract-readiness/v1` and includes the selected
-target, environment, bundle and PlanID identity, generation, entry digest,
+The report includes the selected target, environment, bundle and PlanID
+identity, generation, entry digest,
 expected and observed fingerprints, check time, gate results, findings, and a
 report digest. Its status is `ready`, `needs_evidence`, `blocked`, or `stale`.
 `--statement-timeout` limits each read-only catalog or data-gate query and

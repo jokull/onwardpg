@@ -1,0 +1,17 @@
+{
+  "status": "needs_action",
+  "durable": {
+    "status": "needs_input",
+    "generated_plan": {
+      "questions": [
+        {
+          "choices": [
+            "assert_only",
+            "manual_sql",
+            "split_plan"
+          ]
+        }
+      ]
+    }
+  }
+}

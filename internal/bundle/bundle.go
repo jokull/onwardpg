@@ -18,11 +18,7 @@ import (
 	"github.com/jokull/onwardpg/internal/protocol"
 )
 
-const Version = "onwardpg.bundle/v3"
-
-const CatalogCheckpointVersion = "onwardpg.catalog-checkpoint/v1"
-
-var rootHistoryDigest = digestFrames([]byte("onwardpg.history/v1"), []byte("root"))
+var rootHistoryDigest = digestFrames([]byte("onwardpg.history"), []byte("root"))
 
 func HistoryRootDigest() string { return rootHistoryDigest }
 
@@ -88,7 +84,6 @@ type FileReceipt struct {
 // plus this bundle's expand phase were executed in disposable PostgreSQL.
 // Production comparison is read-only and uses this as the overlap authority.
 type CatalogCheckpoint struct {
-	ProtocolVersion     string `json:"protocol_version"`
 	BundleID            string `json:"bundle_id"`
 	PlanID              string `json:"plan_id"`
 	Generation          int    `json:"generation"`
@@ -98,13 +93,12 @@ type CatalogCheckpoint struct {
 }
 
 type Manifest struct {
-	ProtocolVersion string `json:"protocol_version"`
-	BundleID        string `json:"bundle_id"`
-	PlanID          string `json:"plan_id,omitempty"`
-	Generation      int    `json:"generation"`
-	Target          string `json:"target"`
-	Purpose         string `json:"purpose"`
-	State           string `json:"state"`
+	BundleID   string `json:"bundle_id"`
+	PlanID     string `json:"plan_id,omitempty"`
+	Generation int    `json:"generation"`
+	Target     string `json:"target"`
+	Purpose    string `json:"purpose"`
+	State      string `json:"state"`
 
 	BaselineSource SourceReceipt   `json:"baseline_source"`
 	DesiredSource  SourceReceipt   `json:"desired_source"`
@@ -262,7 +256,7 @@ func (a Artifact) Validate() error {
 		if err := json.Unmarshal(a.Files["answers.json"], &decoded); err != nil {
 			return fmt.Errorf("decode answers.json: %w", err)
 		}
-		if decoded.ProtocolVersion != protocol.Version || decoded.CurrentFingerprint != a.Manifest.BaselineSource.Fingerprint || decoded.DesiredFingerprint != a.Manifest.DesiredSource.Fingerprint {
+		if decoded.CurrentFingerprint != a.Manifest.BaselineSource.Fingerprint || decoded.DesiredFingerprint != a.Manifest.DesiredSource.Fingerprint {
 			return fmt.Errorf("answers.json does not match the bundle fingerprints")
 		}
 		answers = &decoded
@@ -287,9 +281,6 @@ func (a Artifact) Validate() error {
 		var receipt protocol.DecisionReceipt
 		if err := json.Unmarshal(a.Files["decisions.json"], &receipt); err != nil {
 			return fmt.Errorf("decode decisions.json: %w", err)
-		}
-		if receipt.Protocol != protocol.DecisionsVersion {
-			return fmt.Errorf("decisions.json protocol is %q, want %q", receipt.Protocol, protocol.DecisionsVersion)
 		}
 		canonical, err := protocol.CanonicalHints(receipt.Hints)
 		if err != nil {
@@ -370,9 +361,6 @@ func Build(input Input) (Artifact, error) {
 	if input.Metadata.Generation == 0 {
 		input.Metadata.Generation = 1
 	}
-	if input.Result.ProtocolVersion != protocol.Version {
-		return Artifact{}, fmt.Errorf("result protocol_version is %q, want %q", input.Result.ProtocolVersion, protocol.Version)
-	}
 	if input.Result.Status != protocol.Planned && input.Result.Status != protocol.NeedsSQLEdits && input.Result.Status != protocol.NeedsInput && input.Result.Status != protocol.Unsupported {
 		return Artifact{}, fmt.Errorf("cannot bundle planner status %q", input.Result.Status)
 	}
@@ -388,8 +376,7 @@ func Build(input Input) (Artifact, error) {
 		return Artifact{}, fmt.Errorf("encode planner result: %w", err)
 	}
 	manifest := Manifest{
-		ProtocolVersion: Version,
-		BundleID:        input.Metadata.BundleID, PlanID: input.Metadata.PlanID, Generation: input.Metadata.Generation,
+		BundleID: input.Metadata.BundleID, PlanID: input.Metadata.PlanID, Generation: input.Metadata.Generation,
 		Target: input.Metadata.Target, Purpose: input.Metadata.Purpose,
 		State:          string(input.Result.Status),
 		BaselineSource: input.Metadata.BaselineSource, DesiredSource: input.Metadata.DesiredSource,
@@ -435,7 +422,7 @@ func Build(input Input) (Artifact, error) {
 		}
 	}
 	if input.Answers != nil {
-		if input.Answers.ProtocolVersion != protocol.Version || input.Answers.CurrentFingerprint != input.Result.CurrentFingerprint || input.Answers.DesiredFingerprint != input.Result.DesiredFingerprint {
+		if input.Answers.CurrentFingerprint != input.Result.CurrentFingerprint || input.Answers.DesiredFingerprint != input.Result.DesiredFingerprint {
 			return Artifact{}, fmt.Errorf("answer receipt does not match bundled planner result")
 		}
 		answerBytes, err := jsonDocument(input.Answers)
@@ -454,7 +441,7 @@ func Build(input Input) (Artifact, error) {
 			return Artifact{}, fmt.Errorf("validate semantic decisions: %w", err)
 		}
 		receiptBytes, err := jsonDocument(protocol.DecisionReceipt{
-			Protocol: protocol.DecisionsVersion, Hints: hints, Answers: *input.Answers,
+			Hints: hints, Answers: *input.Answers,
 		})
 		if err != nil {
 			return Artifact{}, fmt.Errorf("encode semantic decisions: %w", err)
@@ -527,7 +514,7 @@ func HistoryEntryDigest(manifest Manifest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return digestFrames([]byte(Version), []byte(history.ParentDigest), data), nil
+	return digestFrames([]byte("onwardpg.bundle-entry"), []byte(history.ParentDigest), data), nil
 }
 
 // ResultDigest returns the canonical digest used by bundle manifests and
@@ -896,9 +883,6 @@ func RenderReplaySQL(result protocol.Result) ([]byte, error) {
 }
 
 func (m Manifest) Validate() error {
-	if m.ProtocolVersion != Version {
-		return fmt.Errorf("bundle protocol_version %q is unsupported; regenerate this developer-preview history with %s", m.ProtocolVersion, Version)
-	}
 	if !safeName(m.BundleID) || !safeName(m.Target) {
 		return fmt.Errorf("bundle_id and target must contain only letters, numbers, dot, underscore, or dash")
 	}
@@ -1021,9 +1005,6 @@ func SemanticHints(artifact Artifact) ([]protocol.Hint, error) {
 	var receipt protocol.DecisionReceipt
 	if err := json.Unmarshal(artifact.Files["decisions.json"], &receipt); err != nil {
 		return nil, fmt.Errorf("decode decisions.json: %w", err)
-	}
-	if receipt.Protocol != protocol.DecisionsVersion {
-		return nil, fmt.Errorf("decisions.json protocol is %q, want %q", receipt.Protocol, protocol.DecisionsVersion)
 	}
 	return protocol.CanonicalHints(receipt.Hints)
 }

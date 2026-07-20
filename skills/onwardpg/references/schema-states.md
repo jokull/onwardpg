@@ -7,7 +7,8 @@ Keep these states distinct whenever reading onwardpg output:
 | H | Accepted onwardpg history replayed in disposable PostgreSQL | Durable migration base | `H -> W` produces the feature bundle |
 | W | Declarative DDL exported from the working tree and ingested by PostgreSQL | Intended destination | Shared destination for durable and local comparisons |
 | D | Long-lived development database inspected read-only | Local convenience | `D -> W` produces optional development SQL |
-| P | Production database or replica | Explicit read-only evidence | Drift audit, bounded data shapes, or post-expand contract readiness |
+| E | Verified selected bundle replayed through expand | Receipted artifact evidence | `P -> E` checks the live post-expand catalog before contract |
+| P | Production database or replica | Explicit read-only evidence | Drift against H, contract readiness against E, or bounded data shapes |
 | V | Independent disposable verification replays | Artifact evidence | Proves exact bundle bytes converge to W |
 
 ## H -> W is durable
@@ -25,10 +26,10 @@ Workspace mode preserves surplus D-only objects. Strict cleanup is an explicit l
 ## P is outside ordinary planning
 
 Production is not an implicit plan input. Use `onwardpg drift check` for an
-explicit read-only comparison with accepted history. If a coding agent has
+explicit read-only comparison of P with accepted history H. If a coding agent has
 separate restricted read-only access, it may gather bounded aggregates or
 classifications as product evidence. After expand, `onwardpg contract check`
-may inspect P read-only against the bundle's receipted expand checkpoint and
+may inspect P read-only against the bundle's receipted expand checkpoint E and
 evaluate contract gates; `plan` and `verify` still do not query production.
 
 ## V proves the artifact, not the environment

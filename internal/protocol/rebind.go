@@ -5,21 +5,18 @@ import (
 	"sort"
 )
 
-const RebindVersion = "onwardpg.answer-rebind/v1"
-
 type RebindFinding struct {
 	Decision string `json:"decision"`
 	Reason   string `json:"reason"`
 }
 
 type RebindReport struct {
-	ProtocolVersion string          `json:"protocol_version"`
-	Answers         Answers         `json:"answers"`
-	Questions       []Question      `json:"questions,omitempty"`
-	Carried         []string        `json:"carried,omitempty"`
-	Invalidated     []RebindFinding `json:"invalidated,omitempty"`
-	Unanswered      []string        `json:"unanswered,omitempty"`
-	Deferred        []string        `json:"deferred,omitempty"`
+	Answers     Answers         `json:"answers"`
+	Questions   []Question      `json:"questions,omitempty"`
+	Carried     []string        `json:"carried,omitempty"`
+	Invalidated []RebindFinding `json:"invalidated,omitempty"`
+	Unanswered  []string        `json:"unanswered,omitempty"`
+	Deferred    []string        `json:"deferred,omitempty"`
 }
 
 // RebindAnswers carries only decisions whose exact question scope survives.
@@ -27,9 +24,6 @@ type RebindReport struct {
 // answer has been matched to its old question and the old/new scoped object
 // receipts are identical.
 func RebindAnswers(previous Answers, previousQuestions, currentQuestions []Question, currentFingerprint, desiredFingerprint string) (RebindReport, error) {
-	if previous.ProtocolVersion != Version {
-		return RebindReport{}, fmt.Errorf("answer protocol_version is %q, want %q", previous.ProtocolVersion, Version)
-	}
 	if currentFingerprint == "" || desiredFingerprint == "" {
 		return RebindReport{}, fmt.Errorf("current answer fingerprints are required")
 	}
@@ -41,8 +35,8 @@ func RebindAnswers(previous Answers, previousQuestions, currentQuestions []Quest
 	if err != nil {
 		return RebindReport{}, fmt.Errorf("current questions: %w", err)
 	}
-	report := RebindReport{ProtocolVersion: RebindVersion, Answers: Answers{
-		ProtocolVersion: Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+	report := RebindReport{Answers: Answers{
+		CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 	}}
 	seenAnswers := make(map[string]bool, len(previous.Answers))
 	carried := make(map[string]bool)

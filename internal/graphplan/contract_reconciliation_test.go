@@ -19,7 +19,7 @@ func TestContractReconciliationAssertOnlyCreatesOrderedGates(t *testing.T) {
 	}
 	question := pending.Questions[0]
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "assert_only", QuestionFingerprint: question.ScopeFingerprint}},
 	}
 	plan, err := Build(current, desired, answers, Options{})
@@ -77,7 +77,7 @@ func TestContractReconciliationManualReusesExactGeneratedBoolean(t *testing.T) {
 	}
 	first := pending.Questions[0]
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: first.Kind, Key: first.Key, Value: "manual_sql", QuestionFingerprint: first.ScopeFingerprint}},
 	}
 	pending, err = Build(current, desired, answers, Options{})
@@ -136,7 +136,7 @@ func TestReconciliationScopeSurvivesUnrelatedChangeButRejectsDependencyChange(t 
 	}
 	question := old.Questions[0]
 	previous := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: old.CurrentFingerprint, DesiredFingerprint: old.DesiredFingerprint,
+		CurrentFingerprint: old.CurrentFingerprint, DesiredFingerprint: old.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "assert_only", QuestionFingerprint: question.ScopeFingerprint}},
 	}
 	unrelated := pgschema.Table{Schema: "public", Name: "audit_log"}
@@ -234,8 +234,8 @@ func buildWithAssertOnlyReconciliations(t *testing.T, current, desired *pgschema
 		if plan.Status != protocol.NeedsInput {
 			return plan
 		}
-		if answers.ProtocolVersion == "" {
-			answers.ProtocolVersion, answers.CurrentFingerprint, answers.DesiredFingerprint = protocol.Version, plan.CurrentFingerprint, plan.DesiredFingerprint
+		if answers.CurrentFingerprint == "" {
+			answers.CurrentFingerprint, answers.DesiredFingerprint = plan.CurrentFingerprint, plan.DesiredFingerprint
 		}
 		for _, question := range plan.Questions {
 			if question.Kind != "reconcile_contract" || !containsString(question.Choices, "assert_only") {
@@ -259,8 +259,8 @@ func buildWithManualReconciliation(t *testing.T, current, desired *pgschema.Snap
 		if plan.Status != protocol.NeedsInput {
 			return plan
 		}
-		if answers.ProtocolVersion == "" {
-			answers.ProtocolVersion, answers.CurrentFingerprint, answers.DesiredFingerprint = protocol.Version, plan.CurrentFingerprint, plan.DesiredFingerprint
+		if answers.CurrentFingerprint == "" {
+			answers.CurrentFingerprint, answers.DesiredFingerprint = plan.CurrentFingerprint, plan.DesiredFingerprint
 		}
 		for _, question := range plan.Questions {
 			switch question.Kind {

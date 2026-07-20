@@ -12,13 +12,11 @@ import (
 
 func TestRefreshRebindAfterHintsReportsFinalResolvedState(t *testing.T) {
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version,
-		Answers:         []protocol.Answer{{Kind: "rename_table", Key: "app:accounts", Value: "app:customers"}},
+		Answers: []protocol.Answer{{Kind: "rename_table", Key: "app:accounts", Value: "app:customers"}},
 	}
 	report := &protocol.RebindReport{
-		ProtocolVersion: protocol.RebindVersion,
-		Unanswered:      []string{"rename_table:app:accounts"},
-		Deferred:        []string{"rename_table:app:accounts", "type_change:app:accounts:created_at"},
+		Unanswered: []string{"rename_table:app:accounts"},
+		Deferred:   []string{"rename_table:app:accounts", "type_change:app:accounts:created_at"},
 	}
 	refreshRebindAfterHints(report, answers, protocol.Result{Status: protocol.Planned})
 	if !reflect.DeepEqual(report.Answers, answers) || len(report.Unanswered) != 0 || len(report.Deferred) != 0 {

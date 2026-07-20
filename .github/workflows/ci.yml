@@ -48,8 +48,11 @@ jobs:
         run: |
           corepack enable
           pnpm --dir website install --frozen-lockfile
+          pnpm --dir website audit --audit-level high
           pnpm --dir website check
+          pnpm --dir website validate
           pnpm --dir website build
+          pnpm --dir website audit:site
           pnpm --dir website check:agent-docs
       - name: Check whitespace errors
         run: git diff --check

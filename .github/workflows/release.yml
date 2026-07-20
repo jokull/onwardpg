@@ -35,7 +35,7 @@ jobs:
           tar -xzf "dist/onwardpg_${GITHUB_REF_NAME#v}_linux_amd64.tar.gz" -C /tmp/onwardpg-release-check
           binary=$(find /tmp/onwardpg-release-check -type f -name onwardpg -print -quit)
           version_json=$("$binary" version)
-          test "$(jq -r '.protocol_version' <<<"$version_json")" = "onwardpg.version/v1"
+          test "$(jq -r '.status' <<<"$version_json")" = "ok"
           test "$(jq -r '.build.version' <<<"$version_json")" = "$GITHUB_REF_NAME"
           test "$(jq -r '.build.commit' <<<"$version_json")" = "$GITHUB_SHA"
           test "$(jq -r '.build.dirty' <<<"$version_json")" = "false"

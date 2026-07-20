@@ -22,13 +22,7 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const (
-	EvidenceVersion = "onwardpg.writer-evidence/v1"
-	ReportVersion   = "onwardpg.contract-readiness/v1"
-)
-
 type Evidence struct {
-	ProtocolVersion    string   `json:"protocol_version"`
 	Target             string   `json:"target"`
 	Environment        string   `json:"environment"`
 	PlanID             string   `json:"plan_id"`
@@ -78,7 +72,6 @@ type ReconciliationReadiness struct {
 }
 
 type Report struct {
-	ProtocolVersion     string                    `json:"protocol_version"`
 	Status              string                    `json:"status"`
 	Target              string                    `json:"target"`
 	Environment         string                    `json:"environment"`
@@ -437,7 +430,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		input.StatementTimeout = 30 * time.Second
 	}
 	report := Report{
-		ProtocolVersion: ReportVersion, Status: "blocked", Target: manifest.Target, Environment: input.Environment,
+		Status: "blocked", Target: manifest.Target, Environment: input.Environment,
 		BundleID: manifest.BundleID, PlanID: manifest.PlanID, Generation: manifest.Generation,
 		BundleEntryDigest: manifest.History.EntryDigest, ExpectedFingerprint: checkpoint.ExpandFingerprint,
 		CheckedAt: input.Now.UTC().Format(time.RFC3339),
@@ -651,7 +644,7 @@ func DecodeEvidence(data []byte) (Evidence, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return evidence, fmt.Errorf("writer evidence contains more than one JSON value")
 	}
-	if evidence.ProtocolVersion != EvidenceVersion || evidence.Target == "" || evidence.Environment == "" || evidence.PlanID == "" || evidence.BundleEntryDigest == "" || !sha256Fingerprint(evidence.DesiredFingerprint) || evidence.Generation < 1 || evidence.Release == "" || len(evidence.Cohorts) == 0 {
+	if evidence.Target == "" || evidence.Environment == "" || evidence.PlanID == "" || evidence.BundleEntryDigest == "" || !sha256Fingerprint(evidence.DesiredFingerprint) || evidence.Generation < 1 || evidence.Release == "" || len(evidence.Cohorts) == 0 {
 		return evidence, fmt.Errorf("writer evidence identity, release, timestamps, and cohorts are required")
 	}
 	if _, err := time.Parse(time.RFC3339, evidence.ObservedAt); err != nil {

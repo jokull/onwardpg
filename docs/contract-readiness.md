@@ -99,8 +99,7 @@ onwardpg contract check \
   --statement-timeout 30s
 ```
 
-The `onwardpg.contract-readiness/v1` result is `ready`, `needs_evidence`,
-`blocked`, or `stale`. Catalog mismatch
+The result is `ready`, `needs_evidence`, `blocked`, or `stale`. Catalog mismatch
 distinguishes an unapplied expand baseline, an already-contracted desired graph,
 and unrelated/partial drift. Data gates run in the same read-only snapshot.
 
@@ -110,7 +109,6 @@ time, and expiry. Observation windows longer than 24 hours are stale:
 
 ```json
 {
-  "protocol_version": "onwardpg.writer-evidence/v1",
   "target": "app",
   "environment": "production",
   "plan_id": "plan_0123456789abcdef0123456789abcdef",

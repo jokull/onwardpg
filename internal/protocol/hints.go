@@ -9,8 +9,6 @@ import (
 	"strings"
 )
 
-const DecisionsVersion = "onwardpg.decisions/v1"
-
 // Hint is the complete semantic intent an agent may add to a schema diff.
 // It deliberately contains no planner IDs or fingerprints: onwardpg validates
 // the statement against the observed diff and adds state binding to its own
@@ -43,9 +41,8 @@ type DecisionChoice struct {
 // retain the full internal scope fingerprints while Hints retain the compact
 // product intent that produced them.
 type DecisionReceipt struct {
-	Protocol string  `json:"protocol"`
-	Hints    []Hint  `json:"hints,omitempty"`
-	Answers  Answers `json:"answers"`
+	Hints   []Hint  `json:"hints,omitempty"`
+	Answers Answers `json:"answers"`
 }
 
 func (h Hint) Validate() error {

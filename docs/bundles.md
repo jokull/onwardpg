@@ -110,8 +110,7 @@ question, answer, gate, checkpoint, override, and verification files exist only
 when that plan actually uses them; a simple additive plan is correspondingly
 smaller.
 
-The manifest is `onwardpg.bundle/v3`. Older developer-preview
-bundles are rejected with a regeneration action. It records:
+The manifest records:
 
 - logical bundle ID, generation, target, and purpose;
 - redacted source descriptions and typed graph fingerprints;

@@ -3,20 +3,24 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
-    "preview": "astro preview",
-    "check": "astro check",
+    "generate:cli-docs": "node scripts/generate-cli-help.mjs --write",
+    "check:cli-docs": "node scripts/generate-cli-help.mjs --check",
+    "prepare:agent-docs": "node scripts/prepare-agent-docs.mjs",
+    "dev": "pnpm generate:cli-docs && pnpm prepare:agent-docs && blume dev",
+    "build": "pnpm check:cli-docs && pnpm prepare:agent-docs && blume build",
+    "preview": "blume preview",
+    "check": "pnpm check:cli-docs && pnpm prepare:agent-docs && blume check --strict",
+    "validate": "pnpm check:cli-docs && pnpm prepare:agent-docs && blume validate",
+    "audit:site": "blume audit",
     "check:agent-docs": "node scripts/check-agent-docs.mjs"
-  },
-  "dependencies": {
-    "@astrojs/starlight": "^0.41.3",
-    "astro": "^7.1.1",
-    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.6",
     "typescript": "^5.9.3",
     "wrangler": "^4.111.0"
+  },
+  "dependencies": {
+    "astro": "^7.1.1",
+    "blume": "1.1.2"
   }
 }

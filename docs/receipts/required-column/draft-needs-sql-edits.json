@@ -1,0 +1,8 @@
+{
+  "status": "needs_sql_edits",
+  "next_action": "edit_files_then_verify",
+  "path": "migrations/onward/app/event-date",
+  "edit": [
+    "phases/contract.sql"
+  ]
+}

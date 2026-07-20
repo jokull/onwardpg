@@ -601,7 +601,7 @@ CREATE TYPE app.state AS ENUM ('open');`,
 				}
 				question := plan.Questions[0]
 				answers := protocol.Answers{
-					ProtocolVersion: protocol.Version, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint,
+					CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint,
 					Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "manual_sql", QuestionFingerprint: question.ScopeFingerprint}},
 				}
 				plan, err = graphplan.Build(current, desired, answers, graphplan.Options{})
@@ -749,7 +749,6 @@ func TestPinnedAtlasIgnoresEnumLabelDrop(t *testing.T) {
 // kinds must be opted in here instead of silently guessing an answer.
 func directAnswers(result protocol.Result) (protocol.Answers, error) {
 	answers := protocol.Answers{
-		ProtocolVersion:    protocol.Version,
 		CurrentFingerprint: result.CurrentFingerprint,
 		DesiredFingerprint: result.DesiredFingerprint,
 	}
@@ -784,7 +783,7 @@ func directAnswers(result protocol.Result) (protocol.Answers, error) {
 }
 
 func buildWithDirectAnswers(current, desired *pgschema.Snapshot, pending protocol.Result, options graphplan.Options) (protocol.Result, error) {
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for attempt := 0; attempt < 5; attempt++ {
 		next, err := directAnswers(pending)
 		if err != nil {

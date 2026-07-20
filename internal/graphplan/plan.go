@@ -174,11 +174,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return protocol.Result{}, err
 	}
 	result := protocol.Result{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		Ignored: unionStrings(current.Ignored(), desired.Ignored()),
 	}
-	if answers.ProtocolVersion == "" && answers.CurrentFingerprint == "" && answers.DesiredFingerprint == "" && len(answers.Answers) == 0 {
-		answers.ProtocolVersion, answers.CurrentFingerprint, answers.DesiredFingerprint = protocol.Version, currentFingerprint, desiredFingerprint
+	if answers.CurrentFingerprint == "" && answers.DesiredFingerprint == "" && len(answers.Answers) == 0 {
+		answers.CurrentFingerprint, answers.DesiredFingerprint = currentFingerprint, desiredFingerprint
 	}
 	resolver, err := answers.Resolver(currentFingerprint, desiredFingerprint)
 	if err != nil {

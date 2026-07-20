@@ -236,7 +236,7 @@ func writeBundle(t *testing.T, root, id, parent, sql, phase string) string {
 	statement := protocol.Statement{SQL: sql, Phase: phase, Safety: "safe"}
 	statement.ID = protocol.StableStatementID(statement)
 	result := protocol.Result{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: current, DesiredFingerprint: desired,
+		CurrentFingerprint: current, DesiredFingerprint: desired,
 		Status: protocol.Planned, Statements: []protocol.Statement{statement},
 		Batches: []protocol.Batch{{ID: "batch-1", Phase: phase, Transactional: true, Statements: []protocol.Statement{statement}}},
 	}

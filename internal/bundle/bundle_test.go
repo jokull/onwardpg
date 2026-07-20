@@ -21,7 +21,7 @@ func TestBuildPlannedBundleWritesDeterministicPhaseReceipts(t *testing.T) {
 	contract := statement("DROP TABLE app.old_users;", "contract", true)
 	result := plannedResult(expand, index, contract)
 	input := Input{Metadata: metadata(), Result: result, Answers: &protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint, Answers: []protocol.Answer{},
+		CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint, Answers: []protocol.Answer{},
 	}}
 	artifact, err := Build(input)
 	if err != nil {
@@ -155,7 +155,7 @@ func TestWithExpandCheckpointReceiptsObservedGraphAndHistory(t *testing.T) {
 
 func TestBuildReceiptsSemanticHintsWithoutMakingThemAuthoringState(t *testing.T) {
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "drop", Key: "column:public:users:legacy", Value: "drop", QuestionFingerprint: "sha256:scope"}},
 	}
 	hint := protocol.Hint{Kind: "drop", Object: "column", Name: []string{"public", "users", "legacy"}}
@@ -206,7 +206,7 @@ func TestBuildHistoryReceiptCommitsToParentAndManifest(t *testing.T) {
 
 func TestBuildNeedsInputStoresDecisionWithoutExecutablePlan(t *testing.T) {
 	result := protocol.Result{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		Status: protocol.NeedsInput, Questions: []protocol.Question{{ID: "rename", Kind: "rename_table", Key: "table:app:old", Choices: []string{"table:app:new"}}},
 	}
 	artifact, err := Build(Input{Metadata: metadata(), Result: result, Attempt: 7})
@@ -221,17 +221,6 @@ func TestBuildNeedsInputStoresDecisionWithoutExecutablePlan(t *testing.T) {
 	}
 	if _, ok := artifact.Files["plan.json"]; ok {
 		t.Fatal("needs_input bundle exposed an executable plan")
-	}
-}
-
-func TestManifestRejectsLegacyThreePhaseProtocolWithRegenerationAction(t *testing.T) {
-	artifact, err := Build(Input{Metadata: metadata(), Result: plannedResult(statement("CREATE TABLE app.users ();", protocol.PhaseExpand, true))})
-	if err != nil {
-		t.Fatal(err)
-	}
-	artifact.Manifest.ProtocolVersion = "onwardpg.bundle/v1"
-	if err := artifact.Manifest.Validate(); err == nil || !strings.Contains(err.Error(), "regenerate") || !strings.Contains(err.Error(), Version) {
-		t.Fatalf("legacy bundle error = %v", err)
 	}
 }
 
@@ -266,7 +255,7 @@ func TestWritePreservesDecisionHistoryAcrossDraftReplacement(t *testing.T) {
 	meta := metadata()
 	meta.HistoryParentDigest = HistoryRootDigest()
 	decisionResult := protocol.Result{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		Status: protocol.NeedsInput, Questions: []protocol.Question{{ID: "rename", Kind: "rename_table", Key: "table:app:old", Choices: []string{"table:app:new"}}},
 	}
 	decision, err := Build(Input{Metadata: meta, Result: decisionResult, Attempt: 1})
@@ -331,7 +320,7 @@ func TestBuildRejectsMismatchedReceiptAndIncompletePlan(t *testing.T) {
 	meta = metadata()
 	bad := protocol.Statement{SQL: "SELECT 1;", Phase: "expand", Safety: "safe"}
 	if _, err := Build(Input{Metadata: meta, Result: protocol.Result{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		Status: protocol.Planned, Statements: []protocol.Statement{bad}, Batches: []protocol.Batch{{ID: "batch-001", Phase: "expand", Transactional: true, Statements: []protocol.Statement{bad}}},
 	}}); err == nil {
 		t.Fatal("expected missing stable statement id")
@@ -527,7 +516,7 @@ func statement(sql, phase string, transactional bool) protocol.Statement {
 }
 
 func plannedResult(statements ...protocol.Statement) protocol.Result {
-	result := protocol.Result{ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint, Status: protocol.Planned, Statements: statements}
+	result := protocol.Result{CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint, Status: protocol.Planned, Statements: statements}
 	for _, item := range statements {
 		transactional := !item.NonTransactional
 		if len(result.Batches) > 0 {

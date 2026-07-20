@@ -190,7 +190,7 @@ func TestBuildCapturesPreparationForUniqueIndexOnNewColumn(t *testing.T) {
 		t.Fatalf("OTP-style uniqueness did not request preparation: %#v", pending)
 	}
 	answers := protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "reconcile_contract", Key: index.ObjectID().String(), Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
 	}
 	pending, err = Build(current, desired, answers, Options{})

@@ -15,7 +15,7 @@ func TestWriterEvidenceRequiresEveryCohortAndExactBinding(t *testing.T) {
 		History: &bundle.HistoryReceipt{EntryDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 	}
 	evidence := Evidence{
-		ProtocolVersion: EvidenceVersion, Target: "primary", Environment: "production", PlanID: manifest.PlanID,
+		Target: "primary", Environment: "production", PlanID: manifest.PlanID,
 		BundleEntryDigest: manifest.History.EntryDigest, DesiredFingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Generation: 2, Release: "release-42",
 		ObservedAt: now.Add(-time.Minute).Format(time.RFC3339), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		Cohorts: []Cohort{{Category: "previews", Name: "vercel previews", Status: "isolated", SourceKind: "provider", Source: "vercel/deployment-policy/42"}},

@@ -15,8 +15,7 @@ func WithExpandCheckpoint(artifact Artifact, expandFingerprint string) (Artifact
 		return Artifact{}, fmt.Errorf("expand fingerprint %q is invalid", expandFingerprint)
 	}
 	checkpoint := CatalogCheckpoint{
-		ProtocolVersion: CatalogCheckpointVersion,
-		BundleID:        artifact.Manifest.BundleID, PlanID: artifact.Manifest.PlanID, Generation: artifact.Manifest.Generation,
+		BundleID: artifact.Manifest.BundleID, PlanID: artifact.Manifest.PlanID, Generation: artifact.Manifest.Generation,
 		BaselineFingerprint: artifact.Manifest.BaselineSource.Fingerprint,
 		ExpandFingerprint:   expandFingerprint,
 		DesiredFingerprint:  artifact.Manifest.DesiredSource.Fingerprint,
@@ -63,8 +62,8 @@ func ReadCatalogCheckpoint(artifact Artifact) (CatalogCheckpoint, error) {
 	if err := json.Unmarshal(body, &checkpoint); err != nil {
 		return checkpoint, fmt.Errorf("decode expand checkpoint: %w", err)
 	}
-	if checkpoint.ProtocolVersion != CatalogCheckpointVersion || !fingerprintPattern.MatchString(checkpoint.ExpandFingerprint) {
-		return checkpoint, fmt.Errorf("expand checkpoint protocol or fingerprint is invalid")
+	if !fingerprintPattern.MatchString(checkpoint.ExpandFingerprint) {
+		return checkpoint, fmt.Errorf("expand checkpoint fingerprint is invalid")
 	}
 	return checkpoint, nil
 }

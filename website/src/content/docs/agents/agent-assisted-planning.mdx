@@ -7,7 +7,7 @@ onwardpg is designed to be operated by a coding agent that already understands t
 
 ## Point your agent at one file
 
-The canonical operating contract is [`https://onwardpg.solberg.is/skill.md`](/skill.md). It is intentionally shorter and more procedural than this human guide. Give the agent that file first; it can load the linked decision, schema-state, and production-evidence references only when needed.
+The canonical operating contract is [`https://onwardpg.solberg.is/skill.md`](https://onwardpg.solberg.is/skill.md). It is intentionally shorter and more procedural than this human guide. Give the agent that file first; it can load the linked decision, schema-state, and production-evidence references only when needed.
 
 ```text
 Read and follow https://onwardpg.solberg.is/skill.md for this migration.
@@ -70,7 +70,7 @@ Accepted hints are captured in the evolving bundle. On the next model edit or re
 
 ## Why is the output agent-friendly?
 
-- JSON is the default and every document has a protocol version.
+- JSON is the default and each document leads with a status or error code.
 - Exit codes distinguish decisions, SQL edits, unsupported state, and broken evidence.
 - High-level `plan` reports status, exact decision choices, edit requirements,
   and safe `workspace_fast_forward` SQL; the lower-level `draft` protocol also

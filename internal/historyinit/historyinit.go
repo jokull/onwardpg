@@ -21,8 +21,6 @@ import (
 	"github.com/jokull/onwardpg/internal/workspace"
 )
 
-const Version = "onwardpg.history-init/v2"
-
 type Finding struct {
 	Code        string `json:"code"`
 	Message     string `json:"message"`
@@ -30,7 +28,6 @@ type Finding struct {
 }
 
 type Report struct {
-	ProtocolVersion    string                `json:"protocol_version"`
 	Outcome            string                `json:"status"`
 	Target             string                `json:"target"`
 	BundleID           string                `json:"bundle_id"`
@@ -63,10 +60,9 @@ type Input struct {
 // before it is installed in the real bundle root.
 func Run(ctx context.Context, input Input) (Report, error) {
 	report := Report{
-		ProtocolVersion: Version,
-		Outcome:         "error",
-		Target:          input.TargetName,
-		BundleID:        input.BundleID,
+		Outcome:  "error",
+		Target:   input.TargetName,
+		BundleID: input.BundleID,
 	}
 	if input.Root == "" || !filepath.IsAbs(input.Root) {
 		return report, fmt.Errorf("history init root must be absolute")

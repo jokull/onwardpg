@@ -87,8 +87,7 @@ onwardpg contract check \
   --statement-timeout 30s
 ```
 
-The `onwardpg.contract-readiness/v1` result is `ready`, `needs_evidence`,
-`blocked`, or `stale`. In one
+The result is `ready`, `needs_evidence`, `blocked`, or `stale`. In one
 `REPEATABLE READ, READ ONLY` transaction it:
 
 1. validates the bundle and requires it to be the history head;

@@ -35,8 +35,8 @@ harnesses are follow-up work, not gates for this shipment.
 - Rebases recalculate the same bundle from the new accepted history.
 - When accepted history absorbs a generated bundle, `plan` removes the empty
   bundle and retires its local selector automatically.
-- No lifecycle verbs, planner modes, scopes, or protocol-version churn were
-  added.
+- No lifecycle verbs, planner modes, scopes, or speculative protocol versions
+  were added; machine output is status-oriented.
 
 ### Durable planning stays separate from local reconciliation
 

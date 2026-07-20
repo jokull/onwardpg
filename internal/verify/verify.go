@@ -18,8 +18,6 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-const Version = "onwardpg.verify/v4"
-
 var phases = []string{protocol.PhaseExpand, protocol.PhaseContract}
 
 type Failure struct {
@@ -40,7 +38,6 @@ type Finding struct {
 }
 
 type Report struct {
-	ProtocolVersion        string           `json:"protocol_version"`
 	Outcome                string           `json:"status"`
 	Target                 string           `json:"target"`
 	BundleID               string           `json:"bundle_id"`
@@ -95,7 +92,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}
 	}
 	report := Report{
-		ProtocolVersion: Version, Outcome: "failed", Target: chain.Target,
+		Outcome: "failed", Target: chain.Target,
 		BundleID: input.BundleID, HistoryHead: chain.HeadDigest, ThroughPhase: input.ThroughPhase,
 	}
 	targetManifest := chain.Entries[len(chain.Entries)-1].Artifact.Manifest

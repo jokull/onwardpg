@@ -18,8 +18,11 @@ current CLI and, against disposable PostgreSQL:
    tests against PostgreSQL, including their edited conversion pockets.
 
 `scripts/check-documentation.mjs` separately ties the website's displayed code
-blocks to these files, rejects stale verify syntax and protocol versions, and
+blocks to these files, rejects stale verify syntax and speculative protocol versioning, and
 checks that every named Go test in the documentation still exists.
+The website's `generate-cli-help.mjs` builds the current binary and generates a
+public help page for every documented command surface. Website checks fail when
+that tracked page is stale, so a new or renamed flag cannot remain invisible.
 
 The scenarios are intentionally small:
 

@@ -47,14 +47,13 @@ func TestStableStatementIDUsesCompleteNormalizedContract(t *testing.T) {
 
 func TestErrorDiagnosticHasVersionedStableShape(t *testing.T) {
 	diagnostic := ErrorDiagnostic("invalid_config", errors.New("bad config"))
-	if diagnostic.ProtocolVersion != DiagnosticVersion || diagnostic.Status != "error" || diagnostic.Code != "invalid_config" || diagnostic.Message == "" {
+	if diagnostic.Status != "error" || diagnostic.Code != "invalid_config" || diagnostic.Message == "" {
 		t.Fatalf("diagnostic = %#v", diagnostic)
 	}
 }
 
 func TestResultJSONV1ContractIncludesExecutionMetadata(t *testing.T) {
 	result := Result{
-		ProtocolVersion:    Version,
 		CurrentFingerprint: "sha256:current",
 		DesiredFingerprint: "sha256:desired",
 		Status:             Planned,
@@ -71,11 +70,11 @@ func TestResultJSONV1ContractIncludesExecutionMetadata(t *testing.T) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatal(err)
 	}
-	if got := document["protocol_version"]; got != Version {
-		t.Fatalf("protocol_version = %#v, want %q", got, Version)
+	if _, exists := document["protocol_version"]; exists {
+		t.Fatalf("result must not expose a protocol version: %#v", document)
 	}
 	if _, exists := document["statements"]; !exists {
-		t.Fatal("v1 result must expose statements")
+		t.Fatal("result must expose statements")
 	}
 	batches, ok := document["batches"].([]any)
 	if !ok || len(batches) != 1 {
@@ -92,7 +91,7 @@ func TestResultJSONV1ContractIncludesExecutionMetadata(t *testing.T) {
 
 func TestResolverBindsAnswersToFingerprintsAndConsumesThem(t *testing.T) {
 	answers := Answers{
-		ProtocolVersion: Version, CurrentFingerprint: "sha256:current", DesiredFingerprint: "sha256:desired",
+		CurrentFingerprint: "sha256:current", DesiredFingerprint: "sha256:desired",
 		Answers: []Answer{{Kind: "drop_table", Key: "public.orders", Value: "drop"}},
 	}
 	resolver, err := answers.Resolver("sha256:current", "sha256:desired")
@@ -110,7 +109,7 @@ func TestResolverBindsAnswersToFingerprintsAndConsumesThem(t *testing.T) {
 
 func TestResolverRejectsStaleContradictoryInvalidAndUnusedAnswers(t *testing.T) {
 	base := Answers{
-		ProtocolVersion: Version, CurrentFingerprint: "current", DesiredFingerprint: "desired",
+		CurrentFingerprint: "current", DesiredFingerprint: "desired",
 		Answers: []Answer{{Kind: "drop_table", Key: "public.orders", Value: "drop"}},
 	}
 	if _, err := base.Resolver("other", "desired"); err == nil {
@@ -134,7 +133,7 @@ func TestResolverRejectsStaleContradictoryInvalidAndUnusedAnswers(t *testing.T) 
 }
 
 func TestResolverRequiresCompleteManualWorkContract(t *testing.T) {
-	answers := Answers{ProtocolVersion: Version, CurrentFingerprint: "current", DesiredFingerprint: "desired", Answers: []Answer{{
+	answers := Answers{CurrentFingerprint: "current", DesiredFingerprint: "desired", Answers: []Answer{{
 		Kind: "partition_reconfiguration", Key: "table:app:events_2026", Value: "provided",
 		Manual: &ManualWork{Summary: "move rows", ExecutionMode: "transactional", Statements: []string{"ALTER TABLE app.events DETACH PARTITION app.events_2026;"}, VerificationSQL: []string{"SELECT 1;"}},
 	}}}
@@ -184,7 +183,7 @@ func TestResolverRequiresCompleteManualWorkContract(t *testing.T) {
 }
 
 func TestResolverRejectsManualPayloadForOrdinaryQuestion(t *testing.T) {
-	answers := Answers{ProtocolVersion: Version, CurrentFingerprint: "current", DesiredFingerprint: "desired", Answers: []Answer{{
+	answers := Answers{CurrentFingerprint: "current", DesiredFingerprint: "desired", Answers: []Answer{{
 		Kind: "drop_table", Key: "table:app:orders", Value: "drop",
 		Manual: &ManualWork{Summary: "not applicable", ExecutionMode: "transactional", Statements: []string{"SELECT 1;"}},
 	}}}
@@ -206,7 +205,7 @@ func FuzzResolverAnswerValidation(f *testing.F) {
 			return
 		}
 		answers := Answers{
-			ProtocolVersion: Version, CurrentFingerprint: "current", DesiredFingerprint: "desired",
+			CurrentFingerprint: "current", DesiredFingerprint: "desired",
 			Answers: []Answer{{Kind: kind, Key: key, Value: value}},
 		}
 		resolver, err := answers.Resolver("current", "desired")
@@ -220,7 +219,7 @@ func FuzzResolverAnswerValidation(f *testing.F) {
 
 func TestResolverRejectsStaleScopedAnswerAtConsumption(t *testing.T) {
 	answers := Answers{
-		ProtocolVersion: Version, CurrentFingerprint: "current", DesiredFingerprint: "desired",
+		CurrentFingerprint: "current", DesiredFingerprint: "desired",
 		Answers: []Answer{{Kind: "reconcile_contract", Key: "constraint:app:orders:check", Value: "assert_only", QuestionFingerprint: "sha256:old"}},
 	}
 	resolver, err := answers.Resolver("current", "desired")

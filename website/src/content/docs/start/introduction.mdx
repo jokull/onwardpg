@@ -18,7 +18,7 @@ onwardpg plan
 ```
 
 :::tip[Using a coding agent?]
-Point it at [`https://onwardpg.solberg.is/skill.md`](/skill.md) before it changes the schema. The skill contains the operating loop, evidence boundaries, stop conditions, and required review handoff.
+Point it at [`https://onwardpg.solberg.is/skill.md`](https://onwardpg.solberg.is/skill.md) before it changes the schema. The skill contains the operating loop, evidence boundaries, stop conditions, and required review handoff.
 
 ```text
 Read and follow https://onwardpg.solberg.is/skill.md for this migration.
@@ -63,7 +63,7 @@ onwardpg never applies SQL to production or to another caller-owned database. Yo
 
 ## What makes it different
 
-onwardpg knows which schemas are playing which role. The durable migration is replayed history → working intent. A separate development reconciliation handles a branch-worn local database without contaminating the production bundle. Production appears only in an explicit drift audit or as externally gathered read-only evidence. Verification uses independent disposable replays.
+onwardpg knows which schemas are playing which role. The durable migration is replayed history → working intent. A separate development reconciliation handles a branch-worn local database without contaminating the production bundle. Production appears only in explicit read-only operations: drift against accepted history, contract readiness against the verified post-expand checkpoint, or bounded evidence gathered by an authorized agent. Verification uses independent disposable replays.
 
 Desired DDL is materialized in real PostgreSQL, then inspected as typed catalog objects and dependencies. When schema state cannot prove intent—a rename, destructive change, backfill, or cast—onwardpg asks for a semantic decision, captures it in the plan, and binds it to the exact participating schema scope instead of guessing.
 

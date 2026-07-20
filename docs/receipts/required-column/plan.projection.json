@@ -1,0 +1,9 @@
+{
+  "status": "needs_action",
+  "durable": {
+    "status": "needs_sql_edits",
+    "edit_files": [
+      "phases/contract.sql"
+    ]
+  }
+}

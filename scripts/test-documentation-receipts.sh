@@ -22,8 +22,10 @@ set +e
 questions_exit=$?
 set -e
 test "$questions_exit" -eq 2
-grep -Eq '"status"[[:space:]]*:[[:space:]]*"needs_input"' questions.json
-grep -q '"choices":\["assert_only","manual_sql","split_plan"\]' questions.json
+jq -e '.status == "needs_action" and .durable.status == "needs_input"' questions.json >/dev/null
+jq '{status, durable: {status: .durable.status, generated_plan: {questions: [.durable.generated_plan.questions[0] | {choices}]}}}' \
+  questions.json >questions.projection.json
+diff -u "$receipt_root/questions.projection.json" questions.projection.json
 
 set +e
 "$binary" plan add-booking-status \
@@ -41,8 +43,10 @@ if [[ "${ONWARDPG_DOC_RECEIPTS_PRINT:-}" == "1" ]]; then
   sed -n '1,240p' plan.json
 fi
 
-grep -Eq '"status"[[:space:]]*:[[:space:]]*"needs_sql_edits"' plan.json
-grep -Eq '"edit_files"[[:space:]]*:[[:space:]]*\["phases/contract.sql"\]' plan.json
+jq -e '.status == "needs_action" and .durable.status == "needs_sql_edits"' plan.json >/dev/null
+jq '{status, durable: {status: .durable.status, edit_files: .durable.edit_files}}' \
+  plan.json >plan.projection.json
+diff -u "$receipt_root/plan.projection.json" plan.projection.json
 
 set +e
 "$binary" verify add-booking-status >positional-verify.json
@@ -105,6 +109,29 @@ grep -q 'booking_status_present' verify.json
 
 "$binary" verify --check >verify-check.json
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"verified"' verify-check.json
+
+draft_fixture="$fixture/draft-envelope"
+mkdir -p "$draft_fixture"
+cp "$receipt_root/config.toml" "$draft_fixture/.onwardpg.toml"
+cp "$receipt_root/base.sql" "$draft_fixture/schema.sql"
+
+cd "$draft_fixture"
+"$binary" init --bundle baseline >init.json
+cp "$receipt_root/desired.sql" schema.sql
+draft_head=$("$binary" history status | jq -r '.head_ref')
+set +e
+"$binary" draft \
+  --bundle event-date \
+  --after "$draft_head" \
+  --create \
+  --hint '{"kind":"reconcile","object":"column","name":["app","bookings","status"],"strategy":"manual_sql"}' \
+  --hint '{"kind":"manual_sql","action":"reconcile_contract_sql","object":"column","name":["app","bookings","status"]}' \
+  >draft.json
+draft_exit=$?
+set -e
+test "$draft_exit" -eq 2
+jq '{status, next_action, path, edit}' draft.json >draft-needs-sql-edits.json
+diff -u "$receipt_root/draft-needs-sql-edits.json" draft-needs-sql-edits.json
 
 cd "$repository_root"
 ONWARDPG_TEST_DATABASE_URL="$ONWARDPG_TEST_DATABASE_URL" \

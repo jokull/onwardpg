@@ -36,7 +36,7 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 		return Resolution{}, err
 	}
 	resolution := Resolution{Result: result, Answers: protocol.Answers{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: result.CurrentFingerprint, DesiredFingerprint: result.DesiredFingerprint,
+		CurrentFingerprint: result.CurrentFingerprint, DesiredFingerprint: result.DesiredFingerprint,
 	}}
 	used := identityUsed
 	for iteration := 0; iteration <= len(hints)*2+1; iteration++ {
@@ -115,7 +115,7 @@ func hintReachable(current, desired *pgschema.Snapshot, target protocol.Hint, op
 	if err != nil {
 		return false, err
 	}
-	queue := []state{{answers: protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: initial.CurrentFingerprint, DesiredFingerprint: initial.DesiredFingerprint}}}
+	queue := []state{{answers: protocol.Answers{CurrentFingerprint: initial.CurrentFingerprint, DesiredFingerprint: initial.DesiredFingerprint}}}
 	seen := make(map[string]bool)
 	for len(queue) > 0 {
 		if len(seen) > 1024 {

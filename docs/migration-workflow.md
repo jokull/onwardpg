@@ -63,10 +63,13 @@ When a target has `dev_database_env`, each `plan` also compares developer DB D
 with W. Use this only to bring local development forward:
 
 ```sh
-onwardpg plan --output sql | psql "$DEV_DATABASE_URL"
+onwardpg plan --output sql | psql "$ONWARDPG_DEV_WRITE_URL"
 ```
 
-The command itself does not pipe or apply the SQL. In the default workspace
+The configured `dev_database_env` may and preferably does use a read-only role;
+the separate `ONWARDPG_DEV_WRITE_URL` above is an optional developer-controlled
+write credential for applying reviewed local reconciliation SQL. onwardpg
+itself does not pipe or apply the SQL. In the default workspace
 mode, objects that exist in D but not W are preserved rather than proposed for
 drop. That makes branch switching and long-lived test data safe enough to be
 useful. The SQL is D → W, not the PR bundle; it does not prove that local state
@@ -126,7 +129,7 @@ Run this when it is operationally useful, not as a requirement of every PR:
 onwardpg drift check --database "$PROD_DATABASE_URL"
 ```
 
-It compares observed P with W and reports drift. A finding is evidence to
+It compares observed P with replayed accepted history H and reports drift. A finding is evidence to
 investigate, not permission for onwardpg to make production changes. Resolve it
 through a reviewed forward bundle or a deliberate declared-schema correction.
 

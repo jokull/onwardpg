@@ -1,0 +1,23 @@
+:root {
+  --blume-foreground: #313a34;
+  --blume-muted: #f1eadb;
+  --blume-muted-foreground: #6a716b;
+  --blume-border: #ded4be;
+  --blume-code-background: #f5efe1;
+  --blume-font-display: Georgia, "Times New Roman", serif;
+}
+
+:root[data-theme="dark"] {
+  --blume-foreground: #fffdf7;
+  --blume-muted: #202823;
+  --blume-muted-foreground: #c7c2b6;
+  --blume-border: #39423d;
+  --blume-code-background: #202823;
+  --blume-font-display: Georgia, "Times New Roman", serif;
+}
+
+.prose h1,
+.prose h2,
+.prose h3 {
+  letter-spacing: -0.025em;
+}

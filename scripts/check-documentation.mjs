@@ -17,7 +17,7 @@ const documentationPaths = [
   path.join(repositoryRoot, 'README.md'),
   ...(await collect(path.join(repositoryRoot, 'docs'), (name) => name.endsWith('.md'))),
   ...(await collect(path.join(repositoryRoot, 'skills'), (name) => name.endsWith('.md'))),
-  ...(await collect(path.join(repositoryRoot, 'website/src/content/docs'), (name) => name.endsWith('.md'))),
+  ...(await collect(path.join(repositoryRoot, 'website/src/content/docs'), (name) => /\.mdx?$/.test(name))),
 ];
 const documents = new Map();
 for (const documentPath of documentationPaths) {
@@ -36,8 +36,8 @@ for (const [documentPath, body] of documents) {
   if (/onwardpg verify add-[a-z0-9-]+/.test(body)) {
     fail(`${relative} passes a positional bundle name to verify`);
   }
-  if (body.includes('onwardpg.verify/v3')) {
-    fail(`${relative} references the retired verify protocol v3`);
+  if (body.includes('protocol_version') || /onwardpg\.[a-z-]+\/v\d+/.test(body)) {
+    fail(`${relative} references a speculative protocol version`);
   }
 }
 
@@ -57,6 +57,18 @@ const requiredVerify = await readFile(
   path.join(repositoryRoot, 'docs/receipts/required-column/verify.sql'),
   'utf8',
 );
+const requiredQuestionsProjection = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/required-column/questions.projection.json'),
+  'utf8',
+);
+const requiredPlanProjection = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/required-column/plan.projection.json'),
+  'utf8',
+);
+const draftNeedsSQLEdits = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/required-column/draft-needs-sql-edits.json'),
+  'utf8',
+);
 const expandContractPath = path.join(
   repositoryRoot,
   'website/src/content/docs/concepts/expand-contract.md',
@@ -65,6 +77,7 @@ const expandContract = documents.get(expandContractPath);
 const planCommand = documents.get(
   path.join(repositoryRoot, 'website/src/content/docs/concepts/plan-command.md'),
 );
+const protocolDoc = documents.get(path.join(repositoryRoot, 'docs/protocol.md'));
 
 function markedFence(markdown, marker) {
   const markerText = `<!-- onwardpg-receipt: ${marker} -->`;
@@ -108,6 +121,11 @@ if (
   markedFence(expandContract, 'required-column-verification') !== requiredVerify.trimEnd()
 ) {
   fail('required-column verification documentation differs from its verified fixture');
+}
+if (
+  markedFence(protocolDoc, 'draft-needs-sql-edits') !== draftNeedsSQLEdits.trimEnd()
+) {
+  fail('draft needs_sql_edits documentation differs from actual onwardpg output');
 }
 
 function assertInOrder(body, fragments, label) {
@@ -191,6 +209,9 @@ assertInOrder(dependencyContract, dependencyFragments, 'dependency type-change r
 assertInOrder(planCommand, dependencyFragments, 'plan-command nightmare ladder');
 
 const homepage = await readFile(path.join(repositoryRoot, 'website/src/pages/index.astro'), 'utf8');
+if (homepage.includes('protocol_version') || /onwardpg\.[a-z-]+\/v\d+/.test(homepage)) {
+  fail('homepage references a speculative protocol version');
+}
 const requiredCleanup = generatedRequiredContract
   .split('\n')
   .find((line) => line.includes('PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL'));
@@ -198,19 +219,23 @@ const requiredGate = generatedRequiredContract
   .split('\n')
   .find((line) => line.includes('onwardpg contract gate failed'));
 if (!requiredCleanup || !requiredGate) fail('required-column receipt is missing its cleanup or contract gate');
+
+function escapedCompactJSON(document) {
+  return JSON.stringify(JSON.parse(document))
+    .replaceAll('{', '&#123;')
+    .replaceAll('}', '&#125;');
+}
+
 assertInOrder(homepage, [
-  '"protocol_version":"onwardpg.plan/v5"',
-  '"status":"needs_input"',
-  '["assert_only","manual_sql","split_plan"]',
+  escapedCompactJSON(requiredQuestionsProjection),
   '"kind":"reconcile","object":"column","name":["app","bookings","status"],"strategy":"manual_sql"',
   '"kind":"manual_sql","action":"reconcile_contract_sql","object":"column","name":["app","bookings","status"]',
-  '"status":"needs_sql_edits"',
-  '"durable":&#123;"edit_files":["phases/contract.sql"]',
+  escapedCompactJSON(requiredPlanProjection),
   expandStatement,
   requiredCleanup.trim(),
   requiredGate.trim(),
   'ALTER COLUMN "status" SET NOT NULL;',
-  'abridged from the checked black-box CLI receipt',
+  'abridged projections from the checked black-box CLI receipt',
 ], 'homepage required-column receipt');
 
 const supportedFeatures = documents.get(path.join(repositoryRoot, 'docs/supported-features.md'));
@@ -234,7 +259,7 @@ if (!decisionProtocol.includes('required production readiness assertion') ||
   fail('agent decision protocol conflates contract gates with optional verify.sql assertions');
 }
 const cliReference = documents.get(path.join(repositoryRoot, 'docs/cli.md'));
-for (const expected of ['--statement-timeout 30s', 'onwardpg.contract-readiness/v1']) {
+for (const expected of ['--statement-timeout 30s', 'PlanID']) {
   if (!cliReference.includes(expected)) fail(`CLI reference omits ${expected}`);
 }
 
@@ -260,5 +285,5 @@ for (const [documentPath, body] of documents) {
 
 console.log(
   `documentation verified: ${documentationPaths.length} Markdown files, ` +
-    'four CLI receipt scenarios, current verify syntax/protocol, and all cited Go tests',
+    'four CLI receipt scenarios, current verify interface, and all cited Go tests',
 );

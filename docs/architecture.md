@@ -9,8 +9,18 @@ accepted chain ── disposable replay ── H ─┐
 working DDL ─── disposable PostgreSQL ─ W ┘
 
 developer DB ───────────────────────── D ── diff to W only for local reconciliation
-production ─────────────────────────── P ── compared to H only by explicit drift audit
+verified bundle through expand ─────── E ─┐
+                                          ├─ explicit contract-readiness check
+production ─────────────────────────── P ─┘
+
+production ─────────────────────────── P ── explicit drift audit against H
+accepted history + selected bundle ── V ── disposable proof of convergence to W
 ```
+
+P is never an ordinary planning input. The two production comparisons are
+deliberately narrower: drift compares P with accepted history H, while contract
+readiness compares P with the verified post-expand checkpoint E and evaluates
+the bundle's data and writer gates.
 
 ## Invariants
 

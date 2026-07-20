@@ -3,6 +3,10 @@ title: CLI reference
 description: The preferred onwardpg authoring, verification, development, and drift commands.
 ---
 
+This guide explains behavior and workflow. The [generated CLI help](/reference/generated-cli-help)
+is dumped from the current binary and is the exhaustive source for available
+flags and defaults.
+
 All commands emit JSON by default. Use `--target NAME` when a repository configures more than one target.
 
 ## `config check`
@@ -25,19 +29,21 @@ Create the first clone-verified history entry. It refuses a non-empty target his
 
 ```sh
 onwardpg plan [NAME] \
+  [--target NAME] [--bundle ID] [--config FILE] \
+  [--purpose feature|repair|contract] \
   [--hint JSON] [--hints-file FILE] \
   [--dev-hint JSON] [--dev-hints-file FILE] \
   [--output json|text|sql]
 ```
 
-Start or revise one worktree-local active migration. The durable comparison is accepted history to working DDL. When a development database is configured, `--output sql` prints a separate direct development reconciliation; onwardpg does not apply it.
+Start or revise one worktree-local active migration. The durable comparison is accepted history to working DDL. When a development database is configured, `--output sql` prints a separate direct development reconciliation; onwardpg does not apply it. Planner rendering and ignore flags are listed in the generated help.
 
 Exit status `2` means the plan needs a semantic decision or editable SQL, not that onwardpg guessed a result.
 
 ## `status`
 
 ```sh
-onwardpg status
+onwardpg status [--target NAME] [--config FILE]
 ```
 
 Report the local active PlanID, selected bundle, and whether its parent is current. This is Git-independent and does not contact PostgreSQL.
@@ -67,8 +73,8 @@ onwardpg contract check \
 Require the selected bundle to be the history head, compare the caller database
 with its receipted post-expand graph, evaluate exact data gates, and validate
 expiring writer evidence. The connection runs one repeatable-read, read-only
-snapshot; this command has no production migration execution path. Its
-`onwardpg.contract-readiness/v1` report carries bundle/PlanID identity,
+snapshot; this command has no production migration execution path. Its report
+carries bundle/PlanID identity,
 expected and observed fingerprints, gate results, findings, and a digest.
 `--statement-timeout` defaults to 30 seconds. See
 [contract readiness](/concepts/contract-readiness/).

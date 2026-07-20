@@ -42,7 +42,7 @@ func TestContractCheckUsesOneReadOnlySnapshotAndRequiresWriterEvidence(t *testin
 	statement := protocol.Statement{SQL: "SELECT 1;", Phase: protocol.PhaseContract, Safety: "review", RequiresGates: []string{dataGate.ID, writerGate.ID}, TransitionID: "test:readiness"}
 	statement.ID = protocol.StableStatementID(statement)
 	result := protocol.Result{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: fingerprint, DesiredFingerprint: fingerprint, Status: protocol.Planned,
+		CurrentFingerprint: fingerprint, DesiredFingerprint: fingerprint, Status: protocol.Planned,
 		Statements: []protocol.Statement{statement}, Batches: []protocol.Batch{{ID: "batch-contract-001", Phase: protocol.PhaseContract, Transactional: true, Statements: []protocol.Statement{statement}}},
 		ContractGates: []protocol.ContractGate{dataGate, writerGate}, Reconciliations: []protocol.Reconciliation{{TransitionID: "test:readiness", Strategy: "assert_only", GateIDs: []string{dataGate.ID}}},
 	}
@@ -69,7 +69,7 @@ func TestContractCheckUsesOneReadOnlySnapshotAndRequiresWriterEvidence(t *testin
 		t.Fatalf("missing evidence report=%#v", report)
 	}
 	evidence := Evidence{
-		ProtocolVersion: EvidenceVersion, Target: "primary", Environment: "production", PlanID: metadata.PlanID,
+		Target: "primary", Environment: "production", PlanID: metadata.PlanID,
 		BundleEntryDigest: artifact.Manifest.History.EntryDigest, DesiredFingerprint: fingerprint, Generation: 1, Release: "integration-release",
 		ObservedAt: input.Now.Add(-time.Minute).Format(time.RFC3339), ExpiresAt: input.Now.Add(time.Hour).Format(time.RFC3339),
 	}
@@ -159,7 +159,7 @@ func TestContractCheckProjectsDedicatedObserverAccessAndFailsClosed(t *testing.T
 	statement := protocol.Statement{SQL: "SELECT 1;", Phase: protocol.PhaseContract, Safety: "review", RequiresGates: []string{dataGate.ID}, TransitionID: "test:observer"}
 	statement.ID = protocol.StableStatementID(statement)
 	result := protocol.Result{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: fingerprint, DesiredFingerprint: fingerprint, Status: protocol.Planned,
+		CurrentFingerprint: fingerprint, DesiredFingerprint: fingerprint, Status: protocol.Planned,
 		Statements: []protocol.Statement{statement}, Batches: []protocol.Batch{{ID: "batch-contract-001", Phase: protocol.PhaseContract, Transactional: true, Statements: []protocol.Statement{statement}}},
 		ContractGates: []protocol.ContractGate{dataGate}, Reconciliations: []protocol.Reconciliation{{TransitionID: "test:observer", Strategy: "assert_only", GateIDs: []string{dataGate.ID}}},
 	}
@@ -278,7 +278,7 @@ func TestContractCheckOrdersWriterDrainBeforeManualReconciliation(t *testing.T) 
 	}
 	transitionID := "constraint:public:deliveries:tier"
 	result := protocol.Result{
-		ProtocolVersion: protocol.Version, CurrentFingerprint: fingerprint, DesiredFingerprint: fingerprint, Status: protocol.Planned,
+		CurrentFingerprint: fingerprint, DesiredFingerprint: fingerprint, Status: protocol.Planned,
 		ContractGates:   []protocol.ContractGate{manualGate, writerGate},
 		Reconciliations: []protocol.Reconciliation{{TransitionID: transitionID, Strategy: "manual_sql", Work: work, GateIDs: []string{manualGate.ID, writerGate.ID}}},
 		Operations: []protocol.Operation{{
@@ -311,7 +311,7 @@ func TestContractCheckOrdersWriterDrainBeforeManualReconciliation(t *testing.T) 
 		t.Fatalf("pre-drain report=%#v", report)
 	}
 	evidence := Evidence{
-		ProtocolVersion: EvidenceVersion, Target: "primary", Environment: "production", PlanID: metadata.PlanID,
+		Target: "primary", Environment: "production", PlanID: metadata.PlanID,
 		BundleEntryDigest: artifact.Manifest.History.EntryDigest, DesiredFingerprint: fingerprint, Generation: 1, Release: "release-42",
 		ObservedAt: now.Add(-time.Minute).Format(time.RFC3339), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		Cohorts: []Cohort{{Category: "web", Name: "web", Status: "drained", SourceKind: "manual", Source: "deploy-42"}},
