@@ -243,6 +243,11 @@ if [[ "${ONWARDPG_DOC_RECEIPTS_PRINT_DEPENDENCY:-}" == "1" ]]; then
 fi
 
 diff -u "$dependency_receipt_root/expand.generated.sql" "$dependency_expand"
-diff -u "$dependency_receipt_root/contract.generated.sql" "$dependency_contract"
+dependency_contract_receipt="$dependency_receipt_root/contract.generated.sql"
+dependency_postgres_major=$(sed -nE 's/.*"postgres_major"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$dependency_bundle_root/manifest.json" | head -1)
+if [[ "$dependency_postgres_major" == "15" ]]; then
+  dependency_contract_receipt="$dependency_receipt_root/contract.generated.pg15.sql"
+fi
+diff -u "$dependency_contract_receipt" "$dependency_contract"
 
 echo "Documentation receipts passed"
