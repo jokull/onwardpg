@@ -70,6 +70,8 @@ Current semantic kinds are:
 - `drop`: object kind plus exact current identifier;
 - `type_change`: column identifier and the `manual_sql` handoff strategy;
 - `rollout`: column identifier and offered strategy (`not_null` is implied);
+- `rename_backfill`: old column identifier and one offered strategy
+  (`manual_sql`, `single_transaction`, or `split_plan`);
 - `confirm`: exact object and authorization/rebuild/destructive action; and
 - `manual_sql`: exact object and action handed to editable phase SQL.
 
@@ -287,7 +289,7 @@ than proof that a historical migration phase ran.
 `init` emits `onwardpg.history-init/v2`. A successful document has
 `status: "initialized"`, target and bundle identity, installed path, history
 head, desired fingerprint, the complete empty-to-desired plan, and an embedded
-`onwardpg.verify/v3` clone receipt. `needs_input` and `unsupported` preserve the
+`onwardpg.verify/v4` clone receipt. `needs_input` and `unsupported` preserve the
 ordinary planner exits `2` and `3` without writing a bundle. A pre-existing
 history returns `status: "blocked"`, a stable finding and remediation, and
 exit `4`.
@@ -302,7 +304,7 @@ content-addressed repository history without Git or PostgreSQL access. A
 missing anchor is an explicit `no_active_plan` status rather than an inferred
 branch state.
 
-`verify` emits `onwardpg.verify/v3` with the selected phase checkpoint, total
+`verify` emits `onwardpg.verify/v4` with the selected phase checkpoint, total
 and selected-bundle batch counts, assertion IDs, observed/full fingerprints,
 and residual plan or typed execution failure. Full verification reports
 `verified_assertions`. Partial verification instead reports assertions run by

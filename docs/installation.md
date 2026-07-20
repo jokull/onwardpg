@@ -97,8 +97,15 @@ the same `checksums.txt` and Homebrew Formula. GNU tar or BSD tar is supported.
 
 onwardpg supports PostgreSQL 15–18. The PostgreSQL major is discovered from the
 configured scratch server and receipted automatically. The development URL may
-be read-only; the scratch URL must be able to create and force-drop disposable
-databases.
+be read-only. The scratch URL is an administrator for a dedicated local or CI
+cluster and must be able to create and force-drop disposable databases and
+short-lived login roles. Project DDL runs as the random database owner, which
+has no cluster-global authority. Do not use a production or shared application
+cluster. Scratch creation copies the connected control database's encoding and
+locale environment and rejects a collation-version mismatch. Referenced roles,
+languages, and extension packages must already be
+available; extensions requiring superuser execution cannot be materialized by
+the restricted owner.
 
 See [PostgreSQL version policy](postgresql-version-policy.md) and
 [Schema inputs](schema-inputs.md).

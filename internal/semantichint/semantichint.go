@@ -145,6 +145,20 @@ func choicesForQuestion(question protocol.Question, current, desired *pgschema.S
 			}, Hazards: hazards})
 		}
 		return result, nil
+	case "rename_backfill_strategy":
+		result := make([]protocol.DecisionChoice, 0, len(question.Choices))
+		for _, strategy := range question.Choices {
+			hazards := []string{"manual_sql"}
+			if strategy == "single_transaction" {
+				hazards = []string{"unbounded_update", "long_transaction", "wal_volume", "replica_lag"}
+			} else if strategy == "split_plan" {
+				hazards = []string{"additional_deployment"}
+			}
+			result = append(result, protocol.DecisionChoice{Hint: protocol.Hint{
+				Kind: "rename_backfill", Name: name, Strategy: strategy,
+			}, Hazards: hazards})
+		}
+		return result, nil
 	}
 
 	if isManualQuestion(question.Kind) {
@@ -216,7 +230,7 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 	if !equal(hint.Name, name) {
 		return answer, false, nil
 	}
-	if hint.Kind != "type_change" && hint.Kind != "rollout" && hint.Object != object {
+	if hint.Kind != "type_change" && hint.Kind != "rollout" && hint.Kind != "rename_backfill" && hint.Object != object {
 		return answer, false, nil
 	}
 	switch question.Kind {
@@ -235,6 +249,11 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 			answer.Value = hint.Strategy
 			return answer, true, nil
 		}
+	case "rename_backfill_strategy":
+		if hint.Kind == "rename_backfill" && object == "column" && contains(question.Choices, hint.Strategy) {
+			answer.Value = hint.Strategy
+			return answer, true, nil
+		}
 	default:
 		if isManualQuestion(question.Kind) && hint.Kind == "manual_sql" && hint.Action == question.Kind {
 			displayName := strings.Join(name, ".")
@@ -249,6 +268,11 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 						"-- Add boolean assertions to verify.sql for every data-dependent assumption.",
 				},
 			}
+			if question.Kind == "rename_backfill" {
+				answer.Manual.VerificationSQL = []string{
+					"SELECT false; -- ONWARDPG TODO: replace with a boolean old/new equality assertion",
+				}
+			}
 			return answer, true, nil
 		}
 		if hint.Kind == "confirm" && hint.Action == question.Kind && len(question.Choices) == 1 {
@@ -261,7 +285,7 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 
 func isManualQuestion(kind string) bool {
 	switch kind {
-	case "refresh_materialized_view", "partition_reconfiguration", "backfill_not_null", "rename_compatibility_bridge":
+	case "refresh_materialized_view", "partition_reconfiguration", "backfill_not_null", "rename_compatibility_bridge", "rename_backfill":
 		return true
 	default:
 		return false
@@ -269,7 +293,7 @@ func isManualQuestion(kind string) bool {
 }
 
 func isIdentityRenameQuestion(kind string) bool {
-	return strings.HasPrefix(kind, "rename_") && kind != "rename_compatibility_bridge"
+	return strings.HasPrefix(kind, "rename_") && kind != "rename_compatibility_bridge" && kind != "rename_backfill_strategy" && kind != "rename_backfill"
 }
 
 func confirmationHazards(kind string) []string {

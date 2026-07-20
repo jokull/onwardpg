@@ -71,6 +71,72 @@ func TestBuildRejectsRangeCanonicalFunctionChoreography(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsDependencyOnlyGraphDifference(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "orders"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		for _, object := range []pgschema.Object{schema, table} {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := desired.AddDependency(table.ObjectID(), schema.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Unsupported || !containsString(result.Unsupported, "dependency_only_graph_difference") {
+		t.Fatalf("dependency-only difference must fail closed: %#v", result)
+	}
+}
+
+func TestExistingPrimaryConstraintExposesBlockingIndexBuild(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "orders"}
+	id := pgschema.Column{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint", NotNull: true}
+	primary := pgschema.Constraint{Table: table.ObjectID(), Name: "orders_pkey", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)", Validated: true}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		for _, object := range []pgschema.Object{schema, table, id} {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, edge := range [][2]pgschema.ID{{table.ObjectID(), schema.ObjectID()}, {id.ObjectID(), table.ObjectID()}} {
+			if err := snapshot.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := desired.Add(primary); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddDependency(primary.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Planned || len(result.Statements) != 1 {
+		t.Fatalf("unexpected constraint result: %#v", result)
+	}
+	for _, hazard := range []string{"access_exclusive_lock", "blocking_index_build"} {
+		if !containsString(result.Statements[0].Hazards, hazard) {
+			t.Fatalf("constraint hazards omit %q: %#v", hazard, result.Statements[0].Hazards)
+		}
+	}
+	if strings.Contains(result.Statements[0].SQL, "CONCURRENTLY") {
+		t.Fatalf("constraint-backed index build was incorrectly made concurrent: %q", result.Statements[0].SQL)
+	}
+}
+
 func TestBuildNullableColumnWithoutDefaultDoesNotClaimTableRewrite(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	schema := pgschema.Schema{Name: "app"}
@@ -102,7 +168,7 @@ func TestBuildNullableColumnWithoutDefaultDoesNotClaimTableRewrite(t *testing.T)
 	if result.Status != protocol.Planned || len(result.Statements) != 1 {
 		t.Fatalf("unexpected result: %#v", result)
 	}
-	if !reflect.DeepEqual(result.Statements[0].Hazards, []string{"table_lock"}) {
+	if !reflect.DeepEqual(result.Statements[0].Hazards, []string{"table_lock", "application_row_shape_change"}) {
 		t.Fatalf("nullable metadata-only ADD COLUMN hazards = %#v", result.Statements[0].Hazards)
 	}
 }
@@ -196,6 +262,455 @@ func TestBuildOrdersPoliciesBeforeRLSAndQuotesRolesAndPrivileges(t *testing.T) {
 	}
 	if strings.Index(joined, "CREATE POLICY") > strings.Index(joined, "ENABLE ROW LEVEL SECURITY") || strings.Index(joined, "ENABLE ROW LEVEL SECURITY") > strings.Index(joined, "FORCE ROW LEVEL SECURITY") {
 		t.Fatalf("unsafe RLS order:\n%s", joined)
+	}
+	for _, item := range result.Statements {
+		if (strings.Contains(item.SQL, "POLICY") || strings.Contains(item.SQL, "ROW LEVEL SECURITY")) && item.Phase != protocol.PhaseExpand {
+			t.Fatalf("new-table authorization must stay in expand: %#v", item)
+		}
+	}
+}
+
+func TestBuildDefersExistingTableTriggerPolicyAndRLSToContract(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "orders"}
+	column := pgschema.Column{Table: table.ObjectID(), Name: "tenant_id", Position: 1, Type: "bigint"}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		for _, object := range []pgschema.Object{schema, table, column} {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, edge := range [][2]pgschema.ID{{table.ObjectID(), schema.ObjectID()}, {column.ObjectID(), table.ObjectID()}} {
+			if err := snapshot.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	using := "tenant_id > 0"
+	policy := pgschema.Policy{Table: table.ObjectID(), Name: "tenant", Permissive: false, Command: "SELECT", Roles: []string{"PUBLIC"}, Using: &using}
+	rls := pgschema.RowSecurity{Table: table.ObjectID(), Enabled: true}
+	trigger := pgschema.Trigger{Table: table.ObjectID(), Name: "audit", Definition: `CREATE TRIGGER audit BEFORE INSERT ON app.orders FOR EACH ROW EXECUTE FUNCTION app.audit()`, Enabled: "O"}
+	for _, object := range []pgschema.Object{policy, rls, trigger} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+		if err := desired.AddDependency(object.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := desired.AddDependency(rls.ObjectID(), policy.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Planned || len(result.Statements) != 3 {
+		t.Fatalf("unexpected activation plan: %#v", result)
+	}
+	for _, item := range result.Statements {
+		if item.Phase != protocol.PhaseContract || !containsString(item.Hazards, "application_behavior_change") {
+			t.Fatalf("existing-table activation was not deferred: %#v", item)
+		}
+	}
+}
+
+func TestBuildOrdersExistingPolicyChangeBeforeRowSecurityTighteningInContract(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "orders"}
+	oldUsing, newUsing := "tenant_id > 0", "tenant_id > 10"
+	oldPolicy := pgschema.Policy{Table: table.ObjectID(), Name: "tenant", Permissive: true, Command: "SELECT", Roles: []string{"PUBLIC"}, Using: &oldUsing}
+	newPolicy := oldPolicy
+	newPolicy.Using = &newUsing
+	oldRLS := pgschema.RowSecurity{Table: table.ObjectID(), Enabled: true, Forced: false}
+	newRLS := pgschema.RowSecurity{Table: table.ObjectID(), Enabled: true, Forced: true}
+	for _, fixture := range []struct {
+		snapshot *pgschema.Snapshot
+		policy   pgschema.Policy
+		rls      pgschema.RowSecurity
+	}{{current, oldPolicy, oldRLS}, {desired, newPolicy, newRLS}} {
+		for _, object := range []pgschema.Object{table, fixture.policy, fixture.rls} {
+			if err := fixture.snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, edge := range [][2]pgschema.ID{{fixture.policy.ObjectID(), table.ObjectID()}, {fixture.rls.ObjectID(), table.ObjectID()}, {fixture.rls.ObjectID(), fixture.policy.ObjectID()}} {
+			if err := fixture.snapshot.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "alter_policy" {
+		t.Fatalf("policy tightening question = %#v", pending)
+	}
+	answers := protocol.Answers{
+		ProtocolVersion:    pending.ProtocolVersion,
+		CurrentFingerprint: pending.CurrentFingerprint,
+		DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{
+			Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "alter", QuestionFingerprint: pending.Questions[0].ScopeFingerprint,
+		}},
+	}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil || planned.Status != protocol.Planned {
+		t.Fatalf("policy and RLS tightening plan=%#v err=%v", planned, err)
+	}
+	joined := joinSQL(planned)
+	policyAt, forceAt := strings.Index(joined, "ALTER POLICY"), strings.Index(joined, "FORCE ROW LEVEL SECURITY")
+	if policyAt < 0 || forceAt < 0 || policyAt > forceAt {
+		t.Fatalf("policy must change before RLS tightening:\n%s", joined)
+	}
+	for _, item := range planned.Statements {
+		if item.Phase != protocol.PhaseContract {
+			t.Fatalf("existing authorization tightening escaped contract: %#v", item)
+		}
+		if strings.Contains(item.SQL, "FORCE ROW LEVEL SECURITY") && !containsString(item.Hazards, "application_behavior_change") {
+			t.Fatalf("RLS tightening omitted behavior hazard: %#v", item)
+		}
+	}
+}
+
+func TestBuildBlocksRoutineSemanticChangesWithRetainedStoredDependents(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "measurements"}
+	base := pgschema.Column{Table: table.ObjectID(), Name: "value", Position: 1, Type: "integer"}
+	generated := pgschema.Column{Table: table.ObjectID(), Name: "score", Position: 2, Type: "integer", Generated: &pgschema.Generated{Expression: "public.score(value)", Kind: "STORED"}}
+	check := pgschema.Constraint{Table: table.ObjectID(), Name: "score_positive", Type: pgschema.ConstraintCheck, Definition: "CHECK (public.score(value) > 0)", Validated: true}
+	index := pgschema.Index{Table: table.ObjectID(), Name: "score_idx", Method: "btree", Parts: []pgschema.IndexPart{{Expression: "public.score(value)"}}}
+	before := pgschema.Routine{Schema: "public", Name: "score", Signature: "integer", Kind: "function", ReturnType: "integer", Definition: "CREATE OR REPLACE FUNCTION public.score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 1'"}
+	after := before
+	after.Definition = "CREATE OR REPLACE FUNCTION public.score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 2'"
+	for _, fixture := range []struct {
+		snapshot *pgschema.Snapshot
+		routine  pgschema.Routine
+	}{{current, before}, {desired, after}} {
+		for _, object := range []pgschema.Object{table, base, generated, check, index, fixture.routine} {
+			if err := fixture.snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, dependent := range []pgschema.ID{generated.ObjectID(), check.ObjectID(), index.ObjectID()} {
+			if err := fixture.snapshot.AddDependency(dependent, fixture.routine.ObjectID()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []pgschema.ID{generated.ObjectID(), check.ObjectID(), index.ObjectID()} {
+		if !hasUnsupportedPrefix(result, "routine_semantic_change_stored_dependent:"+id.String()) {
+			t.Fatalf("retained stored dependent %s did not block: %#v", id, result)
+		}
+	}
+}
+
+func TestBuildBlocksSemanticRoutineRenameWithRetainedMaterializedView(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	before := pgschema.Routine{Schema: "public", Name: "old_score", Signature: "integer", Kind: "function", ReturnType: "integer", Definition: "CREATE FUNCTION public.old_score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 1'"}
+	after := pgschema.Routine{Schema: "public", Name: "score", Signature: "integer", Kind: "function", ReturnType: "integer", Definition: "CREATE FUNCTION public.score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 2'"}
+	oldView := pgschema.View{Schema: "public", Name: "scores", Materialized: true, Populated: true, Definition: "SELECT public.old_score(1) AS score"}
+	newView := oldView
+	newView.Definition = "SELECT public.score(1) AS score"
+	for _, fixture := range []struct {
+		snapshot *pgschema.Snapshot
+		routine  pgschema.Routine
+		view     pgschema.View
+	}{{current, before, oldView}, {desired, after, newView}} {
+		if err := fixture.snapshot.Add(fixture.routine); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.snapshot.Add(fixture.view); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.snapshot.AddDependency(fixture.view.ObjectID(), fixture.routine.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_routine" {
+		t.Fatalf("semantic rename question=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: before.ObjectID().String(), Value: after.ObjectID().String()}}}
+	result, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Unsupported || !hasUnsupportedPrefix(result, "routine_semantic_change_stored_dependent:"+oldView.ObjectID().String()) {
+		t.Fatalf("semantic rename retained stale materialized data: %#v", result)
+	}
+}
+
+func TestBuildBlocksExtensionUpgradeWithRetainedDependent(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	before := pgschema.Extension{Schema: "public", Name: "opaque", Version: "1.0"}
+	after := before
+	after.Version = "2.0"
+	table := pgschema.Table{Schema: "public", Name: "events"}
+	index := pgschema.Index{Table: table.ObjectID(), Name: "opaque_idx", Method: "btree", Parts: []pgschema.IndexPart{{Expression: "public.opaque_value()"}}}
+	for _, fixture := range []struct {
+		snapshot  *pgschema.Snapshot
+		extension pgschema.Extension
+	}{{current, before}, {desired, after}} {
+		for _, object := range []pgschema.Object{fixture.extension, table, index} {
+			if err := fixture.snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := fixture.snapshot.AddDependency(index.ObjectID(), fixture.extension.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Unsupported || !hasUnsupportedPrefix(result, "extension_upgrade_retained_dependent:"+index.ObjectID().String()) {
+		t.Fatalf("opaque extension upgrade retained dependent: %#v", result)
+	}
+}
+
+func TestBuildPromotesNewRoutineDependentBehindContractReplacement(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "measurements"}
+	column := pgschema.Column{Table: table.ObjectID(), Name: "value", Position: 1, Type: "integer"}
+	before := pgschema.Routine{Schema: "public", Name: "score", Signature: "integer", Kind: "function", ReturnType: "integer", Definition: "CREATE OR REPLACE FUNCTION public.score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 1'"}
+	after := before
+	after.Definition = "CREATE OR REPLACE FUNCTION public.score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 2'"
+	index := pgschema.Index{Table: table.ObjectID(), Name: "score_idx", Method: "btree", Parts: []pgschema.IndexPart{{Expression: "public.score(value)"}}}
+	for _, fixture := range []struct {
+		snapshot *pgschema.Snapshot
+		routine  pgschema.Routine
+	}{{current, before}, {desired, after}} {
+		for _, object := range []pgschema.Object{table, column, fixture.routine} {
+			if err := fixture.snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := desired.Add(index); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddDependency(index.ObjectID(), after.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || result.Status != protocol.Planned {
+		t.Fatalf("routine replacement with new dependent plan=%#v err=%v", result, err)
+	}
+	joined := joinSQL(result)
+	routineAt, indexAt := strings.Index(joined, "CREATE OR REPLACE FUNCTION"), strings.Index(joined, "CREATE INDEX")
+	if routineAt < 0 || indexAt < 0 || routineAt > indexAt {
+		t.Fatalf("new dependent must follow routine replacement:\n%s", joined)
+	}
+	for _, item := range result.Statements {
+		if item.Phase != protocol.PhaseContract {
+			t.Fatalf("routine-dependent work escaped contract: %#v", item)
+		}
+	}
+}
+
+func TestBuildPromotesNewDependentBehindContractEnumMutation(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	before := pgschema.Enum{Schema: "public", Name: "state", Labels: []string{"old"}}
+	after := pgschema.Enum{Schema: "public", Name: "state", Labels: []string{"fresh"}}
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.Add(after); err != nil {
+		t.Fatal(err)
+	}
+	table := pgschema.Table{Schema: "public", Name: "events"}
+	defaultValue := "'fresh'::public.state"
+	column := pgschema.Column{Table: table.ObjectID(), Name: "state", Position: 1, Type: "public.state", Default: &defaultValue}
+	for _, object := range []pgschema.Object{table, column} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := desired.AddDependency(table.ObjectID(), after.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || result.Status != protocol.Planned {
+		t.Fatalf("enum mutation with dependent table plan=%#v err=%v", result, err)
+	}
+	joined := joinSQL(result)
+	renameAt, tableAt := strings.Index(joined, "RENAME VALUE"), strings.Index(joined, "CREATE TABLE")
+	if renameAt < 0 || tableAt < 0 || renameAt > tableAt {
+		t.Fatalf("new enum-dependent table must follow label mutation:\n%s", joined)
+	}
+	for _, item := range result.Statements {
+		if item.Phase != protocol.PhaseContract {
+			t.Fatalf("enum-dependent create escaped contract: %#v", item)
+		}
+	}
+}
+
+func TestBuildBlocksUncoordinatedSharedNamespaceKindTransition(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	if err := current.Add(pgschema.Enum{Schema: "public", Name: "status", Labels: []string{"open"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.Add(pgschema.Domain{Schema: "public", Name: "status", BaseType: "text"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasUnsupportedPrefix(result, "shared_namespace_transition:type:public.status") {
+		t.Fatalf("shared type namespace transition did not block: %#v", result)
+	}
+}
+
+func TestBuildBlocksExplicitMultirangeSharedNamespaceTransition(t *testing.T) {
+	current := snapshotForTest(t, pgschema.Enum{Schema: "public", Name: "span_multirange", Labels: []string{"old"}})
+	desired := snapshotForTest(t, pgschema.Range{Schema: "public", Name: "span", Subtype: "integer", MultirangeName: "span_multirange"})
+	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != protocol.Unsupported || !hasUnsupportedPrefix(result, "shared_namespace_transition:type:public.span_multirange") {
+		t.Fatalf("explicit multirange name escaped type namespace guard: %#v", result)
+	}
+}
+
+func TestBuildOrdersReplicaIdentityAfterIndexRename(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "events"}
+	column := pgschema.Column{Table: table.ObjectID(), Name: "id", Position: 1, Type: "integer", NotNull: true}
+	oldIndex := pgschema.Index{Table: table.ObjectID(), Name: "events_old_uidx", Unique: true, Method: "btree", Parts: []pgschema.IndexPart{{Column: "id"}}}
+	newIndex := oldIndex
+	newIndex.Name = "events_uidx"
+	oldIdentity := pgschema.ReplicaIdentity{Table: table.ObjectID(), Mode: pgschema.ReplicaIdentityDefault}
+	newIdentity := pgschema.ReplicaIdentity{Table: table.ObjectID(), Mode: pgschema.ReplicaIdentityIndex, Index: ptrID(newIndex.ObjectID())}
+	for _, fixture := range []struct {
+		snapshot *pgschema.Snapshot
+		index    pgschema.Index
+		identity pgschema.ReplicaIdentity
+	}{{current, oldIndex, oldIdentity}, {desired, newIndex, newIdentity}} {
+		for _, object := range []pgschema.Object{table, column, fixture.index, fixture.identity} {
+			if err := fixture.snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := desired.AddDependency(newIdentity.ObjectID(), newIndex.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_index" {
+		t.Fatalf("index rename question=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_index", Key: oldIndex.ObjectID().String(), Value: newIndex.ObjectID().String()}}}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil || planned.Status != protocol.Planned {
+		t.Fatalf("index rename plan=%#v err=%v", planned, err)
+	}
+	joined := joinSQL(planned)
+	renameAt, identityAt := strings.Index(joined, `ALTER INDEX "public"."events_old_uidx" RENAME TO "events_uidx";`), strings.Index(joined, `REPLICA IDENTITY USING INDEX "events_uidx";`)
+	if renameAt < 0 || identityAt < 0 || renameAt > identityAt {
+		t.Fatalf("replica identity preceded its renamed provider:\n%s", joined)
+	}
+}
+
+func TestBuildOrdersNewIndexAfterColumnRenameBridge(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "events"}
+	oldColumn := pgschema.Column{Table: table.ObjectID(), Name: "old_value", Position: 1, Type: "integer"}
+	newColumn := oldColumn
+	newColumn.Name = "value"
+	index := pgschema.Index{Table: table.ObjectID(), Name: "events_value_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "value"}}}
+	for _, object := range []pgschema.Object{table, oldColumn} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{table, newColumn, index} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := desired.AddDependency(index.ObjectID(), newColumn.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_column" {
+		t.Fatalf("column rename question=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
+		{Kind: "rename_column", Key: oldColumn.ObjectID().String(), Value: newColumn.ObjectID().String()},
+		{Kind: "rename_backfill_strategy", Key: oldColumn.ObjectID().String(), Value: "single_transaction"},
+	}}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil || planned.Status != protocol.Planned {
+		t.Fatalf("column rename plan=%#v err=%v", planned, err)
+	}
+	joined := joinSQL(planned)
+	renameAt, indexAt := strings.Index(joined, `RENAME COLUMN "old_value" TO "value";`), strings.Index(joined, `CREATE INDEX "events_value_idx"`)
+	if renameAt < 0 || indexAt < 0 || renameAt > indexAt {
+		t.Fatalf("new index preceded final column identity:\n%s", joined)
+	}
+}
+
+func TestBuildOrdersTableRenameBeforeNewDependentAndOldSchemaDrop(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	oldSchema, newSchema := pgschema.Schema{Name: "old_app"}, pgschema.Schema{Name: "app"}
+	oldTable := pgschema.Table{Schema: oldSchema.Name, Name: "events"}
+	newTable := pgschema.Table{Schema: newSchema.Name, Name: "events"}
+	oldColumn := pgschema.Column{Table: oldTable.ObjectID(), Name: "id", Position: 1, Type: "integer"}
+	newColumn := pgschema.Column{Table: newTable.ObjectID(), Name: "id", Position: 1, Type: "integer"}
+	dependent := pgschema.View{Schema: newSchema.Name, Name: "event_ids", Definition: "SELECT id FROM app.events"}
+	for _, object := range []pgschema.Object{oldSchema, newSchema, oldTable, oldColumn} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{newSchema, newTable, newColumn, dependent} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{oldTable.ObjectID(), oldSchema.ObjectID()}, {oldColumn.ObjectID(), oldTable.ObjectID()}} {
+		if err := current.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{newTable.ObjectID(), newSchema.ObjectID()}, {newColumn.ObjectID(), newTable.ObjectID()}, {dependent.ObjectID(), newTable.ObjectID()}} {
+		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
+		t.Fatalf("table rename question=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
+		{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String()},
+		{Kind: "drop", Key: oldSchema.ObjectID().String(), Value: "drop"},
+	}}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil || planned.Status != protocol.Planned {
+		t.Fatalf("table rename plan=%#v err=%v", planned, err)
+	}
+	joined := joinSQL(planned)
+	moveAt := strings.Index(joined, `ALTER TABLE "old_app"."events" SET SCHEMA "app";`)
+	dependentAt := strings.Index(joined, `CREATE VIEW "app"."event_ids"`)
+	dropAt := strings.Index(joined, `DROP SCHEMA "old_app" CASCADE;`)
+	if moveAt < 0 || dependentAt < 0 || dropAt < 0 || moveAt > dependentAt || moveAt > dropAt {
+		t.Fatalf("table identity was consumed before its provider existed:\n%s", joined)
 	}
 }
 
@@ -892,7 +1407,7 @@ func TestBuildUnsortedDumpRejectsIncompleteOrderAndMutation(t *testing.T) {
 	}
 }
 
-func TestBuildUsesSemanticDefaultComparator(t *testing.T) {
+func TestBuildRefusesSemanticDefaultSuppressionWithoutFingerprintNormalization(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "app", Name: "orders"}
 	beforeDefault, afterDefault := "1 + 1", "2"
@@ -924,8 +1439,8 @@ func TestBuildUsesSemanticDefaultComparator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != protocol.Planned || len(result.Statements) != 0 {
-		t.Fatalf("equivalent defaults should not plan a mutation: %#v", result)
+	if !hasUnsupportedPrefix(result, "default_equivalence_not_fingerprintable") {
+		t.Fatalf("equivalent defaults must not create a fingerprint-inconsistent empty plan: %#v", result)
 	}
 }
 
@@ -1273,6 +1788,9 @@ func TestBuildStagesNewRequiredColumnWithoutDefault(t *testing.T) {
 	if strings.Contains(plan.Statements[0].SQL, "NOT NULL") {
 		t.Fatalf("expand broke old writers: %s", plan.Statements[0].SQL)
 	}
+	if !containsString(plan.Statements[0].Hazards, "application_row_shape_change") {
+		t.Fatalf("required column addition must expose row-shape compatibility risk: %#v", plan.Statements[0].Hazards)
+	}
 }
 
 func TestBuildAddsRequiredColumnWithDefaultDirectly(t *testing.T) {
@@ -1305,6 +1823,9 @@ func TestBuildAddsRequiredColumnWithDefaultDirectly(t *testing.T) {
 	}
 	if plan.Status != protocol.Planned || len(plan.Statements) != 1 || !strings.Contains(plan.Statements[0].SQL, `ADD COLUMN "status" text DEFAULT 'pending'::text NOT NULL`) {
 		t.Fatalf("required column with retained default should be directly addable: %#v", plan)
+	}
+	if !containsString(plan.Statements[0].Hazards, "application_row_shape_change") {
+		t.Fatalf("defaulted column addition must expose row-shape compatibility risk: %#v", plan.Statements[0].Hazards)
 	}
 }
 
@@ -2318,11 +2839,19 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
 	}
+	strategyPending, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategyPending.Status != protocol.NeedsInput || len(strategyPending.Questions) != 1 || strategyPending.Questions[0].Kind != "rename_backfill_strategy" {
+		t.Fatalf("rename identity alone must not emit an unbounded backfill: %#v", strategyPending)
+	}
+	answers.Answers = append(answers.Answers, protocol.Answer{Kind: "rename_backfill_strategy", Key: before.ObjectID().String(), Value: "single_transaction"})
 	planned, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.Status != protocol.Planned || len(planned.Statements) != 9 {
+	if planned.Status != protocol.Planned || len(planned.Statements) != 10 {
 		t.Fatalf("column rename must produce a two-phase compatibility bridge: %#v", planned)
 	}
 	if planned.Statements[0].Phase != protocol.PhaseExpand || planned.Statements[4].Phase != protocol.PhaseContract {
@@ -2339,6 +2868,59 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 		if !strings.Contains(joined, fragment) {
 			t.Fatalf("column rename bridge missing %q:\n%s", fragment, joined)
 		}
+	}
+	if !containsString(planned.Statements[3].Hazards, "unbounded_update") || !containsString(planned.Statements[4].Hazards, "unbounded_update") {
+		t.Fatalf("single-transaction rename must expose operational backfill risk: %#v", planned.Statements)
+	}
+
+	manualAnswers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{
+			{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()},
+			{Kind: "rename_backfill_strategy", Key: before.ObjectID().String(), Value: "manual_sql"},
+		},
+	}
+	manualPending, err := Build(current, desired, manualAnswers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualPending.Status != protocol.NeedsInput || len(manualPending.Questions) != 1 || manualPending.Questions[0].Kind != "rename_backfill" {
+		t.Fatalf("manual rename strategy must request verifiable work: %#v", manualPending)
+	}
+	manualAnswers.Answers = append(manualAnswers.Answers, protocol.Answer{
+		Kind: "rename_backfill", Key: before.ObjectID().String(), Value: "provided",
+		Manual: &protocol.ManualWork{
+			Summary: "backfill one reviewed key range", ExecutionMode: "transactional",
+			Statements:      []string{`UPDATE "public"."orders" SET "new_name" = "old_name" WHERE "new_name" IS DISTINCT FROM "old_name" AND ctid IN (SELECT ctid FROM "public"."orders" LIMIT 1000);`},
+			VerificationSQL: []string{`SELECT count(*) = 0 FROM "public"."orders" WHERE "new_name" IS DISTINCT FROM "old_name";`},
+		},
+	})
+	manualPlan, err := Build(current, desired, manualAnswers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualPlan.Status != protocol.Planned || manualPlan.Statements[3].Manual == nil || manualPlan.Statements[3].Phase != protocol.PhaseExpand {
+		t.Fatalf("manual rename backfill plan = %#v", manualPlan)
+	}
+	for _, statement := range manualPlan.Statements {
+		if statement.Manual == nil && strings.HasPrefix(statement.SQL, `UPDATE "public"."orders" SET "new_name" = "old_name"`) {
+			t.Fatalf("manual strategy emitted an implicit full-table update: %#v", statement)
+		}
+	}
+
+	splitAnswers := protocol.Answers{
+		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{
+			{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()},
+			{Kind: "rename_backfill_strategy", Key: before.ObjectID().String(), Value: "split_plan"},
+		},
+	}
+	split, err := Build(current, desired, splitAnswers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if split.Status != protocol.Planned || len(split.Statements) != 0 || len(split.Guidance) != 1 || split.Guidance[0].Kind != "split_plan" {
+		t.Fatalf("split rename plan = %#v", split)
 	}
 }
 
@@ -3430,7 +4012,10 @@ func TestColumnRenamePreservesAutomaticallyRewrittenConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_column", Key: oldColumn.ObjectID().String(), Value: newColumn.ObjectID().String()}}}
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{
+		{Kind: "rename_column", Key: oldColumn.ObjectID().String(), Value: newColumn.ObjectID().String()},
+		{Kind: "rename_backfill_strategy", Key: oldColumn.ObjectID().String(), Value: "single_transaction"},
+	}}
 	plan, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)

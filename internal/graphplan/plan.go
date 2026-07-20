@@ -67,6 +67,8 @@ type decisions struct {
 	enumRewrite     map[pgschema.ID]bool
 	authorization   map[pgschema.ID]bool
 	renameBridge    map[pgschema.ID]protocol.ManualWork
+	renameBackfill  map[pgschema.ID]protocol.ManualWork
+	renameStrategy  map[pgschema.ID]string
 }
 
 type renameIndex struct {
@@ -187,6 +189,9 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 
 	changes := change.Between(current, desired)
 	result.Compatibility = append(result.Compatibility, ignoredExtensionVersionEvidence(changes, options.IgnoreExtensionVersions)...)
+	if len(changes) == 0 && currentFingerprint != desiredFingerprint {
+		return unsupportedResult(result, resolver, []string{"dependency_only_graph_difference"})
+	}
 	if options.UnsortedDump {
 		for _, item := range changes {
 			if item.Kind != change.Create {
@@ -197,9 +202,13 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	if err := validateSchemaQualifier(current, desired, changes, options.SchemaQualifier); err != nil {
 		return protocol.Result{}, err
 	}
+	beforeDefaultNormalization := len(changes)
 	changes, err = filterEquivalentDefaults(changes, options.DefaultEquivalent)
 	if err != nil {
 		return protocol.Result{}, err
+	}
+	if len(changes) != beforeDefaultNormalization {
+		return unsupportedResult(result, resolver, []string{"default_equivalence_not_fingerprintable"})
 	}
 	changes, constraintRenames, constraintRenameQuestions, err := resolveConstraintRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint)
 	if err != nil {
@@ -308,6 +317,15 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	if options.PreserveSurplus {
 		changes, result.Preserved = preserveSurplus(changes)
 	}
+	if unsupported := extensionUpgradeRetainedDependencyBlockers(changes, current, desired); len(unsupported) > 0 {
+		return unsupportedResult(result, resolver, unsupported)
+	}
+	if unsupported := routineSemanticStoredDependencyBlockers(changes, routineRenames, current, desired); len(unsupported) > 0 {
+		return unsupportedResult(result, resolver, unsupported)
+	}
+	if unsupported := sharedNamespaceTransitionBlockers(changes); len(unsupported) > 0 {
+		return unsupportedResult(result, resolver, unsupported)
+	}
 	if unreachable := unreachableColumnPhysicalOrder(current, desired, tableRenames, columnRenames); len(unreachable) > 0 {
 		result.Compatibility = append(result.Compatibility, unreachable...)
 		sort.Strings(result.Compatibility)
@@ -322,7 +340,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return protocol.Result{}, err
 	}
 	questions = append(questions, mutationQuestions...)
-	bridgeQuestions, err := resolveRenameBridges(tableRenames, columnRenames, viewRenames, routineRenames, resolver, currentFingerprint, desiredFingerprint, &choices)
+	bridgeQuestions, err := resolveRenameBridges(tableRenames, columnRenames, viewRenames, routineRenames, resolver, currentFingerprint, desiredFingerprint, options.DirectColumnRenames, &choices)
 	if err != nil {
 		return protocol.Result{}, err
 	}
@@ -336,7 +354,46 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		result.Guidance = partitionReconfigurationGuidance(changes, current, desired, options)
 		return result, nil
 	}
-	result.Guidance = append(splitPlanGuidance(changes, choices), partitionReconfigurationGuidance(changes, current, desired, options)...)
+	result.Guidance = append(splitPlanGuidance(changes, columnRenames, choices), partitionReconfigurationGuidance(changes, current, desired, options)...)
+	// Contract-phase providers pull every desired dependent into contract. This
+	// preserves graph order after the final phase grouping, which otherwise
+	// places all expand work ahead of all contract work.
+	contractProviders := make(map[pgschema.ID]bool)
+	for _, move := range extensionMoves {
+		contractProviders[move.to.ObjectID()] = true
+	}
+	for _, rename := range routineRenames {
+		contractProviders[rename.to.ObjectID()] = true
+	}
+	for _, rename := range triggerRenames {
+		contractProviders[rename.to.ObjectID()] = true
+	}
+	for _, rename := range constraintRenames {
+		contractProviders[rename.to.ObjectID()] = true
+	}
+	for _, rename := range viewRenames {
+		contractProviders[rename.to.ObjectID()] = true
+	}
+	for _, rename := range enumRenames {
+		contractProviders[rename.to.ObjectID()] = true
+	}
+	for _, rename := range columnRenames {
+		contractProviders[rename.to.ObjectID()] = true
+	}
+	for _, rename := range indexRenames {
+		contractProviders[rename.to.ObjectID()] = true
+	}
+
+	// An extension schema move must precede every same-phase operation that
+	// names one of its members in the desired schema. The move itself remains a
+	// contract operation because old application SQL may use the old qualified
+	// member name. Dependent creates/modifications are therefore also contracted
+	// and retain scheduler order after this statement.
+	for _, move := range extensionMoves {
+		for _, statement := range renderExtensionMove(move) {
+			appendStatement(&result, statement)
+		}
+	}
 	// These statements must precede same-phase work that refers to the desired
 	// routine identity. Trigger definitions are reapplied after a confirmed
 	// routine rename, never before the new routine name exists.
@@ -364,6 +421,57 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			appendStatement(&result, statement)
 		}
 	}
+	// Rename providers which do not have scheduled prerequisites are emitted
+	// before the scheduled graph. Phase grouping will still place their expand
+	// and contract statements correctly, while preserving provider-before-
+	// dependent order inside contract.
+	for _, rename := range indexRenames {
+		for _, statement := range renderIndexRename(rename) {
+			appendStatement(&result, statement)
+		}
+	}
+	for _, rename := range viewRenames {
+		if work, manual := choices.renameBridge[rename.from.ObjectID()]; manual {
+			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
+			continue
+		}
+		for _, statement := range renderViewRename(rename) {
+			appendStatement(&result, statement)
+		}
+		for _, rewrite := range rename.dependents {
+			for _, statement := range renderDependentViewRewrite(rewrite) {
+				appendStatement(&result, statement)
+			}
+		}
+		for _, rewrite := range rename.indexComments {
+			for _, statement := range renderIndexCommentRewrite(rewrite) {
+				appendStatement(&result, statement)
+			}
+		}
+	}
+	for _, rename := range enumRenames {
+		for _, statement := range renderEnumRename(rename) {
+			appendStatement(&result, statement)
+		}
+	}
+	for _, rename := range columnRenames {
+		if work, manual := choices.renameBridge[rename.from.ObjectID()]; manual {
+			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
+			continue
+		}
+		if options.DirectColumnRenames {
+			for _, statement := range renderDirectColumnRename(rename) {
+				appendStatement(&result, statement)
+			}
+			continue
+		}
+		if choices.renameStrategy[rename.from.ObjectID()] == "split_plan" {
+			continue
+		}
+		for _, statement := range renderColumnRename(rename, choices.renameStrategy[rename.from.ObjectID()], choices.renameBackfill[rename.from.ObjectID()]) {
+			appendStatement(&result, statement)
+		}
+	}
 
 	createdTables := make(map[pgschema.ID]bool)
 	for _, item := range changes {
@@ -374,6 +482,8 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	detachedIndexes := detachedConstraintIndexes(changes)
 	deferredIndexCreates := make([]change.Change, 0)
 	deferredPostConstraintStatements := make([]protocol.Statement, 0)
+	deferredTableRenameDependents := make([]protocol.Statement, 0)
+	deferredTableRenameSchemaDrops := make([]protocol.Statement, 0)
 	consumed := make(map[pgschema.ID]bool)
 	coordinatedConstraintChanges := coordinatedConstraintChangeIDs(changes, current, desired, options)
 	coordinatedDerivedChanges := coordinatedColumnDerivedChangeIDs(changes, current, desired, choices)
@@ -416,6 +526,27 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 				consumed[id] = true
 			}
 			dynamicUnsupported = append(dynamicUnsupported, unsupported...)
+			deferUntilTableRename := item.Kind != change.Drop && dependsOnTableRenameTarget(desired, item.ID, tableRenames) && !tableRenamePrerequisite(item, tableRenames)
+			if deferUntilTableRename {
+				statements = withPhase(statements, "contract", "review", "table_rename_dependency")
+			}
+			if item.Kind != change.Drop && dependsOnMovedExtension(desired, item.ID, extensionMoves) {
+				statements = withPhase(statements, "contract", "review", "extension_schema_move_dependency")
+			}
+			if item.Kind != change.Drop && dependsOnContractProvider(desired, item.ID, contractProviders) {
+				statements = withPhase(statements, "contract", "review", "dependency_phase_promotion")
+			}
+			if item.Kind != change.Drop && statementsContainPhase(statements, protocol.PhaseContract) {
+				contractProviders[item.ID] = true
+			}
+			if deferUntilTableRename {
+				deferredTableRenameDependents = append(deferredTableRenameDependents, statements...)
+				continue
+			}
+			if item.Kind == change.Drop && item.ID.Kind == pgschema.KindSchema && schemaDropMustFollowTableRename(item.ID, tableRenames) {
+				deferredTableRenameSchemaDrops = append(deferredTableRenameSchemaDrops, statements...)
+				continue
+			}
 			for _, statement := range statements {
 				if stringIn(statement.Hazards, "after_primary_key_drop") {
 					deferredPostConstraintStatements = append(deferredPostConstraintStatements, statement)
@@ -472,11 +603,6 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	if err := resolver.ValidateAllUsed(); err != nil {
 		return protocol.Result{}, err
 	}
-	for _, rename := range indexRenames {
-		for _, statement := range renderIndexRename(rename) {
-			appendStatement(&result, statement)
-		}
-	}
 	for _, rename := range tableRenames {
 		if rename.manualOnly {
 			appendStatement(&result, manualWorkStatement(choices.renameBridge[rename.from.ObjectID()], "rename_compatibility_bridge", "application_contract"))
@@ -490,49 +616,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			appendStatement(&result, statement)
 		}
 	}
-	for _, rename := range viewRenames {
-		if work, manual := choices.renameBridge[rename.from.ObjectID()]; manual {
-			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
-			continue
-		}
-		for _, statement := range renderViewRename(rename) {
-			appendStatement(&result, statement)
-		}
-		for _, rewrite := range rename.dependents {
-			for _, statement := range renderDependentViewRewrite(rewrite) {
-				appendStatement(&result, statement)
-			}
-		}
-		for _, rewrite := range rename.indexComments {
-			for _, statement := range renderIndexCommentRewrite(rewrite) {
-				appendStatement(&result, statement)
-			}
-		}
+	for _, statement := range deferredTableRenameDependents {
+		appendStatement(&result, statement)
 	}
-	for _, rename := range enumRenames {
-		for _, statement := range renderEnumRename(rename) {
-			appendStatement(&result, statement)
-		}
-	}
-	for _, move := range extensionMoves {
-		for _, statement := range renderExtensionMove(move) {
-			appendStatement(&result, statement)
-		}
-	}
-	for _, rename := range columnRenames {
-		if work, manual := choices.renameBridge[rename.from.ObjectID()]; manual {
-			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
-			continue
-		}
-		if options.DirectColumnRenames {
-			for _, statement := range renderDirectColumnRename(rename) {
-				appendStatement(&result, statement)
-			}
-			continue
-		}
-		for _, statement := range renderColumnRename(rename) {
-			appendStatement(&result, statement)
-		}
+	for _, statement := range deferredTableRenameSchemaDrops {
+		appendStatement(&result, statement)
 	}
 	if options.SchemaQualifier != nil {
 		applySchemaQualifier(&result, schemaNamesForChanges(current, desired, changes), *options.SchemaQualifier)
@@ -1498,6 +1586,34 @@ func renderExtensionMove(move moveExtension) []protocol.Statement {
 	return append(statements, commentModificationPhase("EXTENSION", quote(move.to.Name), move.from.Comment, move.to.Comment, "contract")...)
 }
 
+func dependsOnMovedExtension(snapshot *pgschema.Snapshot, id pgschema.ID, moves []moveExtension) bool {
+	if snapshot == nil || len(moves) == 0 {
+		return false
+	}
+	targets := make(map[pgschema.ID]bool, len(moves))
+	for _, move := range moves {
+		targets[move.to.ObjectID()] = true
+	}
+	seen := make(map[pgschema.ID]bool)
+	var visit func(pgschema.ID) bool
+	visit = func(current pgschema.ID) bool {
+		if targets[current] {
+			return true
+		}
+		if seen[current] {
+			return false
+		}
+		seen[current] = true
+		for _, dependency := range snapshot.Dependencies(current) {
+			if visit(dependency) {
+				return true
+			}
+		}
+		return false
+	}
+	return visit(id)
+}
+
 func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, direct, preserveSurplus bool) ([]change.Change, []renameColumn, []protocol.Question, []string, error) {
 	var drops, creates []change.Change
 	for _, item := range changes {
@@ -1934,7 +2050,7 @@ func isIdentifierPart(value byte) bool {
 	return isIdentifierStart(value) || value >= '0' && value <= '9' || value == '$'
 }
 
-func renderColumnRename(rename renameColumn) []protocol.Statement {
+func renderColumnRename(rename renameColumn, strategy string, work protocol.ManualWork) []protocol.Statement {
 	table := qualified(rename.from.Table.Schema, rename.from.Table.Name)
 	oldColumn, newColumn := quote(rename.from.Name), quote(rename.to.Name)
 	functionName, triggerName := columnBridgeNames(rename.from, rename.to)
@@ -1967,13 +2083,33 @@ func renderColumnRename(rename renameColumn) []protocol.Statement {
 		statement("ALTER TABLE "+table+" ADD COLUMN "+renderColumn(shadow)+";", "expand", "review", true, "table_lock", "column_overlap_bridge"),
 		statement(functionSQL, "expand", "review", true, "column_overlap_bridge", "trigger_function"),
 		statement("CREATE TRIGGER "+quote(triggerName)+" BEFORE INSERT OR UPDATE OF "+oldColumn+", "+newColumn+" ON "+table+" FOR EACH ROW EXECUTE FUNCTION "+function+"();", "expand", "review", true, "column_overlap_bridge", "trigger_behavior_change", "table_lock"),
-		statement("UPDATE "+table+" SET "+newColumn+" = "+oldColumn+" WHERE "+newColumn+" IS DISTINCT FROM "+oldColumn+";", "expand", "review", true, "column_overlap_bridge", "data_movement", "table_scan"),
-		statement("UPDATE "+table+" SET "+newColumn+" = "+oldColumn+" WHERE "+newColumn+" IS DISTINCT FROM "+oldColumn+";", "contract", "review", true, "final_overlap_catchup", "data_movement", "table_scan"),
+	}
+	if strategy == "single_transaction" {
+		statements = append(statements, statement(
+			"UPDATE "+table+" SET "+newColumn+" = "+oldColumn+" WHERE "+newColumn+" IS DISTINCT FROM "+oldColumn+";",
+			"expand", "review", true,
+			"column_overlap_bridge", "data_movement", "table_scan", "unbounded_update", "long_transaction", "wal_volume", "replica_lag",
+		))
+	} else {
+		statements = append(statements, manualWorkStatementPhase(work, protocol.PhaseExpand,
+			"column_overlap_bridge", "rename_backfill", "data_movement", "operator_batched"))
+	}
+	if strategy == "single_transaction" {
+		statements = append(statements, statement(
+			"UPDATE "+table+" SET "+newColumn+" = "+oldColumn+" WHERE "+newColumn+" IS DISTINCT FROM "+oldColumn+";",
+			"contract", "review", true,
+			"final_overlap_catchup", "data_movement", "table_scan", "unbounded_update", "long_transaction", "wal_volume", "replica_lag",
+		))
+	}
+	assertionSQL := "DO $onwardpg$ BEGIN IF EXISTS (SELECT 1 FROM " + table + " WHERE " + newColumn + " IS DISTINCT FROM " + oldColumn + ") THEN RAISE EXCEPTION " +
+		literal("onwardpg column rename equality assertion failed for "+rename.from.ObjectID().String()) + "; END IF; END $onwardpg$;"
+	statements = append(statements,
+		statement(assertionSQL, "contract", "review", true, "rename_equality_assertion", "table_scan"),
 		statement("DROP TRIGGER "+quote(triggerName)+" ON "+table+";", "contract", "review", true, "compatibility_removal", "table_lock"),
 		statement("DROP FUNCTION "+function+"();", "contract", "review", true, "compatibility_removal"),
 		statement("ALTER TABLE "+table+" DROP COLUMN "+newColumn+";", "contract", "dangerous", true, "compatibility_removal", "data_loss", "access_exclusive_lock"),
 		statement("ALTER TABLE "+table+" RENAME COLUMN "+oldColumn+" TO "+newColumn+";", "contract", "review", true, "compatibility_removal", "access_exclusive_lock"),
-	}
+	)
 	statements = appendNotNullConstraintRename(statements, table, rename, "contract")
 	if !reflect.DeepEqual(rename.from.Comment, rename.to.Comment) {
 		value := "NULL"
@@ -2049,7 +2185,7 @@ func tableIdentityChangeBelongsTo(value any, from, to pgschema.Table) bool {
 // when PostgreSQL has no generic, online-compatible rename sequence. The
 // planner has already bounded the old/new objects and any typed dependents;
 // only the product's compatibility window and rollout SQL remain unknown.
-func resolveRenameBridges(tables []renameTable, _ []renameColumn, views []renameView, routines []renameRoutine, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, choices *decisions) ([]protocol.Question, error) {
+func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []renameView, routines []renameRoutine, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, directColumnRenames bool, choices *decisions) ([]protocol.Question, error) {
 	type bridge struct {
 		id      pgschema.ID
 		kind    string
@@ -2090,6 +2226,48 @@ func resolveRenameBridges(tables []renameTable, _ []renameColumn, views []rename
 			continue
 		}
 		choices.renameBridge[bridge.id] = work
+	}
+	if directColumnRenames {
+		return questions, nil
+	}
+	for _, rename := range columns {
+		id := rename.from.ObjectID()
+		strategyQuestion := protocol.Question{
+			ID: "rename_backfill_strategy:" + id.String(), Kind: "rename_backfill_strategy", Key: id.String(),
+			Message:            "Column " + id.String() + " will overlap with " + rename.to.ObjectID().String() + ". Choose an operator-authored backfill, explicitly accept a single unbounded transaction for a known-small table, or split the work into a later plan.",
+			Choices:            []string{"manual_sql", "single_transaction", "split_plan"},
+			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		}
+		strategy, found, err := resolver.Resolve(strategyQuestion)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			questions = append(questions, strategyQuestion)
+			continue
+		}
+		choices.renameStrategy[id] = strategy
+		if strategy != "manual_sql" {
+			continue
+		}
+		backfillQuestion := protocol.Question{
+			ID: "rename_backfill:" + id.String(), Kind: "rename_backfill", Key: id.String(),
+			Message:            "Supply the reviewed column backfill and at least one boolean verification query proving the old and new values agree before contract removes the compatibility bridge.",
+			Choices:            []string{"provided"},
+			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		}
+		work, provided, err := resolver.ResolveManual(backfillQuestion)
+		if err != nil {
+			return nil, err
+		}
+		if !provided {
+			questions = append(questions, backfillQuestion)
+			continue
+		}
+		if len(work.VerificationSQL) == 0 {
+			return nil, fmt.Errorf("rename backfill %s requires at least one boolean verification query", id)
+		}
+		choices.renameBackfill[id] = work
 	}
 	return questions, nil
 }
@@ -3887,7 +4065,7 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			column := quote(object.Name)
 			statements := []protocol.Statement{statement(
 				"ALTER TABLE "+table+" ADD COLUMN "+renderColumn(expandColumn)+";",
-				"expand", "review", true, "table_lock", "application_compatibility",
+				"expand", "review", true, "table_lock", "application_compatibility", "application_row_shape_change",
 			)}
 			if object.Comment != nil {
 				statements = append(statements, statement("COMMENT ON COLUMN "+table+"."+column+" IS "+literal(*object.Comment)+";", "expand", "safe", true))
@@ -3907,7 +4085,7 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			return statements, nil, nil, nil
 		}
 		sql := "ALTER TABLE " + qualified(object.Table.Schema, object.Table.Name) + " ADD COLUMN " + renderColumn(object) + ";"
-		hazards := []string{"table_lock"}
+		hazards := []string{"table_lock", "application_row_shape_change"}
 		if object.Default != nil || object.Identity != nil || object.Serial != nil || object.Generated != nil {
 			hazards = append(hazards, "table_rewrite_possible")
 		}
@@ -3930,7 +4108,10 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		}
 		sql := "ALTER TABLE " + qualified(object.Table.Schema, object.Table.Name) + " ADD CONSTRAINT " + quote(object.Name) + " " + object.Definition + ";"
 		phase := "contract"
-		hazards := []string{"table_lock", "validation_scan_possible", "compatible_writers_required"}
+		hazards := []string{"table_lock", "access_exclusive_lock", "validation_scan_possible", "compatible_writers_required"}
+		if object.Type == pgschema.ConstraintPrimary || object.Type == pgschema.ConstraintUnique || object.Type == pgschema.ConstraintExclusion {
+			hazards = append(hazards, "blocking_index_build")
+		}
 		if createdTables[object.Table] {
 			phase = "expand"
 			hazards = []string{"table_lock"}
@@ -4016,17 +4197,21 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		if unsupported != "" {
 			return nil, nil, []string{unsupported}, nil
 		}
-		statements := []protocol.Statement{statement(sql, "expand", "review", true, "trigger_create", "table_lock")}
+		phase := "contract"
+		if createdTables[object.Table] {
+			phase = "expand"
+		}
+		statements := []protocol.Statement{statement(sql, phase, "review", true, "trigger_create", "table_lock", "application_behavior_change")}
 		if object.Enabled != "O" {
 			enabled, unsupported := renderTriggerEnabled(object)
 			if unsupported != "" {
 				return nil, nil, []string{unsupported}, nil
 			}
-			statements = append(statements, statement(enabled, "expand", "review", true, "trigger_enable_state", "table_lock"))
+			statements = append(statements, statement(enabled, phase, "review", true, "trigger_enable_state", "table_lock", "application_behavior_change"))
 		}
 		if object.Comment != nil {
 			identifier := quote(object.Name) + " ON " + qualified(object.Table.Schema, object.Table.Name)
-			statements = append(statements, statement("COMMENT ON TRIGGER "+identifier+" IS "+literal(*object.Comment)+";", "expand", "safe", true))
+			statements = append(statements, statement("COMMENT ON TRIGGER "+identifier+" IS "+literal(*object.Comment)+";", phase, "safe", true))
 		}
 		return statements, nil, nil, nil
 	case pgschema.Policy:
@@ -4034,13 +4219,17 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		if unsupported != "" {
 			return nil, nil, []string{unsupported}, nil
 		}
-		hazards := []string{"row_security_policy_change", "authorization_change"}
+		phase := "contract"
+		if createdTables[object.Table] {
+			phase = "expand"
+		}
+		hazards := []string{"row_security_policy_change", "authorization_change", "application_behavior_change"}
 		if object.Permissive {
 			hazards = append(hazards, "permissive_policy_added")
 		} else {
 			hazards = append(hazards, "restrictive_policy_added", "availability_risk")
 		}
-		return []protocol.Statement{statement(sql, "expand", "review", true, hazards...)}, nil, nil, nil
+		return []protocol.Statement{statement(sql, phase, "review", true, hazards...)}, nil, nil, nil
 	case pgschema.ReplicaIdentity:
 		if object.Mode == pgschema.ReplicaIdentityDefault && object.Index == nil {
 			return nil, nil, nil, nil
@@ -4057,12 +4246,16 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		if object.Table.Kind != pgschema.KindTable || object.Table.Schema == "" || object.Table.Name == "" || (!object.Enabled && !object.Forced) {
 			return nil, nil, []string{"row_security_render:" + object.ObjectID().String()}, nil
 		}
+		phase := "contract"
+		if createdTables[object.Table] {
+			phase = "expand"
+		}
 		var statements []protocol.Statement
 		if object.Enabled {
-			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" ENABLE ROW LEVEL SECURITY;", "expand", "review", "row_security_enabled", "authorization_change", "availability_risk", "table_lock"))
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" ENABLE ROW LEVEL SECURITY;", phase, "review", "row_security_enabled", "authorization_change", "availability_risk", "table_lock", "application_behavior_change"))
 		}
 		if object.Forced {
-			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" FORCE ROW LEVEL SECURITY;", "expand", "review", "row_security_forced", "authorization_change", "availability_risk", "table_lock"))
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(object.Table.Schema, object.Table.Name)+" FORCE ROW LEVEL SECURITY;", phase, "review", "row_security_forced", "authorization_change", "availability_risk", "table_lock", "application_behavior_change"))
 		}
 		return statements, nil, nil, nil
 	case pgschema.TablePrivilege:
@@ -5227,22 +5420,22 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		}
 		var statements []protocol.Statement
 		if before.Enabled != next.Enabled {
-			mode, phase, safety := "ENABLE", "expand", "review"
-			hazards := []string{"row_security_enabled", "authorization_change", "availability_risk", "table_lock"}
+			mode, safety := "ENABLE", "review"
+			hazards := []string{"row_security_enabled", "authorization_change", "availability_risk", "table_lock", "application_behavior_change"}
 			if !next.Enabled {
-				mode, phase, safety = "DISABLE", "contract", "dangerous"
+				mode, safety = "DISABLE", "dangerous"
 				hazards = []string{"row_security_disabled", "authorization_relaxation", "table_lock"}
 			}
-			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(next.Table.Schema, next.Table.Name)+" "+mode+" ROW LEVEL SECURITY;", phase, safety, hazards...))
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(next.Table.Schema, next.Table.Name)+" "+mode+" ROW LEVEL SECURITY;", "contract", safety, hazards...))
 		}
 		if before.Forced != next.Forced {
-			mode, phase, safety := "FORCE", "expand", "review"
-			hazards := []string{"row_security_forced", "authorization_change", "availability_risk", "table_lock"}
+			mode, safety := "FORCE", "review"
+			hazards := []string{"row_security_forced", "authorization_change", "availability_risk", "table_lock", "application_behavior_change"}
 			if !next.Forced {
-				mode, phase, safety = "NO FORCE", "contract", "dangerous"
+				mode, safety = "NO FORCE", "dangerous"
 				hazards = []string{"row_security_unforced", "authorization_relaxation", "table_lock"}
 			}
-			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(next.Table.Schema, next.Table.Name)+" "+mode+" ROW LEVEL SECURITY;", phase, safety, hazards...))
+			statements = append(statements, authorizationStatement("ALTER TABLE "+qualified(next.Table.Schema, next.Table.Name)+" "+mode+" ROW LEVEL SECURITY;", "contract", safety, hazards...))
 		}
 		return statements, nil, nil, nil
 	case pgschema.TablePrivilege:
@@ -5975,7 +6168,7 @@ func renderDomainConstraintAdd(domain pgschema.Domain, constraint pgschema.Domai
 		return "", "domain_constraint_definition:" + domain.ObjectID().String() + ":" + constraint.Name
 	}
 	sql := "ALTER DOMAIN " + qualified(domain.Schema, domain.Name) + " ADD CONSTRAINT " + quote(constraint.Name) + " " + constraint.Definition
-	if !constraint.Validated {
+	if !constraint.Validated && !strings.HasSuffix(strings.ToUpper(strings.TrimSpace(constraint.Definition)), " NOT VALID") {
 		sql += " NOT VALID"
 	}
 	return sql + ";", ""
@@ -6118,7 +6311,7 @@ func renderCompositeAttributeChanges(before, after pgschema.Composite) ([]protoc
 		if _, exists := afterByName[attribute.Name]; exists {
 			continue
 		}
-		statements = append(statements, statement("ALTER TYPE "+identifier+" DROP ATTRIBUTE "+quote(attribute.Name)+" CASCADE;", "contract", "review", true, "composite_attribute_removed", "dependent_row_type_change"))
+		statements = append(statements, statement("ALTER TYPE "+identifier+" DROP ATTRIBUTE "+quote(attribute.Name)+" CASCADE;", "contract", "dangerous", true, "composite_attribute_removed", "dependent_row_type_change", "data_loss", "application_semantics_required"))
 	}
 	for _, oldAttribute := range before.Attributes {
 		newAttribute, exists := afterByName[oldAttribute.Name]
@@ -6129,7 +6322,7 @@ func renderCompositeAttributeChanges(before, after pgschema.Composite) ([]protoc
 		if newAttribute.Collation != "" {
 			definition += " COLLATE " + newAttribute.Collation
 		}
-		statements = append(statements, statement("ALTER TYPE "+identifier+" ALTER ATTRIBUTE "+quote(newAttribute.Name)+" TYPE "+definition+" CASCADE;", "contract", "review", true, "composite_attribute_type_change", "dependent_row_type_change"))
+		statements = append(statements, statement("ALTER TYPE "+identifier+" ALTER ATTRIBUTE "+quote(newAttribute.Name)+" TYPE "+definition+" CASCADE;", "contract", "dangerous", true, "composite_attribute_type_change", "dependent_row_type_change", "implicit_cast", "table_rewrite_possible", "application_semantics_required"))
 	}
 	for _, attribute := range after.Attributes {
 		if _, exists := beforeByName[attribute.Name]; exists {
@@ -6161,7 +6354,7 @@ func renderRangeCreate(object pgschema.Range) (string, string) {
 	if object.SubtypeDiff != "" {
 		options = append(options, "SUBTYPE_DIFF = "+object.SubtypeDiff)
 	}
-	options = append(options, "MULTIRANGE_TYPE_NAME = "+quote(object.MultirangeName))
+	options = append(options, "MULTIRANGE_TYPE_NAME = "+qualified(object.Schema, object.MultirangeName))
 	return "CREATE TYPE " + qualified(object.Schema, object.Name) + " AS RANGE (" + strings.Join(options, ", ") + ");", ""
 }
 
@@ -6374,7 +6567,7 @@ func renderEnumDefinition(object pgschema.Enum) string {
 }
 
 func mutationQuestions(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, decisions, error) {
-	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), enumRewrite: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool), renameBridge: make(map[pgschema.ID]protocol.ManualWork)}
+	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), enumRewrite: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool), renameBridge: make(map[pgschema.ID]protocol.ManualWork), renameBackfill: make(map[pgschema.ID]protocol.ManualWork), renameStrategy: make(map[pgschema.ID]string)}
 	var questions []protocol.Question
 	refreshes := dependentMaterializedViewsNeedingRefresh(changes, current, desired)
 	for _, view := range refreshes {
@@ -6395,6 +6588,24 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 		}
 	}
 	for _, item := range changes {
+		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindComposite {
+			before, after := item.Before.(pgschema.Composite), item.After.(pgschema.Composite)
+			if compositeCascadeRequiresIntent(before, after) {
+				question := protocol.Question{
+					ID: "composite_cascade:" + item.ID.String(), Kind: "composite_cascade", Key: item.ID.String(),
+					Message:            "Composite type " + item.ID.String() + " drops an attribute or changes an attribute type with CASCADE. Confirm the reviewed data-loss/conversion operation; PostgreSQL chooses the dependent-value cast and onwardpg cannot infer product semantics.",
+					Choices:            []string{"cascade"},
+					CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+				}
+				_, found, err := resolver.Resolve(question)
+				if err != nil {
+					return nil, decisions, err
+				}
+				if !found {
+					questions = append(questions, question)
+				}
+			}
+		}
 		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindTable {
 			before, after := item.Before.(pgschema.Table), item.After.(pgschema.Table)
 			if before.Owner != after.Owner {
@@ -6619,6 +6830,20 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 	return questions, decisions, nil
 }
 
+func compositeCascadeRequiresIntent(before, after pgschema.Composite) bool {
+	afterByName := make(map[string]pgschema.CompositeAttribute, len(after.Attributes))
+	for _, attribute := range after.Attributes {
+		afterByName[attribute.Name] = attribute
+	}
+	for _, attribute := range before.Attributes {
+		next, exists := afterByName[attribute.Name]
+		if !exists || attribute.Type != next.Type || attribute.Collation != next.Collation {
+			return true
+		}
+	}
+	return false
+}
+
 // dependentMaterializedViewsNeedingRefresh finds materialized views whose
 // stored data can be stale after a semantic ordinary-view replacement or
 // routine-body replacement. It follows only typed catalog dependency edges,
@@ -6702,6 +6927,259 @@ func routineRequiresMaterializedRefresh(before, after pgschema.Routine) bool {
 	return !reflect.DeepEqual(before, after)
 }
 
+// extensionUpgradeRetainedDependencyBlockers treats an extension version as an
+// atomic, opaque package boundary. An upgrade script can change member function
+// semantics or type representation without exposing that change in onwardpg's
+// typed graph, so retained users make a catalog-only convergence proof
+// insufficient. The operator can upgrade the package outside onwardpg after
+// applying extension-specific rebuild and validation procedures.
+func extensionUpgradeRetainedDependencyBlockers(changes []change.Change, current, desired *pgschema.Snapshot) []string {
+	changedExtensions := make(map[pgschema.ID]bool)
+	for _, item := range changes {
+		if item.Kind != change.Modify || item.ID.Kind != pgschema.KindExtension {
+			continue
+		}
+		before, beforeOK := item.Before.(pgschema.Extension)
+		after, afterOK := item.After.(pgschema.Extension)
+		if beforeOK && afterOK && before.Version != after.Version {
+			changedExtensions[item.ID] = true
+		}
+	}
+	if len(changedExtensions) == 0 {
+		return nil
+	}
+	var unsupported []string
+	for _, object := range current.Objects() {
+		id := object.ObjectID()
+		if id.Kind == pgschema.KindExtension || !dependsOnAny(current, id, changedExtensions) {
+			continue
+		}
+		if _, retained := desired.Object(id); retained {
+			unsupported = append(unsupported, "extension_upgrade_retained_dependent:"+id.String())
+		}
+	}
+	sort.Strings(unsupported)
+	return unsupported
+}
+
+// routineSemanticStoredDependencyBlockers prevents catalog convergence from
+// standing in for data convergence. PostgreSQL does not rebuild expression or
+// partial indexes, recompute stored generated columns, revalidate CHECK
+// constraints, or refresh materialized views when routine behavior changes.
+// A simultaneous rename is included: rename resolution consumes the original
+// drop/create pair before ordinary Modify-based semantic checks run.
+func routineSemanticStoredDependencyBlockers(changes []change.Change, renames []renameRoutine, current, desired *pgschema.Snapshot) []string {
+	changedRoutines := make(map[pgschema.ID]bool)
+	renamedRoutines := make(map[pgschema.ID]bool)
+	for _, item := range changes {
+		if item.Kind != change.Modify || item.ID.Kind != pgschema.KindRoutine {
+			continue
+		}
+		before, beforeOK := item.Before.(pgschema.Routine)
+		after, afterOK := item.After.(pgschema.Routine)
+		// Return-type changes already use the stricter dependent drop/rebuild
+		// choreography and its more precise blockers.
+		if beforeOK && afterOK && before.ReturnType == after.ReturnType && routineRequiresMaterializedRefresh(before, after) {
+			changedRoutines[item.ID] = true
+		}
+	}
+	for _, rename := range renames {
+		if routineRenameChangesSemantics(rename.from, rename.to) {
+			changedRoutines[rename.from.ObjectID()] = true
+			renamedRoutines[rename.from.ObjectID()] = true
+		}
+	}
+	if len(changedRoutines) == 0 {
+		return nil
+	}
+	var unsupported []string
+	for _, object := range current.Objects() {
+		id := object.ObjectID()
+		if _, retained := desired.Object(id); !retained || !dependsOnAny(current, id, changedRoutines) {
+			continue
+		}
+		stored := false
+		switch value := object.(type) {
+		case pgschema.Index, pgschema.Constraint:
+			stored = true
+		case pgschema.Column:
+			stored = value.Generated != nil && strings.EqualFold(value.Generated.Kind, "STORED")
+		case pgschema.View:
+			// Same-identity replacements already request explicit refresh work.
+			// Rename resolution consumes its drop/create before that detector, so
+			// only the rename-plus-semantic-change path fails closed here.
+			stored = value.Materialized && dependsOnAny(current, id, renamedRoutines)
+		}
+		if stored {
+			unsupported = append(unsupported, "routine_semantic_change_stored_dependent:"+id.String())
+		}
+	}
+	sort.Strings(unsupported)
+	return unsupported
+}
+
+func routineRenameChangesSemantics(before, after pgschema.Routine) bool {
+	if normalized, changed := normalizeRoutineCallReferences(before.Definition, before, after); changed {
+		before.Definition = normalized
+	}
+	before.Schema, after.Schema = "", ""
+	before.Name, after.Name = "", ""
+	before.Comment, after.Comment = nil, nil
+	return !reflect.DeepEqual(before, after)
+}
+
+func dependsOnTableRenameTarget(snapshot *pgschema.Snapshot, object pgschema.ID, renames []renameTable) bool {
+	if snapshot == nil || len(renames) == 0 {
+		return false
+	}
+	targets := make(map[pgschema.ID]bool, len(renames))
+	for _, rename := range renames {
+		targets[rename.to.ObjectID()] = true
+	}
+	return dependsOnAny(snapshot, object, targets)
+}
+
+// Table-rename resolution deliberately retargets new and modified columns to
+// the old physical table so those prerequisites run before the compatibility
+// view is removed and the table assumes its desired identity.
+func tableRenamePrerequisite(item change.Change, renames []renameTable) bool {
+	column, ok := item.After.(pgschema.Column)
+	if !ok {
+		return false
+	}
+	for _, rename := range renames {
+		if column.Table == rename.from.ObjectID() {
+			return true
+		}
+	}
+	return false
+}
+
+func schemaDropMustFollowTableRename(schemaID pgschema.ID, renames []renameTable) bool {
+	for _, rename := range renames {
+		if rename.from.Schema != rename.to.Schema && schemaID.Name == rename.from.Schema {
+			return true
+		}
+	}
+	return false
+}
+
+func dependsOnContractProvider(snapshot *pgschema.Snapshot, object pgschema.ID, providers map[pgschema.ID]bool) bool {
+	return dependsOnAny(snapshot, object, providers)
+}
+
+func dependsOnAny(snapshot *pgschema.Snapshot, object pgschema.ID, targets map[pgschema.ID]bool) bool {
+	seen := map[pgschema.ID]bool{object: true}
+	stack := append([]pgschema.ID(nil), snapshot.Dependencies(object)...)
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		dependency := stack[last]
+		stack = stack[:last]
+		if targets[dependency] {
+			return true
+		}
+		if seen[dependency] {
+			continue
+		}
+		seen[dependency] = true
+		stack = append(stack, snapshot.Dependencies(dependency)...)
+	}
+	return false
+}
+
+func statementsContainPhase(statements []protocol.Statement, phase string) bool {
+	for _, item := range statements {
+		if item.Phase == phase {
+			return true
+		}
+	}
+	return false
+}
+
+type sharedNamespaceKey struct {
+	namespace string
+	schema    string
+	name      string
+}
+
+// sharedNamespaceTransitionBlockers catches cross-kind replacement shapes
+// that PostgreSQL cannot create before dropping the old object. Dedicated
+// choreography exists for standalone index-to-index collisions; other kind
+// transitions need an explicit compatibility design.
+func sharedNamespaceTransitionBlockers(changes []change.Change) []string {
+	type occupant struct {
+		id   pgschema.ID
+		kind pgschema.Kind
+	}
+	drops := make(map[sharedNamespaceKey][]occupant)
+	creates := make(map[sharedNamespaceKey][]occupant)
+	for _, item := range changes {
+		var object pgschema.Object
+		var destination map[sharedNamespaceKey][]occupant
+		switch item.Kind {
+		case change.Drop:
+			object, destination = item.Before, drops
+		case change.Create:
+			object, destination = item.After, creates
+		default:
+			continue
+		}
+		for _, key := range sharedNamespaceKeys(object) {
+			destination[key] = append(destination[key], occupant{id: item.ID, kind: item.ID.Kind})
+		}
+	}
+	var unsupported []string
+	for key, oldObjects := range drops {
+		newObjects := creates[key]
+		for _, oldObject := range oldObjects {
+			for _, newObject := range newObjects {
+				if oldObject.id == newObject.id || oldObject.kind == pgschema.KindIndex && newObject.kind == pgschema.KindIndex {
+					continue
+				}
+				unsupported = append(unsupported, "shared_namespace_transition:"+key.namespace+":"+key.schema+"."+key.name)
+			}
+		}
+	}
+	sort.Strings(unsupported)
+	result := unsupported[:0]
+	for _, selector := range unsupported {
+		if len(result) == 0 || result[len(result)-1] != selector {
+			result = append(result, selector)
+		}
+	}
+	return result
+}
+
+func sharedNamespaceKeys(object pgschema.Object) []sharedNamespaceKey {
+	key := func(namespace, schema, name string) sharedNamespaceKey {
+		return sharedNamespaceKey{namespace: namespace, schema: schema, name: name}
+	}
+	switch value := object.(type) {
+	case pgschema.Table:
+		return []sharedNamespaceKey{key("relation", value.Schema, value.Name), key("type", value.Schema, value.Name)}
+	case pgschema.View:
+		return []sharedNamespaceKey{key("relation", value.Schema, value.Name), key("type", value.Schema, value.Name)}
+	case pgschema.Sequence:
+		return []sharedNamespaceKey{key("relation", value.Schema, value.Name)}
+	case pgschema.Index:
+		return []sharedNamespaceKey{key("relation", value.Table.Schema, value.Name)}
+	case pgschema.Composite:
+		return []sharedNamespaceKey{key("relation", value.Schema, value.Name), key("type", value.Schema, value.Name)}
+	case pgschema.Enum:
+		return []sharedNamespaceKey{key("type", value.Schema, value.Name)}
+	case pgschema.Domain:
+		return []sharedNamespaceKey{key("type", value.Schema, value.Name)}
+	case pgschema.Range:
+		keys := []sharedNamespaceKey{key("type", value.Schema, value.Name)}
+		if value.MultirangeName != "" {
+			keys = append(keys, key("type", value.Schema, value.MultirangeName))
+		}
+		return keys
+	default:
+		return nil
+	}
+}
+
 func sortedManualWorkIDs(work map[pgschema.ID]protocol.ManualWork) []pgschema.ID {
 	ids := make([]pgschema.ID, 0, len(work))
 	for id := range work {
@@ -6711,7 +7189,7 @@ func sortedManualWorkIDs(work map[pgschema.ID]protocol.ManualWork) []pgschema.ID
 	return ids
 }
 
-func splitPlanGuidance(changes []change.Change, choices decisions) []protocol.Guidance {
+func splitPlanGuidance(changes []change.Change, columnRenames []renameColumn, choices decisions) []protocol.Guidance {
 	var guidance []protocol.Guidance
 	for _, item := range changes {
 		if item.Kind != change.Modify || item.ID.Kind != pgschema.KindColumn || choices.typeUsing[item.ID] != "split_plan" {
@@ -6742,6 +7220,32 @@ func splitPlanGuidance(changes []change.Change, choices decisions) []protocol.Gu
 					Stage: "plan_b_boundary",
 					SQL: "-- Create a later onwardpg feature only after deploying code which no longer depends on " + table + "." + quote(before.Name) + ".\n" +
 						"-- That later desired DDL may remove the old column and compatibility objects.",
+				},
+			},
+		})
+	}
+	for _, rename := range columnRenames {
+		if choices.renameStrategy[rename.from.ObjectID()] != "split_plan" {
+			continue
+		}
+		table := qualified(rename.to.Table.Schema, rename.to.Table.Name)
+		guidance = append(guidance, protocol.Guidance{
+			Kind: "split_plan", Key: rename.from.ObjectID().String(),
+			Summary: "Revise this feature's desired DDL to retain the old column and add the new column as a separate long-lived contract. Backfill and deploy dual-compatible code before a later feature removes the old name.",
+			Steps: []protocol.GuidanceStep{
+				{
+					Stage: "plan_a_expand_scaffold",
+					SQL:   "ALTER TABLE " + table + " ADD COLUMN " + quote(rename.to.Name) + " " + rename.to.Type + ";",
+				},
+				{
+					Stage: "plan_a_product_semantics",
+					SQL: "-- ONWARDPG TODO: define write precedence and synchronization between " + quote(rename.from.Name) + " and " + quote(rename.to.Name) + ".\n" +
+						"-- Run a reviewed batched backfill and add a boolean equality assertion.",
+				},
+				{
+					Stage: "plan_b_boundary",
+					SQL: "-- Create a later onwardpg feature only after all code reads and writes " + table + "." + quote(rename.to.Name) + ".\n" +
+						"-- That later desired DDL may remove " + quote(rename.from.Name) + " and any compatibility objects.",
 				},
 			},
 		})
@@ -8148,7 +8652,11 @@ func serialColumnSupported(column pgschema.Column) bool {
 
 func renderConstraintCreate(object pgschema.Constraint) []protocol.Statement {
 	sql := "ALTER TABLE " + qualified(object.Table.Schema, object.Table.Name) + " ADD CONSTRAINT " + quote(object.Name) + " " + object.Definition + ";"
-	return []protocol.Statement{statement(sql, "expand", "review", true, "table_lock", "validation_scan_possible")}
+	hazards := []string{"table_lock", "access_exclusive_lock", "validation_scan_possible"}
+	if object.Type == pgschema.ConstraintPrimary || object.Type == pgschema.ConstraintUnique || object.Type == pgschema.ConstraintExclusion {
+		hazards = append(hazards, "blocking_index_build")
+	}
+	return []protocol.Statement{statement(sql, "expand", "review", true, hazards...)}
 }
 
 func constraintUsesMatchPartial(object pgschema.Constraint) bool {
@@ -8589,13 +9097,17 @@ func withTimeoutGuidance(statement protocol.Statement, statementTimeoutMS, lockT
 }
 
 func manualWorkStatement(work protocol.ManualWork, hazards ...string) protocol.Statement {
+	return manualWorkStatementPhase(work, protocol.PhaseContract, hazards...)
+}
+
+func manualWorkStatementPhase(work protocol.ManualWork, phase string, hazards ...string) protocol.Statement {
 	lines := []string{"-- PRODUCT-SPECIFIC SQL: " + work.Summary}
 	for _, verification := range work.VerificationSQL {
 		lines = append(lines, "-- Verify: "+verification)
 	}
 	lines = append(lines, work.Statements...)
 	return protocol.Statement{
-		SQL: strings.Join(lines, "\n"), Phase: protocol.PhaseContract, Safety: "manual",
+		SQL: strings.Join(lines, "\n"), Phase: phase, Safety: "manual",
 		Hazards: hazards, Manual: &work, NonTransactional: work.ExecutionMode == "non_transactional",
 	}
 }

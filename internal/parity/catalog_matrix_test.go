@@ -91,7 +91,7 @@ func TestPostgresCatalogFamilyMatrixKeepsSafetyBlockersVisible(t *testing.T) {
 	if err := json.Unmarshal(data, &matrix); err != nil {
 		t.Fatal(err)
 	}
-	if matrix.SchemaVersion != 2 || matrix.InventoryStatus != "catalog_tables_classified_attribute_audit_in_progress" || !reflect.DeepEqual(matrix.Versions, []int{15, 16, 17, 18}) {
+	if matrix.SchemaVersion != 2 || matrix.InventoryStatus != "catalog_tables_and_attributes_classified" || !reflect.DeepEqual(matrix.Versions, []int{15, 16, 17, 18}) {
 		t.Fatalf("invalid catalog matrix header: %#v", matrix)
 	}
 	// The catalog file keeps historical PG14 material as reference data, but the

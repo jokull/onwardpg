@@ -1,0 +1,15 @@
+-- onwardpg: forward-only PostgreSQL migration plan.
+-- Review every batch, safety classification, and hazard in the JSON plan before execution.
+-- ============================================================================
+-- EXPAND — run before the one application deployment anchored to this plan.
+-- Old code must remain usable while new code begins using the expanded shape.
+-- Transactional and non-transactional batches are marked below; this phase is not split by transaction.
+-- ============================================================================
+-- onwardpg:batch transactional
+-- Batch batch-expand-001: transactional.
+-- Review: safety=manual; hazards=manual_sql,single_deployment_bridge_required,product_semantics_required.
+-- onwardpg:edit begin stmt-sha256-fded1b9bef93ffdafd61f2f1cc6c1bc7b23a36c61738b12cb3e268b07d656954
+-- ONWARDPG TODO: replace this comment with reviewed EXPAND SQL for column:app:accounts:age (text -> integer).
+-- Establish both old and new interfaces, synchronization/conflict behavior, and any initial backfill while old code is live.
+-- Do not use a direct ALTER TYPE here: this plan surrounds one rolling application deployment.
+-- onwardpg:edit end stmt-sha256-fded1b9bef93ffdafd61f2f1cc6c1bc7b23a36c61738b12cb3e268b07d656954

@@ -83,7 +83,7 @@ is required before the manifest becomes `planned`.
 
 ## Generated files
 
-A complete generated bundle currently looks like:
+A decision-bearing bundle can contain all of these generated files:
 
 ~~~text
 customer-profile/
@@ -100,7 +100,9 @@ customer-profile/
 ~~~
 
 Only non-empty phases are written. Phase SQL preserves planner comments,
-transaction boundaries, hazards, and deterministic statement IDs.
+transaction boundaries, hazards, and deterministic statement IDs. Decision,
+question, answer, and verification files exist only when that plan actually
+uses them; a simple additive plan is correspondingly smaller.
 
 The manifest is `onwardpg.bundle/v2`. Older three-phase developer-preview
 bundles are rejected with a regeneration action. It records:

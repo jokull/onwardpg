@@ -119,9 +119,11 @@ Stored generated-expression changes converge across PostgreSQL 15–18, while
 PostgreSQL 18 virtual columns support create/add/drop and in-place expression
 changes. Same-type column collation changes and reset-to-default transitions
 also converge across the matrix.
-Ordinary and partitioned table ownership is typed, requires a fingerprint-bound
-authorization decision, and can be narrowly ignored without weakening the
-non-table ownership blockers.
+Ordinary and partitioned table ownership is typed in live graphs, requires a
+fingerprint-bound authorization decision, and can be narrowly ignored without
+weakening the non-table ownership blockers. Default restricted declarative
+materialization cannot assume membership in an external owner role; closing
+that pgmig workflow gap requires an isolated privileged-cluster path.
 Exact-name extension version ignores are repeatable and harmless when a name
 does not match; identity-preserving extension schema moves and both ignore
 branches converge across PostgreSQL 15–18.

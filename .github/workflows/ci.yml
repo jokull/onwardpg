@@ -16,6 +16,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Test
         run: go test -race ./...
       - name: Fuzz safety boundaries
@@ -39,6 +42,15 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: Check Go formatting
         run: bash scripts/check-gofmt.sh
+      - name: Check documentation invariants
+        run: node scripts/check-documentation.mjs
+      - name: Check documentation website
+        run: |
+          corepack enable
+          pnpm --dir website install --frozen-lockfile
+          pnpm --dir website check
+          pnpm --dir website build
+          pnpm --dir website check:agent-docs
       - name: Check whitespace errors
         run: git diff --check
 
@@ -101,3 +113,7 @@ jobs:
         env:
           ONWARDPG_TEST_DATABASE_URL: postgres://pgmig:pgmig@localhost:5432/pgmig?sslmode=disable
         run: scripts/test-readme-workflow.sh
+      - name: Black-box documentation receipts
+        env:
+          ONWARDPG_TEST_DATABASE_URL: postgres://pgmig:pgmig@localhost:5432/pgmig?sslmode=disable
+        run: scripts/test-documentation-receipts.sh

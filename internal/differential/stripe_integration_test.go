@@ -916,6 +916,10 @@ func TestPinnedStripeAndOnwardPGAttachExistingPartitionConstraintIndexes(t *test
 		t.Fatal(err)
 	}
 	defer func() { _, _ = admin.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", integrationLock) }()
+	var serverVersion int
+	if err := admin.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&serverVersion); err != nil {
+		t.Fatal(err)
+	}
 
 	currentDDL := `CREATE TABLE pk_events (id integer NOT NULL, bucket text NOT NULL) PARTITION BY LIST (bucket);
 CREATE TABLE pk_events_1 PARTITION OF pk_events FOR VALUES IN ('one');
@@ -951,6 +955,18 @@ ALTER INDEX uq_events_key ATTACH PARTITION uq_events_1_key;`
 		t.Fatal(err)
 	}
 	onward, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{ConcurrentIndexes: true})
+	if serverVersion >= 180000 {
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantPrefix := "not_null_constraint:public.pk_events_1."
+		for _, selector := range onward.Unsupported {
+			if strings.HasPrefix(selector, wantPrefix) {
+				return
+			}
+		}
+		t.Fatalf("PostgreSQL 18 local-plus-inherited NOT NULL state did not block: %#v", onward)
+	}
 	if err != nil || onward.Status != protocol.Planned || len(onward.Statements) != 4 {
 		t.Fatalf("onwardpg constraint attachment=%#v err=%v", onward, err)
 	}

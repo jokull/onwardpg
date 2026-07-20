@@ -1,0 +1,11 @@
+-- onwardpg: forward-only PostgreSQL migration plan.
+-- Review every batch, safety classification, and hazard in the JSON plan before execution.
+-- ============================================================================
+-- EXPAND — run before the one application deployment anchored to this plan.
+-- Old code must remain usable while new code begins using the expanded shape.
+-- Transactional and non-transactional batches are marked below; this phase is not split by transaction.
+-- ============================================================================
+-- onwardpg:batch transactional
+-- Batch batch-expand-001: transactional.
+-- Review: safety=review; hazards=table_lock,application_compatibility,application_row_shape_change.
+ALTER TABLE "app"."bookings" ADD COLUMN "status" text;

@@ -1,0 +1,231 @@
+import { readFile, readdir } from 'node:fs/promises';
+import path from 'node:path';
+import process from 'node:process';
+
+const repositoryRoot = process.cwd();
+
+async function collect(directory, predicate, output = []) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const resolved = path.join(directory, entry.name);
+    if (entry.isDirectory()) await collect(resolved, predicate, output);
+    if (entry.isFile() && predicate(entry.name)) output.push(resolved);
+  }
+  return output;
+}
+
+const documentationPaths = [
+  path.join(repositoryRoot, 'README.md'),
+  ...(await collect(path.join(repositoryRoot, 'docs'), (name) => name.endsWith('.md'))),
+  ...(await collect(path.join(repositoryRoot, 'skills'), (name) => name.endsWith('.md'))),
+  ...(await collect(path.join(repositoryRoot, 'website/src/content/docs'), (name) => name.endsWith('.md'))),
+];
+const documents = new Map();
+for (const documentPath of documentationPaths) {
+  documents.set(documentPath, await readFile(documentPath, 'utf8'));
+}
+
+function fail(message) {
+  throw new Error(message);
+}
+
+for (const [documentPath, body] of documents) {
+  const relative = path.relative(repositoryRoot, documentPath);
+  if (/onwardpg verify \[(?:name|NAME)\]/.test(body)) {
+    fail(`${relative} documents the rejected positional verify syntax`);
+  }
+  if (/onwardpg verify add-[a-z0-9-]+/.test(body)) {
+    fail(`${relative} passes a positional bundle name to verify`);
+  }
+  if (body.includes('onwardpg.verify/v3')) {
+    fail(`${relative} references the retired verify protocol v3`);
+  }
+}
+
+const generatedRequiredContract = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/required-column/contract.generated.sql'),
+  'utf8',
+);
+const editedRequiredContract = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/required-column/contract.edited.sql'),
+  'utf8',
+);
+const requiredExpand = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/required-column/expand.sql'),
+  'utf8',
+);
+const requiredVerify = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/required-column/verify.sql'),
+  'utf8',
+);
+const expandContractPath = path.join(
+  repositoryRoot,
+  'website/src/content/docs/concepts/expand-contract.md',
+);
+const expandContract = documents.get(expandContractPath);
+const planCommand = documents.get(
+  path.join(repositoryRoot, 'website/src/content/docs/concepts/plan-command.md'),
+);
+
+function markedFence(markdown, marker) {
+  const markerText = `<!-- onwardpg-receipt: ${marker} -->`;
+  const markerOffset = markdown.indexOf(markerText);
+  if (markerOffset < 0) fail(`missing documentation receipt marker ${marker}`);
+  const fenceStart = markdown.indexOf('```', markerOffset + markerText.length);
+  const contentStart = markdown.indexOf('\n', fenceStart) + 1;
+  const fenceEnd = markdown.indexOf('\n```', contentStart);
+  if (fenceStart < 0 || contentStart === 0 || fenceEnd < 0) {
+    fail(`malformed documentation receipt fence ${marker}`);
+  }
+  return markdown.slice(contentStart, fenceEnd);
+}
+
+const expandStatement = requiredExpand.match(/ALTER TABLE[^\n]+;/)?.[0];
+if (!expandStatement) fail('required-column expand receipt has no ALTER TABLE statement');
+if (markedFence(expandContract, 'required-column-expand-statement') !== expandStatement) {
+  fail('required-column expand documentation differs from actual onwardpg output');
+}
+
+const generatedPocketStart = generatedRequiredContract.indexOf('-- onwardpg:edit begin ');
+const generatedEnforcementEnd = generatedRequiredContract.indexOf(' SET NOT NULL;') + ' SET NOT NULL;'.length;
+const generatedPocket = `-- contract.sql\n${generatedRequiredContract.slice(generatedPocketStart, generatedEnforcementEnd)}`;
+if (markedFence(expandContract, 'required-column-generated-contract-pocket') !== generatedPocket) {
+  fail('required-column generated contract documentation differs from actual onwardpg output');
+}
+
+function editPocket(body) {
+  const begin = body.indexOf('\n', body.indexOf('-- onwardpg:edit begin ')) + 1;
+  const end = body.indexOf('-- onwardpg:edit end ', begin);
+  return body.slice(begin, end).trimEnd();
+}
+
+if (
+  markedFence(expandContract, 'required-column-edited-contract-pocket') !==
+  editPocket(editedRequiredContract)
+) {
+  fail('required-column application edit documentation differs from its verified fixture');
+}
+if (
+  markedFence(expandContract, 'required-column-verification') !== requiredVerify.trimEnd()
+) {
+  fail('required-column verification documentation differs from its verified fixture');
+}
+
+function assertInOrder(body, fragments, label) {
+  let offset = -1;
+  for (const fragment of fragments) {
+    const next = body.indexOf(fragment, offset + 1);
+    if (next < 0) fail(`${label} is missing: ${fragment}`);
+    offset = next;
+  }
+}
+
+assertInOrder(planCommand, [
+  expandStatement,
+  '-- ONWARDPG TODO: deploy code that writes column:app:bookings:status, then replace this comment with a reviewed backfill for existing rows.',
+  'ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;',
+], 'plan-command easy/medium ladder');
+
+const typeExpand = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/type-change/expand.generated.sql'),
+  'utf8',
+);
+const typeContract = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/type-change/contract.generated.sql'),
+  'utf8',
+);
+for (const line of [...typeExpand.split('\n'), ...typeContract.split('\n')].filter((line) =>
+  line.startsWith('-- ONWARDPG TODO:') ||
+  line.startsWith('-- Establish both old and new interfaces') ||
+  line.startsWith('-- Do not use a direct ALTER TYPE') ||
+  line.startsWith('-- After pre-deployment writers drain')
+)) {
+  if (![documents.get(path.join(repositoryRoot, 'README.md')), documents.get(path.join(repositoryRoot, 'website/src/content/docs/concepts/decisions.md'))].some((body) => body.includes(line))) {
+    fail(`actual type-change output is not represented in public documentation: ${line}`);
+  }
+}
+
+const renameExpand = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/rename/expand.generated.sql'),
+  'utf8',
+);
+const renameContract = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/rename/contract.generated.sql'),
+  'utf8',
+);
+const renameFragments = [
+  'ALTER TABLE "app"."accounts" ADD COLUMN "full_name" text;',
+  'CREATE TRIGGER "onwardpg_sync_column_4cff936be08db67c" BEFORE INSERT OR UPDATE OF "display_name", "full_name" ON "app"."accounts" FOR EACH ROW EXECUTE FUNCTION "app"."onwardpg_sync_column_4cff936be08db67c"();',
+  'UPDATE "app"."accounts" SET "full_name" = "display_name" WHERE "full_name" IS DISTINCT FROM "display_name";',
+];
+assertInOrder(renameExpand, renameFragments, 'rename expand receipt');
+for (const fragment of renameFragments) {
+  if (!planCommand.includes(fragment)) fail(`plan-command hard ladder is missing: ${fragment}`);
+}
+for (const fragment of [
+  'DROP TRIGGER "onwardpg_sync_column_4cff936be08db67c" ON "app"."accounts";',
+  'DROP FUNCTION "app"."onwardpg_sync_column_4cff936be08db67c"();',
+  'ALTER TABLE "app"."accounts" DROP COLUMN "full_name";',
+  'ALTER TABLE "app"."accounts" RENAME COLUMN "display_name" TO "full_name";',
+]) {
+  if (!renameContract.includes(fragment) || !planCommand.includes(fragment)) {
+    fail(`plan-command hard ladder differs from rename receipt: ${fragment}`);
+  }
+}
+
+const dependencyContract = await readFile(
+  path.join(repositoryRoot, 'docs/receipts/dependency-type-change/contract.generated.sql'),
+  'utf8',
+);
+const dependencyFragments = [
+  'DROP MATERIALIZED VIEW "app"."fact_cache";',
+  'DROP VIEW "app"."fact_view";',
+  '-- ONWARDPG TODO: replace this comment with reviewed CONTRACT SQL for column:app:facts:val (integer -> bigint).',
+  'ANALYZE "app"."facts" ("val");',
+  'CREATE VIEW "app"."fact_view" AS SELECT val',
+  'CREATE MATERIALIZED VIEW "app"."fact_cache" AS SELECT val',
+  '-- onwardpg:batch nontransactional',
+  'CREATE UNIQUE INDEX CONCURRENTLY "fact_cache_val_idx" ON "app"."fact_cache" USING "btree" ("val" NULLS LAST);',
+];
+assertInOrder(dependencyContract, dependencyFragments, 'dependency type-change receipt');
+assertInOrder(planCommand, dependencyFragments, 'plan-command nightmare ladder');
+
+const homepage = await readFile(path.join(repositoryRoot, 'website/src/pages/index.astro'), 'utf8');
+for (const expected of [
+  '"protocol_version":"onwardpg.plan/v5"',
+  '"status":"needs_sql_edits"',
+  '"durable":&#123;"edit_files":["phases/contract.sql"]',
+  expandStatement,
+  'ONWARDPG TODO: reviewed backfill',
+  'ALTER COLUMN "status" SET NOT NULL;',
+  'abridged from the checked black-box CLI receipt',
+]) {
+  if (!homepage.includes(expected)) fail(`homepage receipt is missing: ${expected}`);
+}
+if (homepage.indexOf('ONWARDPG TODO: reviewed backfill') > homepage.indexOf('ALTER COLUMN "status" SET NOT NULL;')) {
+  fail('homepage puts required-column enforcement before its backfill pocket');
+}
+
+const goRoots = ['cmd', 'internal', 'pgschema', 'scripts'].map((name) =>
+  path.join(repositoryRoot, name),
+);
+const testPaths = [];
+for (const goRoot of goRoots) {
+  testPaths.push(...(await collect(goRoot, (name) => name.endsWith('_test.go'))));
+}
+const actualTests = new Set();
+for (const testPath of testPaths) {
+  const source = await readFile(testPath, 'utf8');
+  for (const match of source.matchAll(/\bfunc (Test[A-Za-z0-9_]+)\s*\(/g)) actualTests.add(match[1]);
+}
+for (const [documentPath, body] of documents) {
+  for (const match of body.matchAll(/\b(Test[A-Z][A-Za-z0-9_]+)\b/g)) {
+    if (!actualTests.has(match[1])) {
+      fail(`${path.relative(repositoryRoot, documentPath)} references missing Go test ${match[1]}`);
+    }
+  }
+}
+
+console.log(
+  `documentation verified: ${documentationPaths.length} Markdown files, ` +
+    'four CLI receipt scenarios, current verify syntax/protocol, and all cited Go tests',
+);

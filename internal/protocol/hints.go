@@ -113,6 +113,17 @@ func (h Hint) Validate() error {
 			return fmt.Errorf("not_null rollout strategy must be direct, staged, or staged_with_backfill")
 		}
 		return h.reject("from", h.From, "to", h.To, "action", h.Action)
+	case "rename_backfill":
+		if h.Object != "" {
+			return fmt.Errorf("rename_backfill hint does not accept object; column is implied")
+		}
+		if err := validateIdentifier("column", h.Name, "name"); err != nil {
+			return err
+		}
+		if h.Strategy != "manual_sql" && h.Strategy != "single_transaction" && h.Strategy != "split_plan" {
+			return fmt.Errorf("rename_backfill strategy must be manual_sql, single_transaction, or split_plan")
+		}
+		return h.reject("from", h.From, "to", h.To, "action", h.Action)
 	case "confirm":
 		if err := h.requireObject(); err != nil {
 			return err

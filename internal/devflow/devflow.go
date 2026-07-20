@@ -65,6 +65,17 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if input.DevURL == "" || input.AdminURL == "" {
 		return Report{}, fmt.Errorf("development and disposable database URLs are required")
 	}
+	developmentMajor, err := source.PostgresMajor(ctx, input.DevURL)
+	if err != nil {
+		return Report{}, fmt.Errorf("inspect development PostgreSQL major: %w", err)
+	}
+	scratchMajor, err := source.PostgresMajor(ctx, input.AdminURL)
+	if err != nil {
+		return Report{}, fmt.Errorf("inspect scratch PostgreSQL major: %w", err)
+	}
+	if err := validatePostgresMajors(developmentMajor, scratchMajor); err != nil {
+		return Report{}, err
+	}
 	compiled, err := workspace.CompileDDL(ctx, input.Root, input.TargetName, input.Target)
 	if err != nil {
 		return Report{}, fmt.Errorf("compile desired schema: %w", err)
@@ -102,6 +113,13 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}
 	}
 	return report, nil
+}
+
+func validatePostgresMajors(developmentMajor, scratchMajor int) error {
+	if developmentMajor != scratchMajor {
+		return fmt.Errorf("development PostgreSQL major %d does not match scratch PostgreSQL major %d", developmentMajor, scratchMajor)
+	}
+	return nil
 }
 
 func evaluatePostconditions(ctx context.Context, databaseURL string, checks []Postcondition) ([]PostconditionResult, error) {

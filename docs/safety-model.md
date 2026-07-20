@@ -30,8 +30,9 @@ The planner's core safety rules are:
 - surface destructive, lock, rewrite, validation, and availability concerns as
   statement safety/hazard metadata for review.
 
-Every supported PostgreSQL `pg_catalog` table is classified in the developer
-preview inventory. The attribute-level audit remains in progress. The current
+Every column of every PostgreSQL 15–18 `pg_catalog` table is classified in the
+checked-in attribute ledger as modeled, blocked, derived, environmental,
+runtime, or secret. Live-version tests reject catalog shape drift. The current
 blockers include domains, composites, aggregates, standalone collations,
 range/multirange types, foreign tables, explicit ownership deviations,
 non-table and column ACL/default-privilege state, non-owner grant chains,
@@ -47,17 +48,35 @@ generated columns are version-gated blockers.
 Subscription connection strings and security-label values are never included
 in diagnostics.
 Extension-owned members are represented atomically by the typed extension
-name/version/schema boundary and are not independently planned. The
+name/version/schema boundary and are not independently planned. Physical
+member addresses alias to that Extension node for dependency ordering.
+Ordinary-view column defaults and comments on domain constraints, composite
+attributes, and view columns remain explicit blockers. Pending concurrent
+partition detaches and exceptional PostgreSQL 18 NOT NULL inheritance also
+fail closed rather than masquerading as ordinary topology. Customized options,
+comments, expressions, persistence, or names on implicit serial and identity
+backing sequences also block when their state is not retained by the typed
+column. The
 machine-readable [catalog-family inventory](../parity/postgres-catalog-families.json)
-records the per-major catalog-table evidence separately from its still-open
-attribute audit. “No unsupported result” is not a catalog-completeness
-certification until that second milestone closes.
+and [attribute ledger](../parity/postgres-catalog-attributes.json) record the
+per-major evidence. Classification proves that the surface was considered; it
+does not turn derived or out-of-scope state into a supported migration target.
+
+Dependency order is checked across phases as well as inside the graph schedule:
+new work depending on a contract-phase provider is promoted to contract.
+Retained expression/partial indexes, stored generated columns, and constraints
+depending on a semantically changed routine block because PostgreSQL will not
+rebuild, recompute, or revalidate their stored state automatically. Cross-kind
+replacement inside PostgreSQL's shared relation/type namespaces also blocks
+until it has explicit drop-before-create compatibility choreography.
 
 RLS enable/force state, policies, and table privileges are modeled rather than
 ignored. Graph edges place policies before RLS enable and RLS disable before
-policy removal. Policy replacement, policy alteration, RLS relaxation,
-privilege revocation, and removal of grant options remain reviewable and, when
-destructive or authorization-relaxing, require an explicit semantic decision.
+policy removal. Creation, alteration, or tightening on an existing table runs
+in contract after old application traffic drains; a policy change stays before
+dependent RLS enable/force work. Policy replacement, policy alteration, RLS
+relaxation, privilege revocation, and removal of grant options remain reviewable
+and, when destructive or authorization-relaxing, require an explicit semantic decision.
 The generated internal receipt remains fingerprint-bound. Every emitted
 authorization statement carries lock/statement timeout guidance; onwardpg
 does not set those values on a caller session.

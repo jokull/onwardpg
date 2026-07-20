@@ -1,0 +1,16 @@
+-- onwardpg: forward-only PostgreSQL migration plan.
+-- Review every batch, safety classification, and hazard in the JSON plan before execution.
+-- ============================================================================
+-- EXPAND — run before the one application deployment anchored to this plan.
+-- Old code must remain usable while new code begins using the expanded shape.
+-- Transactional and non-transactional batches are marked below; this phase is not split by transaction.
+-- ============================================================================
+-- onwardpg:batch transactional
+-- Batch batch-expand-001: transactional.
+-- Review: safety=manual; hazards=manual_sql,single_deployment_bridge_required,product_semantics_required.
+-- onwardpg:edit begin stmt-sha256-160b67ef746c36a227ae8728cf11b9b81d66238757724b4bba03b75c97db55a8
+-- ONWARDPG TODO: replace this comment with reviewed EXPAND SQL for column:app:facts:val (integer -> bigint).
+-- Establish both old and new interfaces, synchronization/conflict behavior, and any initial backfill while old code is live.
+-- Do not use a direct ALTER TYPE here: this plan surrounds one rolling application deployment.
+-- Dependent view/materialized-view/index objects in scope: index:app:fact_cache:fact_cache_val_idx, materialized_view:app:fact_cache, view:app:fact_view. Preserve or recreate this exact dependency closure in the reviewed bridge SQL.
+-- onwardpg:edit end stmt-sha256-160b67ef746c36a227ae8728cf11b9b81d66238757724b4bba03b75c97db55a8

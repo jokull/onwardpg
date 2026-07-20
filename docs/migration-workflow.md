@@ -38,17 +38,17 @@ Generated operations are classified and rendered into readable phase files:
 
 | Phase | Typical work | Deployment meaning |
 | --- | --- | --- |
-| Expand | additive shape, compatibility views/triggers, initial backfill | run while pre-deployment code is still live, before one application rollout |
-| Contract | final catch-up, validation, enforcement, compatibility cleanup | run after pre-deployment instances and writers have drained |
+| Expand | additive shape, compatibility views/triggers, explicitly chosen backfill work | run while pre-deployment code is still live, before one application rollout |
+| Contract | assertions, validation, enforcement, compatibility cleanup | run after pre-deployment instances and writers have drained |
 
 Comments identify transactional boundaries, required non-transactional batches,
 locking/rewrite hazards, and sequencing. Review the files as deployment SQL;
 their application remains the responsibility of the person or system with
 deployment visibility.
 
-Backfill is work, not a third deployment phase. Initial synchronization belongs
-in expand when it is safe with old code live. Final catch-up, assertions, and
-enforcement belong in contract after old writers drain. Either file may contain
+Backfill is work, not a third deployment phase. Synchronization belongs in
+expand when it is safe with old code live. Assertions and enforcement belong
+in contract after old writers drain. Either file may contain
 multiple explicit transactional and non-transactional batches.
 
 One bundle surrounds exactly one application deployment. The new application

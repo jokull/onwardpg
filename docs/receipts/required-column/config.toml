@@ -1,0 +1,8 @@
+version = 1
+bundle_root = "migrations/onward"
+
+[targets.app]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+dev_mode = "workspace"

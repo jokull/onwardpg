@@ -3,9 +3,11 @@ package verify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jokull/onwardpg/internal/protocol"
@@ -36,13 +38,9 @@ func TestTransactionalBatchRollsBackWhenManualVerificationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close(context.Background())
-	name, err := databaseName()
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := strings.Replace(name, "onwardpg_verify_", "onwardpg_rollback_", 1)
+	schema := fmt.Sprintf("onwardpg_rollback_%d", time.Now().UTC().UnixNano())
 	statement := protocol.Statement{
-		SQL: "CREATE SCHEMA " + quote(schema) + "; CREATE TABLE " + quote(schema) + ".example (id bigint);",
+		SQL: "CREATE SCHEMA " + testQuote(schema) + "; CREATE TABLE " + testQuote(schema) + ".example (id bigint);",
 		Manual: &protocol.ManualWork{
 			Summary: "prove false assertions roll back", ExecutionMode: "transactional",
 			Statements: []string{"SELECT 1;"}, VerificationSQL: []string{"SELECT false;"},
@@ -61,4 +59,8 @@ func TestTransactionalBatchRollsBackWhenManualVerificationFails(t *testing.T) {
 	if exists {
 		t.Fatalf("schema %s survived transactional verification failure", schema)
 	}
+}
+
+func testQuote(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
 }

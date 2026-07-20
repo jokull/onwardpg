@@ -32,7 +32,7 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | Down migrations | No separate planner model | Never | Recovery is a new reviewed forward migration. |
 | One-deployment expand / contract sections | No | **Plannable** | SQL is annotated around exactly one rolling application deployment. |
 | Typed ambiguity decisions | No | **Decision required** | Agent-facing hints use semantic object names; onwardpg binds generated receipts to both schema fingerprints. Hints may be supplied before the first plan. |
-| Unknown catalog object | Inspector dependent | Catalog tables classified; attribute audit incomplete | Every supported PostgreSQL catalog table has a machine-readable modeled/blocked/atomic/out-of-scope classification. Less-common attributes inside modeled families remain preview audit work. |
+| Unknown catalog object | Inspector dependent | **Blocked or explicitly classified** | Every PostgreSQL 15–18 catalog table and column has a machine-readable classification. Live tests reject catalog drift; derived, environmental, runtime, and secret state are not migration targets. |
 | Server policy | Historical project support | PG 15–18 | Support is a policy boundary, not an assertion about every object variation. |
 
 ## Schemas, extensions, tables, and columns
@@ -47,12 +47,12 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | Table comments | No verified diff family | **Plannable** | |
 | Table rename | Drop/create-oriented diff | **Decision required**, then **Plannable** for the supported shape | Expand keeps the old physical table and creates a new-name security-invoker view; contract atomically replaces the view with the renamed table. Retained child names must remain stable, and new code must tolerate the temporary view. |
 | Table persistence | Partial | **Plannable** | Includes logged/unlogged transitions; ownership is separate. |
-| Table ownership | Explicit deviations detected | **Decision required**, then **Plannable** | Ordinary and partitioned tables use a fingerprint-bound authorization decision and quoted role identity; non-table ownership remains blocked. |
+| Table ownership | Explicit deviations detected | **Planner support; restricted-source limitation** | Live graph comparisons retain ordinary/partitioned-table ownership and require a fingerprint-bound authorization decision. Default declarative materialization cannot `SET ROLE` to an external owner; an isolated privileged-cluster execution path remains roadmap work. |
 | Columns add/drop/null/default | Yes | **Plannable** or **SQL handoff** | Drops require approval. A new required column without a default is added nullable, handed off for dual-write/backfill, then enforced in contract. New columns append physically; a different declarative position is reported as compatibility evidence rather than blocked. |
 | Column comments | No verified diff family | **Plannable** | |
-| Column rename | Drop/create-oriented diff | **Blocked after identity is confirmed** | Intent and catalog rewrites are recognized, but no bare rename is emitted until both column contracts can overlap. |
+| Column rename | Drop/create-oriented diff | **Decision required**, then **Plannable**, **SQL handoff**, or split | Eligible same-type columns use a dual-write bridge. Identity confirmation is followed by an explicit manual, single-transaction, or split-plan backfill strategy; no unbounded update is implicit. |
 | Column type change | Yes | **Blocked** or **SQL handoff** | onwardpg never invents a `USING` expression or lets a direct `ALTER COLUMN TYPE` masquerade as expand/contract. Product-specific shadow-column work can be handed to edited SQL. |
-| Identity / generated / serial / collation | Yes | **Plannable** for supported forms | Stored generated-expression changes work on PostgreSQL 15–18; virtual generated columns work on PostgreSQL 18; same-type explicit collation changes and reset-to-default transitions are reviewed rewrites. |
+| Identity / generated / serial / collation | Yes | **Plannable** for supported forms | Stored generated-expression changes work on PostgreSQL 15–18; virtual generated columns work on PostgreSQL 18; same-type explicit collation changes and reset-to-default transitions are reviewed rewrites. Customized implicit serial/identity backing-sequence metadata blocks when it cannot be represented. |
 
 ## Constraints, indexes, and sequences
 

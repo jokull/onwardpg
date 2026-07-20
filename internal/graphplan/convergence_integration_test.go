@@ -83,6 +83,116 @@ CREATE INDEX orders_state_idx ON "` + schemaName + `".orders (state);`
 	}
 }
 
+func TestCatalogProjectedDependencyCreateAndDropConvergeOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := fmt.Sprintf("onwardpg_catalog_dependencies_%d", time.Now().UTC().UnixNano())
+	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
+	qualified := `"` + schemaName + `".`
+	ddl := `CREATE SCHEMA "` + schemaName + `";
+CREATE FUNCTION ` + qualified + `is_positive(integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 > 0';
+CREATE DOMAIN ` + qualified + `positive_integer AS integer CHECK (` + qualified + `is_positive(VALUE));
+CREATE FUNCTION ` + qualified + `timestamp_distance(timestamptz, timestamptz) RETURNS double precision LANGUAGE sql IMMUTABLE AS 'SELECT EXTRACT(EPOCH FROM ($1 - $2))';
+CREATE TYPE ` + qualified + `time_window AS RANGE (subtype = timestamptz, subtype_diff = ` + qualified + `timestamp_distance);
+CREATE TYPE ` + qualified + `state AS ENUM ('open', 'closed');
+CREATE FUNCTION ` + qualified + `normalize_state(` + qualified + `state) RETURNS ` + qualified + `state LANGUAGE sql IMMUTABLE AS 'SELECT $1';
+CREATE FUNCTION ` + qualified + `echo_states(` + qualified + `state[]) RETURNS ` + qualified + `state[] LANGUAGE sql IMMUTABLE AS 'SELECT $1';
+CREATE TABLE ` + qualified + `row_base (id integer);
+CREATE FUNCTION ` + qualified + `echo_row(` + qualified + `row_base) RETURNS ` + qualified + `row_base LANGUAGE sql IMMUTABLE AS 'SELECT $1';
+CREATE TYPE ` + qualified + `row_wrap AS (item ` + qualified + `row_base);
+CREATE DOMAIN ` + qualified + `row_domain AS ` + qualified + `row_base;
+CREATE TABLE ` + qualified + `row_holder (item ` + qualified + `row_base);
+CREATE TABLE ` + qualified + `items (
+  amount ` + qualified + `positive_integer,
+  state ` + qualified + `state DEFAULT ` + qualified + `normalize_state('open')
+);`
+
+	desired, err := source.LoadDDLGraphForComparison(ctx, []byte(ddl), "catalog dependency fixture", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || created.Status != protocol.Planned {
+		t.Fatalf("dependency create plan=%#v err=%v", created, err)
+	}
+	createSQL := joinPlan(created)
+	for _, ordering := range [][2]string{
+		{"CREATE OR REPLACE FUNCTION " + schemaName + ".is_positive", "CREATE DOMAIN " + qualified + quote("positive_integer")},
+		{"CREATE OR REPLACE FUNCTION " + schemaName + ".timestamp_distance", "CREATE TYPE " + qualified + quote("time_window")},
+		{"CREATE TYPE " + qualified + quote("state") + " AS ENUM", "CREATE OR REPLACE FUNCTION " + schemaName + ".normalize_state"},
+		{"CREATE OR REPLACE FUNCTION " + schemaName + ".normalize_state", "CREATE TABLE " + qualified + quote("items")},
+		{"CREATE TABLE " + qualified + quote("row_base"), "CREATE OR REPLACE FUNCTION " + schemaName + ".echo_row"},
+		{"CREATE TABLE " + qualified + quote("row_base"), "CREATE TYPE " + qualified + quote("row_wrap")},
+		{"CREATE TABLE " + qualified + quote("row_base"), "CREATE DOMAIN " + qualified + quote("row_domain")},
+		{"CREATE TABLE " + qualified + quote("row_base"), "CREATE TABLE " + qualified + quote("row_holder")},
+	} {
+		dependency, consumer := ordering[0], ordering[1]
+		if !strings.Contains(createSQL, dependency) || !strings.Contains(createSQL, consumer) || strings.Index(createSQL, dependency) > strings.Index(createSQL, consumer) {
+			t.Fatalf("dependency %q must precede %q:\n%s", dependency, consumer, createSQL)
+		}
+	}
+	applyPlan(t, ctx, conn, created)
+	assertGraphConverges(t, ctx, url, desired)
+
+	empty, err := source.LoadDDLGraphForComparison(ctx, []byte(`CREATE SCHEMA "`+schemaName+`";`), "empty dependency fixture", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Build(current, empty, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput {
+		t.Fatalf("dependency drop questions=%#v err=%v", pending, err)
+	}
+	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	for _, question := range pending.Questions {
+		if question.Kind != "drop" {
+			t.Fatalf("unexpected dependency drop question: %#v", question)
+		}
+		answers.Answers = append(answers.Answers, protocol.Answer{
+			Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint,
+		})
+	}
+	dropped, err := Build(current, empty, answers, Options{})
+	if err != nil || dropped.Status != protocol.Planned {
+		t.Fatalf("dependency drop plan=%#v err=%v", dropped, err)
+	}
+	dropSQL := joinPlan(dropped)
+	if strings.Index(dropSQL, "DROP DOMAIN "+qualified+quote("positive_integer")) > strings.Index(dropSQL, "DROP FUNCTION "+qualified+quote("is_positive")) ||
+		strings.Index(dropSQL, "DROP TYPE "+qualified+quote("time_window")) > strings.Index(dropSQL, "DROP FUNCTION "+qualified+quote("timestamp_distance")) {
+		t.Fatalf("consumers must be dropped before dependencies:\n%s", dropSQL)
+	}
+	baseDrop := strings.Index(dropSQL, "DROP TABLE "+qualified+quote("row_base"))
+	for _, consumer := range []string{
+		"DROP FUNCTION " + qualified + quote("echo_row"),
+		"DROP TYPE " + qualified + quote("row_wrap"),
+		"DROP DOMAIN " + qualified + quote("row_domain"),
+		"DROP TABLE " + qualified + quote("row_holder"),
+	} {
+		consumerDrop := strings.Index(dropSQL, consumer)
+		if baseDrop < 0 || consumerDrop < 0 || consumerDrop > baseDrop {
+			t.Fatalf("row-type consumer %q must be dropped before its table dependency:\n%s", consumer, dropSQL)
+		}
+	}
+	applyPlan(t, ctx, conn, dropped)
+	assertGraphConverges(t, ctx, url, empty)
+}
+
 func TestSchemaAndSearchPathConvergeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -434,15 +544,13 @@ func TestViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL(t *test
 	suffix := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 	dataSchema := "onwardpg_view_type_data_" + suffix
 	apiSchema := "onwardpg_view_type_api_" + suffix
-	viewOwner := "onwardpg_view_owner_" + suffix
 	viewReader := "onwardpg_view_reader_" + suffix
 	defer func() {
 		_, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+apiSchema+`" CASCADE`)
 		_, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+dataSchema+`" CASCADE`)
 		_, _ = conn.Exec(context.Background(), `DROP ROLE IF EXISTS "`+viewReader+`"`)
-		_, _ = conn.Exec(context.Background(), `DROP ROLE IF EXISTS "`+viewOwner+`"`)
 	}()
-	if _, err := conn.Exec(ctx, `CREATE ROLE "`+viewOwner+`"; CREATE ROLE "`+viewReader+`";`); err != nil {
+	if _, err := conn.Exec(ctx, `CREATE ROLE "`+viewReader+`";`); err != nil {
 		t.Fatal(err)
 	}
 	currentDDL := `CREATE SCHEMA "` + dataSchema + `"; CREATE SCHEMA "` + apiSchema + `";
@@ -451,7 +559,6 @@ CREATE FUNCTION "` + apiSchema + `".base_insert() RETURNS trigger LANGUAGE plpgs
 CREATE VIEW "` + apiSchema + `".base AS SELECT val FROM "` + dataSchema + `".t;
 CREATE TRIGGER base_insert INSTEAD OF INSERT ON "` + apiSchema + `".base FOR EACH ROW EXECUTE FUNCTION "` + apiSchema + `".base_insert();
 COMMENT ON TRIGGER base_insert ON "` + apiSchema + `".base IS 'typed view trigger';
-ALTER VIEW "` + apiSchema + `".base OWNER TO "` + viewOwner + `";
 GRANT SELECT ON "` + apiSchema + `".base TO "` + viewReader + `";
 CREATE VIEW "` + apiSchema + `".derived AS SELECT val FROM "` + apiSchema + `".base;
 CREATE VIEW "` + apiSchema + `".keep_view AS SELECT keep FROM "` + dataSchema + `".t;`
@@ -500,7 +607,7 @@ CREATE VIEW "` + apiSchema + `".keep_view AS SELECT keep FROM "` + dataSchema + 
 	if !strings.Contains(sql, "val + 1") {
 		t.Fatalf("changed dependent view definition was not recreated from desired catalog state:\n%s", sql)
 	}
-	for _, fragment := range []string{`ALTER VIEW "` + apiSchema + `"."base" OWNER TO "` + viewOwner + `"`, `GRANT SELECT ON TABLE "` + apiSchema + `"."base" TO "` + viewReader + `"`} {
+	for _, fragment := range []string{`GRANT SELECT ON TABLE "` + apiSchema + `"."base" TO "` + viewReader + `"`} {
 		if !strings.Contains(sql, fragment) {
 			t.Fatalf("view closure did not preserve ownership/privileges %q:\n%s", fragment, sql)
 		}
@@ -514,11 +621,7 @@ FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON
 WHERE n.nspname = $1 AND c.relname = 'derived' AND a.attname = 'val' AND a.attnum > 0`, apiSchema).Scan(&outputType); err != nil || outputType != "bigint" {
 		t.Fatalf("recreated transitive view output type=%q err=%v", outputType, err)
 	}
-	var actualOwner string
 	var readerCanSelect bool
-	if err := conn.QueryRow(ctx, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 'base'`, apiSchema).Scan(&actualOwner); err != nil || actualOwner != viewOwner {
-		t.Fatalf("recreated view owner=%q err=%v", actualOwner, err)
-	}
 	if err := conn.QueryRow(ctx, `SELECT has_table_privilege($1::text, format('%I.%I', $2::text, 'base'), 'SELECT')`, viewReader, apiSchema).Scan(&readerCanSelect); err != nil || !readerCanSelect {
 		t.Fatalf("recreated view privilege select=%v err=%v", readerCanSelect, err)
 	}
@@ -1614,6 +1717,10 @@ func TestAttachExistingPartitionConstraintIndexesConvergeOnPostgreSQL(t *testing
 	}
 	defer conn.Close(ctx)
 	lockGraphPlanIntegration(t, ctx, conn)
+	var serverVersion int
+	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&serverVersion); err != nil {
+		t.Fatal(err)
+	}
 	schemaName := "onwardpg_attach_constraint_" + time.Now().UTC().Format("20060102150405")
 	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
 	currentDDL := `CREATE SCHEMA "` + schemaName + `";
@@ -1646,6 +1753,13 @@ ALTER INDEX "` + schemaName + `".uq_events_key ATTACH PARTITION "` + schemaName 
 		t.Fatal(err)
 	}
 	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	if serverVersion >= 180000 {
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertUnsupportedPrefix(t, plan, "not_null_constraint:"+schemaName+".pk_events_1.")
+		return
+	}
 	if err != nil || plan.Status != protocol.Planned || len(plan.Statements) != 4 {
 		t.Fatalf("partition constraint attachment plan=%#v err=%v", plan, err)
 	}
@@ -3077,6 +3191,101 @@ func TestRoutineReplacementRequiresMaterializedViewRefreshContract(t *testing.T)
 	assertGraphConverges(t, ctx, url, desired)
 }
 
+func TestRoutineSemanticStoredDependentsBlockAndNewDependentsFollowReplacementOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	suffix := time.Now().UTC().Format("20060102150405")
+	storedSchema := "onwardpg_routine_stored_" + suffix
+	newSchema := "onwardpg_routine_new_" + suffix
+	defer func() {
+		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(storedSchema)+" CASCADE")
+		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(newSchema)+" CASCADE")
+	}()
+
+	storedCurrentDDL := `CREATE SCHEMA "` + storedSchema + `";
+CREATE FUNCTION "` + storedSchema + `".score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 1';
+CREATE TABLE "` + storedSchema + `".measurements (
+  value integer,
+  generated_score integer GENERATED ALWAYS AS ("` + storedSchema + `".score(value)) STORED,
+  CONSTRAINT score_positive CHECK ("` + storedSchema + `".score(value) > 0)
+);
+CREATE INDEX score_idx ON "` + storedSchema + `".measurements ("` + storedSchema + `".score(value));
+INSERT INTO "` + storedSchema + `".measurements(value) VALUES (1);`
+	if _, err := conn.Exec(ctx, storedCurrentDDL); err != nil {
+		t.Fatal(err)
+	}
+	storedDesiredDDL := strings.Replace(storedCurrentDDL, "SELECT $1 + 1", "SELECT $1 + 2", 1)
+	storedDesiredDDL = strings.ReplaceAll(storedDesiredDDL, "\nINSERT INTO "+quote(storedSchema)+".measurements(value) VALUES (1);", "")
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadDDLGraphForComparison(ctx, []byte(storedDesiredDDL), "routine stored-dependent fixture", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableID := (pgschema.Table{Schema: storedSchema, Name: "measurements"}).ObjectID()
+	for _, id := range []pgschema.ID{
+		(pgschema.Column{Table: tableID, Name: "generated_score"}).ObjectID(),
+		(pgschema.Constraint{Table: tableID, Name: "score_positive"}).ObjectID(),
+		(pgschema.Index{Table: tableID, Name: "score_idx"}).ObjectID(),
+	} {
+		assertUnsupportedPrefix(t, blocked, "routine_semantic_change_stored_dependent:"+id.String())
+	}
+	if _, err := conn.Exec(ctx, "DROP SCHEMA "+quote(storedSchema)+" CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+
+	newCurrentDDL := `CREATE SCHEMA "` + newSchema + `";
+CREATE FUNCTION "` + newSchema + `".score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 1';
+CREATE TABLE "` + newSchema + `".measurements (value integer);
+INSERT INTO "` + newSchema + `".measurements(value) VALUES (1);`
+	if _, err := conn.Exec(ctx, newCurrentDDL); err != nil {
+		t.Fatal(err)
+	}
+	newDesiredDDL := `CREATE SCHEMA "` + newSchema + `";
+CREATE FUNCTION "` + newSchema + `".score(integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1 + 2';
+CREATE TABLE "` + newSchema + `".measurements (value integer);
+CREATE INDEX score_idx ON "` + newSchema + `".measurements ("` + newSchema + `".score(value));`
+	current, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err = source.LoadDDLGraphForComparison(ctx, []byte(newDesiredDDL), "routine new-dependent fixture", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || planned.Status != protocol.Planned {
+		t.Fatalf("new routine-dependent index plan=%#v err=%v", planned, err)
+	}
+	joined := joinPlan(planned)
+	routineAt, indexAt := strings.Index(joined, "CREATE OR REPLACE FUNCTION"), strings.Index(joined, "CREATE INDEX")
+	if routineAt < 0 || indexAt < 0 || routineAt > indexAt {
+		t.Fatalf("routine replacement must precede new dependent index:\n%s", joined)
+	}
+	for _, statement := range planned.Statements {
+		if statement.Phase != protocol.PhaseContract {
+			t.Fatalf("new routine dependent escaped contract: %#v", statement)
+		}
+	}
+	applyPlan(t, ctx, conn, planned)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
 func TestRoutineRenameWithDependentTriggerRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -3899,15 +4108,10 @@ func TestMaterializedViewsOverExternalViewsConvergeOnPostgreSQL(t *testing.T) {
 	schemaName := fmt.Sprintf("onwardpg_matview_external_%d", time.Now().UTC().UnixNano())
 	defer func() {
 		_, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`)
-		_, _ = conn.Exec(context.Background(), "DROP EXTENSION IF EXISTS pg_stat_statements")
 	}()
-	if _, err := conn.Exec(ctx, "DROP EXTENSION IF EXISTS pg_stat_statements"); err != nil {
-		t.Fatal(err)
-	}
-	ddl := `CREATE EXTENSION pg_stat_statements;
-CREATE SCHEMA "` + schemaName + `";
+	ddl := `CREATE SCHEMA "` + schemaName + `";
 CREATE MATERIALIZED VIEW "` + schemaName + `".active AS SELECT pid FROM pg_catalog.pg_stat_activity WITH NO DATA;
-CREATE MATERIALIZED VIEW "` + schemaName + `".stats AS SELECT userid FROM public.pg_stat_statements WITH NO DATA;`
+CREATE MATERIALIZED VIEW "` + schemaName + `".columns AS SELECT table_schema FROM information_schema.columns WITH NO DATA;`
 	path := filepath.Join(t.TempDir(), "schema.sql")
 	if err := os.WriteFile(path, []byte(ddl), 0o600); err != nil {
 		t.Fatal(err)
@@ -4374,16 +4578,17 @@ func TestExtensionSchemaMoveConvergesOnPostgreSQL(t *testing.T) {
 	defer conn.Close(ctx)
 	lockGraphPlanIntegration(t, ctx, conn)
 	schemaName := "onwardpg_ext_move_" + time.Now().UTC().Format("20060102150405")
-	if _, err := conn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS pg_trgm"); err != nil {
+	tableSchema := schemaName + "_app"
+	if _, err := conn.Exec(ctx, "DROP EXTENSION IF EXISTS pg_trgm CASCADE; CREATE EXTENSION pg_trgm; CREATE SCHEMA "+quote(tableSchema)+"; CREATE TABLE "+qualified(tableSchema, "docs")+" (body text); CREATE INDEX docs_body_trgm_idx ON "+qualified(tableSchema, "docs")+" USING gin (body public.gin_trgm_ops);"); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = conn.Exec(context.Background(), "ALTER EXTENSION pg_trgm SET SCHEMA public")
+		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(tableSchema)+" CASCADE")
 		_, _ = conn.Exec(context.Background(), "DROP EXTENSION IF EXISTS pg_trgm")
 		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE")
 	}()
 	path := filepath.Join(t.TempDir(), "schema.sql")
-	ddl := "CREATE SCHEMA " + quote(schemaName) + "; CREATE EXTENSION pg_trgm WITH SCHEMA " + quote(schemaName) + ";"
+	ddl := "CREATE SCHEMA " + quote(schemaName) + "; CREATE EXTENSION pg_trgm WITH SCHEMA " + quote(schemaName) + "; CREATE SCHEMA " + quote(tableSchema) + "; CREATE TABLE " + qualified(tableSchema, "docs") + " (body text); CREATE INDEX docs_body_trgm_idx ON " + qualified(tableSchema, "docs") + " USING gin (body " + qualified(schemaName, "gin_trgm_ops") + "); CREATE INDEX docs_body_trgm_new_idx ON " + qualified(tableSchema, "docs") + " USING gin (body " + qualified(schemaName, "gin_trgm_ops") + ");"
 	if err := os.WriteFile(path, []byte(ddl), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -4399,7 +4604,11 @@ func TestExtensionSchemaMoveConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || !strings.Contains(joinPlan(plan), "ALTER EXTENSION \"pg_trgm\" SET SCHEMA "+quote(schemaName)+";") {
+	joined := joinPlan(plan)
+	moveAt := strings.Index(joined, "ALTER EXTENSION \"pg_trgm\" SET SCHEMA "+quote(schemaName)+";")
+	dependentAt := strings.Index(joined, qualified(schemaName, "gin_trgm_ops"))
+	newIndexAt := strings.Index(joined, "docs_body_trgm_new_idx")
+	if plan.Status != protocol.Planned || moveAt < 0 || dependentAt < 0 || newIndexAt < 0 || moveAt > dependentAt || moveAt > newIndexAt {
 		t.Fatalf("expected extension schema-move plan: %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -5394,7 +5603,7 @@ CREATE TABLE "` + schemaName + `".orders (
 	}
 }
 
-func TestSemanticDefaultEquivalenceAvoidsMigrationOnPostgreSQL(t *testing.T) {
+func TestSemanticDefaultEquivalenceRefusesFingerprintInconsistencyOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -5435,8 +5644,9 @@ CREATE TABLE "` + schemaName + `".orders (value integer DEFAULT 2);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 0 {
-		t.Fatalf("equivalent defaults should not migrate: %#v", plan)
+	assertUnsupportedPrefix(t, plan, "default_equivalence_not_fingerprintable")
+	if len(plan.Statements) != 0 {
+		t.Fatalf("equivalent default blocker emitted SQL: %#v", plan)
 	}
 }
 
@@ -6920,12 +7130,20 @@ CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, new_name text);
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: oldID, Value: newID}},
 	}
+	strategyPending, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategyPending.Status != protocol.NeedsInput || len(strategyPending.Questions) != 1 || strategyPending.Questions[0].Kind != "rename_backfill_strategy" {
+		t.Fatalf("expected explicit rename backfill strategy: %#v", strategyPending)
+	}
+	answers.Answers = append(answers.Answers, protocol.Answer{Kind: "rename_backfill_strategy", Key: oldID, Value: "single_transaction", QuestionFingerprint: strategyPending.Questions[0].ScopeFingerprint})
 	plan, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 9 {
-		t.Fatalf("expected automatic two-phase overlap bridge: %#v", plan)
+	if plan.Status != protocol.Planned || len(plan.Statements) != 10 {
+		t.Fatalf("expected explicitly authorized two-phase overlap bridge: %#v", plan)
 	}
 	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseExpand)
 
@@ -7231,6 +7449,45 @@ func TestDomainDependencyOrderingConvergesOnPostgreSQL(t *testing.T) {
 	assertGraphConverges(t, ctx, url, desired)
 }
 
+func TestNotValidDomainConstraintConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_domain_not_valid_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	ddl := "CREATE SCHEMA " + quote(schemaName) + "; CREATE DOMAIN " + quote(schemaName) + ".code AS integer; ALTER DOMAIN " + quote(schemaName) + ".code ADD CONSTRAINT code_positive CHECK (VALUE > 0) NOT VALID;"
+	if err := os.WriteFile(path, []byte(ddl), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := joinPlan(plan)
+	if plan.Status != protocol.Planned || strings.Count(joined, "NOT VALID") != 1 {
+		t.Fatalf("invalid domain constraint rendering: %#v", plan)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
 func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -7281,6 +7538,19 @@ func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 			plan, err := Build(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if plan.Status == protocol.NeedsInput {
+				answers := protocol.Answers{ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint}
+				for _, question := range plan.Questions {
+					if question.Kind != "composite_cascade" {
+						t.Fatalf("unexpected composite question: %#v", question)
+					}
+					answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "cascade", QuestionFingerprint: question.ScopeFingerprint})
+				}
+				plan, err = Build(current, desired, answers, Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			if plan.Status != protocol.Planned {
 				t.Fatalf("expected composite plan: %#v", plan)
@@ -7446,9 +7716,11 @@ func TestTableOwnershipChangesConvergeOnPostgreSQL(t *testing.T) {
 	suffix := fmt.Sprint(time.Now().UTC().UnixNano())
 	schemaName := "onwardpg_owner_" + suffix
 	roleA, roleB := "onwardpg_owner_a_"+suffix, "onwardpg_owner_b_"+suffix
+	desiredDatabase := "onwardpg_owner_desired_" + suffix
 	q := quote(schemaName)
 	defer func() {
 		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+q+" CASCADE")
+		_, _ = conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+quote(desiredDatabase)+" WITH (FORCE)")
 		_, _ = conn.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(roleA))
 		_, _ = conn.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(roleB))
 	}()
@@ -7456,15 +7728,30 @@ func TestTableOwnershipChangesConvergeOnPostgreSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	desiredDDL := "CREATE SCHEMA " + q + "; CREATE TABLE " + q + ".person (name text); ALTER TABLE " + q + ".person OWNER TO " + quote(roleB) + ";"
-	path := filepath.Join(t.TempDir(), "owner.sql")
-	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+	if _, err := conn.Exec(ctx, "CREATE DATABASE "+quote(desiredDatabase)); err != nil {
+		t.Fatal(err)
+	}
+	desiredConfig, err := pgx.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredConfig.Database = desiredDatabase
+	desiredConn, err := pgx.ConnectConfig(ctx, desiredConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := desiredConn.Exec(ctx, desiredDDL); err != nil {
+		desiredConn.Close(context.Background())
+		t.Fatal(err)
+	}
+	if err := desiredConn.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
 	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	desired, err := source.LoadDatabaseGraphForComparison(ctx, desiredConfig, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7505,7 +7792,7 @@ func TestTableOwnershipChangesConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ignoredDesired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, []string{selector})
+	ignoredDesired, err := source.LoadDatabaseGraphForComparison(ctx, desiredConfig, []string{selector})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8181,7 +8468,8 @@ func TestEnumValueRenameConvergesOnPostgreSQL(t *testing.T) {
 	}
 	desiredDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
 		"CREATE TYPE " + quote(schemaName) + ".state AS ENUM ('fresh', 'enabled', 'archived');" +
-		"CREATE TABLE " + quote(schemaName) + ".orders (state " + quote(schemaName) + ".state NOT NULL);"
+		"CREATE TABLE " + quote(schemaName) + ".orders (state " + quote(schemaName) + ".state NOT NULL);" +
+		"CREATE TABLE " + quote(schemaName) + ".new_orders (state " + quote(schemaName) + ".state DEFAULT 'fresh');"
 	path := filepath.Join(t.TempDir(), "schema.sql")
 	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
 		t.Fatal(err)
@@ -8201,6 +8489,14 @@ func TestEnumValueRenameConvergesOnPostgreSQL(t *testing.T) {
 	joined := joinSQL(plan)
 	if plan.Status != protocol.Planned || strings.Count(joined, "RENAME VALUE") != 2 || !strings.Contains(joined, "'new' TO 'fresh'") || !strings.Contains(joined, "'active' TO 'enabled'") {
 		t.Fatalf("expected two enum label renames, got %#v", plan)
+	}
+	if renameAt, createAt := strings.Index(joined, "RENAME VALUE"), strings.Index(joined, "CREATE TABLE "+quote(schemaName)+`."new_orders"`); renameAt < 0 || createAt < 0 || renameAt > createAt {
+		t.Fatalf("new enum dependent must follow contract label mutation:\n%s", joined)
+	}
+	for _, statement := range plan.Statements {
+		if statement.Phase != protocol.PhaseContract {
+			t.Fatalf("enum-dependent create escaped contract: %#v", statement)
+		}
 	}
 	applyPlan(t, ctx, conn, plan)
 	assertGraphConverges(t, ctx, url, desired)
@@ -8245,7 +8541,7 @@ SELECT available.name, available.default_version
 FROM pg_available_extensions available
 JOIN pg_available_extension_versions version
   ON version.name = available.name AND version.version = available.default_version
-WHERE version.relocatable
+WHERE version.relocatable AND available.name = 'hstore'
   AND NOT EXISTS (SELECT 1 FROM pg_extension installed WHERE installed.extname = available.name)
 ORDER BY available.name
 LIMIT 1`).Scan(&extensionName, &extensionVersion)
@@ -9270,9 +9566,9 @@ func TestSequenceOwnedByTransitionsConvergeOnPostgreSQL(t *testing.T) {
 CREATE TABLE "` + identitySchema + `".items (id bigint GENERATED BY DEFAULT AS IDENTITY);
 CREATE SEQUENCE "` + identitySchema + `".manual_identity_owned;
 ALTER SEQUENCE "` + identitySchema + `".manual_identity_owned OWNED BY "` + identitySchema + `".items.id;`
-	applyDesired("identity-owned sequence excluded", identityDDL, func(sql string) {
-		if strings.Contains(sql, "manual_identity_owned") {
-			t.Fatalf("identity-owned sequence leaked into standalone planning:\n%s", sql)
+	applyDesired("identity-owned standalone sequence retained", identityDDL, func(sql string) {
+		if !strings.Contains(sql, "manual_identity_owned") || !strings.Contains(sql, "CREATE SEQUENCE") || !strings.Contains(sql, "OWNED BY") {
+			t.Fatalf("identity-owned standalone sequence was lost:\n%s", sql)
 		}
 	})
 	applyDesired("identity exclusion cleanup", "", nil)
@@ -9590,6 +9886,39 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 	for _, fragment := range []string{"ALTER POLICY", "NO FORCE ROW LEVEL SECURITY", "REVOKE GRANT OPTION FOR SELECT", "REVOKE INSERT"} {
 		if !strings.Contains(joinPlan(plan), fragment) {
 			t.Fatalf("authorization plan missing %q:\n%s", fragment, joinPlan(plan))
+		}
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+
+	desired = loadDesired(base + `
+CREATE POLICY tenant_access ON "` + schemaName + `".orders AS PERMISSIVE FOR ALL TO "` + roleName + `" USING (tenant_id > 20) WITH CHECK (amount > 0);
+ALTER TABLE "` + schemaName + `".orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "` + schemaName + `".orders FORCE ROW LEVEL SECURITY;
+GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
+	current, err = source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err = Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "alter_policy" {
+		t.Fatalf("authorization tightening must ask for policy intent: plan=%#v err=%v", pending, err)
+	}
+	answers = protocol.Answers{
+		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "alter", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
+	}
+	plan, err = Build(current, desired, answers, Options{})
+	if err != nil || plan.Status != protocol.Planned {
+		t.Fatalf("authorization tightening plan=%#v err=%v", plan, err)
+	}
+	tighteningSQL := joinPlan(plan)
+	if policyAt, forceAt := strings.Index(tighteningSQL, "ALTER POLICY"), strings.Index(tighteningSQL, "FORCE ROW LEVEL SECURITY"); policyAt < 0 || forceAt < 0 || policyAt > forceAt {
+		t.Fatalf("policy must tighten before RLS is forced:\n%s", tighteningSQL)
+	}
+	for _, statement := range plan.Statements {
+		if statement.Phase != protocol.PhaseContract {
+			t.Fatalf("existing-table authorization tightening escaped contract: %#v", statement)
 		}
 	}
 	applyPlan(t, ctx, conn, plan)

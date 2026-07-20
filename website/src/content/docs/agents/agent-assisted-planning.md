@@ -1,0 +1,187 @@
+---
+title: Agent-assisted planning
+description: Give coding agents a strict planning protocol and carefully scoped production evidence.
+---
+
+onwardpg is designed to be operated by a coding agent that already understands the feature, repository, and deployment environment. It does not embed an agent. Instead, it gives one a narrow, inspectable protocol for doing migration work.
+
+## Point your agent at one file
+
+The canonical operating contract is [`https://onwardpg.solberg.is/skill.md`](/skill.md). It is intentionally shorter and more procedural than this human guide. Give the agent that file first; it can load the linked decision, schema-state, and production-evidence references only when needed.
+
+```text
+Read and follow https://onwardpg.solberg.is/skill.md for this migration.
+Inspect this repository's schema source, accepted history, and affected code.
+Maintain one evolving onwardpg plan. Supply only evidence-backed decisions,
+edit only planner-named SQL pockets, never apply to production, run onwardpg
+verify, and report what disposable verification still cannot prove.
+```
+
+For a repeatable team workflow, pin the `skills/onwardpg` package from a reviewed onwardpg release in the application repository and add a short pointer to its `AGENTS.md`. Claude Code users can import the same instructions from `CLAUDE.md` rather than maintaining a second copy. Review skill updates like any other development dependency.
+
+```md
+## PostgreSQL schema changes
+
+Before modifying the database schema, read and follow
+`.agents/skills/onwardpg/SKILL.md`.
+```
+
+[`llms.txt`](/llms.txt) indexes the complete documentation and every page has a clean `.md` form. It is discovery context, not a substitute for the operating skill. [`llms-full.txt`](/llms-full.txt) is available for bulk ingestion but should not be the default prompt payload.
+
+The pairing is useful because the two sides know different things:
+
+```text
+coding agent                         onwardpg
+────────────────────────────────     ────────────────────────────────
+feature intent                       PostgreSQL catalog truth
+application read/write paths         dependency-safe operation order
+product conversion rules             decision scope and stale detection
+deployment conventions               expand/contract phase constraints
+reviewed backfill SQL                 disposable convergence evidence
+```
+
+## Why can an agent decide early?
+
+Hints describe semantic intent, not planner internals. If the agent knows from the code change that `display_name` became `full_name`, it can provide that on the first call:
+
+```json
+[
+  {
+    "kind": "rename",
+    "object": "column",
+    "from": ["app", "accounts", "display_name"],
+    "to": ["app", "accounts", "full_name"]
+  },
+  {
+    "kind": "rename_backfill",
+    "name": ["app", "accounts", "display_name"],
+    "strategy": "manual_sql"
+  }
+]
+```
+
+```sh
+onwardpg plan rename-display-name --hints-file onwardpg-hints.json
+```
+
+The planner consumes a hint only if a real dependency-ordered decision matches it. A contradiction, stale answer, impossible transition, or unused guess fails. The agent can be proactive without being allowed to overrule the catalog.
+
+Accepted hints are captured in the evolving bundle. On the next model edit or rebase, the agent runs `plan` again; onwardpg carries only the decisions whose scoped meaning still holds.
+
+## Why is the output agent-friendly?
+
+- JSON is the default and every document has a protocol version.
+- Exit codes distinguish decisions, SQL edits, unsupported state, and broken evidence.
+- High-level `plan` reports status, exact decision choices, and `edit_files`; the lower-level `draft` protocol also supplies `next_action`.
+- Hazards, phases, batches, dependencies, and exact object identities are structured.
+- Product SQL lives in stable edit pockets instead of being smuggled through JSON.
+- `verify` executes the exact edited artifact that will be reviewed.
+
+A good agent loop is deliberately boring:
+
+```text
+inspect feature -> export schema -> plan -> answer intent -> edit SQL
+       ^                                                   |
+       +------------- re-plan after every change ----------+
+                               |
+                            verify
+```
+
+## Let the agent read production—carefully
+
+Some decisions need data evidence. For a `text` → `integer` transition, schema catalogs cannot tell the agent whether production contains blanks, whitespace, signs, decimals, or malformed strings.
+
+Giving the coding agent read-only MCP access to a production replica or tightly restricted production role can make the plan better informed. This is external evidence; onwardpg itself does not query production rows during `plan` or `verify`.
+
+Prefer shape and count queries over copying raw values:
+
+```sql
+SELECT
+  count(*) AS rows,
+  count(*) FILTER (WHERE age IS NULL) AS nulls,
+  count(*) FILTER (WHERE age IS NOT NULL AND trim(age) = '') AS blanks,
+  count(*) FILTER (
+    WHERE age IS NOT NULL
+      AND trim(age) <> ''
+      AND trim(age) !~ '^[0-9]+$'
+  ) AS non_numeric,
+  min(length(age)) AS shortest,
+  max(length(age)) AS longest
+FROM app.accounts;
+```
+
+The agent can now justify a conversion instead of assuming one:
+
+```sql
+NULLIF(trim(age), '')::integer
+```
+
+It should also record the production precondition—such as `non_numeric = 0`—for the deployment runbook or a read-only preflight gate. Disposable verification cannot prove that live rows still satisfy it.
+
+:::danger[Production access is evidence, not authority]
+Use a dedicated role with only `CONNECT` and `SELECT` on approved schemas, views, or columns. Enforce read-only transactions, statement timeouts, row limits, and audited access. Never give the agent onwardpg’s scratch administrator, write credentials, secrets, or unrestricted access to sensitive columns.
+:::
+
+## Turn observed shapes into a safe verification shim
+
+Do not copy production rows into Git. Instead, translate the observed *classes* of values into small synthetic examples in `verify.sql`:
+
+```sql
+-- onwardpg:assert age_conversion_examples
+WITH examples(raw, expected) AS (
+  VALUES
+    ('42'::text, 42::integer),
+    (' 7 '::text, 7::integer),
+    (''::text, NULL::integer),
+    ('   '::text, NULL::integer),
+    (NULL::text, NULL::integer)
+)
+SELECT bool_and(
+  NULLIF(trim(raw), '')::integer IS NOT DISTINCT FROM expected
+)
+FROM examples;
+```
+
+This assertion runs in onwardpg’s disposable verification database. It checks the intended conversion semantics across representative categories without retaining names, identifiers, or one-for-one production values.
+
+The distinction matters:
+
+- the production MCP query discovers value shapes and live preconditions;
+- the synthetic `VALUES` assertion tests the product rule repeatably;
+- the edited phase SQL performs the reviewed migration work;
+- clone verification proves the bundle executes and reaches W; and
+- the deployment system rechecks live preconditions, volume, locks, and drain state.
+
+Do not insert test fixtures into `expand.sql` or `contract.sql`; those files are deployment artifacts. `verify.sql` accepts read-only Boolean queries, so CTE/`VALUES` examples are the safe place for a semantic shim.
+
+## A complete agent handoff
+
+For a product-specific type transition, ask the agent to return evidence at each boundary:
+
+1. **Code evidence:** which readers and writers change, and whether one deployed version supports both schemas.
+2. **Catalog evidence:** the `plan` output, affected dependencies, hazards, and unanswered decisions.
+3. **Production evidence:** bounded read-only counts or classifications, with no secrets copied into the bundle.
+4. **Intent:** semantic hints supplied up front or in response to real questions.
+5. **Executable work:** reviewed edits inside generated phase pockets.
+6. **Semantic examples:** synthetic Boolean assertions in `verify.sql`.
+7. **Structural proof:** successful `onwardpg verify` with an empty residual diff.
+8. **Operational gates:** live preconditions, lock budgets, replica health, deployment, and drain evidence owned by the release system.
+
+This makes agent participation reviewable. The agent contributes context and SQL; onwardpg constrains what that context is allowed to authorize.
+
+## Prompting pattern
+
+Give the agent the feature and boundaries, not just “make a migration”:
+
+```text
+Run onwardpg plan for this feature. Read the application paths that touch the
+changed columns. Supply semantic hints only when code or product context proves
+them. If product SQL is required, edit only the named onwardpg pockets and add
+synthetic verify.sql assertions for each conversion rule. Treat production MCP
+access as read-only evidence: use aggregates and value-shape classifications,
+do not copy sensitive rows, and record any live precondition that must be
+rechecked before deployment. Finish with onwardpg verify and summarize hazards
+that clone convergence cannot prove.
+```
+
+The result is not unattended migration generation. It is a disciplined collaboration between application understanding, PostgreSQL evidence, and explicit human review.

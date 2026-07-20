@@ -127,7 +127,8 @@ onwardpg dev plan \
 
 Reads the current catalog from dev_database_env and compares it with the
 configured working DDL. The current database is inspected read-only. Desired
-DDL is materialized in a disposable database.
+DDL is materialized in a disposable database. The development and disposable
+servers must run the same PostgreSQL major; cross-major comparison is rejected.
 
 This D → W loop is intentionally independent from durable history. The command
 never runs its emitted SQL.
@@ -188,7 +189,9 @@ participating-object scope matches are carried across that change.
 
 `--hint` is repeatable and accepts one strict semantic JSON object.
 `--hints-file` accepts an array of the same objects. Current kinds are identity,
-rename, drop, type_change, rollout, confirm, and manual_sql. `identity` is a
+rename, rename_backfill, drop, type_change, rollout, confirm, and manual_sql.
+`rename_backfill` chooses manual SQL, an explicitly hazardous single
+transaction, or a split plan after column identity is confirmed. `identity` is a
 table-only upstream assertion: it lets an agent state that two observed table
 names are the same relation before normal rename candidacy. It never guesses a
 transition; an unautomatable asserted identity becomes an editable compatibility

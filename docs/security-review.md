@@ -8,9 +8,15 @@ not a third-party audit.
 
 - Caller-owned PostgreSQL URLs are catalog-inspected in a repeatable-read,
   read-only transaction. onwardpg never applies migration SQL to them.
-- DDL and migration SQL execute only in onwardpg-created disposable databases.
-  The configured scratch role is therefore trusted with `CREATE DATABASE` and
-  must not point at an application database.
+- The configured scratch URL is an administrator for a dedicated local or CI
+  cluster. It creates a one-hour login and disposable database, but DDL and
+  migration SQL execute only as that database owner. The execution login has
+  no superuser, role, database, replication, or row-security-bypass authority.
+  The scratch URL must never point at production or a shared application
+  cluster. Disposable databases use `template0`, not a locally customized
+  default template. Creation explicitly copies the connected control
+  database's encoding, locale provider, locale, collation, and ctype, and
+  rejects a collation-version mismatch.
 - `schema_command` is trusted project code, invoked directly without a shell.
   It is checked for deterministic output and observable checkout mutations,
   but it is not an operating-system sandbox.
@@ -49,13 +55,19 @@ not a third-party audit.
   only repository-controlled export commands, ideally in an isolated CI job.
 - Clone verification cannot model table size, lock queues, concurrent traffic,
   role membership outside the clone, or application rollout correctness.
+- Superuser-only extensions and ownership transfer to external roles cannot be
+  materialized by the default restricted owner. Supporting those declarative
+  inputs requires an isolated privileged-cluster execution boundary, not a
+  quiet privilege escalation inside the shared scratch cluster.
 - Release archives have SHA-256 checksums and GitHub build-provenance
   attestations. Homebrew verifies the selected archive checksum; consumers who
   require provenance verification must additionally use `gh attestation
   verify`.
 - PostgreSQL's catalog surface is larger than the modeled preview boundary.
-  The catalog blocker inventory reduces silent equivalence risk, but the
-  attribute-level audit remains ongoing and is documented as a preview limit.
+  The catalog-family and column-level ledgers classify the PostgreSQL 15–18
+  surface, and live tests reject newly unclassified columns. Derived,
+  environmental, runtime, and secret classifications remain explicit review
+  boundaries rather than supported migration semantics.
 
 Before a preview tag, rerun race tests, vet, static analysis, formatting,
 PostgreSQL 15–18 integration tests, deterministic release builds, and the Go

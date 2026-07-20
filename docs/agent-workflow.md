@@ -101,8 +101,8 @@ non-transactional batches. Product-aware initial synchronization belongs in
 expand when it is safe with old code live; final catch-up and enforcement
 belong in contract after old writers drain.
 
-For example, after choosing a manual type conversion, the agent edits the
-generated TODO rather than encoding an orchestration language in JSON:
+For example, one application-owned backfill inside a larger reviewed
+expand/contract type bridge might be:
 
 ```sql
 -- Product rule: reporting days use each account's agreed business timezone.
@@ -110,6 +110,11 @@ UPDATE app.payments
 SET settled_on = (settled_at AT TIME ZONE 'Atlantic/Reykjavik')::date
 WHERE settled_on IS NULL;
 ```
+
+This is deliberately not presented as complete onwardpg output: the generated
+type-change receipt requires both an expand compatibility interface and a
+contract cutover. The agent replaces the exact TODO pockets around product SQL
+such as this and preserves their markers.
 
 Add boolean assertions in `verify.sql` when useful. Then run:
 

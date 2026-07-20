@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,15 @@ import (
 func TestVersionIsDistinctFromDurableBundleProtocol(t *testing.T) {
 	if Version == "" || Version == "onwardpg.draft/v5" {
 		t.Fatalf("development protocol version = %q", Version)
+	}
+}
+
+func TestValidatePostgresMajors(t *testing.T) {
+	if err := validatePostgresMajors(17, 17); err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePostgresMajors(15, 18); err == nil || !strings.Contains(err.Error(), "development PostgreSQL major 15 does not match scratch PostgreSQL major 18") {
+		t.Fatalf("cross-major validation error = %v", err)
 	}
 }
 

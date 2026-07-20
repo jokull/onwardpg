@@ -80,7 +80,7 @@ func TestResolveWorkspaceRequiresExplicitRenameOrPreserveIntent(t *testing.T) {
 	}
 }
 
-func TestResolveTurnsConfirmedColumnRenameIntoGeneratedOverlapBridge(t *testing.T) {
+func TestResolveRequiresBackfillStrategyAfterConfirmedColumnRename(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "app", Name: "accounts"}
 	before := pgschema.Column{Table: table.ObjectID(), Name: "display_name", Position: 1, Type: "text"}
@@ -100,9 +100,28 @@ func TestResolveTurnsConfirmedColumnRenameIntoGeneratedOverlapBridge(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resolution.Result.Status != protocol.NeedsInput || len(resolution.Result.Questions) != 1 || resolution.Result.Questions[0].Kind != "rename_backfill_strategy" || len(resolution.Result.Statements) != 0 {
+		t.Fatalf("confirmed rename must require an explicit backfill strategy: %#v", resolution)
+	}
+	hints = append(hints, protocol.Hint{Kind: "rename_backfill", Name: []string{"app", "accounts", "display_name"}, Strategy: "single_transaction"})
+	resolution, err = Resolve(current, desired, hints, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	sql := joinResolutionSQL(resolution)
 	if resolution.Result.Status != protocol.Planned || !strings.Contains(sql, "CREATE TRIGGER") || !strings.Contains(sql, `RENAME COLUMN "display_name" TO "full_name"`) {
-		t.Fatalf("confirmed rename must produce a generated overlap bridge: %#v", resolution)
+		t.Fatalf("explicit backfill strategy must produce the overlap bridge: %#v", resolution)
+	}
+	manualHints := append(hints[:1],
+		protocol.Hint{Kind: "rename_backfill", Name: []string{"app", "accounts", "display_name"}, Strategy: "manual_sql"},
+		protocol.Hint{Kind: "manual_sql", Object: "column", Name: []string{"app", "accounts", "display_name"}, Action: "rename_backfill"},
+	)
+	manual, err := Resolve(current, desired, manualHints, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manual.Result.Status != protocol.NeedsSQLEdits || !strings.Contains(joinResolutionSQL(manual), "ONWARDPG TODO") {
+		t.Fatalf("manual backfill strategy must create an editable, unverifiable-until-edited handoff: %#v", manual)
 	}
 }
 

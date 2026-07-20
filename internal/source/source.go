@@ -3,7 +3,6 @@ package source
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"sort"
 	"strings"
@@ -139,14 +138,6 @@ func ActiveIgnoreSelectors(selectors []string, snapshots ...*pgschema.Snapshot) 
 		write++
 	}
 	return active[:write], nil
-}
-
-func temporaryName() (string, error) {
-	bytes := make([]byte, 8)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("onwardpg_ddl_%x", bytes), nil
 }
 
 func quote(identifier string) string { return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"` }

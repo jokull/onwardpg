@@ -2,8 +2,10 @@ package source
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -69,8 +71,73 @@ func TestLoadGraphForeignKeyIntegration(t *testing.T) {
 	dependencies := snapshot.Dependencies(foreignKey)
 	primaryKey := pgschema.Constraint{Table: accounts, Name: "accounts_pkey"}.ObjectID()
 	accountID := pgschema.Column{Table: orders, Name: "account_id"}.ObjectID()
-	if len(dependencies) != 4 || dependencies[0] != accountID || dependencies[1] != primaryKey || dependencies[2] != accounts || dependencies[3] != orders {
+	referencedID := pgschema.Column{Table: accounts, Name: "id"}.ObjectID()
+	primaryIndex := pgschema.Index{Table: accounts, Name: "accounts_pkey"}.ObjectID()
+	want := []pgschema.ID{referencedID, accountID, primaryKey, primaryIndex, accounts, orders}
+	if !reflect.DeepEqual(dependencies, want) {
 		t.Fatalf("foreign key dependencies = %#v", dependencies)
+	}
+}
+
+func TestLoadGraphProjectsCatalogDependencies(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockIntegrationDatabase(t, ctx, conn)
+	schemaName := fmt.Sprintf("onwardpg_dependencies_%d", time.Now().UTC().UnixNano())
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA "+quote(schemaName)+" CASCADE") }()
+
+	qualified := quote(schemaName) + "."
+	ddl := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE FUNCTION " + qualified + "is_positive(integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 > 0';" +
+		"CREATE DOMAIN " + qualified + "positive_integer AS integer CHECK (" + qualified + "is_positive(VALUE));" +
+		"CREATE FUNCTION " + qualified + "timestamp_distance(timestamptz, timestamptz) RETURNS double precision LANGUAGE sql IMMUTABLE AS 'SELECT EXTRACT(EPOCH FROM ($1 - $2))';" +
+		"CREATE TYPE " + qualified + "time_window AS RANGE (subtype = timestamptz, subtype_diff = " + qualified + "timestamp_distance);" +
+		"CREATE TYPE " + qualified + "state AS ENUM ('open', 'closed');" +
+		"CREATE FUNCTION " + qualified + "normalize_state(" + qualified + "state) RETURNS " + qualified + "state LANGUAGE sql IMMUTABLE AS 'SELECT $1';" +
+		"CREATE FUNCTION " + qualified + "echo_states(" + qualified + "state[]) RETURNS " + qualified + "state[] LANGUAGE sql IMMUTABLE AS 'SELECT $1';" +
+		"CREATE TABLE " + qualified + "items (amount " + qualified + "positive_integer, state " + qualified + "state DEFAULT " + qualified + "normalize_state('open'));"
+	if _, err := conn.Exec(ctx, ddl); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := (pgschema.Domain{Schema: schemaName, Name: "positive_integer"}).ObjectID()
+	positive := (pgschema.Routine{Schema: schemaName, Name: "is_positive", Signature: "integer"}).ObjectID()
+	if !containsID(snapshot.Dependencies(domain), positive) {
+		t.Fatalf("domain dependencies = %#v, want %s", snapshot.Dependencies(domain), positive)
+	}
+	rangeID := (pgschema.Range{Schema: schemaName, Name: "time_window"}).ObjectID()
+	distance := (pgschema.Routine{Schema: schemaName, Name: "timestamp_distance", Signature: "timestamp with time zone, timestamp with time zone"}).ObjectID()
+	if !containsID(snapshot.Dependencies(rangeID), distance) {
+		t.Fatalf("range dependencies = %#v, want %s", snapshot.Dependencies(rangeID), distance)
+	}
+	state := (pgschema.Enum{Schema: schemaName, Name: "state"}).ObjectID()
+	for _, routine := range []pgschema.ID{
+		(pgschema.Routine{Schema: schemaName, Name: "normalize_state", Signature: schemaName + ".state"}).ObjectID(),
+		(pgschema.Routine{Schema: schemaName, Name: "echo_states", Signature: schemaName + ".state[]"}).ObjectID(),
+	} {
+		if !containsID(snapshot.Dependencies(routine), state) {
+			t.Fatalf("routine dependencies for %s = %#v, want %s", routine, snapshot.Dependencies(routine), state)
+		}
+	}
+	table := (pgschema.Table{Schema: schemaName, Name: "items"}).ObjectID()
+	stateColumn := (pgschema.Column{Table: table, Name: "state"}).ObjectID()
+	normalize := (pgschema.Routine{Schema: schemaName, Name: "normalize_state", Signature: schemaName + ".state"}).ObjectID()
+	for _, object := range []pgschema.ID{stateColumn, table} {
+		if !containsID(snapshot.Dependencies(object), normalize) {
+			t.Fatalf("default-expression dependencies for %s = %#v, want %s", object, snapshot.Dependencies(object), normalize)
+		}
 	}
 }
 
@@ -112,6 +179,7 @@ func TestLoadGraphBlocksPreviouslyBlindCatalogFamilies(t *testing.T) {
 	ddl := "CREATE ROLE " + quote(roleName) + ";" +
 		"CREATE SCHEMA " + quote(schemaName) + ";" +
 		"CREATE TABLE " + quote(schemaName) + ".objects (id bigint, other bigint, label text);" +
+		"ALTER TABLE " + quote(schemaName) + ".objects SET (toast.autovacuum_enabled = false);" +
 		"CREATE TABLE " + quote(schemaName) + ".inherited (extra bigint) INHERITS (" + quote(schemaName) + ".objects);" +
 		"ALTER TABLE " + quote(schemaName) + ".objects ALTER COLUMN label SET STORAGE EXTERNAL;" +
 		"ALTER TABLE " + quote(schemaName) + ".objects ALTER COLUMN label SET STATISTICS 500;" +
@@ -141,7 +209,12 @@ func TestLoadGraphBlocksPreviouslyBlindCatalogFamilies(t *testing.T) {
 		"CREATE POLICY objects_policy ON " + quote(schemaName) + ".objects USING (true);" +
 		"COMMENT ON POLICY objects_policy ON " + quote(schemaName) + ".objects IS 'must not disappear';" +
 		"CREATE VIEW " + quote(schemaName) + ".objects_view AS SELECT id FROM " + quote(schemaName) + ".objects;" +
+		"ALTER VIEW " + quote(schemaName) + ".objects_view ALTER COLUMN id SET DEFAULT 42;" +
 		"COMMENT ON COLUMN " + quote(schemaName) + ".objects_view.id IS 'must not disappear';" +
+		"CREATE DOMAIN " + quote(schemaName) + ".positive AS bigint CONSTRAINT positive_check CHECK (VALUE > 0);" +
+		"COMMENT ON CONSTRAINT positive_check ON DOMAIN " + quote(schemaName) + ".positive IS 'must not disappear';" +
+		"CREATE TYPE " + quote(schemaName) + ".pair AS (left_value bigint);" +
+		"COMMENT ON COLUMN " + quote(schemaName) + ".pair.left_value IS 'must not disappear';" +
 		"CREATE STATISTICS " + quote(schemaName) + ".objects_stats ON id, other FROM " + quote(schemaName) + ".objects;" +
 		"CREATE FUNCTION " + quote(schemaName) + ".event_sink() RETURNS event_trigger LANGUAGE plpgsql AS 'BEGIN END';" +
 		"CREATE EVENT TRIGGER " + quote(eventName) + " ON ddl_command_end EXECUTE FUNCTION " + quote(schemaName) + ".event_sink();" +
@@ -211,14 +284,15 @@ func TestLoadGraphBlocksPreviouslyBlindCatalogFamilies(t *testing.T) {
 	unsupported := snapshot.Unsupported()
 	for _, prefix := range []string{
 		"acl:default:", "rule:",
-		"clustered_index:", "table_options:",
+		"clustered_index:", "table_options:", "toast_options:",
 		"text_search_configuration:", "text_search_dictionary:", "event_trigger:",
 		"publication:", "extended_statistics:", "foreign_data_wrapper:",
 		"foreign_server:", "user_mapping:", "table_inheritance:",
 		"column_storage:", "column_statistics:",
 		"access_method:", "operator:", "operator_family:", "cast:",
 		"conversion:", "procedural_language:", "subscription:",
-		"comment:policy:", "comment:view_column:",
+		"comment:policy:", "comment:view_column:", "view_column_default:",
+		"comment:domain_constraint:", "comment:composite_attribute:",
 	} {
 		found := false
 		for _, selector := range unsupported {
@@ -285,6 +359,9 @@ func TestPostgres18NamedNotNullConstraintsBlockAndVirtualColumnsLoad(t *testing.
 	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+quote(schemaName)+"; CREATE TABLE "+quote(schemaName)+".objects (id bigint CONSTRAINT id_required NOT NULL, doubled bigint GENERATED ALWAYS AS (id * 2) VIRTUAL)"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := conn.Exec(ctx, "CREATE TABLE "+quote(schemaName)+".parent (id bigint NOT NULL) PARTITION BY RANGE (id); CREATE TABLE "+quote(schemaName)+".child PARTITION OF "+quote(schemaName)+".parent FOR VALUES FROM (0) TO (10); ALTER TABLE "+quote(schemaName)+".child ALTER COLUMN id SET NOT NULL"); err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := LoadGraph(ctx, Parse(url), "", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -301,12 +378,173 @@ func TestPostgres18NamedNotNullConstraintsBlockAndVirtualColumnsLoad(t *testing.
 			t.Fatalf("missing %q blocker in %#v", want, snapshot.Unsupported())
 		}
 	}
+	foundLocalInherited := false
+	for _, selector := range snapshot.Unsupported() {
+		if strings.HasPrefix(selector, "not_null_constraint:"+schemaName+".child.") {
+			foundLocalInherited = true
+			break
+		}
+	}
+	if !foundLocalInherited {
+		t.Fatalf("local-plus-inherited NOT NULL state was not blocked: %#v", snapshot.Unsupported())
+	}
 	columnID := (pgschema.Column{Table: (pgschema.Table{Schema: schemaName, Name: "objects"}).ObjectID(), Name: "doubled"}).ObjectID()
 	columnObject, exists := snapshot.Object(columnID)
 	column, ok := columnObject.(pgschema.Column)
 	if !exists || !ok || column.Generated == nil || column.Generated.Kind != "VIRTUAL" || column.Generated.Expression != "(id * 2)" {
 		t.Fatalf("virtual generated column = %#v", columnObject)
 	}
+}
+
+func TestLoadGraphBlocksPendingConcurrentPartitionDetach(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockIntegrationDatabase(t, ctx, conn)
+	schemaName := "onwardpg_detach_pending_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+quote(schemaName)+"; CREATE TABLE "+quote(schemaName)+".parent (id bigint) PARTITION BY RANGE (id); CREATE TABLE "+quote(schemaName)+".child PARTITION OF "+quote(schemaName)+".parent FOR VALUES FROM (0) TO (10)"); err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close(ctx)
+	detacher, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer detacher.Close(ctx)
+	if _, err := blocker.Exec(ctx, "BEGIN; SELECT * FROM "+quote(schemaName)+".child"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = blocker.Exec(context.Background(), "ROLLBACK") }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := detacher.Exec(context.Background(), "ALTER TABLE "+quote(schemaName)+".parent DETACH PARTITION "+quote(schemaName)+".child CONCURRENTLY")
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var pending bool
+		if err := conn.QueryRow(ctx, `
+SELECT COALESCE((
+  SELECT i.inhdetachpending
+  FROM pg_inherits i
+  JOIN pg_class c ON c.oid = i.inhrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = $1 AND c.relname = 'child'
+), false)`, schemaName).Scan(&pending); err != nil {
+			t.Fatal(err)
+		}
+		if pending {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("detach completed before pending state was observable: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for pending partition detach")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_terminate_backend($1)", detacher.PgConn().PID()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("concurrent detach unexpectedly finalized before backend termination")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out terminating concurrent partition detach")
+	}
+	if _, err := blocker.Exec(ctx, "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "partition_detach_pending:" + schemaName + ".child"
+	found := false
+	for _, selector := range snapshot.Unsupported() {
+		if selector == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing %q blocker in %#v", want, snapshot.Unsupported())
+	}
+}
+
+func TestLoadGraphBlocksNonOwnerTableGrantChains(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockIntegrationDatabase(t, ctx, conn)
+	suffix := time.Now().UTC().Format("20060102150405")
+	schemaName := "onwardpg_grant_chain_" + suffix
+	ownerRole := "onwardpg_grant_owner_" + suffix
+	grantorRole := "onwardpg_grantor_" + suffix
+	granteeRole := "onwardpg_grantee_" + suffix
+	adminRole := conn.Config().User
+	defer func() {
+		_, _ = conn.Exec(context.Background(), "RESET ROLE")
+		_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE")
+		_, _ = conn.Exec(context.Background(), "REVOKE "+quote(grantorRole)+" FROM "+quote(adminRole))
+		_, _ = conn.Exec(context.Background(), "REVOKE "+quote(ownerRole)+" FROM "+quote(adminRole))
+		_, _ = conn.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(granteeRole))
+		_, _ = conn.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(grantorRole))
+		_, _ = conn.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(ownerRole))
+	}()
+	ddl := "CREATE ROLE " + quote(ownerRole) + ";" +
+		"CREATE ROLE " + quote(grantorRole) + ";" +
+		"CREATE ROLE " + quote(granteeRole) + ";" +
+		"GRANT " + quote(ownerRole) + " TO " + quote(adminRole) + ";" +
+		"GRANT " + quote(grantorRole) + " TO " + quote(adminRole) + ";" +
+		"CREATE SCHEMA " + quote(schemaName) + ";" +
+		"GRANT USAGE ON SCHEMA " + quote(schemaName) + " TO " + quote(ownerRole) + ", " + quote(grantorRole) + ";" +
+		"CREATE TABLE " + quote(schemaName) + ".objects (id bigint);" +
+		"ALTER TABLE " + quote(schemaName) + ".objects OWNER TO " + quote(ownerRole) + ";" +
+		"SET ROLE " + quote(ownerRole) + ";" +
+		"GRANT SELECT ON " + quote(schemaName) + ".objects TO " + quote(grantorRole) + " WITH GRANT OPTION;" +
+		"RESET ROLE;" +
+		"SET ROLE " + quote(grantorRole) + ";" +
+		"GRANT SELECT ON " + quote(schemaName) + ".objects TO " + quote(granteeRole) + ";" +
+		"RESET ROLE;"
+	if _, err := conn.Exec(ctx, ddl); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "acl:table_non_owner_grantor:"
+	for _, selector := range snapshot.Unsupported() {
+		if strings.HasPrefix(selector, want) {
+			return
+		}
+	}
+	t.Fatalf("missing %s blocker in %#v", want, snapshot.Unsupported())
 }
 
 func TestLoadGraphNormalizesEquivalentTimestampDefaults(t *testing.T) {
@@ -493,6 +731,56 @@ func TestLoadGraphPreservesAtlasCoreCatalogSemantics(t *testing.T) {
 	idColumn := (pgschema.Column{Table: tableID, Name: "id"}).ObjectID()
 	if !containsID(indexDependencies, nameColumn) || !containsID(indexDependencies, idColumn) {
 		t.Fatalf("index column dependencies missing: %#v", indexDependencies)
+	}
+}
+
+func TestLoadGraphBlocksCustomizedImplicitSequenceState(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockIntegrationDatabase(t, ctx, conn)
+	schemaName := "onwardpg_implicit_sequences_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA "+quote(schemaName)+" CASCADE") }()
+	ddl := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE TABLE " + quote(schemaName) + ".ordinary (id serial);" +
+		"CREATE TABLE " + quote(schemaName) + ".serial_items (id serial);" +
+		"ALTER SEQUENCE " + quote(schemaName) + ".serial_items_id_seq INCREMENT BY 7 CACHE 19 CYCLE;" +
+		"COMMENT ON SEQUENCE " + quote(schemaName) + ".serial_items_id_seq IS 'allocation contract';" +
+		"ALTER TABLE " + quote(schemaName) + ".serial_items ALTER COLUMN id SET DEFAULT nextval('" + schemaName + ".serial_items_id_seq'::regclass) + 100;" +
+		"CREATE TABLE " + quote(schemaName) + ".identity_items (id bigint GENERATED BY DEFAULT AS IDENTITY);" +
+		"ALTER SEQUENCE " + quote(schemaName) + ".identity_items_id_seq RENAME TO renamed_identity_seq;" +
+		"COMMENT ON SEQUENCE " + quote(schemaName) + ".renamed_identity_seq IS 'identity allocation';"
+	if _, err := conn.Exec(ctx, ddl); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wants := map[string]bool{
+		"serial_sequence_state:" + schemaName + ".serial_items.id":        false,
+		"identity_sequence_metadata:" + schemaName + ".identity_items.id": false,
+	}
+	for _, selector := range snapshot.Unsupported() {
+		if _, ok := wants[selector]; ok {
+			wants[selector] = true
+		}
+		if strings.Contains(selector, schemaName+".ordinary.id") {
+			t.Fatalf("ordinary serial column was falsely blocked: %q", selector)
+		}
+	}
+	for selector, found := range wants {
+		if !found {
+			t.Fatalf("missing %q blocker in %#v", selector, snapshot.Unsupported())
+		}
 	}
 }
 

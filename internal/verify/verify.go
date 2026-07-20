@@ -5,17 +5,15 @@ package verify
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/pgschema"
 )
@@ -215,31 +213,18 @@ func selectedBatchCount(artifact bundle.Artifact, throughPhase string) (int, err
 }
 
 func executeDisposable(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignores []string) (snapshot *pgschema.Snapshot, batches int, failure *Failure, resultErr error) {
-	admin, err := pgx.Connect(ctx, adminURL)
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("connect disposable database admin: %w", err)
-	}
-	defer admin.Close(context.Background())
-	name, err := databaseName()
+	database, err := scratchdb.Create(ctx, adminURL, "onwardpg_verify")
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+quote(name)); err != nil {
-		return nil, 0, nil, fmt.Errorf("create disposable database: %w", err)
-	}
 	defer func() {
-		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+quote(name)+" WITH (FORCE)"); err != nil && resultErr == nil {
-			resultErr = fmt.Errorf("drop disposable database %s: %w", name, err)
+		if err := database.Close(); err != nil && resultErr == nil {
+			resultErr = err
 		}
 	}()
-	config, err := pgx.ParseConfig(adminURL)
+	connection, err := database.Connect(ctx)
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("parse disposable database URL: %w", err)
-	}
-	config.Database = name
-	connection, err := pgx.ConnectConfig(ctx, config)
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("connect disposable database: %w", err)
+		return nil, 0, nil, err
 	}
 	for _, entry := range chain.Entries {
 		data := entry.Artifact.Files["plan.json"]
@@ -317,7 +302,7 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 	if err := connection.Close(ctx); err != nil {
 		return nil, batches, nil, fmt.Errorf("close disposable execution connection: %w", err)
 	}
-	snapshot, err = source.LoadDatabaseGraphForComparison(ctx, config, ignores)
+	snapshot, err = source.LoadDatabaseGraphForComparison(ctx, database.Config, ignores)
 	if err != nil {
 		return nil, batches, nil, fmt.Errorf("inspect disposable result: %w", err)
 	}
@@ -422,13 +407,3 @@ func phaseIndex(phase string) int {
 	}
 	return -1
 }
-
-func databaseName() (string, error) {
-	data := make([]byte, 8)
-	if _, err := rand.Read(data); err != nil {
-		return "", err
-	}
-	return "onwardpg_verify_" + hex.EncodeToString(data), nil
-}
-
-func quote(identifier string) string { return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"` }

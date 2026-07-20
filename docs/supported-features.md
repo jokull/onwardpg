@@ -22,9 +22,9 @@ mean a feature is ready for unattended production use. A preview feature earns
 stronger confidence only with current real-PostgreSQL convergence evidence.
 
 For explicitly inventoried unsupported families, onwardpg blocks rather than
-silently ignoring the object. Every supported PostgreSQL catalog table is
-classified, while the finer modeled-attribute audit remains open; see [the
-safety model](safety-model.md) for that distinction and ignore-selector
+silently ignoring the object. Every PostgreSQL 15–18 catalog table column is
+classified in a checked-in ledger and the live matrix rejects catalog drift;
+see [the safety model](safety-model.md) for classification and ignore-selector
 semantics, and the [reference behavior
 study](atlas-postgres-parity.md) for the separate Atlas research boundary.
 
@@ -49,6 +49,11 @@ converge on PostgreSQL 15–18.
 Standalone sequences model logged/unlogged persistence, including unlogged
 creation and both `SET LOGGED`/`SET UNLOGGED` transitions on PostgreSQL 15–18.
 Temporary sequence persistence remains an explicit blocker.
+Serial columns retain their pseudo-type and backing-sequence name. If their
+implicit backing sequence has customized allocation options, comments,
+persistence, or a noncanonical default expression, inspection fails closed.
+Identity options are typed; customized identity-sequence names, comments, or
+persistence likewise block instead of comparing equal.
 Replica identity is a separate typed table child with `DEFAULT`, `FULL`,
 `NOTHING`, and `USING INDEX` modes. The index form has an explicit dependency
 on its unique index, so new-table plans create the table and index before
@@ -182,15 +187,19 @@ expression, multi-column projection, alias, quoted identifier, or other
 dependent-view change is a structured unsupported result rather than an
 out-of-order `CREATE OR REPLACE` or guessed rebuild. Even the narrow recognized
 case is not emitted as a bare rename. Eligible same-type columns use two
-physical columns plus a bidirectional trigger through expand, then final
-catch-up and a native identity-preserving rename in contract. Defaults,
+physical columns plus a bidirectional trigger through expand. A second,
+fingerprint-bound choice requires reviewed manual SQL with an equality
+assertion, explicit consent to a hazardous single-transaction update, or a
+split plan. Contract asserts equality before the native identity-preserving
+rename. Defaults,
 generated/identity values, partitions, existing trigger ordering, RLS, and
 unproven dependent rewrites block the automatic bridge.
 
 Functions, procedures, and triggers are graph-modeled. Their canonical
 PostgreSQL definitions support create, replace/recreate, enable-state changes,
 comments, and approved drops; a trigger depends on both its owning relation and
-its invoked routine. This includes ordinary and partitioned tables, constraint
+its invoked routine. Trigger creation on an existing table is contract work;
+new-table triggers remain expand work. This includes ordinary and partitioned tables, constraint
 triggers, and `INSTEAD OF` triggers on ordinary views. Ordinary and materialized
 views also have typed catalog edges to
 invoked user routines, so routine creation precedes dependent views and
@@ -203,6 +212,10 @@ dependencies also order chain and diamond drops. Dropped or changed
 dependents, routine-on-routine return changes, and circular dropped-relation
 shapes refuse explicitly. String-body SQL and procedural-language references
 remain opaque because PostgreSQL does not record them in `pg_depend`.
+A same-signature semantic change also refuses while a catalog-proven
+expression/partial index, stored generated column, or constraint is retained:
+PostgreSQL does not rebuild or revalidate that stored state. A newly created
+dependent is promoted behind the routine's contract replacement.
 A same-signature routine
 rename requires a validated semantic hint and then an explicit editable
 expand/contract wrapper handoff; onwardpg does not guess or directly apply a
@@ -221,16 +234,26 @@ PostgreSQL does not record arbitrary
 procedural-body references, so
 onwardpg does not rewrite a routine body for a column/table change or claim to
 have inferred those hidden dependencies. Routine ownership remains an explicit
-blocker. Ordinary and partitioned table ownership is typed; changes require a
-fingerprint-bound authorization decision, use stable role quoting, and carry
-authorization hazards. A narrow `table_owner:` ignore can suppress that one
-attribute while preserving the table. RLS state, policies, and
+blocker. Ordinary and partitioned table ownership is typed; live graph
+comparisons require a fingerprint-bound authorization decision, use stable
+role quoting, and carry authorization hazards. Default declarative
+materialization deliberately cannot assume membership in an external owner
+role, so that input fails before planning until a separately isolated
+privileged-cluster path exists. A narrow `table_owner:` ignore can suppress
+that one attribute while preserving the table. RLS state, policies, and
 ordinary/partitioned-table grants are typed verticals: policy column/routine
 dependencies are catalog edges; policy and authorization contractions require
 explicit semantic decisions; and role identifiers are quoted with `PUBLIC`
-retained as the PostgreSQL keyword. Default privileges, column grants,
+retained as the PostgreSQL keyword. New or changed policies and RLS
+enable/force changes on an existing table are contract work, with policy work
+ordered before dependent RLS tightening. Default privileges, column grants,
 non-owner grant chains, non-table ownership, and privileges on other relation
 kinds remain explicit blockers.
+
+Create/modify dependencies retain their order after phase assignment. A new
+dependent of any contract-phase provider is promoted to contract transitively.
+Cross-kind replacements that collide in PostgreSQL's shared relation or type
+namespace fail closed unless dedicated choreography exists.
 
 A confirmed, shape-preserving table rename is an expand/contract transition,
 not a phase-labelled cutover. In expand, onwardpg preserves the old physical
@@ -350,3 +373,8 @@ start/increment/min/max/cache/cycle, and removal. Removing identity is an
 explicit destructive decision because PostgreSQL drops the owned identity
 sequence; a replacement default is installed afterward in the same `contract`
 phase.
+
+Catalog-normal dependencies on table, view, and materialized-view row types
+(including their arrays) project to the owning relation. Routine signatures,
+domains, composite attributes, and table columns therefore create after and
+drop before the relation whose row type they consume.

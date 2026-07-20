@@ -6,5 +6,6 @@
 /.stripe-pg-schema-diff/
 /dist/
 /.onwardpg/
+/.wrangler/
 /PLAN.md
 /REVIEW.md

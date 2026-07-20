@@ -82,6 +82,7 @@ fi
 set +e
 "$binary" plan \
   --hint '{"kind":"rename","object":"column","from":["app","accounts","display_name"],"to":["app","accounts","full_name"]}' \
+  --hint '{"kind":"rename_backfill","name":["app","accounts","display_name"],"strategy":"single_transaction"}' \
   >planned.json
 planned_exit=$?
 set -e
