@@ -163,7 +163,7 @@ func EnsureGitExclude(root string) (GitHygiene, error) {
 		return GitHygiene{}, fmt.Errorf("inspect tracked local onward state: %w", err)
 	}
 	if strings.TrimSpace(tracked) != "" {
-		return GitHygiene{}, fmt.Errorf("Git already tracks local onward state at %s; move durable files elsewhere and remove it from the index before continuing", localPath)
+		return GitHygiene{}, fmt.Errorf("git already tracks local onward state at %s; move durable files elsewhere and remove it from the index before continuing", localPath)
 	}
 	excludePath, err := gitOutput(root, "rev-parse", "--git-path", "info/exclude")
 	if err != nil {
