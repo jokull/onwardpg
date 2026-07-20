@@ -95,11 +95,15 @@ adds, unchanged state, both foreign-key enforcement transitions, check
 rebuilds, temporal renames/rebuilds, and approved drops converge on PostgreSQL
 18. These forms remain version-gated and are not emitted on older servers.
 
-Standalone same-name index definition changes on ordinary tables,
-materialized views, and independent local partition indexes support continuous
-replacement when concurrent indexes are enabled: the typed old index receives a
-deterministic temporary name, the desired stable name is built concurrently,
-and the temporary index is dropped concurrently in `contract`. Every statement
+Standalone same-name **non-unique** index definition changes on ordinary
+tables, materialized views, and independent local partition indexes support
+continuous replacement when concurrent indexes are enabled: the typed old
+index receives a deterministic temporary name, the desired stable name is built
+concurrently, and the temporary index is dropped concurrently in `contract`.
+Standalone unique indexes instead follow enforcement acceptance: a proven
+weaker definition is replaced wholly in expand; an incomparable definition
+drops obsolete uniqueness in expand and restores the desired index in contract,
+with the duplicate window reported explicitly. Every statement
 has explicit lock/statement-timeout guidance, and each step is placed in a
 valid transactional or non-transactional batch. Temporary-name conflicts are
 checked across PostgreSQL's whole relation namespace. Partitioned-parent
@@ -119,11 +123,26 @@ new local primary/unique constraints may also claim same-named matching unique
 indexes before attaching them to a constraint-owned parent. Detach, reparent,
 structural mutation, mismatched identities, and existing dependent local
 constraints remain unsupported rather than inferred.
-Ordinary-table primary-key and unique-constraint definition
-changes without external dependents build a replacement unique index
-concurrently, then swap the constraint to that index in one short contract
-transaction; foreign-key dependents reject explicitly instead of receiving an
-out-of-order drop. Isolated direct attached-child mutation, partitioned
+Ordinary-table primary-key and unique-constraint definition changes without
+external dependents build a replacement unique index concurrently. A proven
+unique- or primary-key relaxation swaps entirely in expand so the old key
+cannot reject the new writer; a proven strengthening retains the short
+contract swap; and an incomparable key uses an explicit uniqueness gap between
+expand and contract.
+Ordinary-table exclusion-constraint mutations without external dependents use
+the same conservative acceptance rule: obsolete enforcement leaves in expand
+and the desired exclusion guarantee returns in contract. No arbitrary operator
+implication is assumed.
+Changing an ordinary constraint's kind under the same name uses that loose
+fallback too; onwardpg does not treat shared identity as semantic compatibility.
+Foreign-key dependents reject explicitly instead of receiving an out-of-order
+drop. CHECK mutations use the catalog-deparsed predicate: bounded implication
+proves literal-set, branch, and finite-to-fixed-regex widenings, while unknown
+relationships use a loose expand envelope and staged contract restoration.
+Unambiguous cross-name CHECK families are correlated by typed constrained-column
+dependencies without pretending the objects were renamed. Foreign-key
+mutations likewise relax in expand and restore through `NOT VALID` plus separate
+validation in contract. Isolated direct attached-child mutation, partitioned
 constraints, and other dependent constraint-backed
 variants remain explicit unsupported transitions until their complete
 vertical slices can preserve PostgreSQL's attachment and ownership semantics.

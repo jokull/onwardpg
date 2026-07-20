@@ -1324,6 +1324,184 @@ func TestPartitionedInheritedCheckDropConvergesOnPostgreSQL(t *testing.T) {
 	assertGraphConverges(t, ctx, url, desired)
 }
 
+func TestCheckWideningAcceptsLegacyAndNewWritesAfterExpand(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := fmt.Sprintf("onwardpg_check_acceptance_%d", time.Now().UTC().UnixNano())
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+
+	currentDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE TABLE " + qualified(schemaName, "support_escalation_delivery") + " (tier text NOT NULL," +
+		" CONSTRAINT support_escalation_delivery_tier_check CHECK (tier IN ('shift_push', 'assigned_email')));"
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE TABLE " + qualified(schemaName, "support_escalation_delivery") + " (tier text NOT NULL," +
+		" CONSTRAINT support_escalation_delivery_tier_check CHECK (tier IN ('slack_new_conversation', 'shift_push', 'assigned_email')));"
+	path := filepath.Join(t.TempDir(), "desired.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned || len(plan.Statements) != 3 {
+		t.Fatalf("widening plan=%#v", plan)
+	}
+	for _, item := range plan.Statements {
+		if item.Phase != protocol.PhaseExpand {
+			t.Fatalf("widening emitted contract work: %#v", item)
+		}
+	}
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseExpand)
+	if _, err := conn.Exec(ctx,
+		"INSERT INTO "+qualified(schemaName, "support_escalation_delivery")+" (tier) VALUES ('shift_push'), ('slack_new_conversation')",
+	); err != nil {
+		t.Fatalf("expand did not accept both legacy and new writes: %v", err)
+	}
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestCrossNameCheckTransitionAcceptsLegacyAndNewWritesAfterExpand(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := fmt.Sprintf("onwardpg_cross_check_%d", time.Now().UTC().UnixNano())
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+
+	currentDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE TABLE " + qualified(schemaName, "checkout_quote") + " (settlement_currency text NOT NULL, presentment_currency text NOT NULL," +
+		" CONSTRAINT checkout_quote_settlement_currency_jpy CHECK (settlement_currency = 'jpy'));"
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE TABLE " + qualified(schemaName, "checkout_quote") + " (settlement_currency text NOT NULL, presentment_currency text NOT NULL," +
+		" quote_mode text DEFAULT 'fx' NOT NULL," +
+		" CONSTRAINT checkout_quote_mode_valid CHECK (quote_mode IN ('fx', 'fixed_market'))," +
+		" CONSTRAINT checkout_quote_settlement_currency_by_mode CHECK ((quote_mode = 'fx' AND settlement_currency = 'jpy') OR (quote_mode = 'fixed_market' AND settlement_currency = presentment_currency)));"
+	path := filepath.Join(t.TempDir(), "desired.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned {
+		t.Fatalf("cross-name CHECK plan=%#v", plan)
+	}
+	joined := joinPlan(plan)
+	if !strings.Contains(joined, `DROP CONSTRAINT "checkout_quote_settlement_currency_jpy"`) ||
+		!strings.Contains(joined, `ADD CONSTRAINT "checkout_quote_settlement_currency_by_mode"`) {
+		t.Fatalf("cross-name enforcement family was not planned together:\n%s", joined)
+	}
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseExpand)
+	if _, err := conn.Exec(ctx,
+		"INSERT INTO "+qualified(schemaName, "checkout_quote")+" (settlement_currency, presentment_currency) VALUES ('jpy', 'usd');"+
+			"INSERT INTO "+qualified(schemaName, "checkout_quote")+" (settlement_currency, presentment_currency, quote_mode) VALUES ('usd', 'usd', 'fixed_market');",
+	); err != nil {
+		t.Fatalf("cross-name expand did not accept legacy and new writes: %v", err)
+	}
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseContract)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestUniqueKeyRelaxationAcceptsLegacyAndNewWritesAfterExpand(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := fmt.Sprintf("onwardpg_unique_acceptance_%d", time.Now().UTC().UnixNano())
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+
+	currentDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE TABLE " + qualified(schemaName, "flight_segment") + " (component_id text NOT NULL, sequence integer NOT NULL," +
+		" CONSTRAINT flight_segment_unique UNIQUE (component_id, sequence));" +
+		"INSERT INTO " + qualified(schemaName, "flight_segment") + " (component_id, sequence) VALUES ('shared', 1);"
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := "CREATE SCHEMA " + quote(schemaName) + ";" +
+		"CREATE TABLE " + qualified(schemaName, "flight_segment") + " (component_id text NOT NULL, sequence integer NOT NULL," +
+		" direction text DEFAULT 'outbound' NOT NULL," +
+		" CONSTRAINT flight_segment_unique UNIQUE (component_id, direction, sequence));"
+	path := filepath.Join(t.TempDir(), "desired.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned {
+		t.Fatalf("unique relaxation plan=%#v", plan)
+	}
+	for _, item := range plan.Statements {
+		if item.Phase != protocol.PhaseExpand {
+			t.Fatalf("unique relaxation emitted contract work: %#v", item)
+		}
+	}
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseExpand)
+	if _, err := conn.Exec(ctx,
+		"INSERT INTO "+qualified(schemaName, "flight_segment")+" (component_id, sequence) VALUES ('legacy', 2);"+
+			"INSERT INTO "+qualified(schemaName, "flight_segment")+" (component_id, direction, sequence) VALUES ('shared', 'return', 1);",
+	); err != nil {
+		t.Fatalf("expand did not accept both legacy and new writes: %v", err)
+	}
+	assertGraphConverges(t, ctx, url, desired)
+}
+
 func TestPartitionedInheritedCheckCreateAndRebuildConvergesOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -8971,6 +9149,9 @@ ALTER TABLE "` + schemaName + `".bookings ADD CONSTRAINT bookings_period_excl EX
 		}
 		if plan.Status != protocol.Planned {
 			t.Fatalf("expected exclusion plan: %#v", plan)
+		}
+		if i == 1 && (len(plan.Statements) != 2 || plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[1].Phase != protocol.PhaseContract) {
+			t.Fatalf("expected exclusion mutation to use a loose overlap envelope: %#v", plan)
 		}
 		applyPlan(t, ctx, conn, plan)
 		actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)

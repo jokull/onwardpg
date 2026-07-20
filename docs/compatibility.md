@@ -58,8 +58,8 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 
 | Capability | Migra | onwardpg preview | Notes |
 | --- | --- | --- | --- |
-| Primary / unique / check constraints | Yes | **Plannable** | Create, drop, and structural rebuilds; destructive changes require approval. PostgreSQL 18 `WITHOUT OVERLAPS` and `NOT ENFORCED` forms are retained. |
-| Foreign keys and dependency cycles | Yes | **Plannable** | Dependency-aware ordering; `NOT VALID` / validation behavior is modeled, including PostgreSQL 18 `PERIOD` and enforcement transitions. |
+| Primary / unique / check constraints | Yes | **Plannable** | Creates, enforcement-specific drops, and structural rebuilds. CHECK widenings and unique-key relaxations run in expand; unknown CHECK evolution uses a deliberately loose overlap schema and staged contract restoration. PostgreSQL 18 `WITHOUT OVERLAPS` and `NOT ENFORCED` forms are retained. |
+| Foreign keys and dependency cycles | Yes | **Plannable** | Dependency-aware ordering; new and changed existing-table FKs use contract `NOT VALID` / validation, while obsolete FK enforcement is removed in expand. PostgreSQL 18 `PERIOD` and enforcement transitions are modeled. |
 | Exclusion constraints | Yes | **Plannable** for supported forms | PostgreSQL and partition-version limits still apply. |
 | Constraint rename | No general rename detection | **Decision required** | Migra's name-keyed comparison generally renders remove/add; onwardpg does not guess. |
 | Ordinary indexes | Yes | **Plannable** | Create, drop, rename, expression/opclass/include/predicate/method/options. |

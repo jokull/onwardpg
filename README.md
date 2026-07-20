@@ -18,6 +18,14 @@ workers, queues, connection pools, and stale write paths have drained. The new
 application version must work on both sides of contract. If that needs two
 deployments, onwardpg says so instead of hiding one inside a phase name.
 
+Expand is an **acceptance-compatible envelope**, not a promise to preserve
+every old database guarantee. It may be deliberately looser than both endpoint
+schemas so legacy and new SQL can coexist. For example, widening a CHECK or
+unique key happens in expand; when the relationship cannot be proven, onwardpg
+can remove the old enforcement in expand and restore the exact desired
+constraint in contract. The plan names the temporary guarantee gap instead of
+letting an obsolete constraint reject the new release.
+
 onwardpg never applies SQL to production. It writes reviewable bundles and
 replays them in restricted disposable PostgreSQL databases.
 
@@ -204,6 +212,14 @@ the current CLI in CI.
   dependent fails closed for extension-specific handling.
 - Rename, destructive, cast, authorization, and backfill decisions are bound
   to exact graph fingerprints. Stale or unused answers fail.
+- CHECK changes use PostgreSQL-deparsed predicates and bounded implication
+  proofs. Literal-set, branch-wise, and safe finite-to-regex widenings converge
+  in expand; unknown same-name or unambiguously correlated cross-name changes
+  use an explicit loose envelope and staged contract validation.
+- Unique-key and unique-index relaxations are distinguished from tightening.
+  New uniqueness over a newly added column on an existing table captures a
+  verified-clean or operator-authored cleanup decision before its contract
+  build.
 - Verification independently replays the selected checkpoint and full
   continuation, runs boolean assertions, compares final graph fingerprints,
   and requires an empty residual diff.
@@ -239,6 +255,9 @@ Concurrent index mode applies only to ordinary standalone indexes. Adding a
 primary-key, unique, or exclusion constraint to an existing table still asks
 PostgreSQL to build its backing index synchronously; the plan reports a blocking
 index build and access-exclusive-lock hazard even when concurrent mode is on.
+Standalone unique-index replacement is enforcement-aware: obsolete uniqueness
+is removed in expand when it could reject the new writer, and unknown desired
+enforcement is restored in contract after the overlap window.
 
 Composite attribute removal or type change uses PostgreSQL `CASCADE` only after
 a fingerprint-bound confirmation and reports data-loss, implicit-cast, and

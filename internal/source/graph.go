@@ -1044,7 +1044,9 @@ func addSequenceOwnershipDependencies(snapshot *pgschema.Snapshot) error {
 func inspectGraphConstraints(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
 	var parentDependencies [][2]pgschema.ID
 	rows, err := tx.Query(ctx, `
-SELECT n.nspname, c.relname, con.conname, pg_get_constraintdef(con.oid), con.contype::text,
+SELECT n.nspname, c.relname, con.conname, pg_get_constraintdef(con.oid),
+       CASE WHEN con.contype = 'c' THEN pg_get_expr(con.conbin, con.conrelid, true) ELSE '' END,
+       con.contype::text,
        con.convalidated, con.connoinherit, con.condeferrable, con.condeferred,
        rn.nspname, referenced.relname, conidx.relname, obj_description(con.oid, 'pg_constraint'),
        parent_n.nspname, parent_rel.relname, parent.conname,
@@ -1091,7 +1093,7 @@ ORDER BY n.nspname, c.relname, con.conname`)
 		var inheritedCandidateCount *int
 		object := pgschema.Constraint{}
 		if err := rows.Scan(
-			&namespace, &tableName, &object.Name, &object.Definition, &kind,
+			&namespace, &tableName, &object.Name, &object.Definition, &object.CheckExpression, &kind,
 			&object.Validated, &object.NoInherit, &object.Deferrable, &object.Deferred,
 			&referenceSchema, &referenceName, &usingIndex, &object.Comment, &parentSchema, &parentTable, &parentName,
 			&partition, &local, &inheritanceCount,

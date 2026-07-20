@@ -3454,6 +3454,9 @@ func TestBuildRendersIfExistsForConstraintDrop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || !strings.Contains(pending.Questions[0].Message, "expand schema may stop enforcing") {
+		t.Fatalf("constraint removal did not ask the enforcement-specific question: %#v", pending)
+	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraint.ObjectID().String(), Value: "drop"}}}
 	plan, err := Build(current, desired, answers, Options{IfExists: true})
 	if err != nil {
@@ -3461,6 +3464,9 @@ func TestBuildRendersIfExistsForConstraintDrop(t *testing.T) {
 	}
 	if !strings.Contains(joinSQL(plan), `DROP CONSTRAINT IF EXISTS "orders_account_fkey"`) {
 		t.Fatalf("missing IF EXISTS constraint drop: %#v", plan)
+	}
+	if len(plan.Statements) != 1 || plan.Statements[0].Phase != protocol.PhaseExpand || containsString(plan.Statements[0].Hazards, "data_loss") || !containsString(plan.Statements[0].Hazards, "referential_enforcement_removed") {
+		t.Fatalf("constraint drop was not rendered as a precise expand relaxation: %#v", plan.Statements)
 	}
 }
 

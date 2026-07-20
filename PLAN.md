@@ -1,622 +1,571 @@
-# PostgreSQL compatibility hill climb
+# Acceptance-compatible expand/contract planning
 
 ## Outcome
 
-Earn a strong context-blind PostgreSQL review by closing correctness gaps in
-modeled schema dependencies, proving catalog-attribute coverage, and making
-operational assumptions impossible to miss.
+Make this promise true for every schema transition onwardpg plans:
 
-This is not a plan to claim support for every PostgreSQL feature. A good
-outcome is:
+> After expand, both the in-flight legacy application and the newly deployed
+> application can execute their database operations. The overlap schema may be
+> deliberately looser than either endpoint schema. Contract restores the exact
+> desired schema only after legacy instances have drained.
 
-- modeled objects carry every catalog-proven dependency needed for correct
-  create, change, and drop ordering;
-- every schema-relevant catalog attribute is modeled, explicitly blocked, or
-  deliberately classified outside the database-schema boundary;
-- generated operations say what application and operational assumptions they
-  require;
-- scratch execution is clearly isolated from cluster-global authority; and
-- a fresh specialist can inspect only the README, source, and tests and find
-  no unmitigated high-severity schema-compatibility gap.
+This is an acceptance-compatibility promise, not a promise to preserve every
+legacy database guarantee during the overlap window. If retaining an old
+constraint would reject a new write, expand may weaken or remove that
+constraint. Onwardpg must make the temporary enforcement gap explicit and must
+prove the desired contract can be restored.
 
-## Architectural verdict
+The motivating bug is a same-name CHECK widening:
 
-The core architecture should stay.
+~~~sql
+-- current
+CHECK (tier IN ('shift_push', 'assigned_email'))
 
-~~~text
-real PostgreSQL catalogs
-        |
-        v
-typed objects + dependency edges
-        |
-        +--> semantic diff
-        +--> dependency-safe create / reverse drop
-        +--> explicit decisions and editable work
-        +--> disposable-clone convergence
+-- desired
+CHECK (tier IN ('slack_new_conversation', 'shift_push', 'assigned_email'))
 ~~~
 
-The review findings land at existing extension points. The first implementation
-pass has now exercised each one:
+Before this hill climb, the generic constraint-mutation renderer rebuilt this
+in `contract`. That let newly deployed code fail before contract. The planner
+now replaces the constraint in `expand`; legacy values remain valid, the new
+value becomes valid, and no contract operation is needed.
 
-| Concern | Existing way forward | Revision needed |
+## Non-negotiable invariant
+
+Let:
+
+- `Old` be the operations issued by pre-deployment application instances;
+- `New` be the operations issued by the newly deployed application; and
+- `Accepts(schema, operation)` mean PostgreSQL can execute the operation
+  without the transitional schema itself rejecting it.
+
+The expand state must satisfy:
+
+~~~text
+for every operation in Old union New:
+    Accepts(expand_schema, operation)
+~~~
+
+The contract state must satisfy:
+
+~~~text
+contract_schema == desired_schema
+~~~
+
+The expand state does **not** have to preserve all guarantees of the old
+schema. In set terms, its accepted state space may be a superset of both
+endpoint schemas:
+
+~~~text
+allowed(expand) >= allowed(current) union allowed(desired)
+~~~
+
+That distinction keeps the planner honest. Preserving old enforcement and
+accepting every new operation are sometimes mutually exclusive. Temporary
+weakening is valid; silently rejecting one application version is not.
+
+## Implemented in this hill climb
+
+- CHECK predicates are inspected directly from `pg_get_expr`, with bounded
+  finite-set, DNF branch, preserved-NOT-NULL, and finite-to-fixed-regex
+  implication proofs.
+- Proven CHECK widenings converge in expand; narrowing stays in contract;
+  unknown changes use an explicit loose expand envelope and staged contract
+  restoration.
+- Unambiguous cross-name CHECK families are correlated through typed constrained
+  columns. The checkout-quote settlement-currency transition is an executable
+  PostgreSQL receipt, not a name guess.
+- Same-name unique/primary-key and standalone unique-index relaxations converge
+  in expand. Incomparable unique constraints and unknown unique-index
+  replacements remove obsolete enforcement in expand and restore desired
+  enforcement in contract.
+- Exclusion mutations and same-name constraint-kind changes use the same loose
+  fallback, with retained catalog dependents blocking instead of being dropped.
+- New uniqueness involving a newly added column on an existing table captures
+  a verified-clean or manual preparation decision, covering the OTP purge and
+  dedupe migration shape.
+- Standalone constraint and unique-index removals are expand relaxations with
+  enforcement-specific questions and hazards, never generic `data_loss`.
+- New existing-table CHECKs and foreign keys use `NOT VALID` plus a separate
+  validation batch. Foreign-key mutations relax in expand and restore in
+  contract.
+- Adding/changing a same-type default is expand; removing one remains contract.
+- Legacy/new acceptance and final convergence receipts pass on PostgreSQL
+  15–18. The complete graph-planner PostgreSQL 18 suite also passes.
+
+History-only product choreography remains intentionally operator-authored. An
+endpoint graph cannot reconstruct the favorite-list ranking backfill, OTP
+expiry judgment, or a defensive drop/update/re-add sequence whose endpoint
+constraint is unchanged. Those belong in the evolving plan as fingerprinted
+manual work and verification, not in guessed SQL.
+
+## Corpus audit: Trip migration history
+
+The implementation fixtures must be grounded in the complete migration corpus
+at `~/Code/triptojapan/trip/packages/db/migrations`, including `origin/main` at
+`2bba8c1824a7fe687b558d8050fee14315cc31bd`, scanned on 2026-07-20.
+
+Corpus size:
+
+- 69 generated migrations containing 4,998 lines of migration SQL;
+- one 124-line production runbook;
+- the latest snapshot contains 161 tables, 2,064 columns, 174 CHECK
+  constraints, 302 foreign keys, 61 unique constraints, and 487 indexes.
+
+### What the history demonstrates
+
+| Transition family | Evidence in the corpus | Planner lesson |
 | --- | --- | --- |
-| Missing dependency edges | Snapshot accepts arbitrary typed edges; the scheduler and closure planners already consume them | Implemented as one post-inspection catalog-address index and normal-dependency projection pass |
-| Attribute blind spots | Typed fields represent supported semantics; unsupported selectors fail closed | Implemented as a generated PostgreSQL 15–18 column ledger, live drift tests, and initial semantic probes |
-| Add-column application risk | Statements already carry stable hazard metadata | Implemented with `application_row_shape_change` on every existing-table addition |
-| Aggressive rename backfill | Fingerprint-bound manual work, edited phase SQL, assertions, and batch boundaries already exist | Implemented as explicit manual, single-transaction, or split-plan strategy |
-| Scratch trust | Materialization is already isolated at the database boundary | Implemented with a short-lived restricted database owner created by the scratch administrator |
+| Same-name CHECK lifecycle | 19 CHECK names appear in both DROP and ADD operations in one migration; 13 change the endpoint predicate and six are defensive/backfill choreography with no endpoint predicate change | Constraint identity is not enough to choose `contract`; compare accepted writes and preserve intentional plan work that is absent from the endpoint diff |
+| Literal-set widening | `support_escalation_delivery_tier_check` adds `shift_push`; `20260720094851_support-new-conversation-slack` then adds `slack_new_conversation` | Proven widening belongs wholly in expand |
+| Complex predicate widening | `chk_trip_line_item_destination_manual_amount` begins allowing a NULL manual amount when a Dato hotel is present | If widening is not proven, use a looser overlap state instead of incorrectly delaying the change |
+| Mixed-looking CHECK evolution | `tt_translation_value_source_field_check` adds Package branches while also adding explicit non-NULL guards, then later adds `co_host_bio` | Reason over acceptance, including SQL three-valued CHECK semantics and other table invariants; fall back safely when implication is unknown |
+| Finite set to general predicate | six currency checks move from `IN ('usd', 'eur', 'jpy', 'krw')` to `~ '^[a-z]{3}$'` | A finite old domain can prove a general new predicate is a widening; otherwise the compatibility fallback still works |
+| Role widening | three admin relay/impersonation CHECKs add `super_admin` | Separate DROP and ADD statements are the same rollout transition as a combined ALTER TABLE |
+| Cross-name constraint evolution | JPY-only currency constraints become supported-currency or mode-dependent constraints | Classify an enforcement family, not only same-ID object mutations |
+| Unique-key relaxation | two flight-segment UNIQUE constraints add `direction` to their key | The old key implies the new weaker key; the swap is needed in expand because new writers may duplicate sequence across directions |
+| Deliberate uniqueness gap | the presentment-currency runbook drops and recreates `idx_order_trip_addon_open_unique` concurrently and explicitly accepts a brief unenforced interval | A looser overlap schema is operationally realistic; surface and verify the gap rather than pretending it does not exist |
+| Nullability polarity | one `DROP NOT NULL`; three `SET NOT NULL` operations after backfills | Relaxation is expand; restriction and validation are contract |
+| Temporary defaults | three required columns are added with sentinel defaults and then have those defaults removed | Add the compatibility default in expand; remove it in contract |
+| New interface plus enforcement | `trip_template_day_item.transfer_mode` is added with a CHECK accepting both legacy place/tour rows and new transfer rows | The column is required in expand; the CHECK can be contract unless new code explicitly relies on its enforcement during overlap |
+| Destructive cleanup | 14 column drops, seven table drops, and five actual index drops | Application-facing removals remain contract, but enforcement-object drops need kind-aware classification because some are required relaxations |
 
-No public graph rewrite, SQL parser, deployment engine, or new migration phase
-is required. The one architectural change belongs inside catalog inspection:
-physical PostgreSQL identities must be projected consistently onto logical
-onwardpg objects after all objects have been discovered.
+No generated Trip migration changes a column type, renames a column, or evolves
+an enum after creation. Those paths still belong in the full engine audit, but
+they must not be presented as corpus-derived findings.
 
-## Hill-climb method
+### Required corpus fixtures
 
-Work in small vertical slices. Each slice begins with a PostgreSQL fixture that
-demonstrates the gap, ends with PostgreSQL 15–18 convergence evidence, and is
-then offered to a fresh reviewer without this plan or PR context.
+Check in minimal, self-contained PostgreSQL fixtures derived from these cases:
+
+1. tier literal-set widening, including the checked-in
+   `slack_new_conversation` migration;
+2. manual-amount complex widening;
+3. translation source/field mixed predicate and later branch widening;
+4. six-table currency `IN` to regex widening;
+5. three admin-role widenings expressed as separate DROP and ADD statements;
+6. flight-segment unique-key relaxation;
+7. settlement-currency cross-name replacement;
+8. NOT NULL relaxation and backfill-then-tighten;
+9. add-required-with-temporary-default then drop-default; and
+10. concurrent partial-unique replacement with an explicit enforcement gap;
+    and
+11. additive `transfer_mode` plus a CHECK that admits both application
+    versions.
+
+Keep the fixtures small enough that a reviewer can see the rollout property.
+Their purpose is not to reproduce the Trip schema.
+
+## Architectural revision: classify before rendering
+
+Phase selection is currently distributed across create, drop, and modify
+renderers. That made all structural constraint replacements become contract
+operations even when their semantic effect was a relaxation.
+
+Introduce a compatibility-classification pass between semantic diffing and SQL
+rendering:
 
 ~~~text
-reproduce -> classify -> fix or block -> converge on PG15–18 -> blind review
-     ^                                                        |
-     +-------------------- next highest-risk finding <---------+
+current graph + desired graph + retained decisions
+                    |
+                    v
+       transition families and proofs
+                    |
+                    v
+     compatibility-envelope classifier
+                    |
+          +---------+---------+
+          |                   |
+          v                   v
+       expand              contract
+  accepts Old + New     exact desired graph
 ~~~
 
-Do not optimize for the number of supported features. Optimize for the absence
-of silent equality and invalid ordering inside the claimed boundary.
+Each changed enforcement family receives a typed disposition:
 
-## Climb 1: make dependency completeness architectural
-
-### Developer failure
-
-A developer adds or removes two individually supported objects, but onwardpg
-orders them incorrectly because PostgreSQL recorded a dependency that the
-source inspector did not project into the graph.
-
-Representative fixtures:
-
-~~~sql
-CREATE FUNCTION app.is_positive(integer) RETURNS boolean
-LANGUAGE sql IMMUTABLE RETURN $1 > 0;
-
-CREATE DOMAIN app.positive_integer AS integer
-CHECK (app.is_positive(VALUE));
+~~~text
+expand_to_desired     desired is proven no stricter; no contract needed
+expand_noop           current already accepts both; tighten in contract
+expand_relax          remove or weaken enforcement; restore in contract
+expand_bridge         expose two interfaces or synchronized representations
+contract_only         operation cannot affect newly deployed SQL acceptance
+needs_decision        application behavior or proof is not inferable
+unsupported           onward cannot construct a safe one-deploy path
 ~~~
 
-~~~sql
-CREATE FUNCTION app.timestamp_distance(timestamptz, timestamptz)
-RETURNS double precision
-LANGUAGE sql IMMUTABLE RETURN EXTRACT(EPOCH FROM ($1 - $2));
+Every disposition records:
 
-CREATE TYPE app.time_window AS RANGE (
-  subtype = timestamptz,
-  subtype_diff = app.timestamp_distance
+- the current and desired object IDs or correlated enforcement-family IDs;
+- whether acceptance is widened, narrowed, unchanged, or unknown;
+- the proof used, such as literal-set inclusion or old unique key implying the
+  new unique key;
+- the temporary guarantee lost during overlap, if any;
+- the verification required immediately before contract; and
+- whether newly deployed SQL addresses the object by name or relies on its
+  behavior, when that requires a developer decision.
+
+Renderers consume the disposition. They do not independently guess phases.
+
+## Climb 1: lock the invariant with failing execution tests
+
+Before changing rendering, add an integration harness that tests application
+acceptance, not only final graph convergence.
+
+Each rollout fixture contains:
+
+~~~text
+current.sql       current production schema
+desired.sql       declarative target schema
+legacy.sql        operations an old instance can issue
+next.sql          operations the new instance can issue
+verify.sql        boolean assertions required before contract
+~~~
+
+The harness must:
+
+1. materialize `current.sql`;
+2. generate and apply only expand;
+3. run both `legacy.sql` and `next.sql` successfully against the same schema;
+4. establish the post-drain/backfill conditions in the fixture;
+5. run `verify.sql` and require every assertion to be true;
+6. apply contract;
+7. prove the catalog graph equals `desired.sql`; and
+8. where the desired contract is stricter, prove the retired legacy operation
+   would now be rejected.
+
+The first red test is the exact tier widening. It must assert:
+
+- DROP old CHECK and ADD desired CHECK are both in expand;
+- they share an atomic replacement boundary;
+- both old tier values and `slack_new_conversation` are accepted after expand;
+- no contract statement exists for that constraint; and
+- final inspection has an empty residual diff.
+
+Run these tests on PostgreSQL 15, 16, 17, and 18.
+
+## Climb 2: make CHECK transitions acceptance-aware
+
+### Model the predicate directly
+
+Extend inspected CHECK constraints with the catalog-deparsed expression from:
+
+~~~sql
+pg_get_expr(con.conbin, con.conrelid, true)
+~~~
+
+Keep the complete `pg_get_constraintdef` representation for faithful DDL, but
+do not scrape the CHECK expression out of that presentation string. Both real
+and materialized desired schemas pass through the same PostgreSQL inspector, so
+the structured expression is catalog-grounded.
+
+### Safe proof ladder
+
+Classify CHECK changes with a deliberately bounded proof ladder:
+
+1. exact semantic equality after PostgreSQL normalization;
+2. single-column `IN` / `= ANY(array)` literal-set inclusion, including NULL
+   acceptance;
+3. finite old literal domain evaluated exhaustively against the desired
+   predicate in the disposable PostgreSQL database;
+4. simple normalized bound/nullability forms with tested implication rules;
+5. otherwise, unknown.
+
+Do not make arbitrary SQL predicate implication a correctness dependency.
+
+### Rendering rules
+
+For a validated current CHECK `P` and desired CHECK `Q`:
+
+- **Q proven at least as permissive as P:** atomically replace P with Q in
+  expand. Add Q as `NOT VALID`, then validate it in a separate expand batch so
+  the strong catalog lock is brief. Since P proved every existing row satisfies
+  Q, this does not invent a data assumption. No contract step remains.
+- **Q proven stricter than P:** retain P through expand. After legacy drain,
+  add Q under a deterministic temporary name as `NOT VALID` so all subsequent
+  writes are fenced by the desired predicate. Backfill and verify existing rows,
+  validate Q, then atomically drop P and rename Q to the durable identity.
+- **Mixed or unknown:** remove P in expand, explicitly creating a looser
+  overlap schema. After legacy drain, add Q as `NOT VALID` to fence subsequent
+  writes, capture any product-specific backfill, run a generated `Q IS FALSE`
+  assertion, and validate Q in contract.
+
+The generic fallback is removal, not automatic `P OR Q` synthesis. Dropping a
+CHECK reliably stops that CHECK from rejecting either writer. Boolean
+composition can still throw for partial expressions or user functions because
+PostgreSQL does not promise source-order evaluation. A future optimization may
+retain `P OR Q` only when total, side-effect-free evaluation is proven.
+
+Preserve comments, validation state, `NO INHERIT`, partition propagation, typed
+dependencies, and stable constraint identity. Block or request manual work when
+partition inheritance or a non-total function prevents a proven automatic
+path.
+
+### Contract proof
+
+Generate the CHECK assertion with PostgreSQL CHECK semantics:
+
+~~~sql
+SELECT NOT EXISTS (
+  SELECT 1
+  FROM "public"."support_escalation_delivery"
+  WHERE (<desired predicate>) IS FALSE
 );
 ~~~
 
-~~~sql
-CREATE TYPE app.state AS ENUM ('open', 'closed');
+`IS FALSE`, rather than `NOT (<predicate>)`, correctly treats NULL as accepted
+by a CHECK constraint. Run the assertion only after the desired `NOT VALID`
+constraint is installed. PostgreSQL then enforces Q for new or updated rows
+while the assertion and backfill cover pre-existing rows, closing the race
+between a successful scan and constraint installation.
 
-CREATE FUNCTION app.normalize_state(app.state) RETURNS app.state
-LANGUAGE sql IMMUTABLE RETURN $1;
-~~~
+## Climb 3: handle UNIQUE, exclusion, and index enforcement
 
-### Architecture
+Constraint and index changes need the same acceptance classifier, but their
+proofs are structural rather than Boolean.
 
-Use a source-internal catalog identity index:
+### Proven unique relaxation
 
-~~~text
-(classid, objid, objsubid) -> logical pgschema.ID
-~~~
-
-One final catalog query runs after every typed inspector and maps physical
-addresses only when the corresponding logical ID exists. Embedded catalog
-objects map to the logical object that owns their lifecycle:
-
-- a domain CHECK constraint maps to its Domain ID;
-- a column default maps to its Column ID and, where required by existing
-  lifecycle behavior, its Table ID;
-- a view rewrite rule maps to its View or MaterializedView ID;
-- index, constraint, trigger, policy, routine, type, relation, and column
-  addresses map directly to their typed IDs.
-
-After every modeled object has been loaded, run one dependency projector over
-pg_depend. It must:
-
-1. translate allowlisted dependency rows whose endpoints are both modeled;
-2. add the logical edge once, regardless of how many catalog rows prove it;
-3. preserve hand-authored semantic edges that pg_depend cannot express, such
-   as rollout ordering and selected ownership/topology relationships;
-4. classify extension-owned, system, automatic, and internal dependencies
-   instead of importing them blindly;
-5. leave unsupported user-schema endpoints to the catalog-family blockers and
-   test the admitted modeled-object address corpus for complete projection; and
-6. keep arbitrary procedural-body references outside the proof, because
-   PostgreSQL itself does not catalog them.
-
-Do not add dependency provenance to canonical graph fingerprints. Provenance
-is inspection evidence; logical edge identity is the schema contract.
-
-### First closures
-
-Implement and prove, in order:
-
-1. domain constraint and domain default dependencies on routines and modeled
-   types;
-2. range subtype-difference dependencies and retained canonical-function
-   edges; a custom canonical lifecycle remains an explicit renderer blocker
-   because a generic SQL function cannot accept PostgreSQL's shell range type;
-3. routine argument, return, OUT-parameter, variadic, array-element, domain,
-   composite, enum, and range type dependencies;
-4. expression dependencies from column defaults, generated expressions,
-   constraints, indexes, policies, and view rules onto modeled routines and
-   types; and
-5. create and drop ordering when these edges form mixed chains or cycles.
-
-### Evidence gate
-
-- Source integration tests assert the exact projected edges.
-- Planner integration tests create the dependency before its consumer and
-  drop the consumer before its dependency.
-- Each fixture converges with an empty residual on PostgreSQL 15, 16, 17, and
-  18.
-- A negative fixture proves an opaque PL/pgSQL string reference is neither
-  claimed nor rewritten.
-- An inventory test fails if a relevant mapped object has an unclassified
-  pg_depend relationship.
-
-## Climb 2: move from catalog-table coverage to attribute coverage
-
-### Developer failure
-
-Two schemas differ in a schema-relevant attribute, but the typed snapshots
-compare equal because the catalog table was classified while that attribute
-was not.
-
-The first concrete probe is auxiliary TOAST state:
+When the old unique key implies the new key—for example:
 
 ~~~sql
-CREATE TABLE app.events (payload text);
-ALTER TABLE app.events
-  SET (toast.autovacuum_enabled = false);
+UNIQUE (package_component_id, sequence)
+-- becomes
+UNIQUE (package_component_id, direction, sequence)
 ~~~
 
-### Architecture
+build the desired backing index concurrently under a reserved temporary name
+while the old constraint still proves it can succeed. Swap to the weaker
+constraint in expand. The new application can then use duplicate sequence
+numbers across directions. Contract is empty.
 
-Add a checked-in, versioned PostgreSQL 15–18 attribute ledger. For every column
-of every in-scope pg_catalog relation, record one classification:
+The proof must account for:
 
-- modeled: retained in a typed object and tested for equality;
-- blocked: detected and emitted as a narrow unsupported selector;
-- derived: intentionally represented by another stable catalog fact;
-- environment: required for materialization but not a migration target;
-- runtime: data, statistics, or transient state outside schema comparison;
-- secret: intentionally neither retained nor printed; or
-- not_applicable: irrelevant to the object shapes onwardpg admits, with a
-  reason.
+- key order and expressions;
+- partial-index predicate implication;
+- `NULLS DISTINCT` versus `NULLS NOT DISTINCT`;
+- included columns and opclasses;
+- collations;
+- exclusion operators; and
+- dependent foreign keys and replica identity.
 
-Live matrix tests must compare the ledger with pg_attribute on each supported
-major. A new or removed catalog column then fails CI until classified.
+Only claim implication for explicitly tested structural forms.
 
-Start the semantic audit with the catalogs carrying the claimed core:
+### Tightening or unknown replacement
 
-1. pg_class and auxiliary relations, including reltoastrelid;
-2. pg_attribute and pg_attrdef;
-3. pg_type, pg_range, and pg_enum;
-4. pg_proc;
-5. pg_constraint and pg_index;
-6. pg_rewrite, pg_trigger, and pg_policy; and
-7. ownership, ACL, comment, and dependency catalogs.
+- Keep compatible old enforcement during expand when it does not reject new
+  operations.
+- If old enforcement may reject new operations, remove it in expand and mark
+  the exact temporary guarantee gap.
+- Build/attach the desired unique or exclusion enforcement in contract after a
+  duplicate/conflict assertion and any captured cleanup.
+- Use concurrent builds and transactional attachment/swap boundaries where
+  PostgreSQL permits them.
 
-TOAST reloptions and tablespace state must initially become parent-table
-blockers. Modeling and planning those options can be a later feature; silent
-equality cannot.
+Generated pre-contract verification must return duplicate keys or exclusion
+conflicts in a bounded, reviewable query.
 
-### Evidence gate
+### Application-visible uniqueness
 
-- PostgreSQL 15–18 live catalog columns exactly match the ledger.
-- Every modeled or blocked entry names an executable test.
-- Mutation probes show a fingerprint change or unsupported selector for every
-  schema-relevant attribute.
-- Secret-bearing fields remain absent from diagnostics and snapshots.
-- README language distinguishes inventoried families from completed
-  attribute coverage until the ledger reaches complete status.
+New application SQL may use `ON CONFLICT`, name a constraint, or assume a
+database-enforced idempotency key. Schema diff alone cannot infer that.
 
-## Climb 3: make application contracts visible
+Ask one focused decision when a new/tightened unique object cannot coexist with
+legacy writes:
 
-### Developer failure
+> Does the newly deployed application address or require this uniqueness before
+> contract?
 
-This additive migration is valid PostgreSQL but can break positional writers
-or rigid row decoders:
+If yes and no acceptance-compatible database shape exists, fail closed with a
+two-deployment or application-bridge requirement. Do not emit a plan that lets
+new SQL fail. If no, the constraint can be restored in contract.
+
+Replace generic `data_loss` hazards on enforcement drops with accurate hazards
+such as `temporary_uniqueness_unenforced`, `constraint_relaxation`, and
+`duplicate_rows_possible`.
+
+## Climb 4: correlate cross-name enforcement families
+
+Object identity alone misses transitions such as:
 
 ~~~sql
-ALTER TABLE app.accounts ADD COLUMN timezone text;
-
--- Existing application code may still do this:
-INSERT INTO app.accounts VALUES (1, 'person@example.com');
+DROP CONSTRAINT checkout_quote_settlement_currency_jpy;
+ADD CONSTRAINT checkout_quote_settlement_currency_by_mode CHECK (...);
 ~~~
 
-### Change
+Build correlation candidates within a table from typed dependency evidence:
 
-Every ADD COLUMN against an existing table must carry an
-application-contract hazard, including nullable columns without defaults.
-Columns created as part of CREATE TABLE do not need it.
+- constraint kind;
+- constrained columns;
+- referenced table/columns for foreign keys;
+- backing index keys and predicates;
+- dependent objects; and
+- explicit rename decisions already captured by the planner.
 
-The rendered review guidance and README must state the assumption:
+Correlation does not silently declare a rename. It groups related enforcement
+changes so the classifier can construct one rollout envelope. Ambiguous
+many-to-many candidates become a concise decision, with drop/add remaining the
+safe semantic fallback.
 
-- writes list their target columns;
-- readers tolerate the additional result shape or avoid positional SELECT *;
-- generated, identity, defaulted, and required columns may add stronger
-  rewrite, validation, or writer-compatibility hazards; and
-- onwardpg cannot inspect application queries to prove those contracts.
+Retained plan decisions are important here. Six Trip CHECK names appear in
+defensive DROP/re-add choreography around a data rewrite even though their
+endpoint predicates do not change. That sequence is not visible in endpoint
+graphs. When an edited onward plan captures equivalent work, rebasing a
+declarative chain must retain it under its stable decision ID until its
+preconditions change or the developer removes it.
 
-Use one stable hazard vocabulary across JSON, rendered SQL, documentation, and
-tests. Avoid calling an operation safe when the claim means only
-catalog-additive.
+## Climb 5: audit every enforcement and interface polarity
 
-### Evidence gate
+Replace ad hoc phase choices with a checked-in transition matrix. Every modeled
+mutation must be classified or explicitly unsupported.
 
-- Every existing-table ADD COLUMN planner path has the hazard.
-- CREATE TABLE fixtures do not receive a misleading compatibility warning.
-- SQL rendering explains the developer action, not only the internal hazard
-  token.
-- A blind reviewer can find the assumption from the five-minute workflow,
-  without discovering it only in the ownership table.
+| Feature | Relaxing direction | Restricting/removing direction | Required audit |
+| --- | --- | --- | --- |
+| CHECK | wider predicate or drop: expand | narrower predicate: contract | Implemented with bounded proofs and a loose unknown fallback |
+| NOT NULL | DROP NOT NULL: expand | SET NOT NULL: backfill/verify/contract | Preserve existing good behavior; move staged proof creation only if it cannot reject legacy writes |
+| FOREIGN KEY | drop old enforcement in expand | add or restore desired enforcement in contract | Implemented for mutation; surface temporary orphan/cascade behavior |
+| UNIQUE / exclusion | weaker or incomparable old enforcement: expand relaxation | stronger or desired enforcement: contract | Implemented for bounded unique proofs and loose incomparable fallbacks |
+| Defaults | adding or changing a same-type default: expand | removing a default: contract | The expand schema has one desired default; old explicit values and omission syntax remain accepted |
+| Column add | nullable or compatibility-default form: expand | final required shape: contract | Preserve nullable shadow/backfill flow |
+| Column drop | n/a | contract | Confirm no renderer can move it earlier through dependency grouping |
+| Column rename | overlap bridge: expand | old-name removal/native identity cleanup: contract | Re-run all existing rename strategies through acceptance probes |
+| Column type | old/new interface bridge: expand | old representation removal: contract | Direct ALTER TYPE is allowed only with an explicit proof that both deployed versions accept the one physical type |
+| Enum | add accepted label: expand | label removal/reorder/rewrite: bridge then contract | Audit enum replacement paths against old and new value probes |
+| Index | additive lookup: expand; uniqueness follows enforcement rules | application-facing removal: contract, enforcement relaxation may be expand | Distinguish performance interface from integrity enforcement |
+| Table/view/routine | additive interface: expand | removal/signature contraction: contract | Exercise old and new queries, including dependent views/routines |
+| Trigger/generated/identity | case-specific | case-specific | Require an explicit write-path compatibility disposition; do not classify from DDL direction alone |
+| RLS/policies/privileges | granting/relaxing may be expand | revoking/tightening contract | Acceptance includes authorization; never use the looser-schema rule to hide an unreviewed security expansion |
 
-## Climb 4: make rename backfill strategy explicit
+Add a test that fails when a modeled create/drop/modify renderer lacks a matrix
+entry. Security changes retain their stricter authorization confirmation even
+when application acceptance would otherwise suggest expansion.
 
-### Developer failure
+## Climb 6: make evolving plans preserve compatibility decisions
 
-The compatibility bridge is logically correct, but its generated UPDATE can
-turn into a long transaction with heavy WAL, bloat, replica lag, and lock
-pressure. Disposable history contains no production row-count evidence.
+Compatibility decisions live in the single plan tied to the merge and deploy.
+They must survive normal schema edits without becoming stale authority.
 
-### Change
+Key decisions by an enforcement-family identity plus current/desired
+fingerprints. On re-plan:
 
-Keep automatic trigger installation and the final native rename. Replace the
-implicit full-table backfill with a fingerprint-bound strategy decision:
+1. preserve edited backfills, verification, and application-interface answers
+   when their exact preconditions are unchanged;
+2. re-run compatibility proofs whenever either endpoint predicate or dependent
+   column shape changes;
+3. invalidate phase/proof decisions when their evidence changes;
+4. show the developer why an item moved between expand and contract;
+5. never silently discard history-only choreography merely because the final
+   endpoint object compares equal; and
+6. detect dev/prod/history drift before applying a retained decision.
 
-- manual_sql is the default and creates an editable, verifiable backfill
-  pocket with explicit batch boundaries;
-- single_transaction retains the generated UPDATE only after an affirmative
-  choice and carries unbounded-update, WAL, replica-lag, table-scan, and
-  long-transaction hazards; or
-- split_plan explains when the bridge and cleanup need separate operational
-  work.
+Add rebase tests where:
 
-The final catch-up must use the same chosen strategy or a verified assertion;
-it must not quietly reintroduce an unbounded UPDATE in contract.
+- another branch adds one more allowed tier;
+- a backfill edit survives an unrelated column addition;
+- a predicate edit invalidates a previous widening proof;
+- production gains rows that fail the pending desired contract; and
+- an unchanged endpoint CHECK still retains an explicitly captured temporary
+  drop/backfill/re-add sequence.
 
-The existing manual-work protocol remains the execution seam. Require at least
-one boolean assertion proving old and new values agree before compatibility
-objects are removed.
+## Climb 7: operational rendering and hazards
 
-### Evidence gate
+Rendered plans must make the temporary contract obvious:
 
-- Accepting rename identity alone never emits an unbounded UPDATE.
-- The single-transaction strategy is explicit, receipted, and regenerated
-  deterministically.
-- Manual backfill edits survive regeneration and clone verification.
-- Contract cannot drop the bridge until the equality assertion succeeds.
-- Small-table and manual/batched paths converge on PostgreSQL 15–18.
-
-## Climb 5: harden the scratch trust boundary
-
-### Developer failure
-
-Dropping a disposable database does not undo cluster-global SQL executed by a
-powerful scratch login. Materialization can also fail mysteriously when
-extensions or referenced roles do not exist on the scratch cluster.
-
-### Immediate contract
-
-Prominently state in the README and configuration guide:
-
-- schema and migration SQL are trusted project code;
-- the scratch URL must point to a dedicated local or CI PostgreSQL cluster,
-  not merely a disposable database on a shared cluster;
-- supported PostgreSQL major means bundles are bound to one major, not portable
-  across all supported majors; and
-- referenced extension packages and roles must already exist in the scratch
-  environment.
-
-### Authority separation
-
-Create separate scratch administration and execution identities for every
-materialization:
-
-~~~text
-scratch admin URL:  creates and force-drops the random database and login role
-scratch DDL owner:  random one-hour login; owns only the random database; no
-                    SUPERUSER, CREATEROLE, CREATEDB, REPLICATION, INHERIT, or
-                    BYPASSRLS
+~~~sql
+-- EXPAND COMPATIBILITY ENVELOPE
+-- Both legacy and new application writes are accepted.
+-- Temporary guarantee removed: support_escalation_delivery_tier_check.
+-- Restore condition: desired predicate has no FALSE rows after legacy drain.
 ~~~
 
-The administrator creates both objects; there is no configured powerful
-execution identity to reuse accidentally. DDL execution and catalog inspection
-use only the generated credentials. Cleanup remains on the administrative
-connection and propagates failures.
+Use separate batches for:
 
-### Matrix finding and architectural revision
+- brief transactional catalog swaps;
+- `CREATE/DROP INDEX CONCURRENTLY` operations;
+- lower-lock validation scans;
+- operator-edited data movement; and
+- final contract attachment/cleanup.
 
-The first PostgreSQL 15–18 run proved that database-role restriction and full
-privileged-DDL compatibility cannot be the same execution mode. A role that
-cannot `SET ROLE` cannot materialize `ALTER ... OWNER TO external_role`, and a
-non-superuser cannot install extensions whose control files require superuser.
-Granting those powers back to arbitrary project SQL would recreate the original
-cluster-global escape.
+Attach accurate timeouts and retry cleanup. A failed concurrent build must be
+detectable as an invalid index and safe to resume, matching the Trip production
+runbook's operational lesson.
 
-Keep the restricted database owner as the default and fail clearly for those
-inputs. The safe way to close the remaining pgmig ownership and privileged
-extension gap is a cluster-per-materialization provider: project SQL may be
-privileged only inside an ephemeral PostgreSQL cluster whose destruction is the
-security boundary. A future provider interface may launch that cluster locally
-or in CI and return a one-use administrative URL plus a mandatory destroy
-operation. A random database on a shared cluster is not an acceptable
-substitute. Until that provider exists, documentation must describe typed
-ownership as planner/live-graph support rather than normal declarative workflow
-support.
+Hazard vocabulary should distinguish:
 
-### Evidence gate
+- temporary enforcement weakening;
+- possible overlap-window invalid rows;
+- pre-contract data cleanup;
+- new application dependency not yet available;
+- strong catalog lock;
+- validation scan;
+- concurrent-build retry residue; and
+- permanent destructive cleanup.
 
-- A fixture attempting CREATE ROLE or CREATE TABLESPACE fails without leaving
-  cluster-global state.
-- Ordinary schemas, trusted extensions, comments, policies, grants, routines,
-  and migrations still materialize under the DDL owner; superuser extensions
-  and external ownership transfers fail at this boundary.
-- Failure messages distinguish missing extension packages, missing roles, and
-  insufficient local privileges where PostgreSQL exposes that distinction.
-- Disposable databases are force-dropped on every tested failure path.
+## Climb 8: documentation and proof receipts
 
-## Blind-review climb log
+Update the README and plan-command guide around the corrected promise:
 
-The first fresh review was positive about the developer-preview boundary, but
-found one high-severity ordering defect: an extension schema move was emitted
-after work that already referenced extension members in the new schema. The
-fix keeps the move in contract, emits it before same-phase work, and contracts
-every transitive dependent create or modification behind it. A live `pg_trgm`
-fixture moves the extension and rebuilds a GIN index with the newly qualified
-operator class, then proves convergence.
+1. expand is an acceptance-compatible envelope, often intentionally looser;
+2. deploy old and new code together against that envelope;
+3. drain legacy code;
+4. backfill and run generated assertions; and
+5. contract to the exact declarative target.
 
-That review also tightened three boundaries:
+Use the tier widening as the easy example, the unique-key relaxation as the
+medium example, the cross-name currency constraint as the hard example, and a
+type/derived-object bridge as the nightmare example.
 
-- extensions are atomic by package name, version, and schema; member contents
-  and upgrade history are not independently compared;
-- constraint-backed primary-key, unique, and exclusion indexes remain
-  synchronous builds and now report blocking-build and access-exclusive-lock
-  hazards even when ordinary concurrent indexes are enabled; and
-- scratch databases clone pristine `template0`, while a dependency-edge-only
-  graph difference now fails closed instead of producing an empty plan.
+For every published SQL sample, generate the plan from a checked-in fixture and
+execute the legacy, next, verify, and convergence receipts in CI. Documentation
+must not hand-author phase claims the planner does not produce.
 
-The completion gate still requires two consecutive fresh reviews after these
-corrections. A finding closes through an executable fix or blocker plus a
-regression fixture; documentation alone closes only a claim mismatch.
+Explain temporary weakening plainly. Do not imply old business invariants are
+preserved while new code starts using values those invariants rejected.
 
-The second fresh review found another admitted-state gap: ordinary-view column
-defaults were absent from both the graph and blockers, a manually created
-sequence owned by an identity column was filtered with the internal identity
-sequence, and references to extension-owned opclasses did not alias to the
-atomic extension node. The next climb therefore:
+## Evidence gates
 
-- blocks view defaults and unmodeled domain-constraint, composite-attribute,
-  and view-column comments;
-- distinguishes PostgreSQL's internal identity sequence (`deptype = 'i'`)
-  from a standalone sequence later attached with `OWNED BY`;
-- maps every extension-member catalog address to its typed Extension ID so a
-  newly created index using a moved opclass is contracted behind the move;
-- blocks table grants issued onward by a non-owner grantor, which a random
-  `NOINHERIT` scratch role cannot reproduce; and
-- defers trigger creation, policy creation, and RLS activation on existing
-  tables to contract, while preserving expand behavior for a newly created
-  table.
+The work is complete only when all of these are true:
 
-The review also proposed unlogged materialized views as a missing state.
-PostgreSQL 15–18 rejects `CREATE UNLOGGED MATERIALIZED VIEW`; `relpersistence`
-is therefore recorded as a PostgreSQL-fixed invariant for that object kind,
-not a new planner feature. Scratch locale, encoding, provider, and default
-collation remain environmental and are now called out beside the scratch URL.
+- the exact `slack_new_conversation` widening is expand-only;
+- every corpus-derived fixture passes legacy and new probes after expand;
+- every contract fixture proves its assertion before desired enforcement is
+  attached;
+- final graph convergence is empty on PostgreSQL 15–18;
+- CHECK, NOT NULL, FK, unique, exclusion, default, index, type, rename, enum,
+  generated, identity, trigger, RLS, policy, and privilege transitions have a
+  checked-in disposition or a fail-closed blocker;
+- no constraint drop is generically labeled `data_loss` without a more precise
+  object-specific reason;
+- re-planning preserves valid edited work and invalidates stale proofs;
+- generated SQL clearly identifies temporary enforcement gaps;
+- README examples are generated from executable fixtures; and
+- a context-blind PostgreSQL specialist can infer the acceptance-compatibility
+  promise from the README, inspect the tests, and find no path where newly
+  deployed or legacy SQL is silently rejected before contract.
 
-Because this second review found unmitigated highs, the consecutive-clean
-counter restarts after these fixes.
+## Non-goals
 
-The third fresh review found two more catalog-state distinctions and one
-renderer defect. PostgreSQL 18 can mark one NOT NULL constraint both local and
-inherited; that later-drop behavior is now a narrow blocker. An interrupted
-`DETACH PARTITION ... CONCURRENTLY` leaves `pg_inherits.inhdetachpending`; the
-table inspector now emits `partition_detach_pending` and the attribute ledger
-classifies that field as blocked. The live fixture holds an old snapshot,
-terminates the detaching backend after its first internal commit, and proves
-the intermediate state cannot compare as an ordinary attached partition.
+- Preserve every old database enforcement guarantee during the overlap window.
+- Infer arbitrary application queries or business invariants from DDL.
+- Solve implication for arbitrary PostgreSQL expressions.
+- Automatically invent product-specific backfills.
+- Pretend every schema change fits one rolling deployment; fail closed when no
+  acceptance-compatible bridge exists.
 
-Invalid domain CHECK constraints exposed a duplicated `NOT VALID` clause
-because PostgreSQL's deparser and the renderer both supplied it. Inspection now
-canonicalizes the definition and retains validation as typed state; the
-renderer remains defensive against pre-canonicalized typed input. The live
-fixture creates, plans, applies, and converges an invalid domain constraint on
-each supported major.
+## Implementation order
 
-This review also suggested unlogged materialized views. Direct probes against
-PostgreSQL 15, 16, 17, and 18 all reject that syntax, confirming the earlier
-fixed-invariant classification. The clean-review counter restarts again after
-the three real fixes.
-
-The review's medium composite-type concern also becomes executable intent:
-attribute removal or type change asks for a fingerprint-bound `CASCADE`
-confirmation and reports data-loss, implicit-cast, table-rewrite, dependent-row,
-and product-semantics hazards.
-
-The fourth fresh review found two high-severity false-equality and ordering
-holes. A serial column previously collapsed any dependent `nextval` expression
-to the serial pseudo-type while excluding its backing sequence, so customized
-sequence allocation, comments, or expressions could disappear. Inspection now
-admits only the canonical implicit shape and emits `serial_sequence_state` for
-the rest. Typed identity options remain supported, while customized backing
-sequence names, comments, or persistence emit `identity_sequence_metadata`.
-An ordinary serial fixture proves the blocker is narrow on PostgreSQL 15–18.
-
-The same review observed that a relation's implicit row `pg_type` was absent
-from the catalog-address index. Table, view, materialized-view, and row-type
-array OIDs now alias to the owning logical relation; standalone composite
-attribute addresses alias to their composite object. Live fixtures prove that
-routines, domains, composites, and columns consuming a table row type create
-after and drop before that table on every supported major. Because these were
-unmitigated highs, the consecutive-clean counter restarts again.
-
-The fifth fresh review found a compatibility-window defect rather than a final
-catalog mismatch. Modifying an existing row-security node assigned `ENABLE`
-and `FORCE ROW LEVEL SECURITY` to expand. When a policy changed in the same
-plan, phase regrouping could therefore move RLS tightening ahead of the policy
-edge it depends on. Existing-table RLS enable/force modifications now remain
-in contract, carry an application-behavior hazard, and retain policy-before-RLS
-ordering. A combined policy mutation and RLS-force fixture applies and
-converges on PostgreSQL 15–18.
-
-That review also exposed a medium environment ambiguity in `dev plan`: the
-development catalog and desired scratch materialization could use two different
-supported majors. The command now discovers both majors and rejects a mismatch
-before comparison. The high-severity finding restarts the consecutive-clean
-counter once more.
-
-The sixth fresh review generalized the phase-order concern and found a more
-serious stored-state case. A same-signature routine replacement could leave a
-retained expression or partial index, stored generated column, or validated
-constraint carrying values computed under the old body. Catalog replay could
-still converge. These retained catalog-proven dependents now emit
-`routine_semantic_change_stored_dependent`; newly created dependents are
-promoted behind the contract routine replacement. Live PostgreSQL 15–18
-fixtures prove both the refusal and the safe new-index order.
-
-Phase assignment now has a transitive dependency closure: any create or modify
-that depends on a contract-phase provider is promoted to contract before final
-batch grouping. This covers routine changes, enum-label changes, extension
-updates, and other typed edges instead of adding special cases per object.
-Uncoordinated create/drop transitions in PostgreSQL's shared relation and type
-namespaces also fail closed. Finally, semantic-default suppression can no
-longer return an empty plan with unequal raw fingerprints; it reports
-`default_equivalence_not_fingerprintable`. Because the review found a high,
-the consecutive-clean counter restarts again.
-
-The seventh fresh review found four high-severity cases where the general
-architecture was sound but its safety closures were incomplete:
-
-- phase promotion changed a dependent's phase without guaranteeing its rename
-  provider appeared first inside that phase;
-- an opaque extension upgrade could change member semantics while retained
-  stored users remained catalog-equal;
-- a routine rename combined with a body change escaped the Modify-based stored
-  dependency guard; and
-- an explicitly named multirange type was missing from PostgreSQL's shared type
-  namespace collision check.
-
-Rename rendering now separates providers with no prerequisites from table
-renames that must follow mutations of the old physical table. New table
-dependents and source-schema drops are held until the physical rename; index,
-view, enum, and column rename providers are emitted before promoted dependents.
-Fixtures cover replica identity after an index rename, an index after a column
-bridge, and a cross-schema table rename before both a new view and old-schema
-drop.
-
-Extension version changes now fail closed when any retained catalog-proven
-dependent exists. Stored-dependency detection includes semantic routine
-rename-plus-replacement and materialized views. Range namespace keys include
-both the range and explicit multirange names. The catalog ledger now describes
-non-table owner and routine ACL attributes as blocked, connection-relative
-state rather than modeled absolute equality.
-
-Finally, scratch creation still uses pristine `template0`, but explicitly
-copies encoding, locale provider, locale, collation, and ctype from the
-connected control database and rejects a collation-version mismatch. These
-changes restart the consecutive-clean counter.
-
-Two subsequent context-blind PostgreSQL reviews inspected the frozen README,
-typed graph, implementation, tests, and catalog ledger without this plan or
-change history. Both concluded `SATISFIED/EXCITED` with no unmitigated
-high-severity correctness or completeness issue. The second review therefore
-satisfies the consecutive-clean completion gate.
-
-The reviews left three non-high follow-ups for a future climb rather than
-reasons to reopen this one:
-
-- sequence parameter reconciliation intentionally does not reposition live
-  `last_value`/`is_called` state; make that operator decision more explicit;
-- a column-rename bridge combined with a standalone sequence `OWNED BY` change
-  can produce a plan that disposable verification rejects; teach rename
-  dependency consumption about that sequence edge or fail it closed earlier;
-- development/scratch locale parity is not compared independently, although
-  each disposable database now exactly inherits its own control database's
-  environment.
-
-These are the first candidates for the next hill climb. They do not weaken the
-completed gate: one is an explicitly disclaimed runtime-data decision, one is
-caught by mandatory disposable execution before acceptance, and one concerns
-development reconciliation rather than a verified production bundle.
-
-## Claims pass
-
-After the five climbs, align README, architecture, safety, security, feature,
-and installation documents around the same precise claims:
-
-- PostgreSQL 15–18 are supported targets, with each bundle bound to one major.
-- Inventoried unsupported state fails closed; completed attribute coverage is
-  claimed only when the live ledger proves it.
-- Catalog convergence does not prove application, data-volume, lock, traffic,
-  or replica safety.
-- Opaque procedural dependencies remain an explicit PostgreSQL boundary.
-- Scratch execution is trusted code inside a dedicated cluster boundary.
-
-Documentation changes are part of each vertical slice, not a final cleanup
-that can drift from behavior.
-
-## Blind-review protocol
-
-After every climb, use a fresh context-blind PostgreSQL specialist. Give it:
-
-- README.md;
-- pgschema and all internal source packages;
-- source, planner, verification, and live PostgreSQL tests; and
-- the checked-in catalog ledgers.
-
-Do not give it this plan, prior reviews, PR descriptions, competitor notes, or
-the intended answer.
-
-Ask:
-
-1. What schema states can compare equal despite a meaningful difference?
-2. What supported-object dependencies can be ordered incorrectly?
-3. Which generated plans are logically convergent but operationally unsafe?
-4. What PostgreSQL-major, privilege, extension, role, or scratch assumptions
-   are hidden?
-5. What is the highest-severity reason not to trust this as a schema review
-   aid?
-
-Classify every finding as:
-
-- correctness: can emit invalid SQL, wrong ordering, or false convergence;
-- completeness: schema-relevant state is absent or silently equal;
-- operational: locks, data volume, WAL, replication, or rollout assumptions;
-- environment: version, role, extension, or cluster prerequisites; or
-- claim: documentation is stronger than implementation.
-
-The next hill-climb item is always the highest-severity reproducible finding.
-Fix it, block it explicitly, or narrow the claim. Do not answer a reviewer only
-with prose when an executable blocker or test can encode the boundary.
-
-## Completion gate
-
-This plan is complete when:
-
-- the dependency projector has no unclassified relevant modeled-object edges
-  across the PostgreSQL 15–18 fixture corpus;
-- the live attribute ledger is complete for all supported majors;
-- TOAST and auxiliary-relation state cannot compare silently;
-- existing-table ADD COLUMN operations expose application assumptions;
-- column rename performs no unbounded backfill without explicit consent;
-- scratch DDL lacks cluster-global authority by default;
-- all repository, race, vet, static, differential, and PostgreSQL 15–18
-  convergence suites pass; and
-- two consecutive fresh blind reviews find no unmitigated high-severity
-  correctness or completeness issue.
-
-Operational and environment limitations may remain, but they must be visible,
-actionable, and stated at the point where a developer encounters them.
+1. Add the legacy/new execution harness and the exact red CHECK fixture.
+2. Introduce typed transition dispositions and remove phase authority from
+   individual renderers.
+3. Implement CHECK expression inspection, bounded proofs, relaxed fallback,
+   assertions, and corpus fixtures.
+4. Implement unique/exclusion implication, concurrent expand swaps, contract
+   verification, and application-visible uniqueness decisions.
+5. Correlate cross-name enforcement families and preserve history-only edited
+   choreography.
+6. Audit FK, default, NOT NULL, index, and destructive-drop polarity.
+7. Run type, rename, enum, generated, identity, trigger, view/routine, RLS,
+   policy, and privilege paths through the transition matrix.
+8. Add plan-rebase invalidation/preservation tests.
+9. Regenerate documentation examples from the executable fixture corpus.
+10. Run PostgreSQL 15–18 convergence and acceptance CI, then request a fresh
+    blind PostgreSQL review.

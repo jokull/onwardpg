@@ -163,8 +163,9 @@ optional `hazards`, and a deterministic content-derived `id`. Bundle amendments
 will bind to the ID rather than a fragile statement-array index. `phase` is one
 of:
 
-- `expand`: work safe while pre-deployment code is live, before the one
-  application deployment anchored to the bundle; or
+- `expand`: an acceptance-compatible schema while pre-deployment code is live,
+  before the one application deployment anchored to the bundle. It may
+  explicitly relax enforcement so legacy and new SQL are both accepted; or
 - `contract`: final catch-up, validation, enforcement, and compatibility
   cleanup after pre-deployment instances and writers have drained.
 

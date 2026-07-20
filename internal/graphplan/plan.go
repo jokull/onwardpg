@@ -69,6 +69,7 @@ type decisions struct {
 	renameBridge    map[pgschema.ID]protocol.ManualWork
 	renameBackfill  map[pgschema.ID]protocol.ManualWork
 	renameStrategy  map[pgschema.ID]string
+	uniquePrepare   map[pgschema.ID]protocol.ManualWork
 }
 
 type renameIndex struct {
@@ -222,6 +223,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		scopeQuestions(result.Questions, current, desired)
 		return result, nil
 	}
+	changes = correlateCrossNameCheckChanges(changes, current, desired)
 	changes, tableRenames, tableRenameQuestions, tableRenameUnsupported, tableRenameAnalysis, err := resolveTableRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint, options.PreserveSurplus, options.IdentityHints)
 	if err != nil {
 		return protocol.Result{}, err
@@ -1835,6 +1837,7 @@ func equivalentAutomaticColumnReferenceAfterRename(before, after pgschema.Object
 			return false
 		}
 		before.Definition = renameIdentifierTokens(before.Definition, from.Name, to.Name)
+		before.CheckExpression = renameIdentifierTokens(before.CheckExpression, from.Name, to.Name)
 		return reflect.DeepEqual(before, next)
 	case pgschema.Index:
 		next, ok := after.(pgschema.Index)
@@ -3848,14 +3851,27 @@ func stringIn(values []string, wanted string) bool {
 func renderChange(item change.Change, current, desired *pgschema.Snapshot, createdTables map[pgschema.ID]bool, options Options, choices decisions) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	switch item.Kind {
 	case change.Create:
+		var preparation []protocol.Statement
+		if work, exists := choices.uniquePrepare[item.ID]; exists {
+			preparation = append(preparation, manualWorkStatementPhase(
+				work, protocol.PhaseContract, "unique_enforcement_preparation", "data_movement", "post_drain_writers_required",
+			))
+		}
 		if constraint, ok := item.After.(pgschema.Constraint); ok {
+			if constraint.Parent == nil && !constraintPropagatedByPartitionParent(constraint, desired) &&
+				!createdTables[constraint.Table] && constraint.Validated &&
+				(constraint.Type == pgschema.ConstraintCheck || constraint.Type == pgschema.ConstraintForeign) &&
+				!containsNotValid(constraint.Definition) {
+				return append(preparation, renderStagedConstraintCreate(constraint, protocol.PhaseContract)...), nil, nil, nil
+			}
 			statements, consumed, unsupported, err := renderConstraintCreateUsingExistingIndex(constraint, current, desired)
 			if !createdTables[constraint.Table] {
 				statements = withPhase(statements, protocol.PhaseContract, "review", "compatible_writers_required")
 			}
-			return statements, consumed, unsupported, err
+			return append(preparation, statements...), consumed, unsupported, err
 		}
-		return renderCreate(item.After, desired, createdTables, options)
+		statements, consumed, unsupported, err := renderCreate(item.After, desired, createdTables, options)
+		return append(preparation, statements...), consumed, unsupported, err
 	case change.Drop:
 		if routine, ok := item.Before.(pgschema.Routine); ok && routineDropCircular(routine, current, desired) {
 			return nil, nil, []string{"routine_drop_circular_dependency:" + routine.ObjectID().String()}, nil
@@ -4106,7 +4122,8 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		if constraintUsesMatchPartial(object) {
 			return nil, nil, []string{"foreign_key_match_partial:" + object.ObjectID().String()}, nil
 		}
-		sql := "ALTER TABLE " + qualified(object.Table.Schema, object.Table.Name) + " ADD CONSTRAINT " + quote(object.Name) + " " + object.Definition + ";"
+		table := qualified(object.Table.Schema, object.Table.Name)
+		definition := object.Definition
 		phase := "contract"
 		hazards := []string{"table_lock", "access_exclusive_lock", "validation_scan_possible", "compatible_writers_required"}
 		if object.Type == pgschema.ConstraintPrimary || object.Type == pgschema.ConstraintUnique || object.Type == pgschema.ConstraintExclusion {
@@ -4116,7 +4133,29 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			phase = "expand"
 			hazards = []string{"table_lock"}
 		}
-		return []protocol.Statement{authorizationStatement(sql, phase, "review", hazards...)}, nil, nil, nil
+		stagedValidation := !createdTables[object.Table] && object.Validated &&
+			(object.Type == pgschema.ConstraintCheck || object.Type == pgschema.ConstraintForeign) && !containsNotValid(definition)
+		if stagedValidation {
+			definition += " NOT VALID"
+			hazards = []string{"constraint_added_not_valid", "new_writes_fenced", "brief_lock", "access_exclusive_lock", "compatible_writers_required"}
+		}
+		sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + quote(object.Name) + " " + definition + ";"
+		statements := []protocol.Statement{authorizationStatement(sql, phase, "review", hazards...)}
+		if stagedValidation {
+			validate := withTimeoutGuidance(statement(
+				"ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(object.Name)+";",
+				phase, "review", true, "constraint_validation", "table_scan", "share_update_exclusive_lock",
+			), 1200000, 3000)
+			validate.BatchBoundaryBefore = true
+			statements = append(statements, validate)
+		}
+		if object.Comment != nil {
+			statements = append(statements, statement(
+				"COMMENT ON CONSTRAINT "+quote(object.Name)+" ON "+table+" IS "+literal(*object.Comment)+";",
+				phase, "safe", true,
+			))
+		}
+		return statements, nil, nil, nil
 	case pgschema.Index:
 		if object.Parent != nil {
 			// PostgreSQL propagates this index from the partitioned parent.
@@ -4905,6 +4944,8 @@ func renderDrop(object pgschema.Object) []protocol.Statement {
 func renderDropWithOptions(object pgschema.Object, options Options) []protocol.Statement {
 	var sql string
 	transactional := true
+	phase := protocol.PhaseContract
+	risk := "dangerous"
 	hazards := []string{"data_loss", "blocking_lock"}
 	switch object := object.(type) {
 	case pgschema.Schema:
@@ -4949,6 +4990,14 @@ func renderDropWithOptions(object pgschema.Object, options Options) []protocol.S
 			prefix += "IF EXISTS "
 		}
 		sql = prefix + quote(object.Name) + ";"
+		// A standalone enforcement removal is part of the compatibility
+		// envelope, not data deletion. Delaying it until contract can leave the
+		// newly deployed writer rejected by an invariant the desired schema has
+		// intentionally removed. The confirmation above the renderer still makes
+		// the lost guarantee an explicit developer decision.
+		phase = protocol.PhaseExpand
+		risk = "review"
+		hazards = constraintRemovalHazards(object)
 	case pgschema.Index:
 		if object.Parent != nil {
 			return nil
@@ -4959,6 +5008,16 @@ func renderDropWithOptions(object pgschema.Object, options Options) []protocol.S
 			hazards = []string{"data_loss", "concurrent_index_drop"}
 		} else {
 			sql = "DROP INDEX " + qualified(object.Table.Schema, object.Name) + ";"
+		}
+		if object.Unique && object.Constraint == "" {
+			phase = protocol.PhaseExpand
+			risk = "review"
+			hazards = []string{"unique_index_enforcement_removed", "duplicate_rows_possible"}
+			if transactional {
+				hazards = append(hazards, "blocking_lock")
+			} else {
+				hazards = append(hazards, "concurrent_index_drop")
+			}
 		}
 	case pgschema.View:
 		kind := "VIEW"
@@ -5001,11 +5060,27 @@ func renderDropWithOptions(object pgschema.Object, options Options) []protocol.S
 	default:
 		return nil
 	}
-	result := statement(sql, "contract", "dangerous", transactional, hazards...)
+	result := statement(sql, phase, risk, transactional, hazards...)
 	if object.ObjectID().Kind == pgschema.KindPolicy || object.ObjectID().Kind == pgschema.KindPrivilege {
 		result = withTimeoutGuidance(result, 30000, 3000)
 	}
 	return []protocol.Statement{result}
+}
+
+func constraintRemovalHazards(object pgschema.Constraint) []string {
+	hazards := []string{"constraint_relaxation", "brief_lock", "access_exclusive_lock"}
+	switch object.Type {
+	case pgschema.ConstraintCheck:
+		return append(hazards, "check_enforcement_removed", "overlap_rows_may_violate_retired_check")
+	case pgschema.ConstraintUnique, pgschema.ConstraintPrimary:
+		return append(hazards, "temporary_or_permanent_uniqueness_unenforced", "duplicate_rows_possible")
+	case pgschema.ConstraintExclusion:
+		return append(hazards, "temporary_or_permanent_exclusion_unenforced", "conflicting_rows_possible")
+	case pgschema.ConstraintForeign:
+		return append(hazards, "referential_enforcement_removed", "orphan_rows_possible", "referential_action_behavior_change")
+	default:
+		return append(hazards, "enforcement_removed")
+	}
 }
 
 func renderModify(before, after pgschema.Object, choices decisions, options Options, current, desired *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
@@ -5110,6 +5185,16 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 		if !reflect.DeepEqual(beforeNoComment, nextNoComment) {
 			if next.Constraint != "" || before.Constraint != "" {
 				return nil, nil, []string{"constraint_backed_index_modify:" + next.ObjectID().String()}, nil
+			}
+			if before.Unique {
+				statements, unsupported, err := renderUniqueIndexAcceptanceReplacement(before, next, current, options)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if len(unsupported) == 0 {
+					return statements, nil, nil, nil
+				}
+				return nil, nil, unsupported, nil
 			}
 			if options.ConcurrentIndexes {
 				if table, ok := desired.Object(next.Table); ok {
@@ -5483,6 +5568,29 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 			// the desired NOT VALID definition.
 		}
 		if !reflect.DeepEqual(beforeNoComment, nextNoComment) {
+			if before.Type != next.Type {
+				return renderUnknownConstraintKindReplacement(before, next, current)
+			}
+			if before.Type == pgschema.ConstraintCheck && next.Type == pgschema.ConstraintCheck {
+				statements, unsupported := renderCheckConstraintReplacement(before, next, current, desired)
+				if len(unsupported) > 0 {
+					return nil, nil, unsupported, nil
+				}
+				return statements, nil, nil, nil
+			}
+			if before.Type == pgschema.ConstraintForeign && next.Type == pgschema.ConstraintForeign {
+				return renderForeignKeyAcceptanceReplacement(before, next), nil, nil, nil
+			}
+			if uniqueConstraintAcceptanceWider(before, next, current, desired) {
+				return renderRelaxedUniqueConstraintReplacement(before, next, current, desired, options)
+			}
+			if before.Type == next.Type && (before.Type == pgschema.ConstraintUnique || before.Type == pgschema.ConstraintPrimary) &&
+				!uniqueConstraintAcceptanceWider(next, before, desired, current) {
+				return renderUnknownKeyConstraintReplacement(before, next, current)
+			}
+			if before.Type == pgschema.ConstraintExclusion && next.Type == pgschema.ConstraintExclusion {
+				return renderUnknownExclusionConstraintReplacement(before, next, current)
+			}
 			if options.ConcurrentIndexes && (before.Type == pgschema.ConstraintPrimary || before.Type == pgschema.ConstraintUnique) && (next.Type == pgschema.ConstraintPrimary || next.Type == pgschema.ConstraintUnique) {
 				statements, consumed, unsupported, err := renderContinuousConstraintReplacement(before, next, current, desired)
 				if err != nil {
@@ -6567,7 +6675,7 @@ func renderEnumDefinition(object pgschema.Enum) string {
 }
 
 func mutationQuestions(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, decisions, error) {
-	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), enumRewrite: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool), renameBridge: make(map[pgschema.ID]protocol.ManualWork), renameBackfill: make(map[pgschema.ID]protocol.ManualWork), renameStrategy: make(map[pgschema.ID]string)}
+	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), enumRewrite: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool), renameBridge: make(map[pgschema.ID]protocol.ManualWork), renameBackfill: make(map[pgschema.ID]protocol.ManualWork), renameStrategy: make(map[pgschema.ID]string), uniquePrepare: make(map[pgschema.ID]protocol.ManualWork)}
 	var questions []protocol.Question
 	refreshes := dependentMaterializedViewsNeedingRefresh(changes, current, desired)
 	for _, view := range refreshes {
@@ -6588,6 +6696,37 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 		}
 	}
 	for _, item := range changes {
+		if uniqueOnNewColumnOfExistingTable(item, current, desired) {
+			question := protocol.Question{
+				ID: "prepare_unique:" + item.ID.String(), Kind: "prepare_unique", Key: item.ID.String(),
+				Message:            "New uniqueness " + item.ID.String() + " uses a newly introduced column on an existing table. Confirm production rows are already conflict-free, or capture reviewed cleanup/backfill SQL before the contract build.",
+				Choices:            []string{"already_clean", "manual_sql"},
+				CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+			}
+			answer, found, err := resolver.Resolve(question)
+			if err != nil {
+				return nil, decisions, err
+			}
+			if !found {
+				questions = append(questions, question)
+			} else if answer != "already_clean" {
+				workQuestion := protocol.Question{
+					ID: "prepare_unique_sql:" + item.ID.String(), Kind: "prepare_unique_sql", Key: item.ID.String(),
+					Message:            "Supply the reviewed cleanup/backfill and verification SQL that makes " + item.ID.String() + " conflict-free after legacy writers drain.",
+					Choices:            []string{"provided"},
+					CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+				}
+				work, provided, err := resolver.ResolveManual(workQuestion)
+				if err != nil {
+					return nil, decisions, err
+				}
+				if !provided {
+					questions = append(questions, workQuestion)
+				} else {
+					decisions.uniquePrepare[item.ID] = work
+				}
+			}
+		}
 		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindComposite {
 			before, after := item.Before.(pgschema.Composite), item.After.(pgschema.Composite)
 			if compositeCascadeRequiresIntent(before, after) {
@@ -6828,6 +6967,39 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 		}
 	}
 	return questions, decisions, nil
+}
+
+func uniqueOnNewColumnOfExistingTable(item change.Change, current, desired *pgschema.Snapshot) bool {
+	if item.Kind != change.Create || current == nil || desired == nil {
+		return false
+	}
+	var table pgschema.ID
+	switch object := item.After.(type) {
+	case pgschema.Index:
+		if !object.Unique || object.Constraint != "" || object.Parent != nil {
+			return false
+		}
+		table = object.Table
+	case pgschema.Constraint:
+		if object.Parent != nil || (object.Type != pgschema.ConstraintUnique && object.Type != pgschema.ConstraintPrimary && object.Type != pgschema.ConstraintExclusion) {
+			return false
+		}
+		table = object.Table
+	default:
+		return false
+	}
+	if _, existingTable := current.Object(table); !existingTable {
+		return false
+	}
+	for _, dependency := range desired.Dependencies(item.ID) {
+		if dependency.Kind != pgschema.KindColumn {
+			continue
+		}
+		if _, exists := current.Object(dependency); !exists {
+			return true
+		}
+	}
+	return false
 }
 
 func compositeCascadeRequiresIntent(before, after pgschema.Composite) bool {
@@ -8013,6 +8185,14 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 			phase = "contract"
 			statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP DEFAULT;", phase, "safe", true))
 		} else {
+			if before.Type == after.Type {
+				// A newly deployed writer may omit a NOT NULL column only after
+				// its desired default exists. Installing or changing the desired
+				// default cannot make an old INSERT syntactically invalid, so it
+				// belongs in the acceptance envelope. Combined type/default
+				// changes stay ordered after the contract type conversion above.
+				phase = "expand"
+			}
 			statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET DEFAULT "+*after.Default+";", phase, "safe", true))
 		}
 	}
@@ -8021,7 +8201,6 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 			phase := "expand"
 			hazards := []string(nil)
 			if droppingPrimaryKeyForColumn(current, desired, after.ObjectID()) {
-				phase = "contract"
 				hazards = append(hazards, "after_primary_key_drop")
 			}
 			statements = append(statements, statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" DROP NOT NULL;", phase, "safe", true, hazards...))
@@ -8659,6 +8838,27 @@ func renderConstraintCreate(object pgschema.Constraint) []protocol.Statement {
 	return []protocol.Statement{statement(sql, "expand", "review", true, hazards...)}
 }
 
+func renderStagedConstraintCreate(object pgschema.Constraint, phase string) []protocol.Statement {
+	table := qualified(object.Table.Schema, object.Table.Name)
+	add := withTimeoutGuidance(statement(
+		"ALTER TABLE "+table+" ADD CONSTRAINT "+quote(object.Name)+" "+strings.TrimSpace(object.Definition)+" NOT VALID;",
+		phase, "review", true, "constraint_added_not_valid", "new_writes_fenced", "brief_lock", "access_exclusive_lock", "compatible_writers_required",
+	), 30000, 3000)
+	validate := withTimeoutGuidance(statement(
+		"ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(object.Name)+";",
+		phase, "review", true, "constraint_validation", "table_scan", "share_update_exclusive_lock",
+	), 1200000, 3000)
+	validate.BatchBoundaryBefore = true
+	statements := []protocol.Statement{add, validate}
+	if object.Comment != nil {
+		statements = append(statements, statement(
+			"COMMENT ON CONSTRAINT "+quote(object.Name)+" ON "+table+" IS "+literal(*object.Comment)+";",
+			phase, "safe", true,
+		))
+	}
+	return statements
+}
+
 func constraintUsesMatchPartial(object pgschema.Constraint) bool {
 	return object.Type == pgschema.ConstraintForeign && strings.Contains(strings.ToUpper(object.Definition), "MATCH PARTIAL")
 }
@@ -8783,9 +8983,15 @@ func destructiveQuestions(changes []change.Change, schemas, tables map[pgschema.
 		if item.Kind != change.Drop || coveredByParent(item.ID, schemas, tables) && !foreignKeyMustDropBeforeReferencedTable(item, tables) || implicitConstraintIndexDrop(item, changes) || propagatedPartitionChildDrop(item, changes) || propagatedPartitionChildRebuild(item, changes) {
 			continue
 		}
+		message := "The desired graph omits " + item.ID.String() + ". Confirm destructive removal."
+		if constraint, ok := item.Before.(pgschema.Constraint); ok {
+			message = "The desired graph removes " + string(constraint.Type) + " enforcement " + item.ID.String() + ". Confirm the expand schema may stop enforcing this guarantee while legacy and new code overlap."
+		} else if index, ok := item.Before.(pgschema.Index); ok && index.Unique && index.Constraint == "" {
+			message = "The desired graph removes unique-index enforcement " + item.ID.String() + ". Confirm the expand schema may admit duplicate rows while legacy and new code overlap."
+		}
 		question := protocol.Question{
 			ID: "drop:" + item.ID.String(), Kind: "drop", Key: item.ID.String(),
-			Message: "The desired graph omits " + item.ID.String() + ". Confirm destructive removal.", Choices: []string{"drop"},
+			Message: message, Choices: []string{"drop"},
 			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		}
 		_, found, err := resolver.Resolve(question)

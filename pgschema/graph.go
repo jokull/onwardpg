@@ -248,13 +248,18 @@ type Constraint struct {
 	Parent     *ID
 	Type       ConstraintType
 	Definition string
-	Validated  bool
-	NoInherit  bool
-	Deferrable bool
-	Deferred   bool
-	Reference  *ID
-	UsingIndex string
-	Comment    *string
+	// CheckExpression is PostgreSQL's catalog-deparsed CHECK predicate without
+	// the surrounding CHECK (...) presentation. Keeping it separate lets the
+	// rollout planner reason about accepted writes without scraping
+	// pg_get_constraintdef output. It is empty for non-CHECK constraints.
+	CheckExpression string `json:"-"`
+	Validated       bool
+	NoInherit       bool
+	Deferrable      bool
+	Deferred        bool
+	Reference       *ID
+	UsingIndex      string
+	Comment         *string
 }
 
 type ConstraintType string
