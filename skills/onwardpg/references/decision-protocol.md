@@ -14,7 +14,10 @@ Some catalog transitions require application-aware data work. onwardpg writes a 
 
 - Initial synchronization that must be safe while old code is live belongs in expand.
 - Final catch-up and enforcement after old writers drain belongs in contract.
-- Read-only Boolean assertions belong in `verify.sql`.
+- A required production readiness assertion stays in its named contract gate
+  pocket in `contract.sql`; do not move it to `verify.sql`.
+- Optional synthetic examples and clone-only postconditions belong in
+  `verify.sql`. They do not authorize production contract.
 - Never put test fixtures in `expand.sql` or `contract.sql`; they are deployment artifacts.
 
 Preserve generated markers and edit boundaries. After edits, `onwardpg verify` executes the exact artifact. A later `plan` may transplant an owned pocket when its scope remains valid; generator-owned conflicts stop with a three-way handoff.

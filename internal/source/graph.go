@@ -66,10 +66,6 @@ func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devUR
 }
 
 func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
-	tracker, err := newIgnoreTracker(ignores)
-	if err != nil {
-		return nil, err
-	}
 	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, err
@@ -80,6 +76,27 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 		return nil, fmt.Errorf("begin graph catalog snapshot: %w", err)
 	}
 	defer tx.Rollback(context.Background())
+	snapshot, err := InspectGraphTransaction(ctx, tx, ignores, validateIgnores)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit graph catalog snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+// InspectGraphTransaction reads a typed catalog graph inside a caller-owned
+// transaction. Contract readiness uses this to keep the catalog checkpoint
+// and all Boolean gates in one repeatable-read, read-only snapshot.
+func InspectGraphTransaction(ctx context.Context, tx pgx.Tx, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("catalog transaction is required")
+	}
+	tracker, err := newIgnoreTracker(ignores)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, "SET LOCAL search_path = pg_catalog"); err != nil {
 		return nil, fmt.Errorf("set graph catalog snapshot search_path: %w", err)
 	}
@@ -153,9 +170,6 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 		if err := tracker.Validate(); err != nil {
 			return nil, err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit graph catalog snapshot: %w", err)
 	}
 	return snapshot, nil
 }
@@ -1052,7 +1066,33 @@ SELECT n.nspname, c.relname, con.conname, pg_get_constraintdef(con.oid),
        parent_n.nspname, parent_rel.relname, parent.conname,
        c.relispartition, con.conislocal, con.coninhcount,
        inherited_parent.nspname, inherited_parent.relname, inherited_parent.conname,
-       inherited_parent.candidate_count
+       inherited_parent.candidate_count,
+       CASE WHEN con.contype = 'f' THEN ARRAY(
+         SELECT local_att.attname
+         FROM unnest(con.conkey) WITH ORDINALITY AS local_key(attnum, ord)
+         JOIN pg_attribute local_att ON local_att.attrelid = con.conrelid AND local_att.attnum = local_key.attnum
+         ORDER BY local_key.ord
+       ) ELSE ARRAY[]::name[] END,
+       CASE WHEN con.contype = 'f' THEN ARRAY(
+         SELECT referenced_att.attname
+         FROM unnest(con.confkey) WITH ORDINALITY AS referenced_key(attnum, ord)
+         JOIN pg_attribute referenced_att ON referenced_att.attrelid = con.confrelid AND referenced_att.attnum = referenced_key.attnum
+         ORDER BY referenced_key.ord
+       ) ELSE ARRAY[]::name[] END,
+       con.confmatchtype::text, con.confupdtype::text, con.confdeltype::text,
+       CASE WHEN con.contype = 'f' THEN ARRAY(
+         SELECT operator_n.nspname
+         FROM unnest(con.conpfeqop) WITH ORDINALITY AS equality(operator_oid, ord)
+         JOIN pg_operator operator ON operator.oid = equality.operator_oid
+         JOIN pg_namespace operator_n ON operator_n.oid = operator.oprnamespace
+         ORDER BY equality.ord
+       ) ELSE ARRAY[]::name[] END,
+       CASE WHEN con.contype = 'f' THEN ARRAY(
+         SELECT operator.oprname
+         FROM unnest(con.conpfeqop) WITH ORDINALITY AS equality(operator_oid, ord)
+         JOIN pg_operator operator ON operator.oid = equality.operator_oid
+         ORDER BY equality.ord
+       ) ELSE ARRAY[]::name[] END
 FROM pg_constraint con
 JOIN pg_class c ON c.oid = con.conrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -1091,6 +1131,8 @@ ORDER BY n.nspname, c.relname, con.conname`)
 		var referenceSchema, referenceName, usingIndex, parentSchema, parentTable, parentName *string
 		var inheritedSchema, inheritedTable, inheritedName *string
 		var inheritedCandidateCount *int
+		var localColumns, referencedColumns, equalitySchemas, equalityNames []string
+		var foreignMatch, foreignOnUpdate, foreignOnDelete string
 		object := pgschema.Constraint{}
 		if err := rows.Scan(
 			&namespace, &tableName, &object.Name, &object.Definition, &object.CheckExpression, &kind,
@@ -1098,6 +1140,8 @@ ORDER BY n.nspname, c.relname, con.conname`)
 			&referenceSchema, &referenceName, &usingIndex, &object.Comment, &parentSchema, &parentTable, &parentName,
 			&partition, &local, &inheritanceCount,
 			&inheritedSchema, &inheritedTable, &inheritedName, &inheritedCandidateCount,
+			&localColumns, &referencedColumns, &foreignMatch, &foreignOnUpdate, &foreignOnDelete,
+			&equalitySchemas, &equalityNames,
 		); err != nil {
 			return err
 		}
@@ -1106,6 +1150,19 @@ ORDER BY n.nspname, c.relname, con.conname`)
 			continue
 		}
 		object.Type = graphConstraintType(kind)
+		if object.Type == pgschema.ConstraintForeign {
+			object.ForeignKeyColumns = localColumns
+			object.ReferencedColumns = referencedColumns
+			object.ForeignKeyMatch = graphForeignKeyMatch(foreignMatch)
+			object.ForeignKeyOnUpdate = graphForeignKeyAction(foreignOnUpdate)
+			object.ForeignKeyOnDelete = graphForeignKeyAction(foreignOnDelete)
+			if len(equalitySchemas) != len(equalityNames) {
+				return fmt.Errorf("foreign key %s has mismatched equality operator metadata", object.ObjectID())
+			}
+			for index := range equalityNames {
+				object.ForeignKeyEqualityOperators = append(object.ForeignKeyEqualityOperators, pgschema.ForeignKeyOperator{Schema: equalitySchemas[index], Name: equalityNames[index]})
+			}
+		}
 		if usingIndex != nil {
 			object.UsingIndex = *usingIndex
 		}
@@ -2958,6 +3015,36 @@ func graphConstraintType(kind string) pgschema.ConstraintType {
 		return pgschema.ConstraintExclusion
 	default:
 		return pgschema.ConstraintType(kind)
+	}
+}
+
+func graphForeignKeyMatch(kind string) pgschema.ForeignKeyMatch {
+	switch kind {
+	case "s":
+		return pgschema.ForeignKeyMatchSimple
+	case "f":
+		return pgschema.ForeignKeyMatchFull
+	case "p":
+		return pgschema.ForeignKeyMatchPartial
+	default:
+		return pgschema.ForeignKeyMatch(kind)
+	}
+}
+
+func graphForeignKeyAction(kind string) pgschema.ForeignKeyAction {
+	switch kind {
+	case "a":
+		return pgschema.ForeignKeyNoAction
+	case "r":
+		return pgschema.ForeignKeyRestrict
+	case "c":
+		return pgschema.ForeignKeyCascade
+	case "n":
+		return pgschema.ForeignKeySetNull
+	case "d":
+		return pgschema.ForeignKeySetDefault
+	default:
+		return pgschema.ForeignKeyAction(kind)
 	}
 }
 

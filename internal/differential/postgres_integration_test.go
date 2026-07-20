@@ -621,11 +621,7 @@ CREATE TYPE app.state AS ENUM ('open');`,
 				return
 			}
 			if plan.Status == protocol.NeedsInput {
-				answers, err := directAnswers(plan)
-				if err != nil {
-					t.Fatal(err)
-				}
-				plan, err = graphplan.Build(current, desired, answers, graphplan.Options{})
+				plan, err = buildWithDirectAnswers(current, desired, plan, graphplan.Options{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -764,12 +760,52 @@ func directAnswers(result protocol.Result) (protocol.Answers, error) {
 			value = "direct"
 		case "drop":
 			value = "drop"
+		case "reconcile_contract":
+			if containsChoice(question.Choices, "assert_only") {
+				value = "assert_only"
+			} else {
+				value = "manual_sql"
+			}
+		case "reconcile_contract_sql":
+			value = "provided"
 		default:
 			return protocol.Answers{}, fmt.Errorf("differential case requires an explicit unsupported answer kind %q", question.Kind)
 		}
-		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value})
+		answer := protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint}
+		if question.Kind == "reconcile_contract_sql" {
+			answer.Manual = &protocol.ManualWork{
+				Summary: "differential fixture has no conflicting rows", ExecutionMode: "transactional",
+				Statements: []string{"SELECT 1;"}, VerificationSQL: []string{"SELECT true;"},
+			}
+		}
+		answers.Answers = append(answers.Answers, answer)
 	}
 	return answers, nil
+}
+
+func buildWithDirectAnswers(current, desired *pgschema.Snapshot, pending protocol.Result, options graphplan.Options) (protocol.Result, error) {
+	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
+	for attempt := 0; attempt < 5; attempt++ {
+		next, err := directAnswers(pending)
+		if err != nil {
+			return protocol.Result{}, err
+		}
+		answers.Answers = append(answers.Answers, next.Answers...)
+		pending, err = graphplan.Build(current, desired, answers, options)
+		if err != nil || pending.Status != protocol.NeedsInput {
+			return pending, err
+		}
+	}
+	return protocol.Result{}, fmt.Errorf("differential decisions did not converge")
+}
+
+func containsChoice(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func hasPhaseTODO(result protocol.Result, phase string) bool {

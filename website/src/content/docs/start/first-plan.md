@@ -62,10 +62,11 @@ migrations/onward/app/add-account-status/
     └── expand.sql
 ```
 
-Only non-empty phases exist. Decision receipts appear after hints are consumed;
-`verify.sql` appears when you add assertions. A required column, rename bridge,
-or other compatibility change may also generate `contract.sql` and editable
-pockets.
+Only non-empty phases exist. Decision receipts appear after hints are consumed.
+Optional `verify.sql` appears when you add clone-only assertions; required live
+readiness assertions stay in `contract.sql` and `contract-gates.json`. A
+required column, rename bridge, or other compatibility change may also generate
+`contract.sql` and editable pockets.
 
 Review every statement and hazard. Continue editing your models or DDL and rerun `onwardpg plan`; the same active feature bundle is recalculated rather than stacked into a trail of local fixups. After rebasing on newly accepted migrations, run it again: the same `PlanID` is restacked on the new replayed head.
 

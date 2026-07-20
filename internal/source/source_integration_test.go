@@ -68,6 +68,10 @@ func TestLoadGraphForeignKeyIntegration(t *testing.T) {
 	if !ok || constraint.Reference == nil || *constraint.Reference != accounts || !constraint.Deferrable || !constraint.Deferred {
 		t.Fatalf("unexpected typed foreign key: %#v", object)
 	}
+	if !reflect.DeepEqual(constraint.ForeignKeyColumns, []string{"account_id"}) || !reflect.DeepEqual(constraint.ReferencedColumns, []string{"id"}) ||
+		constraint.ForeignKeyMatch != pgschema.ForeignKeyMatchSimple || len(constraint.ForeignKeyEqualityOperators) != 1 || constraint.ForeignKeyEqualityOperators[0].Name != "=" {
+		t.Fatalf("foreign key comparison semantics were not typed: %#v", constraint)
+	}
 	dependencies := snapshot.Dependencies(foreignKey)
 	primaryKey := pgschema.Constraint{Table: accounts, Name: "accounts_pkey"}.ObjectID()
 	accountID := pgschema.Column{Table: orders, Name: "account_id"}.ObjectID()

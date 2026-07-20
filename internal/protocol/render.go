@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -64,6 +65,11 @@ func reviewComment(statement Statement) string {
 	}
 	if len(statement.Hazards) > 0 {
 		parts = append(parts, "hazards="+strings.Join(statement.Hazards, ","))
+	}
+	if len(statement.RequiresGates) > 0 {
+		gates := append([]string(nil), statement.RequiresGates...)
+		sort.Strings(gates)
+		parts = append(parts, "requires_gates="+strings.Join(gates, ","))
 	}
 	if len(parts) == 0 {
 		return ""

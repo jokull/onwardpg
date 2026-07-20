@@ -38,6 +38,7 @@ export default defineConfig({
           items: [
             { label: 'The plan command', slug: 'concepts/plan-command' },
             { label: 'Expand → deploy → contract', slug: 'concepts/expand-contract' },
+            { label: 'Contract readiness', slug: 'concepts/contract-readiness' },
             { label: 'Decisions and editable SQL', slug: 'concepts/decisions' },
             { label: 'What verification proves', slug: 'concepts/verification' },
           ],

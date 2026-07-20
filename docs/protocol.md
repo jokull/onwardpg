@@ -125,7 +125,7 @@ does not change planning semantics or prompt on a TTY.
 writes JSON to standard output by default. Its public command protocol is
 `onwardpg.plan/v4` for planned, decision, and unsupported results.
 The receipted planner document embedded in bundles retains its separately
-versioned internal `onwardpg.plan/v2` schema.
+versioned internal `onwardpg.plan/v3` schema.
 
 `--output text` is deliberately not JSON: it is a review-only rendering available only
 when a plan is ready. It emits SQL comments for phase boundaries and
@@ -145,6 +145,8 @@ Every normal planner result has this shape:
   "status": "planned | needs_input | needs_sql_edits | unsupported",
   "statements": [],
   "batches": [],
+  "contract_gates": [],
+  "reconciliations": [],
   "questions": [],
   "ignored": [],
   "unsupported": []
@@ -159,7 +161,8 @@ catalog graphs used for the decision. A fingerprint change means a new planning
 input, even if an object name appears unchanged.
 
 `planned` contains forward SQL. Each statement has `sql`, `safety`, `phase`,
-optional `hazards`, and a deterministic content-derived `id`. Bundle amendments
+optional `hazards`, gate references, a transition identity, a typed contract
+disposition, and a deterministic content-derived `id`. Bundle amendments
 will bind to the ID rather than a fragile statement-array index. `phase` is one
 of:
 
@@ -176,6 +179,13 @@ and after contract, the change requires another plan.
 `batches` are the execution boundary: a batch declares whether it is
 transactional and carries its statements. A non-transactional batch must not
 be wrapped in an explicit transaction by an executor.
+
+`contract_gates` records exact read-only data assertions and external writer
+attestations. `reconciliations` binds `assert_only` or reviewed `manual_sql`
+work to the affected transition and gate IDs. A contract enforcement statement
+must either reference its gate or carry a narrow catalog/atomic proof
+disposition; a hazard string alone is invalid. Stable statement identity and
+the bundle hash chain include these fields.
 
 `needs_input` contains typed questions and no executable plan.
 `needs_sql_edits` contains phased SQL with at least one explicit TODO and is not

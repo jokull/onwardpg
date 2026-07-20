@@ -7,8 +7,9 @@ current CLI and, against disposable PostgreSQL:
 1. initializes the checked-in `base.sql`;
 2. replaces it with `desired.sql` and runs the documented `plan` command;
 3. compares the emitted phase files byte-for-byte with the generated receipts;
-4. installs the explicitly labeled application-owned required-column edit and
-   Boolean assertion;
+4. installs the explicitly labeled application-owned required-column cleanup
+   and optional clone assertion, while preserving the generated inline contract
+   gate;
 5. runs `verify` and then read-only `verify --check`;
 6. proves positional `verify NAME` is rejected; and
 7. runs `TestRequiredColumnStagingConvergesOnPostgreSQL`, which inserts a row
@@ -22,8 +23,9 @@ checks that every named Go test in the documentation still exists.
 
 The scenarios are intentionally small:
 
-- `required-column/` captures generated expand/contract SQL, a clearly
-  separated product edit, and its verified assertion.
+- `required-column/` captures generated expand/contract SQL, the generated
+  inline contract gate, a clearly separated product edit, and an optional
+  clone assertion.
 - `type-change/` captures the real `manual_sql` expand and contract handoffs;
   it demonstrates that onwardpg does not present a bare `ALTER TYPE` as a
   rolling-deployment bridge.

@@ -124,6 +124,17 @@ func (h Hint) Validate() error {
 			return fmt.Errorf("rename_backfill strategy must be manual_sql, single_transaction, or split_plan")
 		}
 		return h.reject("from", h.From, "to", h.To, "action", h.Action)
+	case "reconcile":
+		if err := h.requireObject(); err != nil {
+			return err
+		}
+		if err := validateIdentifier(h.Object, h.Name, "name"); err != nil {
+			return err
+		}
+		if h.Strategy != "assert_only" && h.Strategy != "manual_sql" && h.Strategy != "split_plan" {
+			return fmt.Errorf("reconcile strategy must be assert_only, manual_sql, or split_plan")
+		}
+		return h.reject("from", h.From, "to", h.To, "action", h.Action)
 	case "confirm":
 		if err := h.requireObject(); err != nil {
 			return err

@@ -69,7 +69,7 @@ type decisions struct {
 	renameBridge    map[pgschema.ID]protocol.ManualWork
 	renameBackfill  map[pgschema.ID]protocol.ManualWork
 	renameStrategy  map[pgschema.ID]string
-	uniquePrepare   map[pgschema.ID]protocol.ManualWork
+	reconciliation  map[pgschema.ID]reconciliationDecision
 }
 
 type renameIndex struct {
@@ -356,6 +356,27 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		result.Guidance = partitionReconfigurationGuidance(changes, current, desired, options)
 		return result, nil
 	}
+	var reconciliationUnsupported []string
+	for _, id := range sortedReconciliationIDs(choices.reconciliation) {
+		if choices.reconciliation[id].Strategy == "split_plan" {
+			reconciliationUnsupported = append(reconciliationUnsupported, "contract_reconciliation_split_plan:"+choices.reconciliation[id].Spec.TransitionID)
+			result.Guidance = append(result.Guidance, protocol.Guidance{
+				Kind: "contract_reconciliation_split_plan", Key: choices.reconciliation[id].Spec.TransitionID,
+				Summary: "Keep the acceptance-compatible overlap in this deployment and restore desired enforcement in a later plan after legacy writers and overlap data are independently reconciled.",
+			})
+		}
+	}
+	if len(reconciliationUnsupported) > 0 {
+		return unsupportedResult(result, resolver, reconciliationUnsupported)
+	}
+	reconciliationGates := make(map[pgschema.ID][]protocol.ContractGate, len(choices.reconciliation))
+	for _, id := range sortedReconciliationIDs(choices.reconciliation) {
+		decision := choices.reconciliation[id]
+		gates, reconciliation := buildReconciliationGates(decision)
+		decision.GateIDs = append([]string(nil), reconciliation.GateIDs...)
+		choices.reconciliation[id] = decision
+		reconciliationGates[id] = gates
+	}
 	result.Guidance = append(splitPlanGuidance(changes, columnRenames, choices), partitionReconfigurationGuidance(changes, current, desired, options)...)
 	// Contract-phase providers pull every desired dependent into contract. This
 	// preserves graph order after the final phase grouping, which otherwise
@@ -489,6 +510,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	consumed := make(map[pgschema.ID]bool)
 	coordinatedConstraintChanges := coordinatedConstraintChangeIDs(changes, current, desired, options)
 	coordinatedDerivedChanges := coordinatedColumnDerivedChangeIDs(changes, current, desired, choices)
+	appliedReconciliations := make(map[pgschema.ID]bool, len(choices.reconciliation))
 	var dynamicUnsupported []string
 	scheduledChanges := change.Schedule(current, desired, changes)
 	if options.UnsortedDump {
@@ -526,6 +548,19 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			}
 			for _, id := range consumedIDs {
 				consumed[id] = true
+			}
+			reconciliationIDs := append([]pgschema.ID{item.ID}, consumedIDs...)
+			for _, reconciliationID := range reconciliationIDs {
+				decision, exists := choices.reconciliation[reconciliationID]
+				if !exists || appliedReconciliations[reconciliationID] {
+					continue
+				}
+				statements = applyReconciliation(statements, decision, reconciliationGates[reconciliationID])
+				appliedReconciliations[reconciliationID] = true
+				result.ContractGates = append(result.ContractGates, reconciliationGates[reconciliationID]...)
+				result.Reconciliations = append(result.Reconciliations, protocol.Reconciliation{
+					TransitionID: decision.Spec.TransitionID, Strategy: decision.Strategy, Work: decision.Work, GateIDs: append([]string(nil), decision.GateIDs...),
+				})
 			}
 			dynamicUnsupported = append(dynamicUnsupported, unsupported...)
 			deferUntilTableRename := item.Kind != change.Drop && dependsOnTableRenameTarget(desired, item.ID, tableRenames) && !tableRenamePrerequisite(item, tableRenames)
@@ -574,6 +609,14 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 		if len(unsupported) > 0 {
 			return unsupportedResult(result, resolver, unsupported)
+		}
+		if decision, exists := choices.reconciliation[item.ID]; exists && !appliedReconciliations[item.ID] {
+			statements = applyReconciliation(statements, decision, reconciliationGates[item.ID])
+			appliedReconciliations[item.ID] = true
+			result.ContractGates = append(result.ContractGates, reconciliationGates[item.ID]...)
+			result.Reconciliations = append(result.Reconciliations, protocol.Reconciliation{
+				TransitionID: decision.Spec.TransitionID, Strategy: decision.Strategy, Work: decision.Work, GateIDs: append([]string(nil), decision.GateIDs...),
+			})
 		}
 		for _, statement := range withPhase(statements, "contract", "review", "index_name_collision") {
 			appendStatement(&result, statement)
@@ -624,6 +667,27 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	for _, statement := range deferredTableRenameSchemaDrops {
 		appendStatement(&result, statement)
 	}
+	for _, id := range sortedReconciliationIDs(choices.reconciliation) {
+		if !appliedReconciliations[id] {
+			return unsupportedResult(result, resolver, []string{"contract_reconciliation_unbound:" + choices.reconciliation[id].Spec.TransitionID})
+		}
+	}
+	if statementsContainPhase(result.Statements, protocol.PhaseContract) {
+		writerGate := writerAttestationGate(currentFingerprint, desiredFingerprint)
+		result.ContractGates = append(result.ContractGates, writerGate)
+		for index := range result.Statements {
+			if result.Statements[index].Phase == protocol.PhaseContract {
+				result.Statements[index].RequiresGates = unionStrings(result.Statements[index].RequiresGates, []string{writerGate.ID})
+			}
+		}
+	}
+	if unsupported := markContractEnforcementDispositions(&result); len(unsupported) > 0 {
+		return unsupportedResult(result, resolver, unsupported)
+	}
+	sort.Slice(result.ContractGates, func(i, j int) bool { return result.ContractGates[i].ID < result.ContractGates[j].ID })
+	sort.Slice(result.Reconciliations, func(i, j int) bool {
+		return result.Reconciliations[i].TransitionID < result.Reconciliations[j].TransitionID
+	})
 	if options.SchemaQualifier != nil {
 		applySchemaQualifier(&result, schemaNamesForChanges(current, desired, changes), *options.SchemaQualifier)
 	}
@@ -879,13 +943,14 @@ func questionScopeFingerprint(question protocol.Question, current, desired *pgsc
 		Key            string                 `json:"key"`
 		Choices        []string               `json:"choices"`
 		AllowsFreeform bool                   `json:"allows_freeform"`
+		ScopeObjects   []string               `json:"scope_objects,omitempty"`
 		Current        []scopedQuestionObject `json:"current"`
 		Desired        []scopedQuestionObject `json:"desired"`
 	}{
 		Kind: question.Kind, Key: question.Key, Choices: append([]string(nil), question.Choices...),
-		AllowsFreeform: question.AllowsFreeform,
-		Current:        questionScopeObjects(current, question, currentExcluded),
-		Desired:        questionScopeObjects(desired, question, desiredExcluded),
+		AllowsFreeform: question.AllowsFreeform, ScopeObjects: append([]string(nil), question.ScopeObjects...),
+		Current: questionScopeObjects(current, question, currentExcluded),
+		Desired: questionScopeObjects(desired, question, desiredExcluded),
 	}
 	if len(document.Current) == 0 && len(document.Desired) == 0 {
 		return ""
@@ -902,6 +967,9 @@ func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Questio
 	selectedNames := map[string]bool{question.Key: true}
 	for _, choice := range question.Choices {
 		selectedNames[choice] = true
+	}
+	for _, name := range question.ScopeObjects {
+		selectedNames[name] = true
 	}
 	selected := make(map[pgschema.ID]bool)
 	ids := snapshot.IDs()
@@ -1131,6 +1199,24 @@ func schemaNamesForChanges(current, desired *pgschema.Snapshot, changes []change
 func applySchemaQualifier(result *protocol.Result, schemas map[string]bool, qualifier string) {
 	for i := range result.Statements {
 		result.Statements[i].SQL = qualifySQL(result.Statements[i].SQL, schemas, qualifier)
+	}
+	for i := range result.ContractGates {
+		if result.ContractGates[i].BooleanSQL != "" {
+			result.ContractGates[i].BooleanSQL = qualifySQL(result.ContractGates[i].BooleanSQL, schemas, qualifier)
+		}
+	}
+	for i := range result.Reconciliations {
+		if result.Reconciliations[i].Work == nil {
+			continue
+		}
+		work := *result.Reconciliations[i].Work
+		for index := range work.Statements {
+			work.Statements[index] = qualifySQL(work.Statements[index], schemas, qualifier)
+		}
+		for index := range work.VerificationSQL {
+			work.VerificationSQL[index] = qualifySQL(work.VerificationSQL[index], schemas, qualifier)
+		}
+		result.Reconciliations[i].Work = &work
 	}
 }
 
@@ -3851,27 +3937,21 @@ func stringIn(values []string, wanted string) bool {
 func renderChange(item change.Change, current, desired *pgschema.Snapshot, createdTables map[pgschema.ID]bool, options Options, choices decisions) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	switch item.Kind {
 	case change.Create:
-		var preparation []protocol.Statement
-		if work, exists := choices.uniquePrepare[item.ID]; exists {
-			preparation = append(preparation, manualWorkStatementPhase(
-				work, protocol.PhaseContract, "unique_enforcement_preparation", "data_movement", "post_drain_writers_required",
-			))
-		}
 		if constraint, ok := item.After.(pgschema.Constraint); ok {
 			if constraint.Parent == nil && !constraintPropagatedByPartitionParent(constraint, desired) &&
 				!createdTables[constraint.Table] && constraint.Validated &&
 				(constraint.Type == pgschema.ConstraintCheck || constraint.Type == pgschema.ConstraintForeign) &&
 				!containsNotValid(constraint.Definition) {
-				return append(preparation, renderStagedConstraintCreate(constraint, protocol.PhaseContract)...), nil, nil, nil
+				return renderStagedConstraintCreate(constraint, protocol.PhaseContract), nil, nil, nil
 			}
 			statements, consumed, unsupported, err := renderConstraintCreateUsingExistingIndex(constraint, current, desired)
 			if !createdTables[constraint.Table] {
 				statements = withPhase(statements, protocol.PhaseContract, "review", "compatible_writers_required")
 			}
-			return append(preparation, statements...), consumed, unsupported, err
+			return statements, consumed, unsupported, err
 		}
 		statements, consumed, unsupported, err := renderCreate(item.After, desired, createdTables, options)
-		return append(preparation, statements...), consumed, unsupported, err
+		return statements, consumed, unsupported, err
 	case change.Drop:
 		if routine, ok := item.Before.(pgschema.Routine); ok && routineDropCircular(routine, current, desired) {
 			return nil, nil, []string{"routine_drop_circular_dependency:" + routine.ObjectID().String()}, nil
@@ -4088,12 +4168,6 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			}
 			statements = append(statements,
 				statement(
-					"-- ONWARDPG TODO: deploy code that writes "+object.ObjectID().String()+", then replace this comment with a reviewed backfill for existing rows.\n"+
-						"-- Expected effect: every row has a product-correct value before the NOT NULL contract runs.\n"+
-						"-- Add a boolean assertion to verify.sql proving no NULL values remain.",
-					"contract", "manual", true, "manual_sql", "data_movement", "post_drain_backfill_required",
-				),
-				statement(
 					"ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;",
 					"contract", "review", true, "table_scan", "access_exclusive_lock", "compatibility_removal",
 				),
@@ -4133,7 +4207,7 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			phase = "expand"
 			hazards = []string{"table_lock"}
 		}
-		stagedValidation := !createdTables[object.Table] && object.Validated &&
+		stagedValidation := !createdTables[object.Table] && !tableIsPartitioned(desired, object.Table) && object.Validated &&
 			(object.Type == pgschema.ConstraintCheck || object.Type == pgschema.ConstraintForeign) && !containsNotValid(definition)
 		if stagedValidation {
 			definition += " NOT VALID"
@@ -4180,6 +4254,9 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		if object.Unique && !createdTables[object.Table] {
 			phase = "contract"
 			hazards = append(hazards, "compatible_writers_required")
+		}
+		if object.Table.Kind == pgschema.KindMatView {
+			hazards = append(hazards, "materialized_view_data_derived")
 		}
 		statements := []protocol.Statement{statement(strings.TrimSuffix(sql, ";")+";", phase, "review", transactional, hazards...)}
 		if object.Comment != nil {
@@ -5579,14 +5656,14 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 				return statements, nil, nil, nil
 			}
 			if before.Type == pgschema.ConstraintForeign && next.Type == pgschema.ConstraintForeign {
-				return renderForeignKeyAcceptanceReplacement(before, next), nil, nil, nil
+				return renderForeignKeyAcceptanceReplacement(before, next, desired), nil, nil, nil
 			}
 			if uniqueConstraintAcceptanceWider(before, next, current, desired) {
 				return renderRelaxedUniqueConstraintReplacement(before, next, current, desired, options)
 			}
 			if before.Type == next.Type && (before.Type == pgschema.ConstraintUnique || before.Type == pgschema.ConstraintPrimary) &&
 				!uniqueConstraintAcceptanceWider(next, before, desired, current) {
-				return renderUnknownKeyConstraintReplacement(before, next, current)
+				return renderUnknownKeyConstraintReplacement(before, next, current, desired, options)
 			}
 			if before.Type == pgschema.ConstraintExclusion && next.Type == pgschema.ConstraintExclusion {
 				return renderUnknownExclusionConstraintReplacement(before, next, current)
@@ -6675,7 +6752,7 @@ func renderEnumDefinition(object pgschema.Enum) string {
 }
 
 func mutationQuestions(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, decisions, error) {
-	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), enumRewrite: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool), renameBridge: make(map[pgschema.ID]protocol.ManualWork), renameBackfill: make(map[pgschema.ID]protocol.ManualWork), renameStrategy: make(map[pgschema.ID]string), uniquePrepare: make(map[pgschema.ID]protocol.ManualWork)}
+	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), enumRewrite: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool), renameBridge: make(map[pgschema.ID]protocol.ManualWork), renameBackfill: make(map[pgschema.ID]protocol.ManualWork), renameStrategy: make(map[pgschema.ID]string), reconciliation: make(map[pgschema.ID]reconciliationDecision)}
 	var questions []protocol.Question
 	refreshes := dependentMaterializedViewsNeedingRefresh(changes, current, desired)
 	for _, view := range refreshes {
@@ -6696,35 +6773,41 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 		}
 	}
 	for _, item := range changes {
-		if uniqueOnNewColumnOfExistingTable(item, current, desired) {
-			question := protocol.Question{
-				ID: "prepare_unique:" + item.ID.String(), Kind: "prepare_unique", Key: item.ID.String(),
-				Message:            "New uniqueness " + item.ID.String() + " uses a newly introduced column on an existing table. Confirm production rows are already conflict-free, or capture reviewed cleanup/backfill SQL before the contract build.",
-				Choices:            []string{"already_clean", "manual_sql"},
-				CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
-			}
+		if spec, required := reconciliationSpecForChange(item, current, desired); required {
+			question := reconciliationQuestion(spec, currentFingerprint, desiredFingerprint)
+			question.ScopeFingerprint = questionScopeFingerprint(question, current, desired)
 			answer, found, err := resolver.Resolve(question)
 			if err != nil {
 				return nil, decisions, err
 			}
 			if !found {
 				questions = append(questions, question)
-			} else if answer != "already_clean" {
-				workQuestion := protocol.Question{
-					ID: "prepare_unique_sql:" + item.ID.String(), Kind: "prepare_unique_sql", Key: item.ID.String(),
-					Message:            "Supply the reviewed cleanup/backfill and verification SQL that makes " + item.ID.String() + " conflict-free after legacy writers drain.",
-					Choices:            []string{"provided"},
-					CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+			} else {
+				decision := reconciliationDecision{Spec: spec, Strategy: answer, ScopeFingerprint: question.ScopeFingerprint}
+				if answer == "manual_sql" {
+					workQuestion := reconciliationManualQuestion(spec, currentFingerprint, desiredFingerprint)
+					workQuestion.ScopeFingerprint = questionScopeFingerprint(workQuestion, current, desired)
+					work, provided, err := resolver.ResolveManual(workQuestion)
+					if err != nil {
+						return nil, decisions, err
+					}
+					if !provided {
+						questions = append(questions, workQuestion)
+					} else if len(work.VerificationSQL) == 0 {
+						return nil, decisions, fmt.Errorf("contract reconciliation %s requires at least one boolean verification query", spec.TransitionID)
+					} else {
+						// The agent-facing manual_sql hint deliberately contains no
+						// SQL. When the planner already has an exact postcondition,
+						// replace the generated TODO verifier with that expression so
+						// only product cleanup remains editable and contract readiness
+						// never depends on a placeholder in plan.json.
+						if spec.BooleanSQL != "" && len(work.VerificationSQL) == 1 && strings.Contains(work.VerificationSQL[0], "ONWARDPG TODO") {
+							work.VerificationSQL[0] = spec.BooleanSQL
+						}
+						decision.Work = &work
+					}
 				}
-				work, provided, err := resolver.ResolveManual(workQuestion)
-				if err != nil {
-					return nil, decisions, err
-				}
-				if !provided {
-					questions = append(questions, workQuestion)
-				} else {
-					decisions.uniquePrepare[item.ID] = work
-				}
+				decisions.reconciliation[item.ID] = decision
 			}
 		}
 		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindComposite {
@@ -6946,6 +7029,15 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 				questions = append(questions, question)
 			} else {
 				decisions.notNullStrategy[item.ID] = answer
+				if answer == "staged" {
+					if _, reusable := preservedValidatedNotNullCheck(current, desired, after); reusable {
+						continue
+					}
+				}
+				spec := notNullReconciliationSpec(before, after)
+				scopeQuestion := reconciliationQuestion(spec, currentFingerprint, desiredFingerprint)
+				scope := questionScopeFingerprint(scopeQuestion, current, desired)
+				reconciliation := reconciliationDecision{Spec: spec, Strategy: "assert_only", ScopeFingerprint: scope}
 				if answer == "staged_with_backfill" {
 					backfillQuestion := protocol.Question{
 						ID: "backfill_not_null:" + item.ID.String(), Kind: "backfill_not_null", Key: item.ID.String(),
@@ -6960,46 +7052,19 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 					if !provided {
 						questions = append(questions, backfillQuestion)
 					} else {
+						if len(work.VerificationSQL) == 0 {
+							return nil, decisions, fmt.Errorf("NOT NULL backfill %s requires at least one boolean verification query", item.ID)
+						}
 						decisions.notNullBackfill[item.ID] = work
+						reconciliation.Strategy = "manual_sql"
+						reconciliation.Work = &work
 					}
 				}
+				decisions.reconciliation[item.ID] = reconciliation
 			}
 		}
 	}
 	return questions, decisions, nil
-}
-
-func uniqueOnNewColumnOfExistingTable(item change.Change, current, desired *pgschema.Snapshot) bool {
-	if item.Kind != change.Create || current == nil || desired == nil {
-		return false
-	}
-	var table pgschema.ID
-	switch object := item.After.(type) {
-	case pgschema.Index:
-		if !object.Unique || object.Constraint != "" || object.Parent != nil {
-			return false
-		}
-		table = object.Table
-	case pgschema.Constraint:
-		if object.Parent != nil || (object.Type != pgschema.ConstraintUnique && object.Type != pgschema.ConstraintPrimary && object.Type != pgschema.ConstraintExclusion) {
-			return false
-		}
-		table = object.Table
-	default:
-		return false
-	}
-	if _, existingTable := current.Object(table); !existingTable {
-		return false
-	}
-	for _, dependency := range desired.Dependencies(item.ID) {
-		if dependency.Kind != pgschema.KindColumn {
-			continue
-		}
-		if _, exists := current.Object(dependency); !exists {
-			return true
-		}
-	}
-	return false
 }
 
 func compositeCascadeRequiresIntent(before, after pgschema.Composite) bool {
@@ -8243,14 +8308,12 @@ func renderSetNotNull(after pgschema.Column, choices decisions, current, desired
 			statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),
 		}, nil
 	case "staged_with_backfill":
-		work, exists := choices.notNullBackfill[after.ObjectID()]
-		if !exists {
+		if _, exists := choices.notNullBackfill[after.ObjectID()]; !exists {
 			return nil, fmt.Errorf("missing NOT NULL backfill for %s", after.ObjectID())
 		}
 		check := notNullCheckName(after.ObjectID())
 		return []protocol.Statement{
 			statement("ALTER TABLE "+table+" ADD CONSTRAINT "+quote(check)+" CHECK ("+column+" IS NOT NULL) NOT VALID;", "contract", "review", true, "share_row_exclusive_lock", "post_drain_writers_required"),
-			manualWorkStatement(work, "application_backfill", "data_movement"),
 			statement("ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(check)+";", "contract", "review", true, "table_scan"),
 			statement("ALTER TABLE "+table+" ALTER COLUMN "+column+" SET NOT NULL;", "contract", "review", true, "access_exclusive_lock"),
 			statement("ALTER TABLE "+table+" DROP CONSTRAINT "+quote(check)+";", "contract", "review", true, "access_exclusive_lock"),

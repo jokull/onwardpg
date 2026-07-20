@@ -138,14 +138,11 @@ func TestBuildIncomparableUniqueConstraintUsesLooseEnvelope(t *testing.T) {
 			}
 		}
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 2 || plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[1].Phase != protocol.PhaseContract {
+	plan := buildWithAssertOnlyReconciliations(t, current, desired, Options{})
+	if plan.Status != protocol.Planned || len(plan.Statements) != 3 || plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[2].Phase != protocol.PhaseContract {
 		t.Fatalf("incomparable unique constraint did not use loose envelope: %#v", plan)
 	}
-	if !containsString(plan.Statements[0].Hazards, "temporary_uniqueness_unenforced") || !strings.Contains(plan.Statements[1].SQL, `UNIQUE (package_component_id, direction)`) {
+	if !containsString(plan.Statements[0].Hazards, "temporary_uniqueness_unenforced") || !strings.Contains(plan.Statements[2].SQL, `UNIQUE (package_component_id, direction)`) {
 		t.Fatalf("incomparable unique envelope SQL/hazards=%#v", plan.Statements)
 	}
 }
@@ -189,22 +186,22 @@ func TestBuildCapturesPreparationForUniqueIndexOnNewColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "prepare_unique" {
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "reconcile_contract" {
 		t.Fatalf("OTP-style uniqueness did not request preparation: %#v", pending)
 	}
 	answers := protocol.Answers{
 		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
-		Answers: []protocol.Answer{{Kind: "prepare_unique", Key: index.ObjectID().String(), Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
+		Answers: []protocol.Answer{{Kind: "reconcile_contract", Key: index.ObjectID().String(), Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
 	}
 	pending, err = Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "prepare_unique_sql" {
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "reconcile_contract_sql" {
 		t.Fatalf("OTP-style uniqueness did not request SQL: %#v", pending)
 	}
 	answers.Answers = append(answers.Answers, protocol.Answer{
-		Kind: "prepare_unique_sql", Key: index.ObjectID().String(), Value: "provided", QuestionFingerprint: pending.Questions[0].ScopeFingerprint,
+		Kind: "reconcile_contract_sql", Key: index.ObjectID().String(), Value: "provided", QuestionFingerprint: pending.Questions[0].ScopeFingerprint,
 		Manual: &protocol.ManualWork{
 			Summary: "dedupe expired OTP rows", ExecutionMode: "transactional",
 			Statements:      []string{`DELETE FROM "public"."otp" a USING "public"."otp" b WHERE a.email = b.email AND a.purpose = b.purpose AND a.ctid < b.ctid;`},
@@ -242,15 +239,12 @@ func TestBuildUnknownUniqueIndexReplacementUsesLooseEnvelope(t *testing.T) {
 		`scope = 'trip_addon' AND stripe_payment_intent_id IS NULL`,
 		`scope = 'trip_addon' AND completed_at IS NULL`,
 	)
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 2 {
+	plan := buildWithAssertOnlyReconciliations(t, current, desired, Options{ConcurrentIndexes: true})
+	if plan.Status != protocol.Planned || len(plan.Statements) != 3 {
 		t.Fatalf("partial unique replacement=%#v", plan)
 	}
 	if plan.Statements[0].Phase != protocol.PhaseExpand || !strings.Contains(plan.Statements[0].SQL, "DROP INDEX CONCURRENTLY") ||
-		plan.Statements[1].Phase != protocol.PhaseContract || !strings.Contains(plan.Statements[1].SQL, "CREATE UNIQUE INDEX CONCURRENTLY") {
+		plan.Statements[2].Phase != protocol.PhaseContract || !strings.Contains(plan.Statements[2].SQL, "CREATE UNIQUE INDEX CONCURRENTLY") {
 		t.Fatalf("unknown uniqueness did not use a loose overlap envelope: %#v", plan.Statements)
 	}
 	if containsString(plan.Statements[0].Hazards, "data_loss") || !containsString(plan.Statements[0].Hazards, "temporary_uniqueness_unenforced") {
@@ -283,15 +277,25 @@ func TestBuildForeignKeyMutationUsesLooseAcceptanceEnvelope(t *testing.T) {
 	orders := pgschema.Table{Schema: "public", Name: "orders"}
 	accounts := pgschema.Table{Schema: "public", Name: "accounts"}
 	users := pgschema.Table{Schema: "public", Name: "users"}
+	owner := pgschema.Column{Table: orders.ObjectID(), Name: "owner_id", Type: "bigint"}
+	accountIDColumn := pgschema.Column{Table: accounts.ObjectID(), Name: "id", Type: "bigint", NotNull: true}
+	userIDColumn := pgschema.Column{Table: users.ObjectID(), Name: "id", Type: "bigint", NotNull: true}
 	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
-		for _, object := range []pgschema.Object{orders, accounts, users} {
+		for _, object := range []pgschema.Object{orders, accounts, users, owner, accountIDColumn, userIDColumn} {
 			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, column := range []pgschema.Column{owner, accountIDColumn, userIDColumn} {
+			if err := snapshot.AddDependency(column.ObjectID(), column.Table); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 	accountID, userID := accounts.ObjectID(), users.ObjectID()
-	before := pgschema.Constraint{Table: orders.ObjectID(), Name: "orders_owner_fkey", Type: pgschema.ConstraintForeign, Definition: `FOREIGN KEY (owner_id) REFERENCES accounts(id) ON DELETE CASCADE`, Reference: &accountID, Validated: true}
+	before := pgschema.Constraint{Table: orders.ObjectID(), Name: "orders_owner_fkey", Type: pgschema.ConstraintForeign, Definition: `FOREIGN KEY (owner_id) REFERENCES accounts(id) ON DELETE CASCADE`, Reference: &accountID, Validated: true,
+		ForeignKeyColumns: []string{"owner_id"}, ReferencedColumns: []string{"id"}, ForeignKeyMatch: pgschema.ForeignKeyMatchSimple,
+		ForeignKeyEqualityOperators: []pgschema.ForeignKeyOperator{{Schema: "pg_catalog", Name: "="}}}
 	after := before
 	after.Definition = `FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE SET NULL`
 	after.Reference = &userID
@@ -309,11 +313,8 @@ func TestBuildForeignKeyMutationUsesLooseAcceptanceEnvelope(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 3 {
+	plan := buildWithAssertOnlyReconciliations(t, current, desired, Options{})
+	if plan.Status != protocol.Planned || len(plan.Statements) != 4 {
 		t.Fatalf("foreign-key envelope=%#v", plan)
 	}
 	if plan.Statements[0].Phase != protocol.PhaseExpand || !strings.Contains(plan.Statements[0].SQL, "DROP CONSTRAINT") {
@@ -324,7 +325,7 @@ func TestBuildForeignKeyMutationUsesLooseAcceptanceEnvelope(t *testing.T) {
 			t.Fatalf("desired foreign key restored before contract: %#v", item)
 		}
 	}
-	if !strings.Contains(plan.Statements[1].SQL, "NOT VALID") || !strings.Contains(plan.Statements[2].SQL, "VALIDATE CONSTRAINT") {
+	if !strings.Contains(plan.Statements[1].SQL, "NOT VALID") || !strings.Contains(plan.Statements[2].SQL, "DO $onwardpg$") || !strings.Contains(plan.Statements[3].SQL, "VALIDATE CONSTRAINT") {
 		t.Fatalf("foreign-key restoration was not staged: %#v", plan.Statements)
 	}
 }
@@ -359,16 +360,13 @@ func TestBuildExclusionMutationUsesLooseAcceptanceEnvelope(t *testing.T) {
 			}
 		}
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 2 ||
-		plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[1].Phase != protocol.PhaseContract {
+	plan := buildWithManualReconciliation(t, current, desired, Options{}, `DELETE FROM "public"."bookings" a USING "public"."bookings" b WHERE a.ctid < b.ctid AND a.period -|- b.period;`, `SELECT NOT EXISTS (SELECT 1 FROM "public"."bookings" a JOIN "public"."bookings" b ON a.ctid < b.ctid AND a.period -|- b.period);`)
+	if plan.Status != protocol.Planned || len(plan.Statements) != 4 ||
+		plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[3].Phase != protocol.PhaseContract {
 		t.Fatalf("exclusion mutation did not use loose envelope: %#v", plan)
 	}
 	if !containsString(plan.Statements[0].Hazards, "temporary_exclusion_unenforced") ||
-		!strings.Contains(plan.Statements[1].SQL, `period WITH -|-`) {
+		!strings.Contains(plan.Statements[3].SQL, `period WITH -|-`) {
 		t.Fatalf("exclusion envelope SQL/hazards=%#v", plan.Statements)
 	}
 }
@@ -410,16 +408,13 @@ func TestBuildConstraintKindChangeUsesLooseAcceptanceEnvelope(t *testing.T) {
 	if err := desired.AddDependency(after.ObjectID(), index.ObjectID()); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 2 ||
-		plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[1].Phase != protocol.PhaseContract {
+	plan := buildWithAssertOnlyReconciliations(t, current, desired, Options{})
+	if plan.Status != protocol.Planned || len(plan.Statements) != 3 ||
+		plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[2].Phase != protocol.PhaseContract {
 		t.Fatalf("constraint-kind change did not use loose envelope: %#v", plan)
 	}
 	if !strings.Contains(plan.Statements[0].SQL, `DROP CONSTRAINT "jobs_state_guard"`) ||
-		!strings.Contains(plan.Statements[1].SQL, `UNIQUE (state)`) {
+		!strings.Contains(plan.Statements[2].SQL, `UNIQUE (state)`) {
 		t.Fatalf("constraint-kind envelope SQL=%#v", plan.Statements)
 	}
 }

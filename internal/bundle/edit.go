@@ -357,6 +357,8 @@ func sameOptionalBytes(left []byte, leftExists bool, right []byte, rightExists b
 }
 
 func prepareEditedArtifact(manifest Manifest, files map[string][]byte) (Artifact, error) {
+	delete(files, contractGateOverridesPath)
+	manifest.ContractGateOverridesDigest = ""
 	previous := manifest.Phases
 	manifest.Phases = make(map[string]PhaseArtifact)
 	for _, phase := range editablePhases {
@@ -385,11 +387,29 @@ func prepareEditedArtifact(manifest Manifest, files map[string][]byte) (Artifact
 	manifest.PhaseSource = "edited"
 	manifest.State = string(protocol.Planned)
 	manifest.VerificationDigest = ""
+	manifest.ExpandCheckpointDigest = ""
+	delete(files, "expand-checkpoint.json")
 	if verification, exists := files["verify.sql"]; exists {
 		if _, err := ParseAssertions(verification); err != nil {
 			return Artifact{}, fmt.Errorf("parse verify.sql: %w", err)
 		}
 		manifest.VerificationDigest = Digest(verification)
+	}
+	var result protocol.Result
+	if err := json.Unmarshal(files["plan.json"], &result); err != nil {
+		return Artifact{}, fmt.Errorf("decode plan.json for edited contract gates: %w", err)
+	}
+	overrides, err := editedContractGateOverrides(result, files[filepath.ToSlash(filepath.Join("phases", protocol.PhaseContract+".sql"))])
+	if err != nil {
+		return Artifact{}, err
+	}
+	if len(overrides) > 0 {
+		body, err := jsonDocument(overrides)
+		if err != nil {
+			return Artifact{}, err
+		}
+		files[contractGateOverridesPath] = body
+		manifest.ContractGateOverridesDigest = Digest(body)
 	}
 	if manifest.History != nil {
 		digest, err := HistoryEntryDigest(manifest)
@@ -408,6 +428,35 @@ func prepareEditedArtifact(manifest Manifest, files map[string][]byte) (Artifact
 		return Artifact{}, fmt.Errorf("validate edited bundle: %w", err)
 	}
 	return artifact, nil
+}
+
+func editedContractGateOverrides(result protocol.Result, contractSQL []byte) ([]protocol.ContractGate, error) {
+	const assertionPrefix = "DO $onwardpg$ BEGIN IF NOT COALESCE(("
+	body := string(contractSQL)
+	var overrides []protocol.ContractGate
+	for _, gate := range result.ContractGates {
+		if !strings.Contains(gate.BooleanSQL, "ONWARDPG TODO") {
+			continue
+		}
+		suffix := "), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: " + gate.ID + "'"
+		suffixAt := strings.Index(body, suffix)
+		if suffixAt < 0 {
+			return nil, fmt.Errorf("edited contract SQL must preserve and resolve the assertion wrapper for placeholder gate %s", gate.ID)
+		}
+		prefixAt := strings.LastIndex(body[:suffixAt], assertionPrefix)
+		if prefixAt < 0 {
+			return nil, fmt.Errorf("edited contract SQL has no assertion query for placeholder gate %s", gate.ID)
+		}
+		query := strings.TrimSpace(body[prefixAt+len(assertionPrefix) : suffixAt])
+		upper := strings.ToUpper(query)
+		if query == "" || strings.Contains(query, "ONWARDPG TODO") || (!strings.HasPrefix(upper, "SELECT ") && !strings.HasPrefix(upper, "WITH ")) {
+			return nil, fmt.Errorf("edited assertion for placeholder gate %s must be one resolved read-only Boolean SELECT", gate.ID)
+		}
+		override := gate
+		override.BooleanSQL = query
+		overrides = append(overrides, override)
+	}
+	return overrides, nil
 }
 
 func isEditablePhasePath(name string) bool {
@@ -439,8 +488,17 @@ func InstallReceipts(directory string, expected Artifact) error {
 	if err != nil {
 		return err
 	}
-	if current.Manifest.History == nil || expected.Manifest.History == nil || current.Manifest.History.EntryDigest != expected.Manifest.History.EntryDigest {
+	unreceiptedExpected, err := withoutExpandCheckpoint(expected)
+	if err != nil {
+		return err
+	}
+	if !artifactsEqual(current, unreceiptedExpected) {
 		return fmt.Errorf("bundle changed after disposable verification")
+	}
+	if checkpoint, exists := expected.Files["expand-checkpoint.json"]; exists {
+		if err := installReceiptFile(directory, "expand-checkpoint.json", checkpoint); err != nil {
+			return err
+		}
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(directory), ".onwardpg-manifest-")
 	if err != nil {
@@ -452,7 +510,7 @@ func InstallReceipts(directory string, expected Artifact) error {
 		temporary.Close()
 		return err
 	}
-	if _, err := temporary.Write(current.Files["manifest.json"]); err != nil {
+	if _, err := temporary.Write(expected.Files["manifest.json"]); err != nil {
 		temporary.Close()
 		return err
 	}
@@ -473,8 +531,60 @@ func InstallReceipts(directory string, expected Artifact) error {
 	if err != nil {
 		return fmt.Errorf("validate bundle after receipt installation: %w", err)
 	}
-	if !artifactsEqual(installed, current) {
+	if !artifactsEqual(installed, expected) {
 		return fmt.Errorf("bundle changed while receipts were installed")
+	}
+	return nil
+}
+
+func withoutExpandCheckpoint(artifact Artifact) (Artifact, error) {
+	files := make(map[string][]byte, len(artifact.Files))
+	for name, body := range artifact.Files {
+		if name != "expand-checkpoint.json" {
+			files[name] = append([]byte(nil), body...)
+		}
+	}
+	manifest := artifact.Manifest
+	manifest.ExpandCheckpointDigest = ""
+	if manifest.History != nil {
+		digest, err := HistoryEntryDigest(manifest)
+		if err != nil {
+			return Artifact{}, err
+		}
+		manifest.History.EntryDigest = digest
+	}
+	body, err := jsonDocument(manifest)
+	if err != nil {
+		return Artifact{}, err
+	}
+	files["manifest.json"] = body
+	return Artifact{Manifest: manifest, Files: files}, nil
+}
+
+func installReceiptFile(directory, name string, body []byte) error {
+	temporary, err := os.CreateTemp(directory, ".onwardpg-receipt-")
+	if err != nil {
+		return fmt.Errorf("create temporary %s: %w", name, err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o644); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(body); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, filepath.Join(directory, name)); err != nil {
+		return fmt.Errorf("install %s: %w", name, err)
 	}
 	return nil
 }

@@ -52,6 +52,27 @@ onwardpg verify --through expand
 
 With no `--bundle`, verify selects the worktree's active plan. It replays exact history and bundle bytes in disposable databases, runs assertions, and proves catalog convergence. `--check` is the read-only CI gate; partial verification proves both the prefix and its continuation without claiming either ran in a real environment. Positional bundle names are rejected.
 
+## `contract check`
+
+```sh
+onwardpg contract check \
+  [--target NAME] \
+  [--bundle NAME] \
+  --environment production \
+  --database-env PROD_READONLY_DATABASE_URL \
+  [--evidence deploy-readiness.json] \
+  [--statement-timeout 30s] [--config .onwardpg.toml]
+```
+
+Require the selected bundle to be the history head, compare the caller database
+with its receipted post-expand graph, evaluate exact data gates, and validate
+expiring writer evidence. The connection runs one repeatable-read, read-only
+snapshot; this command has no production migration execution path. Its
+`onwardpg.contract-readiness/v1` report carries bundle/PlanID identity,
+expected and observed fingerprints, gate results, findings, and a digest.
+`--statement-timeout` defaults to 30 seconds. See
+[contract readiness](/concepts/contract-readiness/).
+
 ## `drift check`
 
 ```sh

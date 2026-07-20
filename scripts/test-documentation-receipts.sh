@@ -18,12 +18,25 @@ cd "$fixture"
 cp "$receipt_root/desired.sql" schema.sql
 
 set +e
-"$binary" plan add-booking-status >plan.json
+"$binary" plan add-booking-status >questions.json
+questions_exit=$?
+set -e
+test "$questions_exit" -eq 2
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"needs_input"' questions.json
+grep -q '"choices":\["assert_only","manual_sql","split_plan"\]' questions.json
+
+set +e
+"$binary" plan add-booking-status \
+  --hint '{"kind":"reconcile","object":"column","name":["app","bookings","status"],"strategy":"manual_sql"}' \
+  --hint '{"kind":"manual_sql","action":"reconcile_contract_sql","object":"column","name":["app","bookings","status"]}' \
+  >plan.json
 plan_exit=$?
 set -e
 test "$plan_exit" -eq 2
 
 if [[ "${ONWARDPG_DOC_RECEIPTS_PRINT:-}" == "1" ]]; then
+  printf '%s\n' '--- questions.json ---'
+  sed -n '1,200p' questions.json
   printf '%s\n' '--- plan.json ---'
   sed -n '1,240p' plan.json
 fi
@@ -54,12 +67,16 @@ if grep -q 'UPDATE .*bookings' "$expand"; then
   echo "required-column backfill unexpectedly runs while legacy writers remain" >&2
   exit 1
 fi
-grep -q 'ONWARDPG TODO: deploy code that writes column:app:bookings:status' "$contract"
+grep -q 'ONWARDPG TODO: provide reconcile_contract_sql SQL for app.bookings.status' "$contract"
+grep -q 'SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);' "$contract"
+grep -q 'onwardpg contract gate failed:' "$contract"
 grep -q 'ALTER COLUMN "status" SET NOT NULL;' "$contract"
 
-todo_line=$(grep -n 'ONWARDPG TODO' "$contract" | cut -d: -f1)
+todo_line=$(grep -n 'ONWARDPG TODO' "$contract" | head -1 | cut -d: -f1)
+assertion_line=$(grep -n 'onwardpg contract gate failed:' "$contract" | cut -d: -f1)
 enforcement_line=$(grep -n 'SET NOT NULL' "$contract" | cut -d: -f1)
 test "$todo_line" -lt "$enforcement_line"
+test "$assertion_line" -lt "$enforcement_line"
 
 if [[ "${ONWARDPG_DOC_RECEIPTS_PRINT:-}" == "1" ]]; then
   printf '%s\n' '--- bundle files ---'
@@ -178,7 +195,10 @@ cp "$receipt_root/config.toml" "$dependency_fixture/.onwardpg.toml"
 cp "$dependency_receipt_root/base.sql" "$dependency_fixture/schema.sql"
 
 cd "$dependency_fixture"
-"$binary" init --bundle baseline --concurrent-indexes >init.json
+if ! "$binary" init --bundle baseline --concurrent-indexes >init.json; then
+  sed -n '1,240p' init.json >&2
+  exit 1
+fi
 cp "$dependency_receipt_root/desired.sql" schema.sql
 
 set +e

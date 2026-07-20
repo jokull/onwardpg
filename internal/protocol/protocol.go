@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const Version = "onwardpg.plan/v2"
+const Version = "onwardpg.plan/v3"
 
 const (
 	PhaseExpand   = "expand"
@@ -37,7 +37,13 @@ type Result struct {
 	Status             Status      `json:"status"`
 	Statements         []Statement `json:"statements,omitempty"`
 	Batches            []Batch     `json:"batches,omitempty"`
-	Questions          []Question  `json:"questions,omitempty"`
+	// ContractGates are typed preconditions for contract restoration. They are
+	// separate from hazards: a hazard explains risk, while a gate is a
+	// fingerprinted condition that must be satisfied before referenced contract
+	// work is considered ready.
+	ContractGates   []ContractGate   `json:"contract_gates,omitempty"`
+	Reconciliations []Reconciliation `json:"reconciliations,omitempty"`
+	Questions       []Question       `json:"questions,omitempty"`
 	// Analysis records planner reasoning that did not become a decision. It is
 	// machine-readable evidence for an agent deciding whether to add an
 	// explicit upstream identity assertion; it never changes plan semantics.
@@ -94,6 +100,16 @@ type Statement struct {
 	SQL     string   `json:"sql"`
 	Safety  string   `json:"safety"`
 	Hazards []string `json:"hazards,omitempty"`
+	// RequiresGates names ContractGate IDs which authorize this statement's
+	// contract transition. Gate order is not semantic and is normalized for
+	// stable statement identity.
+	RequiresGates []string `json:"requires_gates,omitempty"`
+	// TransitionID groups generated fence, cleanup, assertion, and restoration
+	// statements for one enforcement transition.
+	TransitionID string `json:"transition_id,omitempty"`
+	// ContractDisposition records why a contract enforcement statement is
+	// executable: gated restoration, catalog-proven invariant, or write fence.
+	ContractDisposition string `json:"contract_disposition,omitempty"`
 	// Phase places work on one side of exactly one application deployment.
 	// "expand" must be safe for the currently running code; "contract" runs
 	// only after pre-deployment instances and write paths have drained.
@@ -128,6 +144,9 @@ func StableStatementID(statement Statement) string {
 		SQL                 string      `json:"sql"`
 		Safety              string      `json:"safety"`
 		Hazards             []string    `json:"hazards,omitempty"`
+		RequiresGates       []string    `json:"requires_gates,omitempty"`
+		TransitionID        string      `json:"transition_id,omitempty"`
+		ContractDisposition string      `json:"contract_disposition,omitempty"`
 		Phase               string      `json:"phase"`
 		NonTransactional    bool        `json:"non_transactional"`
 		BatchBoundaryBefore bool        `json:"batch_boundary_before"`
@@ -136,11 +155,14 @@ func StableStatementID(statement Statement) string {
 		Manual              *ManualWork `json:"manual,omitempty"`
 	}{
 		SQL: statement.SQL, Safety: statement.Safety, Hazards: hazards,
+		RequiresGates: append([]string(nil), statement.RequiresGates...),
+		TransitionID:  statement.TransitionID, ContractDisposition: statement.ContractDisposition,
 		Phase: statement.Phase, NonTransactional: statement.NonTransactional,
 		BatchBoundaryBefore: statement.BatchBoundaryBefore,
 		StatementTimeoutMS:  statement.StatementTimeoutMS, LockTimeoutMS: statement.LockTimeoutMS,
 		Manual: statement.Manual,
 	}
+	sort.Strings(canonical.RequiresGates)
 	data, err := json.Marshal(canonical)
 	if err != nil {
 		// The canonical contract contains only JSON-native values. Keep the
@@ -149,6 +171,29 @@ func StableStatementID(statement Statement) string {
 	}
 	sum := sha256.Sum256(data)
 	return "stmt-sha256-" + hex.EncodeToString(sum[:])
+}
+
+// ContractGate is a machine-readable precondition for contract work. BooleanSQL
+// is a read-only query returning exactly one boolean row. External gates leave
+// it empty and name the evidence cohorts the deployment-aware caller must
+// supply.
+type ContractGate struct {
+	ID               string   `json:"id"`
+	Kind             string   `json:"kind"`
+	ScopeFingerprint string   `json:"scope_fingerprint"`
+	Reason           string   `json:"reason"`
+	BooleanSQL       string   `json:"boolean_sql,omitempty"`
+	RequiredEvidence []string `json:"required_evidence,omitempty"`
+}
+
+// Reconciliation records how a potentially dirty overlap will be brought back
+// to the desired invariant. The operator-authored work remains verbatim and
+// fingerprint-bound through the answer receipt.
+type Reconciliation struct {
+	TransitionID string      `json:"transition_id"`
+	Strategy     string      `json:"strategy"`
+	Work         *ManualWork `json:"work,omitempty"`
+	GateIDs      []string    `json:"gate_ids"`
 }
 
 // ManualWork is a fingerprint-bound, operator-authored migration contract.
@@ -173,12 +218,16 @@ type Batch struct {
 }
 
 type Question struct {
-	ID                 string   `json:"id"`
-	Kind               string   `json:"kind"`
-	Message            string   `json:"message"`
-	Key                string   `json:"key"`
-	Choices            []string `json:"choices"`
-	AllowsFreeform     bool     `json:"allows_freeform,omitempty"`
+	ID             string   `json:"id"`
+	Kind           string   `json:"kind"`
+	Message        string   `json:"message"`
+	Key            string   `json:"key"`
+	Choices        []string `json:"choices"`
+	AllowsFreeform bool     `json:"allows_freeform,omitempty"`
+	// ScopeObjects names additional current/desired objects whose dependency
+	// closures bind the decision even when they are not themselves a user-facing
+	// choice (for example a cross-name constraint transition).
+	ScopeObjects       []string `json:"scope_objects,omitempty"`
 	CurrentFingerprint string   `json:"current_fingerprint,omitempty"`
 	DesiredFingerprint string   `json:"desired_fingerprint,omitempty"`
 	// ScopeFingerprint commits to the participating current/desired objects and
@@ -240,6 +289,9 @@ func (r *Resolver) Resolve(question Question) (string, bool, error) {
 	if !exists {
 		return "", false, nil
 	}
+	if question.ScopeFingerprint != "" && answer.QuestionFingerprint != question.ScopeFingerprint {
+		return "", false, fmt.Errorf("answer %s question fingerprint is stale: got %q want %q", id, answer.QuestionFingerprint, question.ScopeFingerprint)
+	}
 	if answer.Manual != nil {
 		return "", false, fmt.Errorf("answer %s includes manual work but this question does not accept it", id)
 	}
@@ -266,6 +318,9 @@ func (r *Resolver) ResolveManual(question Question) (ManualWork, bool, error) {
 	answer, exists := r.answers[id]
 	if !exists {
 		return ManualWork{}, false, nil
+	}
+	if question.ScopeFingerprint != "" && answer.QuestionFingerprint != question.ScopeFingerprint {
+		return ManualWork{}, false, fmt.Errorf("answer %s question fingerprint is stale: got %q want %q", id, answer.QuestionFingerprint, question.ScopeFingerprint)
 	}
 	if answer.Value != "provided" || answer.Manual == nil {
 		return ManualWork{}, false, fmt.Errorf("manual answer %s must use value %q and include manual work", id, "provided")

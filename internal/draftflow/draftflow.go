@@ -506,6 +506,28 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			Artifact:  artifact,
 		})
 		proposed.HeadDigest = artifact.Manifest.History.EntryDigest
+		expandVerification, err := verify.Run(ctx, verify.Input{
+			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
+			ThroughPhase: protocol.PhaseExpand, Ignores: input.Ignores, Options: input.PlannerOptions,
+		})
+		if err != nil {
+			return report, fmt.Errorf("verify generated expand checkpoint: %w", err)
+		}
+		if expandVerification.Outcome != "partial_verified" && expandVerification.Outcome != "verified" {
+			report.Outcome = "blocked"
+			report.Verification = &expandVerification
+			report.Findings = append(report.Findings, Finding{
+				Code: "generated_expand_checkpoint_failed", Message: "generated expand did not produce a valid disposable PostgreSQL checkpoint",
+				Remediation: "inspect the expand verification failure; no bundle was written",
+			})
+			return report, nil
+		}
+		artifact, err = bundle.WithExpandCheckpoint(artifact, expandVerification.ObservedFingerprint)
+		if err != nil {
+			return report, fmt.Errorf("receipt generated expand checkpoint: %w", err)
+		}
+		proposed.Entries[len(proposed.Entries)-1].Artifact = artifact
+		proposed.HeadDigest = artifact.Manifest.History.EntryDigest
 		verification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: "contract", Ignores: input.Ignores, Options: input.PlannerOptions,

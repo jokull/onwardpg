@@ -101,6 +101,7 @@ func TestExistingPrimaryConstraintExposesBlockingIndexBuild(t *testing.T) {
 	table := pgschema.Table{Schema: "app", Name: "orders"}
 	id := pgschema.Column{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint", NotNull: true}
 	primary := pgschema.Constraint{Table: table.ObjectID(), Name: "orders_pkey", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)", Validated: true}
+	primaryIndex := pgschema.Index{Table: table.ObjectID(), Name: "orders_pkey", Constraint: "orders_pkey", Unique: true, Primary: true, Method: "btree", Parts: []pgschema.IndexPart{{Column: "id"}}}
 	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
 		for _, object := range []pgschema.Object{schema, table, id} {
 			if err := snapshot.Add(object); err != nil {
@@ -116,24 +117,27 @@ func TestExistingPrimaryConstraintExposesBlockingIndexBuild(t *testing.T) {
 	if err := desired.Add(primary); err != nil {
 		t.Fatal(err)
 	}
-	if err := desired.AddDependency(primary.ObjectID(), table.ObjectID()); err != nil {
+	if err := desired.Add(primaryIndex); err != nil {
 		t.Fatal(err)
 	}
-
-	result, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != protocol.Planned || len(result.Statements) != 1 {
-		t.Fatalf("unexpected constraint result: %#v", result)
-	}
-	for _, hazard := range []string{"access_exclusive_lock", "blocking_index_build"} {
-		if !containsString(result.Statements[0].Hazards, hazard) {
-			t.Fatalf("constraint hazards omit %q: %#v", hazard, result.Statements[0].Hazards)
+	for _, edge := range [][2]pgschema.ID{{primary.ObjectID(), table.ObjectID()}, {primary.ObjectID(), primaryIndex.ObjectID()}, {primaryIndex.ObjectID(), table.ObjectID()}, {primaryIndex.ObjectID(), id.ObjectID()}} {
+		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if strings.Contains(result.Statements[0].SQL, "CONCURRENTLY") {
-		t.Fatalf("constraint-backed index build was incorrectly made concurrent: %q", result.Statements[0].SQL)
+
+	result := buildWithAssertOnlyReconciliations(t, current, desired, Options{ConcurrentIndexes: true})
+	if result.Status != protocol.Planned || len(result.Statements) != 2 {
+		t.Fatalf("unexpected constraint result: %#v", result)
+	}
+	enforcement := result.Statements[len(result.Statements)-1]
+	for _, hazard := range []string{"access_exclusive_lock", "blocking_index_build"} {
+		if !containsString(enforcement.Hazards, hazard) {
+			t.Fatalf("constraint hazards omit %q: %#v", hazard, enforcement.Hazards)
+		}
+	}
+	if strings.Contains(enforcement.SQL, "CONCURRENTLY") {
+		t.Fatalf("constraint-backed index build was incorrectly made concurrent: %q", enforcement.SQL)
 	}
 }
 
@@ -1773,16 +1777,21 @@ func TestBuildStagesNewRequiredColumnWithoutDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.NeedsSQLEdits || len(plan.Statements) != 3 {
-		t.Fatalf("required new column must create an editable staged plan: %#v", plan)
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "reconcile_contract" {
+		t.Fatalf("required new column must capture a reconciliation decision: %#v", pending)
+	}
+	plan := buildWithManualReconciliation(t, current, desired, Options{}, `UPDATE "app"."customers" SET "email" = 'unknown-' || id::text WHERE "email" IS NULL;`, `SELECT NOT EXISTS (SELECT 1 FROM "app"."customers" WHERE "email" IS NULL);`)
+	if plan.Status != protocol.Planned || len(plan.Statements) != 4 {
+		t.Fatalf("required new column staged plan: %#v", plan)
 	}
 	if plan.Statements[0].Phase != "expand" || plan.Statements[0].SQL != `ALTER TABLE "app"."customers" ADD COLUMN "email" text;` ||
-		plan.Statements[1].Phase != protocol.PhaseContract || !strings.Contains(plan.Statements[1].SQL, "ONWARDPG TODO") ||
-		plan.Statements[2].Phase != "contract" || plan.Statements[2].SQL != `ALTER TABLE "app"."customers" ALTER COLUMN "email" SET NOT NULL;` {
+		plan.Statements[1].Phase != protocol.PhaseContract || plan.Statements[1].Manual == nil ||
+		!strings.Contains(plan.Statements[2].SQL, "DO $onwardpg$") ||
+		plan.Statements[3].Phase != "contract" || plan.Statements[3].SQL != `ALTER TABLE "app"."customers" ALTER COLUMN "email" SET NOT NULL;` {
 		t.Fatalf("required column phases = %#v", plan.Statements)
 	}
 	if strings.Contains(plan.Statements[0].SQL, "NOT NULL") {
@@ -1884,7 +1893,8 @@ func TestBuildStagesApplicationBackfillBeforeNotNullContract(t *testing.T) {
 	if planned.Batches[0].Phase != protocol.PhaseContract || planned.Batches[1].Phase != protocol.PhaseContract || planned.Batches[2].Phase != protocol.PhaseContract {
 		t.Fatalf("phase order = %#v", planned.Batches)
 	}
-	if !strings.Contains(planned.Batches[0].Statements[0].SQL, "NOT VALID") || planned.Batches[1].Statements[0].Manual == nil || !strings.Contains(planned.Batches[2].Statements[0].SQL, "VALIDATE CONSTRAINT") {
+	if !strings.Contains(planned.Batches[0].Statements[0].SQL, "NOT VALID") || planned.Batches[1].Statements[0].Manual == nil ||
+		!strings.Contains(planned.Batches[2].Statements[0].SQL, "DO $onwardpg$") || !strings.Contains(joinSQL(planned), "VALIDATE CONSTRAINT") {
 		t.Fatalf("backfill/contract = %#v", planned.Batches)
 	}
 }
@@ -3528,15 +3538,12 @@ func TestBuildRendersStructuredIndexWithoutRawDefinition(t *testing.T) {
 	if err := desired.AddDependency(index.ObjectID(), table.ObjectID()); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != protocol.Planned || len(result.Statements) != 1 {
+	result := buildWithManualReconciliation(t, current, desired, Options{}, `DELETE FROM "app"."orders" a USING "app"."orders" b WHERE a.ctid < b.ctid AND lower(a.name) = lower(b.name);`, `SELECT NOT EXISTS (SELECT 1 FROM "app"."orders" WHERE name IS NOT NULL GROUP BY lower(name) HAVING count(*) > 1);`)
+	if result.Status != protocol.Planned || len(result.Statements) != 3 {
 		t.Fatalf("unexpected structured index plan %#v", result)
 	}
 	want := `CREATE UNIQUE INDEX "orders_lookup_idx" ON "app"."orders" USING "btree" ((lower(name)) "text_pattern_ops" DESC NULLS FIRST) INCLUDE ("id") NULLS NOT DISTINCT WITH ("fillfactor" = 70) WHERE name IS NOT NULL;`
-	if got := result.Statements[0].SQL; got != want {
+	if got := result.Statements[len(result.Statements)-1].SQL; got != want {
 		t.Fatalf("structured index SQL = %q, want %q", got, want)
 	}
 }
@@ -3564,11 +3571,8 @@ func TestBuildValidatesNotValidConstraintWithoutRebuild(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	result, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != protocol.Planned || len(result.Statements) != 1 || result.Statements[0].SQL != `ALTER TABLE "public"."orders" VALIDATE CONSTRAINT "orders_positive";` || result.Statements[0].Phase != protocol.PhaseExpand {
+	result := buildWithAssertOnlyReconciliations(t, current, desired, Options{})
+	if result.Status != protocol.Planned || len(result.Statements) != 2 || result.Statements[1].SQL != `ALTER TABLE "public"."orders" VALIDATE CONSTRAINT "orders_positive";` || result.Statements[1].Phase != protocol.PhaseContract {
 		t.Fatalf("unexpected validation plan %#v", result)
 	}
 }

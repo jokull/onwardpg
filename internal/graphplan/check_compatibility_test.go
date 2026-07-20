@@ -164,7 +164,7 @@ func TestBuildCheckNarrowingKeepsOldEnforcementUntilContract(t *testing.T) {
 		`CHECK ("tier" IN ('open', 'closed'))`,
 		`CHECK ("tier" IN ('open'))`,
 	)
-	if plan.Status != protocol.Planned || len(plan.Statements) != 4 {
+	if plan.Status != protocol.Planned || len(plan.Statements) != 5 {
 		t.Fatalf("narrowing plan=%#v", plan)
 	}
 	for _, item := range plan.Statements {
@@ -186,7 +186,7 @@ func TestBuildUnknownCheckChangeUsesLooseExpandEnvelope(t *testing.T) {
 		`CHECK ((amount > 0))`,
 		`CHECK ((amount <> 10))`,
 	)
-	if plan.Status != protocol.Planned || len(plan.Statements) != 3 {
+	if plan.Status != protocol.Planned || len(plan.Statements) != 4 {
 		t.Fatalf("unknown check plan=%#v", plan)
 	}
 	if plan.Statements[0].Phase != protocol.PhaseExpand || !strings.Contains(plan.Statements[0].SQL, "DROP CONSTRAINT") {
@@ -224,14 +224,11 @@ func TestBuildNewCheckOnExistingTableStagesValidationInContract(t *testing.T) {
 	if err := desired.AddDependency(check.ObjectID(), column.ObjectID()); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 2 || len(plan.Batches) != 2 {
+	plan := buildWithAssertOnlyReconciliations(t, current, desired, Options{})
+	if plan.Status != protocol.Planned || len(plan.Statements) != 3 || len(plan.Batches) != 2 {
 		t.Fatalf("new CHECK validation plan=%#v", plan)
 	}
-	if !strings.Contains(plan.Statements[0].SQL, "NOT VALID") || !strings.Contains(plan.Statements[1].SQL, "VALIDATE CONSTRAINT") {
+	if !strings.Contains(plan.Statements[0].SQL, "NOT VALID") || !strings.Contains(plan.Statements[1].SQL, "DO $onwardpg$") || !strings.Contains(plan.Statements[2].SQL, "VALIDATE CONSTRAINT") {
 		t.Fatalf("new CHECK did not stage validation: %#v", plan.Statements)
 	}
 	for _, item := range plan.Statements {
@@ -265,9 +262,5 @@ func buildCheckTransition(t *testing.T, beforeDefinition, afterDefinition string
 			t.Fatal(err)
 		}
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return plan
+	return buildWithAssertOnlyReconciliations(t, current, desired, Options{})
 }

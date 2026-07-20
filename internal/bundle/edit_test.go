@@ -97,6 +97,10 @@ func TestPrepareEditedAndInstallReceiptsExactSQL(t *testing.T) {
 	if candidate.Manifest.PhaseSource != "edited" || candidate.Manifest.VerificationDigest == "" || candidate.Manifest.Phases[protocol.PhaseContract].Digest != Digest([]byte(contract)) {
 		t.Fatalf("candidate manifest = %#v", candidate.Manifest)
 	}
+	candidate, err = WithExpandCheckpoint(candidate, candidate.Manifest.BaselineSource.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := InstallReceipts(destination, candidate); err != nil {
 		t.Fatal(err)
 	}
@@ -107,8 +111,71 @@ func TestPrepareEditedAndInstallReceiptsExactSQL(t *testing.T) {
 	if receipted.Manifest.History.EntryDigest == artifact.Manifest.History.EntryDigest {
 		t.Fatal("edited SQL did not change the history entry digest")
 	}
+	if receipted.Manifest.ExpandCheckpointDigest == "" || len(receipted.Files["expand-checkpoint.json"]) == 0 {
+		t.Fatal("edited SQL receipt did not atomically install its verified expand checkpoint")
+	}
 	if _, _, err := NextCoordinates(destination, meta, plannedResult()); err != nil {
 		t.Fatalf("receipted feature draft should remain replaceable: %v", err)
+	}
+}
+
+func TestPrepareEditedReceiptsResolvedManualContractGate(t *testing.T) {
+	gate := protocol.ContractGate{
+		ID:               "manual:users_email",
+		Kind:             "manual_reconciliation",
+		ScopeFingerprint: currentFingerprint,
+		Reason:           "operator must define the exact desired email invariant",
+		BooleanSQL:       "SELECT false /* ONWARDPG TODO: replace with an exact boolean postcondition */",
+	}
+	assertionSQL := "DO $onwardpg$ BEGIN IF NOT COALESCE((" + gate.BooleanSQL + "), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: " + gate.ID + "'; END IF; END $onwardpg$;"
+	assertion := statement(assertionSQL, protocol.PhaseContract, true)
+	assertion.TransitionID = "constraint:app:users:users_email_check"
+	assertion.ID = protocol.StableStatementID(assertion)
+	result := plannedResult(assertion)
+	result.Status = protocol.NeedsSQLEdits
+	result.ContractGates = []protocol.ContractGate{gate}
+	result.Reconciliations = []protocol.Reconciliation{{
+		TransitionID: assertion.TransitionID,
+		Strategy:     "manual_sql",
+		Work: &protocol.ManualWork{
+			Statements:      []string{"-- ONWARDPG TODO: reconcile existing email values"},
+			VerificationSQL: []string{gate.BooleanSQL},
+		},
+		GateIDs: []string{gate.ID},
+	}}
+	result.Batches[0].Statements[0] = assertion
+
+	artifact, err := Build(Input{Metadata: metadata(), Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := "SELECT NOT EXISTS (SELECT 1 FROM app.users WHERE email IS NULL)"
+	editedContract := strings.Replace(string(artifact.Files["phases/contract.sql"]), gate.BooleanSQL, resolved, 1)
+	edited, err := PrepareEditedFiles(artifact, map[string][]byte{
+		"phases/contract.sql": []byte(editedContract),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Manifest.ContractGateOverridesDigest == "" || len(edited.Files[contractGateOverridesPath]) == 0 {
+		t.Fatalf("edited gate override was not receipted: %#v", edited.Manifest)
+	}
+	gates, err := ContractGates(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gates) != 1 || gates[0].BooleanSQL != resolved {
+		t.Fatalf("effective gates = %#v", gates)
+	}
+
+	tampered := edited
+	tampered.Files = make(map[string][]byte, len(edited.Files))
+	for name, body := range edited.Files {
+		tampered.Files[name] = append([]byte(nil), body...)
+	}
+	tampered.Files[contractGateOverridesPath] = append(tampered.Files[contractGateOverridesPath], '\n')
+	if _, err := ContractGates(tampered); err == nil {
+		t.Fatal("accepted a contract gate override whose bytes no longer match its receipt")
 	}
 }
 

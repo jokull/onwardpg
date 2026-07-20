@@ -60,6 +60,64 @@ func TestBuildPlannedBundleWritesDeterministicPhaseReceipts(t *testing.T) {
 	}
 }
 
+func TestBuildReceiptsAndValidatesContractGates(t *testing.T) {
+	gate := protocol.ContractGate{
+		ID: "data:orders_owner", Kind: "data_assertion", ScopeFingerprint: currentFingerprint,
+		Reason: "orders must reference a retained owner", BooleanSQL: "SELECT true;",
+	}
+	contract := protocol.Statement{
+		SQL: "ALTER TABLE app.orders VALIDATE CONSTRAINT orders_owner_fkey;", Safety: "review", Phase: protocol.PhaseContract,
+		RequiresGates: []string{gate.ID}, ContractDisposition: "gated_restoration",
+	}
+	contract.ID = protocol.StableStatementID(contract)
+	result := plannedResult(contract)
+	result.ContractGates = []protocol.ContractGate{gate}
+	result.Reconciliations = []protocol.Reconciliation{{TransitionID: "constraint:app:orders:orders_owner_fkey", Strategy: "assert_only", GateIDs: []string{gate.ID}}}
+	artifact, err := Build(Input{Metadata: metadata(), Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.ContractGatesDigest == "" || artifact.Files["contract-gates.json"] == nil {
+		t.Fatalf("contract gate receipt missing: %#v", artifact.Manifest)
+	}
+	if err := artifact.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := result
+	invalid.Statements[0].RequiresGates = []string{"missing"}
+	invalid.Statements[0].ID = protocol.StableStatementID(invalid.Statements[0])
+	invalid.Batches[0].Statements[0] = invalid.Statements[0]
+	if _, err := Build(Input{Metadata: metadata(), Result: invalid}); err == nil || !strings.Contains(err.Error(), "missing or duplicate") {
+		t.Fatalf("missing gate validation = %v", err)
+	}
+}
+
+func TestWithExpandCheckpointReceiptsObservedGraphAndHistory(t *testing.T) {
+	inputMetadata := metadata()
+	inputMetadata.PlanID = "plan_0123456789abcdef0123456789abcdef"
+	inputMetadata.HistoryParentDigest = HistoryRootDigest()
+	artifact, err := Build(Input{Metadata: inputMetadata, Result: plannedResult(statement("SELECT 1;", protocol.PhaseExpand, true))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalEntry := artifact.Manifest.History.EntryDigest
+	receipted, err := WithExpandCheckpoint(artifact, currentFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipted.Manifest.ExpandCheckpointDigest == "" || receipted.Manifest.History.EntryDigest == originalEntry {
+		t.Fatalf("checkpoint did not enter manifest/hash chain: %#v", receipted.Manifest)
+	}
+	checkpoint, err := ReadCatalogCheckpoint(receipted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.ExpandFingerprint != currentFingerprint || checkpoint.PlanID != inputMetadata.PlanID {
+		t.Fatalf("checkpoint=%#v", checkpoint)
+	}
+}
+
 func TestBuildReceiptsSemanticHintsWithoutMakingThemAuthoringState(t *testing.T) {
 	answers := protocol.Answers{
 		ProtocolVersion: protocol.Version, CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,

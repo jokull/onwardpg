@@ -1,6 +1,6 @@
 ---
 name: onwardpg
-description: Plan, revise, restack, and verify PostgreSQL schema migrations with onwardpg. Use when a repository has .onwardpg.toml or the user asks to create or update an onwardpg plan, resolve planner decisions, author a backfill or compatibility transition, handle schema drift across branches, or verify a migration bundle.
+description: Plan, revise, restack, verify, and assess contract readiness for PostgreSQL schema migrations with onwardpg. Use when a repository has .onwardpg.toml or the user asks to create or update an onwardpg plan, resolve planner decisions, author a backfill or compatibility transition, handle schema drift across branches, verify a migration bundle, or check post-expand readiness.
 license: MIT
 compatibility: Requires the onwardpg CLI, the repository's configured schema exporter, and access to its configured scratch PostgreSQL administrator. Development and production database access are optional and must remain separately scoped.
 metadata:
@@ -21,6 +21,8 @@ Use onwardpg as the catalog-aware planner and verifier. Bring application intent
 - Supply a semantic hint only when application code, product requirements, or bounded data evidence proves it.
 - Edit only files and `ONWARDPG TODO` pockets named by planner output. Preserve markers and generated ownership boundaries.
 - Treat successful disposable verification as structural and semantic evidence, not proof of live data distribution, lock duration, traffic drain, replica health, or deployment completion.
+- Treat `onwardpg contract check` as read-only, expiring readiness evidence. It
+  does not execute contract or replace the assertion repeated in contract SQL.
 
 Read [the schema-state model](references/schema-states.md) before interpreting a diff. Read [production evidence](references/production-evidence.md) before querying any live or replicated database.
 
@@ -72,7 +74,12 @@ For product-specific transformations:
 2. Use bounded production aggregates or value-shape classifications only when the user has provided restricted read-only access.
 3. Record any live precondition that must be rechecked during deployment.
 4. Edit the named `expand.sql` or `contract.sql` pocket with reviewed SQL.
-5. Add read-only Boolean assertions to `verify.sql`. Use synthetic `WITH ... VALUES (...)` cases for representative conversion categories; do not insert fixtures into deployment phases.
+5. Resolve any planner-named Boolean contract-gate pocket in `contract.sql`;
+   that assertion is repeated at production enforcement time. Separately add
+   optional read-only assertions to `verify.sql` for synthetic `WITH ... VALUES
+   (...)` conversion examples or clone-only postconditions. Do not insert
+   fixtures into deployment phases or treat `verify.sql` as production
+   readiness evidence.
 6. Rerun `onwardpg plan` when the declarative schema changes, then run `onwardpg verify` against the exact edited bundle.
 
 ## Development databases and branches
@@ -99,5 +106,17 @@ Report:
 5. verification outcome and residual diff;
 6. hazards, unsupported objects, or unanswered decisions;
 7. live preconditions and operational gates still owned by the deployment system.
+
+If the user is operating a post-expand deployment, validate provider-neutral,
+expiring evidence for every potential writer cohort and run the read-only gate:
+
+```sh
+onwardpg contract check \
+  --environment production \
+  --database-env PROD_READONLY_DATABASE_URL \
+  --evidence deploy-readiness.json
+```
+
+Report `ready`, `needs_evidence`, `blocked`, or `stale`; never apply phase SQL.
 
 Do not describe the migration as safe merely because clone verification passed.

@@ -41,22 +41,25 @@ bundle, hazard, history, and verification machinery as every harder rung.
 
 Change the destination to `status text NOT NULL` and the same SQL is no longer
 enough. Old code can still insert without `status` after expand. Actual output
-therefore adds the nullable shape first, reports `needs_sql_edits`, and puts the
-product backfill before enforcement in contract:
+therefore asks whether to `assert_only`, supply `manual_sql`, or `split_plan`.
+With reviewed cleanup selected, it adds the nullable shape first, reports
+`needs_sql_edits`, and puts cleanup plus an exact gate before enforcement:
 
 ```sql
 -- expand.sql
 ALTER TABLE "app"."bookings" ADD COLUMN "status" text;
 
 -- contract.sql
--- ONWARDPG TODO: deploy code that writes column:app:bookings:status, then replace this comment with a reviewed backfill for existing rows.
+-- PRODUCT-SPECIFIC SQL: ONWARDPG TODO: provide reconcile_contract_sql SQL for app.bookings.status
+-- Verify: SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);
+DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:1c16b884027de910'; END IF; END $onwardpg$;
 ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
 ```
 
 Now the output answers the question a raw diff cannot: *when is each operation
 compatible?* The application deploy and drain sit between those files. The
-developer supplies the historical value; onwardpg keeps that edit ahead of the
-constraint and verifies the resulting bytes. The complete generated and edited
+developer supplies the historical value; onwardpg keeps that edit ahead of its
+receipted data assertion and the constraint. The complete generated and edited
 files live in the
 [`required-column` receipt](https://github.com/jokull/onwardpg/tree/main/docs/receipts/required-column).
 
@@ -263,7 +266,9 @@ A team workflow becomes straightforward:
 4. Rebase and rerun `plan`; review only what the new base invalidated.
 5. Run `verify --check` in CI.
 6. Merge the application change and its one bundle together.
-7. The release system applies expand, deploys the application, proves old writers drained, then applies contract.
+7. The release system applies expand, deploys the application, supplies
+   expiring evidence for every potential writer, requires `contract check` to
+   pass, then applies the assertion-bearing contract.
 8. The merged bundle becomes H for the next feature.
 
 The new application must work on both sides of contract. If it cannot, keep the compatibility shape and remove it in a later feature plan. One plan is tied to one merge and one application deployment—not to every keystroke that happened before them.

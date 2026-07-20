@@ -16,11 +16,8 @@ func TestBuildCrossNameCheckFamilyUsesLooseAcceptanceEnvelope(t *testing.T) {
 		[]string{"settlement_currency"},
 		[]string{"quote_mode", "settlement_currency", "presentment_currency"},
 	)
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 3 {
+	plan := buildWithAssertOnlyReconciliations(t, current, desired, Options{})
+	if plan.Status != protocol.Planned || len(plan.Statements) != 4 {
 		t.Fatalf("cross-name CHECK was not correlated: %#v", plan)
 	}
 	if plan.Statements[0].Phase != protocol.PhaseExpand || !strings.Contains(plan.Statements[0].SQL, `DROP CONSTRAINT "checkout_quote_settlement_currency_jpy"`) {

@@ -3,6 +3,7 @@ package graphplan
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -69,7 +70,7 @@ func checkPredicateTransitionShape(before, after pgschema.Constraint) bool {
 	left.CheckExpression, right.CheckExpression = "", ""
 	left.Validated, right.Validated = false, false
 	left.Comment, right.Comment = nil, nil
-	return left == right
+	return reflect.DeepEqual(left, right)
 }
 
 func renderCrossNameNarrowingCheckReplacement(before, after pgschema.Constraint) []protocol.Statement {

@@ -33,6 +33,16 @@ func TestStableStatementIDUsesCompleteNormalizedContract(t *testing.T) {
 	if StableStatementID(left) == StableStatementID(right) {
 		t.Fatal("timeout guidance did not affect stable statement identity")
 	}
+	right = left
+	right.RequiresGates = []string{"data:b", "data:a"}
+	ordered := left
+	ordered.RequiresGates = []string{"data:a", "data:b"}
+	if StableStatementID(right) != StableStatementID(ordered) {
+		t.Fatal("contract gate insertion order changed stable statement identity")
+	}
+	if StableStatementID(left) == StableStatementID(right) {
+		t.Fatal("contract gate requirements did not affect stable statement identity")
+	}
 }
 
 func TestErrorDiagnosticHasVersionedStableShape(t *testing.T) {
@@ -206,6 +216,21 @@ func FuzzResolverAnswerValidation(f *testing.F) {
 		_, _, _ = resolver.Resolve(Question{Kind: kind, Key: key, Choices: []string{"drop", "table:app:accounts"}})
 		_ = resolver.ValidateAllUsed()
 	})
+}
+
+func TestResolverRejectsStaleScopedAnswerAtConsumption(t *testing.T) {
+	answers := Answers{
+		ProtocolVersion: Version, CurrentFingerprint: "current", DesiredFingerprint: "desired",
+		Answers: []Answer{{Kind: "reconcile_contract", Key: "constraint:app:orders:check", Value: "assert_only", QuestionFingerprint: "sha256:old"}},
+	}
+	resolver, err := answers.Resolver("current", "desired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = resolver.Resolve(Question{Kind: "reconcile_contract", Key: "constraint:app:orders:check", Choices: []string{"assert_only"}, ScopeFingerprint: "sha256:new"})
+	if err == nil || !strings.Contains(err.Error(), "question fingerprint is stale") {
+		t.Fatalf("stale scope error=%v", err)
+	}
 }
 
 func TestRenderSQLIncludesPhaseAndBatchGuidance(t *testing.T) {

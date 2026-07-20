@@ -39,7 +39,19 @@ SELECT bool_and(
 FROM examples;
 ```
 
-The production query discovers categories and live preconditions. The synthetic assertion tests the product rule repeatably. Edited phase SQL performs the migration work. The release system rechecks live data, volume, lock budgets, replica health, deployment, and drain state.
+The production query discovers categories and live preconditions. The synthetic
+assertion tests the product rule repeatably. Edited phase SQL performs the
+migration work. After expand, `onwardpg contract check` compares the live
+catalog with the receipted checkpoint and evaluates exact contract data gates.
+The release system still owns volume, lock budgets, replica health, execution,
+and drain evidence.
+
+Drain evidence must cover potential writers, not only active sessions: web,
+workers, schedules, queues and retries, connection pools, previews, and ad-hoc
+writers. A scaled-to-zero preview with production write credentials can return
+and therefore remains active potential unless upgraded, drained, isolated, or
+made read-only. Evidence is expiring and bound to the exact plan, bundle entry,
+environment, and release.
 
 ## Access boundary
 

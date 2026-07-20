@@ -1,571 +1,512 @@
-# Acceptance-compatible expand/contract planning
+# Contract readiness and reconciliation
+
+Status: implemented and proven in the working tree on 2026-07-20, after
+`69a1b0d` established acceptance-compatible expand planning.
+
+## Implementation receipts
+
+The hill climb now exists as protocol and executable proof, not only this
+roadmap:
+
+- plan protocol v3 carries typed contract gates, reconciliation decisions,
+  statement gate references, transition identities, and proof dispositions;
+- bundle protocol v3 receipts those gates, the observed post-expand catalog
+  checkpoint, and any operator-edited manual Boolean gate in the history hash;
+- `onwardpg contract check` inspects the caller database in one read-only,
+  repeatable-read transaction, compares the checkpoint, runs exact data gates,
+  and validates expiring writer evidence bound to the PlanID, desired
+  fingerprint, generation, environment, and bundle entry digest;
+- CHECK, NOT NULL, typed MATCH SIMPLE/FULL foreign keys, and modeled unique
+  enforcement receive exact generated probes; exclusion and genuinely
+  unmodeled semantics remain a reviewed, receipted manual gate;
+- every contract enforcement renderer passes one registry which rejects a
+  statement without a typed gate or narrow catalog proof; and
+- the checked documentation fixtures now reproduce the initial reconciliation
+  question, developer cleanup pocket, inline assertion, restoration, and final
+  convergence from current CLI output.
+
+Proof commands and outcomes are recorded in [Completion receipts](#completion-receipts).
 
 ## Outcome
 
-Make this promise true for every schema transition onwardpg plans:
+Make onwardpg's second promise as strong and explicit as its first:
 
-> After expand, both the in-flight legacy application and the newly deployed
-> application can execute their database operations. The overlap schema may be
-> deliberately looser than either endpoint schema. Contract restores the exact
-> desired schema only after legacy instances have drained.
+1. `expand.sql` admits the legacy and newly deployed application while they
+   overlap, even when that requires temporarily weaker enforcement.
+2. `contract.sql` is executable only after legacy writers have drained, any
+   rows admitted by the loose overlap have been reconciled, and exact
+   postconditions prove the desired enforcement can be restored.
 
-This is an acceptance-compatibility promise, not a promise to preserve every
-legacy database guarantee during the overlap window. If retaining an old
-constraint would reject a new write, expand may weaken or remove that
-constraint. Onwardpg must make the temporary enforcement gap explicit and must
-prove the desired contract can be restored.
+The important word is **writers**, not connections. A closed connection does
+not prove an old Vercel preview, worker, cron job, queued retry, ad-hoc script,
+or scaled-to-zero deployment cannot reconnect and issue a legacy write.
 
-The motivating bug is a same-name CHECK widening:
+Onwardpg remains a planner. It will not apply migration SQL to production or
+pretend it can discover a team's deployment topology. It will make contract
+preconditions machine-readable, run permitted read-only checks, bind external
+drain evidence to the exact plan, and refuse to call the contract ready while
+required evidence is missing or stale.
+
+## What the investigation found
+
+The phase classifier is materially stronger than the contract-readiness model.
+
+### Already sound
+
+- Proven CHECK widenings and unique-key relaxations converge in expand.
+- Unknown CHECK, foreign-key, uniqueness, exclusion, and cross-kind changes
+  can use a deliberately loose overlap instead of rejecting the new writer.
+- Desired CHECK and foreign-key enforcement can be restored with `NOT VALID`
+  followed by a separate validation batch.
+- NOT NULL has direct, staged, and operator-authored backfill paths.
+- Manual work, answers, and edited SQL are fingerprinted and survive an
+  unrelated plan rebase only when their scope fingerprint still matches.
+- Clone verification executes exact phase bytes, checks manual Boolean
+  verification queries, and proves final catalog convergence.
+
+### Gaps found in the pre-climb architecture
+
+1. A hazard such as `duplicate_rows_possible` or
+   `possible_overlap_window_invalid_rows` is descriptive text. It does not
+   force a cleanup choice or block the restoring statement.
+2. Several loose-envelope paths proceed directly to `VALIDATE CONSTRAINT`,
+   `CREATE UNIQUE INDEX`, or exclusion creation. PostgreSQL will correctly
+   fail if overlap rows are invalid, but the failure arrives late and without
+   a retained reconciliation decision.
+3. `ManualWork.VerificationSQL` is optional in the generic protocol. Individual
+   features sometimes require it, but cleanup does not have one uniform
+   contract.
+4. Manual verification is rendered into phase SQL as a `-- Verify:` comment
+   and executed by onwardpg only during clone batch verification. It is not an
+   ordered production assertion before `VALIDATE CONSTRAINT`, unique-index
+   creation, or another restoring statement.
+5. `verify` runs against onward-created disposable databases. Those clones do
+   not contain production overlap writes, so successful clone convergence is
+   not evidence that production is ready for contract.
+6. `verify.sql` is a postcondition artifact. Reusing it as a production
+   contract-readiness gate would confuse clone proof, development evidence,
+   and live preconditions.
+7. Onwardpg has no typed drain evidence. Contract comments say “after writers
+   drain,” but no artifact identifies which writer cohorts were considered or
+   whether previews can still write to production.
+8. There is no read-only check that production currently matches the expected
+   post-expand catalog checkpoint before contract begins.
+
+Therefore the next hill climb is not another phase heuristic. It is a
+first-class **contract gate and reconciliation protocol**.
+
+## The invariants
+
+For a plan with current schema `C`, expand checkpoint `E`, and desired schema
+`D`:
+
+~~~text
+before deploy:       catalog == E
+during overlap:      E accepts LegacyWrites union NewWrites
+before contract:     LegacyWriters == drained
+before restoration:  DesiredInvariant(data) == true
+after contract:      catalog == D
+~~~
+
+Every contract restoration must have a typed disposition:
+
+- `no_gate`: catalog-only cleanup or a proof shows overlap cannot violate the
+  desired invariant;
+- `generated_assertion`: onwardpg can generate an exact Boolean data test;
+- `manual_reconciliation`: reviewed cleanup SQL plus a required Boolean test;
+- `external_attestation`: deployment state must be supplied by the system or
+  agent that can observe writers; or
+- `split_plan`: one deployment cannot safely reach the desired contract.
+
+No restoration statement may rely only on a hazard string.
+
+## Developer experience
+
+### Planning
+
+When a loose overlap can create rows outside the desired invariant, `plan`
+asks one scoped question:
+
+~~~text
+The overlap may admit rows that violate constraint:app:orders:orders_owner_fkey.
+How will contract reconcile them after legacy writers drain?
+
+  assert_only   Run the exact generated assertion; no repair is expected.
+  manual_sql    Capture cleanup SQL and a Boolean verification query.
+  split_plan    Keep the loose schema and restore enforcement in a later plan.
+~~~
+
+`assert_only` does not mean “production is clean today.” It means the exact
+assertion must pass again after drain, immediately before restoration.
+
+`manual_sql` requires:
+
+- a one-line summary;
+- transactional or non-transactional execution mode;
+- at least one cleanup/backfill statement; and
+- at least one read-only query returning exactly one Boolean `true` row.
+
+That answer is bound to the desired invariant and its dependency closure. A
+predicate, key, referenced-column, collation, NULL behavior, or participating
+table change invalidates it. Unrelated schema edits retain it.
+
+### Generated contract ordering
+
+Where PostgreSQL supports `NOT VALID`, contract should fence new writes before
+repairing historical overlap rows:
 
 ~~~sql
--- current
-CHECK (tier IN ('shift_push', 'assigned_email'))
+-- Contract precondition: legacy writer evidence has passed.
 
--- desired
-CHECK (tier IN ('slack_new_conversation', 'shift_push', 'assigned_email'))
+ALTER TABLE app.orders
+  ADD CONSTRAINT orders_owner_fkey
+  FOREIGN KEY (owner_id) REFERENCES app.users(id) NOT VALID;
+
+-- Fingerprinted operator cleanup, when selected.
+UPDATE app.orders ...;
+
+-- Exact generated or operator-authored Boolean assertion.
+DO $onwardpg$
+BEGIN
+  IF NOT (<read-only Boolean postcondition>) THEN
+    RAISE EXCEPTION 'onwardpg contract gate failed: orders_owner_fkey';
+  END IF;
+END
+$onwardpg$;
+
+ALTER TABLE app.orders
+  VALIDATE CONSTRAINT orders_owner_fkey;
 ~~~
 
-Before this hill climb, the generic constraint-mutation renderer rebuilt this
-in `contract`. That let newly deployed code fail before contract. The planner
-now replaces the constraint in `expand`; legacy values remain valid, the new
-value becomes valid, and no contract operation is needed.
+The new application is already deployed and must satisfy the desired
+constraint. `NOT VALID` fences its new writes while allowing historical rows
+to be repaired and then validated.
 
-## Non-negotiable invariant
+UNIQUE, primary-key, and exclusion enforcement have no general `NOT VALID`
+form. Their contract must instead order cleanup, an exact duplicate/conflict
+probe, and the build. If concurrent writes can reopen the race before the
+constraint exists, the planner must require an application-level idempotency
+proof, a bounded write fence, a retryable concurrent-build handoff, or
+`split_plan`. “The application probably does not create duplicates” is not a
+proof.
 
-Let:
+### Contract readiness
 
-- `Old` be the operations issued by pre-deployment application instances;
-- `New` be the operations issued by the newly deployed application; and
-- `Accepts(schema, operation)` mean PostgreSQL can execute the operation
-  without the transitional schema itself rejecting it.
+Add a read-only command whose job is evidence, not execution:
 
-The expand state must satisfy:
-
-~~~text
-for every operation in Old union New:
-    Accepts(expand_schema, operation)
+~~~sh
+onwardpg contract check \
+  --bundle support-new-conversation-slack \
+  --database-env PROD_READONLY_DATABASE_URL \
+  --evidence deploy-readiness.json
 ~~~
 
-The contract state must satisfy:
+It returns versioned JSON with one of:
 
-~~~text
-contract_schema == desired_schema
+- `ready`: every static, catalog, data, and external gate passed;
+- `needs_evidence`: the database is compatible but writer evidence is absent;
+- `blocked`: a data assertion, preview policy, or catalog checkpoint failed;
+- `stale`: the evidence targets another PlanID, bundle digest, generation,
+  desired fingerprint, environment, or expired observation window.
+
+The command must:
+
+1. validate the bundle and hash chain;
+2. ensure the selected bundle is the expected chain head;
+3. inspect production in a repeatable-read, read-only transaction;
+4. compare production with the simulated post-expand checkpoint;
+5. run contract data gates read-only where they are safe and bounded;
+6. validate external writer evidence; and
+7. emit a content-addressed readiness report for the deployment system.
+
+It must never apply `expand.sql`, cleanup SQL, or `contract.sql` to the supplied
+database.
+
+Contract SQL repeats its data assertions after any cleanup. The earlier
+readiness check is operational feedback, not authority that can survive a
+time-of-check/time-of-use race.
+
+## Writer-drain evidence
+
+Drain evidence belongs to the deployment-aware caller. Define a small provider-
+neutral document bound to:
+
+- target and environment;
+- PlanID, bundle entry digest, and generation;
+- application release/cutover identity;
+- observation time and expiry;
+- every known write-capable cohort; and
+- the evidence source for each cohort.
+
+Minimum cohort categories:
+
+- web/application deployments;
+- background workers and consumers;
+- cron and scheduled jobs;
+- queues, retries, and dead-letter replays;
+- connection pools and long-running processes;
+- preview/test deployments with production credentials; and
+- ad-hoc or third-party writers.
+
+Each cohort must be `upgraded`, `drained`, `isolated`, or `read_only`.
+`unknown` blocks. Manual evidence is allowed during preview, but it must be
+explicit, expiring, reviewable, and no more powerful than provider-derived
+evidence.
+
+### Vercel previews
+
+A Vercel preview with production write credentials is an active potential
+legacy writer even when it has zero current database sessions. Contract has
+four honest options:
+
+1. delete or expire it;
+2. redeploy it with the compatible release;
+3. isolate it from production or make its production access read-only; or
+4. keep the compatibility shape and move cleanup to a later plan.
+
+Ignoring previews is not an allowed attestation. A future Vercel adapter may
+produce cohort evidence, but the first protocol should remain provider-neutral
+so Kubernetes, ECS, Cloudflare, Render, Fly, and bespoke workers fit the same
+model.
+
+## Typed planner model
+
+Introduce machine semantics instead of inferring readiness from hazards:
+
+~~~go
+type ContractGate struct {
+    ID               string
+    Kind             string // catalog_checkpoint, data_assertion, manual_reconciliation, writer_attestation
+    ScopeFingerprint string
+    Reason           string
+    BooleanSQL       string
+    RequiredEvidence []string
+}
+
+type Reconciliation struct {
+    TransitionID string
+    Strategy     string // assert_only, manual_sql, split_plan
+    Work         *ManualWork
+    GateIDs      []string
+}
 ~~~
 
-The expand state does **not** have to preserve all guarantees of the old
-schema. In set terms, its accepted state space may be a superset of both
-endpoint schemas:
+Contract statements and batches reference gate IDs. Stable statement identity
+must include those references. The protocol, plan digest, bundle manifest, and
+edited-phase receipts therefore commit to the complete readiness contract.
 
-~~~text
-allowed(expand) >= allowed(current) union allowed(desired)
-~~~
+Use a coordinated preview version bump for `protocol`, `bundle`, and readiness
+report formats. Older bundles remain readable only through an explicit
+compatibility path; they must not silently acquire gates they never receipted.
 
-That distinction keeps the planner honest. Preserving old enforcement and
-accepting every new operation are sometimes mutually exclusive. Temporary
-weakening is valid; silently rejecting one application version is not.
+## Exact gate coverage
 
-## Implemented in this hill climb
-
-- CHECK predicates are inspected directly from `pg_get_expr`, with bounded
-  finite-set, DNF branch, preserved-NOT-NULL, and finite-to-fixed-regex
-  implication proofs.
-- Proven CHECK widenings converge in expand; narrowing stays in contract;
-  unknown changes use an explicit loose expand envelope and staged contract
-  restoration.
-- Unambiguous cross-name CHECK families are correlated through typed constrained
-  columns. The checkout-quote settlement-currency transition is an executable
-  PostgreSQL receipt, not a name guess.
-- Same-name unique/primary-key and standalone unique-index relaxations converge
-  in expand. Incomparable unique constraints and unknown unique-index
-  replacements remove obsolete enforcement in expand and restore desired
-  enforcement in contract.
-- Exclusion mutations and same-name constraint-kind changes use the same loose
-  fallback, with retained catalog dependents blocking instead of being dropped.
-- New uniqueness involving a newly added column on an existing table captures
-  a verified-clean or manual preparation decision, covering the OTP purge and
-  dedupe migration shape.
-- Standalone constraint and unique-index removals are expand relaxations with
-  enforcement-specific questions and hazards, never generic `data_loss`.
-- New existing-table CHECKs and foreign keys use `NOT VALID` plus a separate
-  validation batch. Foreign-key mutations relax in expand and restore in
-  contract.
-- Adding/changing a same-type default is expand; removing one remains contract.
-- Legacy/new acceptance and final convergence receipts pass on PostgreSQL
-  15–18. The complete graph-planner PostgreSQL 18 suite also passes.
-
-History-only product choreography remains intentionally operator-authored. An
-endpoint graph cannot reconstruct the favorite-list ranking backfill, OTP
-expiry judgment, or a defensive drop/update/re-add sequence whose endpoint
-constraint is unchanged. Those belong in the evolving plan as fingerprinted
-manual work and verification, not in guessed SQL.
-
-## Corpus audit: Trip migration history
-
-The implementation fixtures must be grounded in the complete migration corpus
-at `~/Code/triptojapan/trip/packages/db/migrations`, including `origin/main` at
-`2bba8c1824a7fe687b558d8050fee14315cc31bd`, scanned on 2026-07-20.
-
-Corpus size:
-
-- 69 generated migrations containing 4,998 lines of migration SQL;
-- one 124-line production runbook;
-- the latest snapshot contains 161 tables, 2,064 columns, 174 CHECK
-  constraints, 302 foreign keys, 61 unique constraints, and 487 indexes.
-
-### What the history demonstrates
-
-| Transition family | Evidence in the corpus | Planner lesson |
+| Desired enforcement | Cleanup risk | First verified gate |
 | --- | --- | --- |
-| Same-name CHECK lifecycle | 19 CHECK names appear in both DROP and ADD operations in one migration; 13 change the endpoint predicate and six are defensive/backfill choreography with no endpoint predicate change | Constraint identity is not enough to choose `contract`; compare accepted writes and preserve intentional plan work that is absent from the endpoint diff |
-| Literal-set widening | `support_escalation_delivery_tier_check` adds `shift_push`; `20260720094851_support-new-conversation-slack` then adds `slack_new_conversation` | Proven widening belongs wholly in expand |
-| Complex predicate widening | `chk_trip_line_item_destination_manual_amount` begins allowing a NULL manual amount when a Dato hotel is present | If widening is not proven, use a looser overlap state instead of incorrectly delaying the change |
-| Mixed-looking CHECK evolution | `tt_translation_value_source_field_check` adds Package branches while also adding explicit non-NULL guards, then later adds `co_host_bio` | Reason over acceptance, including SQL three-valued CHECK semantics and other table invariants; fall back safely when implication is unknown |
-| Finite set to general predicate | six currency checks move from `IN ('usd', 'eur', 'jpy', 'krw')` to `~ '^[a-z]{3}$'` | A finite old domain can prove a general new predicate is a widening; otherwise the compatibility fallback still works |
-| Role widening | three admin relay/impersonation CHECKs add `super_admin` | Separate DROP and ADD statements are the same rollout transition as a combined ALTER TABLE |
-| Cross-name constraint evolution | JPY-only currency constraints become supported-currency or mode-dependent constraints | Classify an enforcement family, not only same-ID object mutations |
-| Unique-key relaxation | two flight-segment UNIQUE constraints add `direction` to their key | The old key implies the new weaker key; the swap is needed in expand because new writers may duplicate sequence across directions |
-| Deliberate uniqueness gap | the presentment-currency runbook drops and recreates `idx_order_trip_addon_open_unique` concurrently and explicitly accepts a brief unenforced interval | A looser overlap schema is operationally realistic; surface and verify the gap rather than pretending it does not exist |
-| Nullability polarity | one `DROP NOT NULL`; three `SET NOT NULL` operations after backfills | Relaxation is expand; restriction and validation are contract |
-| Temporary defaults | three required columns are added with sentinel defaults and then have those defaults removed | Add the compatibility default in expand; remove it in contract |
-| New interface plus enforcement | `trip_template_day_item.transfer_mode` is added with a CHECK accepting both legacy place/tour rows and new transfer rows | The column is required in expand; the CHECK can be contract unless new code explicitly relies on its enforcement during overlap |
-| Destructive cleanup | 14 column drops, seven table drops, and five actual index drops | Application-facing removals remain contract, but enforcement-object drops need kind-aware classification because some are required relaxations |
-
-No generated Trip migration changes a column type, renames a column, or evolves
-an enum after creation. Those paths still belong in the full engine audit, but
-they must not be presented as corpus-derived findings.
-
-### Required corpus fixtures
-
-Check in minimal, self-contained PostgreSQL fixtures derived from these cases:
-
-1. tier literal-set widening, including the checked-in
-   `slack_new_conversation` migration;
-2. manual-amount complex widening;
-3. translation source/field mixed predicate and later branch widening;
-4. six-table currency `IN` to regex widening;
-5. three admin-role widenings expressed as separate DROP and ADD statements;
-6. flight-segment unique-key relaxation;
-7. settlement-currency cross-name replacement;
-8. NOT NULL relaxation and backfill-then-tighten;
-9. add-required-with-temporary-default then drop-default; and
-10. concurrent partial-unique replacement with an explicit enforcement gap;
-    and
-11. additive `transfer_mode` plus a CHECK that admits both application
-    versions.
-
-Keep the fixtures small enough that a reviewer can see the rollout property.
-Their purpose is not to reproduce the Trip schema.
-
-## Architectural revision: classify before rendering
-
-Phase selection is currently distributed across create, drop, and modify
-renderers. That made all structural constraint replacements become contract
-operations even when their semantic effect was a relaxation.
-
-Introduce a compatibility-classification pass between semantic diffing and SQL
-rendering:
-
-~~~text
-current graph + desired graph + retained decisions
-                    |
-                    v
-       transition families and proofs
-                    |
-                    v
-     compatibility-envelope classifier
-                    |
-          +---------+---------+
-          |                   |
-          v                   v
-       expand              contract
-  accepts Old + New     exact desired graph
-~~~
-
-Each changed enforcement family receives a typed disposition:
-
-~~~text
-expand_to_desired     desired is proven no stricter; no contract needed
-expand_noop           current already accepts both; tighten in contract
-expand_relax          remove or weaken enforcement; restore in contract
-expand_bridge         expose two interfaces or synchronized representations
-contract_only         operation cannot affect newly deployed SQL acceptance
-needs_decision        application behavior or proof is not inferable
-unsupported           onward cannot construct a safe one-deploy path
-~~~
-
-Every disposition records:
-
-- the current and desired object IDs or correlated enforcement-family IDs;
-- whether acceptance is widened, narrowed, unchanged, or unknown;
-- the proof used, such as literal-set inclusion or old unique key implying the
-  new unique key;
-- the temporary guarantee lost during overlap, if any;
-- the verification required immediately before contract; and
-- whether newly deployed SQL addresses the object by name or relies on its
-  behavior, when that requires a developer decision.
-
-Renderers consume the disposition. They do not independently guess phases.
-
-## Climb 1: lock the invariant with failing execution tests
-
-Before changing rendering, add an integration harness that tests application
-acceptance, not only final graph convergence.
-
-Each rollout fixture contains:
-
-~~~text
-current.sql       current production schema
-desired.sql       declarative target schema
-legacy.sql        operations an old instance can issue
-next.sql          operations the new instance can issue
-verify.sql        boolean assertions required before contract
-~~~
-
-The harness must:
-
-1. materialize `current.sql`;
-2. generate and apply only expand;
-3. run both `legacy.sql` and `next.sql` successfully against the same schema;
-4. establish the post-drain/backfill conditions in the fixture;
-5. run `verify.sql` and require every assertion to be true;
-6. apply contract;
-7. prove the catalog graph equals `desired.sql`; and
-8. where the desired contract is stricter, prove the retired legacy operation
-   would now be rejected.
-
-The first red test is the exact tier widening. It must assert:
-
-- DROP old CHECK and ADD desired CHECK are both in expand;
-- they share an atomic replacement boundary;
-- both old tier values and `slack_new_conversation` are accepted after expand;
-- no contract statement exists for that constraint; and
-- final inspection has an empty residual diff.
-
-Run these tests on PostgreSQL 15, 16, 17, and 18.
-
-## Climb 2: make CHECK transitions acceptance-aware
-
-### Model the predicate directly
-
-Extend inspected CHECK constraints with the catalog-deparsed expression from:
-
-~~~sql
-pg_get_expr(con.conbin, con.conrelid, true)
-~~~
-
-Keep the complete `pg_get_constraintdef` representation for faithful DDL, but
-do not scrape the CHECK expression out of that presentation string. Both real
-and materialized desired schemas pass through the same PostgreSQL inspector, so
-the structured expression is catalog-grounded.
-
-### Safe proof ladder
-
-Classify CHECK changes with a deliberately bounded proof ladder:
-
-1. exact semantic equality after PostgreSQL normalization;
-2. single-column `IN` / `= ANY(array)` literal-set inclusion, including NULL
-   acceptance;
-3. finite old literal domain evaluated exhaustively against the desired
-   predicate in the disposable PostgreSQL database;
-4. simple normalized bound/nullability forms with tested implication rules;
-5. otherwise, unknown.
-
-Do not make arbitrary SQL predicate implication a correctness dependency.
-
-### Rendering rules
-
-For a validated current CHECK `P` and desired CHECK `Q`:
-
-- **Q proven at least as permissive as P:** atomically replace P with Q in
-  expand. Add Q as `NOT VALID`, then validate it in a separate expand batch so
-  the strong catalog lock is brief. Since P proved every existing row satisfies
-  Q, this does not invent a data assumption. No contract step remains.
-- **Q proven stricter than P:** retain P through expand. After legacy drain,
-  add Q under a deterministic temporary name as `NOT VALID` so all subsequent
-  writes are fenced by the desired predicate. Backfill and verify existing rows,
-  validate Q, then atomically drop P and rename Q to the durable identity.
-- **Mixed or unknown:** remove P in expand, explicitly creating a looser
-  overlap schema. After legacy drain, add Q as `NOT VALID` to fence subsequent
-  writes, capture any product-specific backfill, run a generated `Q IS FALSE`
-  assertion, and validate Q in contract.
-
-The generic fallback is removal, not automatic `P OR Q` synthesis. Dropping a
-CHECK reliably stops that CHECK from rejecting either writer. Boolean
-composition can still throw for partial expressions or user functions because
-PostgreSQL does not promise source-order evaluation. A future optimization may
-retain `P OR Q` only when total, side-effect-free evaluation is proven.
-
-Preserve comments, validation state, `NO INHERIT`, partition propagation, typed
-dependencies, and stable constraint identity. Block or request manual work when
-partition inheritance or a non-total function prevents a proven automatic
-path.
-
-### Contract proof
-
-Generate the CHECK assertion with PostgreSQL CHECK semantics:
-
-~~~sql
-SELECT NOT EXISTS (
-  SELECT 1
-  FROM "public"."support_escalation_delivery"
-  WHERE (<desired predicate>) IS FALSE
-);
-~~~
-
-`IS FALSE`, rather than `NOT (<predicate>)`, correctly treats NULL as accepted
-by a CHECK constraint. Run the assertion only after the desired `NOT VALID`
-constraint is installed. PostgreSQL then enforces Q for new or updated rows
-while the assertion and backfill cover pre-existing rows, closing the race
-between a successful scan and constraint installation.
-
-## Climb 3: handle UNIQUE, exclusion, and index enforcement
-
-Constraint and index changes need the same acceptance classifier, but their
-proofs are structural rather than Boolean.
-
-### Proven unique relaxation
-
-When the old unique key implies the new key—for example:
-
-~~~sql
-UNIQUE (package_component_id, sequence)
--- becomes
-UNIQUE (package_component_id, direction, sequence)
-~~~
-
-build the desired backing index concurrently under a reserved temporary name
-while the old constraint still proves it can succeed. Swap to the weaker
-constraint in expand. The new application can then use duplicate sequence
-numbers across directions. Contract is empty.
-
-The proof must account for:
-
-- key order and expressions;
-- partial-index predicate implication;
-- `NULLS DISTINCT` versus `NULLS NOT DISTINCT`;
-- included columns and opclasses;
-- collations;
-- exclusion operators; and
-- dependent foreign keys and replica identity.
-
-Only claim implication for explicitly tested structural forms.
-
-### Tightening or unknown replacement
-
-- Keep compatible old enforcement during expand when it does not reject new
-  operations.
-- If old enforcement may reject new operations, remove it in expand and mark
-  the exact temporary guarantee gap.
-- Build/attach the desired unique or exclusion enforcement in contract after a
-  duplicate/conflict assertion and any captured cleanup.
-- Use concurrent builds and transactional attachment/swap boundaries where
-  PostgreSQL permits them.
-
-Generated pre-contract verification must return duplicate keys or exclusion
-conflicts in a bounded, reviewable query.
-
-### Application-visible uniqueness
-
-New application SQL may use `ON CONFLICT`, name a constraint, or assume a
-database-enforced idempotency key. Schema diff alone cannot infer that.
-
-Ask one focused decision when a new/tightened unique object cannot coexist with
-legacy writes:
-
-> Does the newly deployed application address or require this uniqueness before
-> contract?
-
-If yes and no acceptance-compatible database shape exists, fail closed with a
-two-deployment or application-bridge requirement. Do not emit a plan that lets
-new SQL fail. If no, the constraint can be restored in contract.
-
-Replace generic `data_loss` hazards on enforcement drops with accurate hazards
-such as `temporary_uniqueness_unenforced`, `constraint_relaxation`, and
-`duplicate_rows_possible`.
-
-## Climb 4: correlate cross-name enforcement families
-
-Object identity alone misses transitions such as:
-
-~~~sql
-DROP CONSTRAINT checkout_quote_settlement_currency_jpy;
-ADD CONSTRAINT checkout_quote_settlement_currency_by_mode CHECK (...);
-~~~
-
-Build correlation candidates within a table from typed dependency evidence:
-
-- constraint kind;
-- constrained columns;
-- referenced table/columns for foreign keys;
-- backing index keys and predicates;
-- dependent objects; and
-- explicit rename decisions already captured by the planner.
-
-Correlation does not silently declare a rename. It groups related enforcement
-changes so the classifier can construct one rollout envelope. Ambiguous
-many-to-many candidates become a concise decision, with drop/add remaining the
-safe semantic fallback.
-
-Retained plan decisions are important here. Six Trip CHECK names appear in
-defensive DROP/re-add choreography around a data rewrite even though their
-endpoint predicates do not change. That sequence is not visible in endpoint
-graphs. When an edited onward plan captures equivalent work, rebasing a
-declarative chain must retain it under its stable decision ID until its
-preconditions change or the developer removes it.
-
-## Climb 5: audit every enforcement and interface polarity
-
-Replace ad hoc phase choices with a checked-in transition matrix. Every modeled
-mutation must be classified or explicitly unsupported.
-
-| Feature | Relaxing direction | Restricting/removing direction | Required audit |
-| --- | --- | --- | --- |
-| CHECK | wider predicate or drop: expand | narrower predicate: contract | Implemented with bounded proofs and a loose unknown fallback |
-| NOT NULL | DROP NOT NULL: expand | SET NOT NULL: backfill/verify/contract | Preserve existing good behavior; move staged proof creation only if it cannot reject legacy writes |
-| FOREIGN KEY | drop old enforcement in expand | add or restore desired enforcement in contract | Implemented for mutation; surface temporary orphan/cascade behavior |
-| UNIQUE / exclusion | weaker or incomparable old enforcement: expand relaxation | stronger or desired enforcement: contract | Implemented for bounded unique proofs and loose incomparable fallbacks |
-| Defaults | adding or changing a same-type default: expand | removing a default: contract | The expand schema has one desired default; old explicit values and omission syntax remain accepted |
-| Column add | nullable or compatibility-default form: expand | final required shape: contract | Preserve nullable shadow/backfill flow |
-| Column drop | n/a | contract | Confirm no renderer can move it earlier through dependency grouping |
-| Column rename | overlap bridge: expand | old-name removal/native identity cleanup: contract | Re-run all existing rename strategies through acceptance probes |
-| Column type | old/new interface bridge: expand | old representation removal: contract | Direct ALTER TYPE is allowed only with an explicit proof that both deployed versions accept the one physical type |
-| Enum | add accepted label: expand | label removal/reorder/rewrite: bridge then contract | Audit enum replacement paths against old and new value probes |
-| Index | additive lookup: expand; uniqueness follows enforcement rules | application-facing removal: contract, enforcement relaxation may be expand | Distinguish performance interface from integrity enforcement |
-| Table/view/routine | additive interface: expand | removal/signature contraction: contract | Exercise old and new queries, including dependent views/routines |
-| Trigger/generated/identity | case-specific | case-specific | Require an explicit write-path compatibility disposition; do not classify from DDL direction alone |
-| RLS/policies/privileges | granting/relaxing may be expand | revoking/tightening contract | Acceptance includes authorization; never use the looser-schema rule to hide an unreviewed security expansion |
-
-Add a test that fails when a modeled create/drop/modify renderer lacks a matrix
-entry. Security changes retain their stricter authorization confirmation even
-when application acceptance would otherwise suggest expansion.
-
-## Climb 6: make evolving plans preserve compatibility decisions
-
-Compatibility decisions live in the single plan tied to the merge and deploy.
-They must survive normal schema edits without becoming stale authority.
-
-Key decisions by an enforcement-family identity plus current/desired
-fingerprints. On re-plan:
-
-1. preserve edited backfills, verification, and application-interface answers
-   when their exact preconditions are unchanged;
-2. re-run compatibility proofs whenever either endpoint predicate or dependent
-   column shape changes;
-3. invalidate phase/proof decisions when their evidence changes;
-4. show the developer why an item moved between expand and contract;
-5. never silently discard history-only choreography merely because the final
-   endpoint object compares equal; and
-6. detect dev/prod/history drift before applying a retained decision.
-
-Add rebase tests where:
-
-- another branch adds one more allowed tier;
-- a backfill edit survives an unrelated column addition;
-- a predicate edit invalidates a previous widening proof;
-- production gains rows that fail the pending desired contract; and
-- an unchanged endpoint CHECK still retains an explicitly captured temporary
-  drop/backfill/re-add sequence.
-
-## Climb 7: operational rendering and hazards
-
-Rendered plans must make the temporary contract obvious:
-
-~~~sql
--- EXPAND COMPATIBILITY ENVELOPE
--- Both legacy and new application writes are accepted.
--- Temporary guarantee removed: support_escalation_delivery_tier_check.
--- Restore condition: desired predicate has no FALSE rows after legacy drain.
-~~~
-
-Use separate batches for:
-
-- brief transactional catalog swaps;
-- `CREATE/DROP INDEX CONCURRENTLY` operations;
-- lower-lock validation scans;
-- operator-edited data movement; and
-- final contract attachment/cleanup.
-
-Attach accurate timeouts and retry cleanup. A failed concurrent build must be
-detectable as an invalid index and safe to resume, matching the Trip production
-runbook's operational lesson.
-
-Hazard vocabulary should distinguish:
-
-- temporary enforcement weakening;
-- possible overlap-window invalid rows;
-- pre-contract data cleanup;
-- new application dependency not yet available;
-- strong catalog lock;
-- validation scan;
-- concurrent-build retry residue; and
-- permanent destructive cleanup.
-
-## Climb 8: documentation and proof receipts
-
-Update the README and plan-command guide around the corrected promise:
-
-1. expand is an acceptance-compatible envelope, often intentionally looser;
-2. deploy old and new code together against that envelope;
-3. drain legacy code;
-4. backfill and run generated assertions; and
-5. contract to the exact declarative target.
-
-Use the tier widening as the easy example, the unique-key relaxation as the
-medium example, the cross-name currency constraint as the hard example, and a
-type/derived-object bridge as the nightmare example.
-
-For every published SQL sample, generate the plan from a checked-in fixture and
-execute the legacy, next, verify, and convergence receipts in CI. Documentation
-must not hand-author phase claims the planner does not produce.
-
-Explain temporary weakening plainly. Do not imply old business invariants are
-preserved while new code starts using values those invariants rejected.
-
-## Evidence gates
-
-The work is complete only when all of these are true:
-
-- the exact `slack_new_conversation` widening is expand-only;
-- every corpus-derived fixture passes legacy and new probes after expand;
-- every contract fixture proves its assertion before desired enforcement is
-  attached;
-- final graph convergence is empty on PostgreSQL 15–18;
-- CHECK, NOT NULL, FK, unique, exclusion, default, index, type, rename, enum,
-  generated, identity, trigger, RLS, policy, and privilege transitions have a
-  checked-in disposition or a fail-closed blocker;
-- no constraint drop is generically labeled `data_loss` without a more precise
-  object-specific reason;
-- re-planning preserves valid edited work and invalidates stale proofs;
-- generated SQL clearly identifies temporary enforcement gaps;
-- README examples are generated from executable fixtures; and
-- a context-blind PostgreSQL specialist can infer the acceptance-compatibility
-  promise from the README, inspect the tests, and find no path where newly
-  deployed or legacy SQL is silently rejected before contract.
+| Proven CHECK widening | None: old accepted rows imply desired predicate | No data gate; expand-only convergence |
+| Unknown or cross-name CHECK restoration | Overlap rows may make the desired predicate `FALSE` | Generated `NOT EXISTS (... WHERE (predicate) IS FALSE)`; SQL NULL must retain PostgreSQL CHECK semantics |
+| New CHECK on an existing table | Existing rows may violate it | Same generated CHECK assertion |
+| NOT NULL | Existing or overlap rows may be NULL | Generated `NOT EXISTS (... WHERE column IS NULL)` |
+| New or changed FK | Orphans or MATCH-null violations | Generated anti-join only after local/referenced column pairs and MATCH semantics are typed |
+| UNIQUE/primary/unique index | Duplicate keys, predicate changes, NULL semantics | Generated duplicate probe for fully modeled keys; otherwise manual verification |
+| Exclusion | Pairwise conflicts under arbitrary operators | Manual verification until exact operator semantics and predicates are modeled |
+| Constraint-kind change | Depends on desired kind | Gate produced by the desired enforcement family |
+| Type/rename/generated data bridge | Product conversion or synchronization drift | Existing manual handoff, upgraded to require Boolean verification |
+| Pure enforcement removal | Desired schema does not restore the guarantee | No contract data gate; retain explicit permanent-loss decision |
+| New enforcement on a new/empty table | No historical rows | No cleanup gate; normal create ordering |
+
+For CHECK predicates, use `expression IS FALSE`, not `NOT expression`: a
+PostgreSQL CHECK accepts `TRUE` and `NULL` and rejects only `FALSE`.
+
+For foreign keys, extend the typed constraint model before generating a probe.
+Parsing presentation SQL during rendering is not acceptable. Retain ordered
+local/referenced column pairs, MATCH mode, actions, and equality/operator
+metadata from the catalog.
+
+For expression and partial unique indexes, the probe must preserve predicate,
+expression, collation, operator class, and `NULLS [NOT] DISTINCT` behavior.
+Unsupported exact probes require manual reconciliation or a blocker; a
+plausible `GROUP BY` is not enough.
+
+## Agent workflow
+
+A coding agent can improve the plan before deployment when it has read-only
+production access:
+
+1. inspect cardinality and representative invalid rows;
+2. choose `assert_only`, compose bounded cleanup SQL, or recommend
+   `split_plan`;
+3. put cleanup and exact Boolean verification into the retained answer;
+4. run clone verification; and
+5. leave contract-time readiness to fresh post-drain evidence.
+
+Sampling production values is useful for designing a backfill or constructing
+`verify` fixtures. Sampling is never a contract gate: only an exact query over
+the relevant production scope, PostgreSQL's own validation/build, or an
+explicitly reviewed manual proof can authorize restoration.
+
+Documentation should give agents one entry point and state this boundary
+plainly: “Point your agent at `docs/agent-workflow.md`; read-only production
+access improves reconciliation planning but does not prove writer drain.”
+
+## Implementation climbs
+
+### 1. Inventory and fail the missing cases
+
+- Create one registry of every statement that restores or tightens
+  enforcement in contract.
+- Add a test that fails if such a statement has neither a proof disposition nor
+  gate IDs.
+- Convert loose-envelope hazard strings into typed transition metadata while
+  retaining human-readable hazards.
+- Cover new enforcement on existing tables, not only mutations introduced by
+  `expand_relax`.
+
+### 2. Reconciliation decisions
+
+- Replace the narrow `prepare_unique` special case with the general
+  reconciliation question.
+- Require non-empty Boolean verification for reconciliation `ManualWork`.
+- Insert cleanup between the desired `NOT VALID` fence and validation where
+  PostgreSQL supports it.
+- Add `assert_only` and `split_plan`; remove the misleading durable meaning of
+  `already_clean`.
+- Rebind decisions by desired-invariant scope, invalidating them on meaningful
+  dependency changes.
+
+### 3. Exact assertion generators
+
+- Implement CHECK and NOT NULL assertions first.
+- Extend typed FK metadata, then implement MATCH-correct anti-joins.
+- Implement simple and expression UNIQUE probes only with exact NULL,
+  predicate, collation, and key semantics.
+- Keep exclusion and unproved forms manual or blocked.
+- Render assertions both as readable contract SQL and typed protocol gates.
+
+### 4. Expected expand checkpoint
+
+- Materialize accepted history plus the selected bundle through expand in a
+  disposable database.
+- Fingerprint that graph and receipt it in the bundle.
+- Compare a caller-supplied production catalog to that checkpoint read-only.
+- Distinguish missing expand, partial contract, unrelated drift, and ignored
+  configured objects in diagnostics.
+
+### 5. Writer evidence and `contract check`
+
+- Define the provider-neutral evidence and readiness-report protocols.
+- Bind evidence to PlanID, entry digest, generation, environment, release, and
+  expiry.
+- Require explicit preview/test cohort disposition.
+- Add the read-only command without adding any production execution path.
+- Make JSON output concise enough for an agent and CI to act on directly.
+
+### 6. Rebase, edits, and history integrity
+
+- Receipt gates and the expand checkpoint in the bundle manifest.
+- Preserve manual reconciliation only when its scope fingerprint remains
+  equal.
+- Treat generator changes to a gated contract region as an edit conflict.
+- Make `verify --check` reject missing, stale, or unreceipted gate artifacts.
+- Ensure an absorbed plan cannot leave orphan drain evidence or readiness
+  receipts behind.
+
+### 7. Documentation and product proof
+
+- Rewrite the workflow around `expand -> deploy -> drain writers -> reconcile
+  -> assert -> contract`.
+- Explain potential writers versus current database sessions with the Vercel
+  preview example.
+- Show easy, medium, hard, and agent-assisted reconciliation cases from
+  generated fixtures.
+- Keep clone verification, production readiness, and migration execution as
+  visibly separate concepts.
+- Update the README claim only after every evidence gate below passes.
+
+## Receipt matrix
+
+Every loose-envelope fixture must exercise four states:
+
+1. legacy and new writes both succeed after expand;
+2. a desired-invalid overlap row makes the named contract gate fail before
+   enforcement is partially restored;
+3. captured cleanup plus its Boolean assertion permits contract; and
+4. final catalog diff is empty.
+
+Required fixtures:
+
+- known CHECK widening with no contract gate;
+- unknown same-name and cross-name CHECK transitions;
+- NOT NULL with and without cleanup;
+- changed FK with MATCH SIMPLE and MATCH FULL composite keys;
+- unique-key relaxation, incomparable uniqueness, partial unique index, and
+  `NULLS NOT DISTINCT`;
+- exclusion mutation using manual verification;
+- same-name constraint-kind change;
+- type and rename manual bridges;
+- stale reconciliation after predicate/key/dependency change;
+- retained reconciliation after unrelated schema change;
+- production not at the expected expand checkpoint;
+- missing, expired, wrong-plan, wrong-environment, and unknown-preview writer
+  evidence; and
+- upgraded, drained, isolated, and read-only preview cohorts.
+
+Run catalog, acceptance, contamination, cleanup, and convergence receipts on
+PostgreSQL 15, 16, 17, and 18. For concurrency-sensitive uniqueness, include a
+writer running during the contract build and prove the selected strategy
+either converges or blocks cleanly.
+
+## Completion gates
+
+This hill climb is complete only when:
+
+- every contract enforcement statement has typed gate coverage or a proof that
+  no gate is needed;
+- every loose overlap that can pollute the desired invariant captures
+  `assert_only`, verified manual cleanup, or `split_plan`;
+- manual reconciliation cannot be accepted without Boolean verification;
+- contract assertions fail before irreversible or partially restored work;
+- production can be compared read-only with the exact expected expand graph;
+- writer evidence is scoped, expiring, and includes preview environments;
+- `contract check` cannot execute migration SQL on a caller database;
+- plan rebasing preserves valid reconciliation and rejects stale evidence;
+- PostgreSQL 15–18 contamination and convergence receipts pass; and
+- documentation no longer implies that clone verification or zero active
+  sessions proves contract readiness.
+
+## Completion receipts
+
+The implementation is guarded by these checked receipts:
+
+- `go test ./... -count=1` passes across every Go package;
+- `scripts/test-documentation-receipts.sh` regenerates the required-column,
+  type-change, rename, and dependency-closure examples from the current CLI,
+  executes the edited fixture, and proves convergence;
+- `node scripts/check-documentation.mjs`, `pnpm --dir website check`, and
+  `pnpm --dir website build` pass;
+- PostgreSQL 15, 16, 17, and 18 each pass the required-column, loose-CHECK
+  contamination/cleanup, `NULLS NOT DISTINCT` uniqueness, `NOT VALID` foreign
+  key, exclusion, and read-only contract-check integration receipts; and
+- `TestContinuousConstraintReplacementRetriesFailedBuildWithoutDroppingOldKey`
+  passes on PostgreSQL 15–18 with a real writer transaction committing a
+  conflicting row while `CREATE UNIQUE INDEX CONCURRENTLY` is running. The
+  build blocks, fails without dropping the old key or its inbound foreign key,
+  then the deterministic cleanup/retry path converges.
+
+The implementation also closes an audit finding discovered while grounding
+the docs: authoritative baseline DDL now discards the staged contract gates
+from its graph-planner inventory, and the contract-check integration test uses
+the restricted scratch database URL rather than accidentally reusing the
+administrator database.
 
 ## Non-goals
 
-- Preserve every old database enforcement guarantee during the overlap window.
-- Infer arbitrary application queries or business invariants from DDL.
-- Solve implication for arbitrary PostgreSQL expressions.
-- Automatically invent product-specific backfills.
-- Pretend every schema change fits one rolling deployment; fail closed when no
-  acceptance-compatible bridge exists.
-
-## Implementation order
-
-1. Add the legacy/new execution harness and the exact red CHECK fixture.
-2. Introduce typed transition dispositions and remove phase authority from
-   individual renderers.
-3. Implement CHECK expression inspection, bounded proofs, relaxed fallback,
-   assertions, and corpus fixtures.
-4. Implement unique/exclusion implication, concurrent expand swaps, contract
-   verification, and application-visible uniqueness decisions.
-5. Correlate cross-name enforcement families and preserve history-only edited
-   choreography.
-6. Audit FK, default, NOT NULL, index, and destructive-drop polarity.
-7. Run type, rename, enum, generated, identity, trigger, view/routine, RLS,
-   policy, and privilege paths through the transition matrix.
-8. Add plan-rebase invalidation/preservation tests.
-9. Regenerate documentation examples from the executable fixture corpus.
-10. Run PostgreSQL 15–18 convergence and acceptance CI, then request a fresh
-    blind PostgreSQL review.
+- Apply expand or contract SQL to production.
+- Discover every deployment, worker, queue, or preview without caller evidence.
+- Treat `pg_stat_activity` as proof that old writers cannot return.
+- Invent product-specific cleanup from DDL or sampled rows.
+- Accept sampling as a substitute for an exact contract assertion.
+- Build provider-specific deployment integrations before the neutral evidence
+  protocol is proven.
+- Force every compatibility change into one deployment; `split_plan` remains a
+  correct outcome.

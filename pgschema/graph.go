@@ -258,8 +258,40 @@ type Constraint struct {
 	Deferrable      bool
 	Deferred        bool
 	Reference       *ID
-	UsingIndex      string
-	Comment         *string
+	// Foreign-key semantics are retained as typed catalog state. The ordered
+	// columns and equality operators are required to generate exact readiness
+	// probes without parsing pg_get_constraintdef presentation SQL.
+	ForeignKeyColumns           []string
+	ReferencedColumns           []string
+	ForeignKeyMatch             ForeignKeyMatch
+	ForeignKeyOnUpdate          ForeignKeyAction
+	ForeignKeyOnDelete          ForeignKeyAction
+	ForeignKeyEqualityOperators []ForeignKeyOperator
+	UsingIndex                  string
+	Comment                     *string
+}
+
+type ForeignKeyMatch string
+
+const (
+	ForeignKeyMatchSimple  ForeignKeyMatch = "simple"
+	ForeignKeyMatchFull    ForeignKeyMatch = "full"
+	ForeignKeyMatchPartial ForeignKeyMatch = "partial"
+)
+
+type ForeignKeyAction string
+
+const (
+	ForeignKeyNoAction   ForeignKeyAction = "no_action"
+	ForeignKeyRestrict   ForeignKeyAction = "restrict"
+	ForeignKeyCascade    ForeignKeyAction = "cascade"
+	ForeignKeySetNull    ForeignKeyAction = "set_null"
+	ForeignKeySetDefault ForeignKeyAction = "set_default"
+)
+
+type ForeignKeyOperator struct {
+	Schema string
+	Name   string
 }
 
 type ConstraintType string

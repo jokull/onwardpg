@@ -29,6 +29,15 @@ letting an obsolete constraint reject the new release.
 onwardpg never applies SQL to production. It writes reviewable bundles and
 replays them in restricted disposable PostgreSQL databases.
 
+Contract is now an evidence boundary rather than a phase-name convention.
+Every statement that restores CHECK, NOT NULL, foreign-key, unique, primary-key,
+or exclusion enforcement has a typed proof disposition. When overlap rows can
+pollute the desired invariant, onwardpg captures an `assert_only`, reviewed
+cleanup, or `split_plan` decision and emits the exact Boolean assertion before
+restoration. `onwardpg contract check` then compares production read-only with
+the receipted post-expand catalog, runs those data gates, and validates expiring
+writer evidence bound to this exact plan and history entry.
+
 **Documentation:** [onwardpg.solberg.is](https://onwardpg.solberg.is)
 
 The [plan-command walkthrough](https://onwardpg.solberg.is/concepts/plan-command/)
@@ -103,23 +112,36 @@ onwardpg init
 onwardpg plan add-booking-status
 ~~~
 
-Answer plan questions with the printed fingerprinted hints and rerun. Editable
-product-specific SQL must pass clone verification before acceptance.
+The required-column plan first asks whether contract should use the generated
+post-drain assertion alone, capture reviewed cleanup SQL, or remain loose for a
+later deployment. Answer with the printed fingerprinted hint and rerun.
+Editable product-specific SQL must pass clone verification before acceptance.
 
-For this exact required-column example, the initial generated receipt is:
+After selecting reviewed cleanup for this exact example, the generated receipt
+contains:
 
 ~~~text
 migrations/onward/app/add-booking-status/
 ├── manifest.json
 ├── plan.json
+├── contract-gates.json
+├── decisions.json
+├── questions.json
+├── answers.json
+├── decisions/
+│   └── attempt-001.json
 └── phases/
     ├── expand.sql
     └── contract.sql
 ~~~
 
-`decisions.json` appears only when a semantic hint is consumed. Add
-`verify.sql` when the plan needs Boolean assertions. Review every statement
-and hazard, edit the reported SQL pocket, then run:
+`decisions.json` appears only when a semantic hint is consumed. The exact
+`NOT NULL` readiness assertion is generated into contract and receipted in
+`contract-gates.json`; add `verify.sql` for additional named clone
+postconditions. Successful verification also receipts `verify.sql` when
+present and writes `expand-checkpoint.json` for later production readiness
+checks. Review every statement and hazard, edit the reported SQL
+pocket, then run:
 
 ~~~sh
 onwardpg verify
@@ -222,7 +244,17 @@ the current CLI in CI.
   build.
 - Verification independently replays the selected checkpoint and full
   continuation, runs boolean assertions, compares final graph fingerprints,
-  and requires an empty residual diff.
+  and requires an empty residual diff. It also receipts the exact catalog graph
+  observed after expand; this is the catalog authority used later by the
+  read-only production contract check.
+- Loose overlap is paired with typed contract reconciliation. Generated gates
+  preserve PostgreSQL's actual CHECK NULL behavior, composite foreign-key MATCH
+  semantics, and supported unique-index predicate/expression/NULL semantics.
+  Unsupported exact probes require reviewed Boolean SQL or a split plan.
+- Writer drain means every potential writer cohort—not merely zero current
+  sessions. Web deployments, workers, schedules, queues, connection pools,
+  previews, and ad-hoc writers must be upgraded, drained, isolated, or read-only
+  in expiring evidence bound to the PlanID and bundle digest.
 
 ## What remains yours
 
@@ -278,6 +310,7 @@ onwardpg init             establish replayable history
 onwardpg plan [name]      create, revise, or restack one active bundle
 onwardpg status           inspect active plan and history
 onwardpg verify           replay, assert, and prove the active bundle
+onwardpg contract check   check post-expand catalog, data, and writer gates read-only
 onwardpg history status   inspect the accepted hash chain
 onwardpg dev plan         reconcile a developer database without applying SQL
 onwardpg drift check      compare production read-only state with accepted history
@@ -287,6 +320,7 @@ onwardpg config check     validate sources, PostgreSQL majors, and ignores
 See [migration workflow](docs/migration-workflow.md),
 [supported features](docs/supported-features.md),
 [safety model](docs/safety-model.md), [CLI reference](docs/cli.md), and
-[bundle format](docs/bundles.md). onwardpg is an MIT-licensed developer preview
+[contract readiness](docs/contract-readiness.md), and [bundle format](docs/bundles.md).
+onwardpg is an MIT-licensed developer preview
 with no production apply command, embedded agent, framework adapter, or down
 migration generator.

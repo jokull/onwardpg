@@ -326,5 +326,11 @@ func authoritativeBaselinePlan(inventory protocol.Result, ddl []byte) protocol.R
 		ID: "batch-expand-001", Phase: protocol.PhaseExpand,
 		Transactional: false, Statements: []protocol.Statement{item},
 	}}
+	// Contract gates describe the graph planner's staged route from an empty
+	// catalog. The authoritative baseline replaces that route with one exact DDL
+	// replay, so retaining those now-unreferenced gates would misrepresent init
+	// and make the baseline bundle invalid.
+	inventory.ContractGates = nil
+	inventory.Reconciliations = nil
 	return inventory
 }

@@ -18,7 +18,9 @@ import (
 	"github.com/jokull/onwardpg/internal/protocol"
 )
 
-const Version = "onwardpg.bundle/v2"
+const Version = "onwardpg.bundle/v3"
+
+const CatalogCheckpointVersion = "onwardpg.catalog-checkpoint/v1"
 
 var rootHistoryDigest = digestFrames([]byte("onwardpg.history/v1"), []byte("root"))
 
@@ -27,6 +29,7 @@ func HistoryRootDigest() string { return rootHistoryDigest }
 var (
 	fingerprintPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	secretDSNPattern   = regexp.MustCompile(`(?i)(?:^|[\s;])(?:password|passfile|sslkey)\s*=`)
+	gateIDPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9_.:-]*$`)
 )
 
 type SourceReceipt struct {
@@ -71,6 +74,19 @@ type FileReceipt struct {
 	Digest string `json:"digest"`
 }
 
+// CatalogCheckpoint receipts the exact graph observed after accepted history
+// plus this bundle's expand phase were executed in disposable PostgreSQL.
+// Production comparison is read-only and uses this as the overlap authority.
+type CatalogCheckpoint struct {
+	ProtocolVersion     string `json:"protocol_version"`
+	BundleID            string `json:"bundle_id"`
+	PlanID              string `json:"plan_id"`
+	Generation          int    `json:"generation"`
+	BaselineFingerprint string `json:"baseline_fingerprint"`
+	ExpandFingerprint   string `json:"expand_fingerprint"`
+	DesiredFingerprint  string `json:"desired_fingerprint"`
+}
+
 type Manifest struct {
 	ProtocolVersion string `json:"protocol_version"`
 	BundleID        string `json:"bundle_id"`
@@ -85,15 +101,18 @@ type Manifest struct {
 	Planner        PlannerReceipt  `json:"planner"`
 	History        *HistoryReceipt `json:"history,omitempty"`
 
-	ResultDigest       string                   `json:"result_digest"`
-	PlanDigest         string                   `json:"plan_digest,omitempty"`
-	Decisions          []FileReceipt            `json:"decisions,omitempty"`
-	AnswersDigest      string                   `json:"answers_digest,omitempty"`
-	QuestionsDigest    string                   `json:"questions_digest,omitempty"`
-	SemanticDigest     string                   `json:"semantic_decisions_digest,omitempty"`
-	PhaseSource        string                   `json:"phase_source,omitempty"`
-	VerificationDigest string                   `json:"verification_digest,omitempty"`
-	Phases             map[string]PhaseArtifact `json:"phases,omitempty"`
+	ResultDigest                string                   `json:"result_digest"`
+	PlanDigest                  string                   `json:"plan_digest,omitempty"`
+	Decisions                   []FileReceipt            `json:"decisions,omitempty"`
+	AnswersDigest               string                   `json:"answers_digest,omitempty"`
+	QuestionsDigest             string                   `json:"questions_digest,omitempty"`
+	SemanticDigest              string                   `json:"semantic_decisions_digest,omitempty"`
+	ContractGatesDigest         string                   `json:"contract_gates_digest,omitempty"`
+	ContractGateOverridesDigest string                   `json:"contract_gate_overrides_digest,omitempty"`
+	ExpandCheckpointDigest      string                   `json:"expand_checkpoint_digest,omitempty"`
+	PhaseSource                 string                   `json:"phase_source,omitempty"`
+	VerificationDigest          string                   `json:"verification_digest,omitempty"`
+	Phases                      map[string]PhaseArtifact `json:"phases,omitempty"`
 }
 
 type Metadata struct {
@@ -146,6 +165,29 @@ func (a Artifact) Validate() error {
 		}
 		if err := validatePlanStatements(result); err != nil {
 			return fmt.Errorf("validate plan.json: %w", err)
+		}
+		if len(result.ContractGates) > 0 {
+			required["contract-gates.json"] = a.Manifest.ContractGatesDigest
+			gateBytes, err := jsonDocument(result.ContractGates)
+			if err != nil {
+				return fmt.Errorf("encode contract gates: %w", err)
+			}
+			if a.Manifest.ContractGatesDigest == "" || string(a.Files["contract-gates.json"]) != string(gateBytes) {
+				return fmt.Errorf("contract gate receipt does not match plan.json")
+			}
+		} else if a.Manifest.ContractGatesDigest != "" {
+			return fmt.Errorf("manifest receipts contract gates absent from plan.json")
+		}
+		if a.Manifest.ContractGateOverridesDigest != "" {
+			required["contract-gate-overrides.json"] = a.Manifest.ContractGateOverridesDigest
+			if a.Manifest.PhaseSource != "edited" {
+				return fmt.Errorf("only edited phase SQL may override placeholder contract gates")
+			}
+		} else if _, exists := a.Files["contract-gate-overrides.json"]; exists {
+			return fmt.Errorf("bundle contains unreceipted contract gate overrides")
+		}
+		if _, err := effectiveContractGates(a, result); err != nil {
+			return err
 		}
 		switch a.Manifest.PhaseSource {
 		case "", "generated":
@@ -229,6 +271,19 @@ func (a Artifact) Validate() error {
 	}
 	if a.Manifest.VerificationDigest != "" {
 		required["verify.sql"] = a.Manifest.VerificationDigest
+	}
+	if a.Manifest.ExpandCheckpointDigest != "" {
+		required["expand-checkpoint.json"] = a.Manifest.ExpandCheckpointDigest
+		checkpoint, err := ReadCatalogCheckpoint(a)
+		if err != nil {
+			return err
+		}
+		if checkpoint.BundleID != a.Manifest.BundleID || checkpoint.PlanID != a.Manifest.PlanID || checkpoint.Generation != a.Manifest.Generation ||
+			checkpoint.BaselineFingerprint != a.Manifest.BaselineSource.Fingerprint || checkpoint.DesiredFingerprint != a.Manifest.DesiredSource.Fingerprint {
+			return fmt.Errorf("expand checkpoint does not match bundle identity and schema receipts")
+		}
+	} else if _, exists := a.Files["expand-checkpoint.json"]; exists {
+		return fmt.Errorf("bundle contains an unreceipted expand checkpoint")
 	}
 	for _, phase := range a.Manifest.Phases {
 		required[phase.Path] = phase.Digest
@@ -327,6 +382,14 @@ func Build(input Input) (Artifact, error) {
 		manifest.PhaseSource = "generated"
 		for name, data := range phaseFiles {
 			files[name] = data
+		}
+		if len(input.Result.ContractGates) > 0 {
+			gateBytes, err := jsonDocument(input.Result.ContractGates)
+			if err != nil {
+				return Artifact{}, fmt.Errorf("encode contract gates: %w", err)
+			}
+			files["contract-gates.json"] = gateBytes
+			manifest.ContractGatesDigest = Digest(gateBytes)
 		}
 	}
 	if input.Answers != nil {
@@ -520,6 +583,9 @@ func jsonDocument(value any) ([]byte, error) {
 }
 
 func validatePlanStatements(result protocol.Result) error {
+	if err := validateContractGates(result); err != nil {
+		return err
+	}
 	ids := make(map[string]protocol.Statement, len(result.Statements))
 	for _, statement := range result.Statements {
 		if !protocol.ValidPhase(statement.Phase) {
@@ -527,6 +593,12 @@ func validatePlanStatements(result protocol.Result) error {
 		}
 		if statement.ID == "" {
 			return fmt.Errorf("planned statement is missing a stable id")
+		}
+		if statement.ContractDisposition != "" && statement.ContractDisposition != "write_fence" && statement.ContractDisposition != "gated_restoration" && statement.ContractDisposition != "catalog_proven_invariant" && statement.ContractDisposition != "catalog_proven_index" && statement.ContractDisposition != "catalog_derived_relation" && statement.ContractDisposition != "postgres_atomic_validation" && statement.ContractDisposition != "operator_owned_manual" {
+			return fmt.Errorf("planned statement %q has invalid contract disposition %q", statement.ID, statement.ContractDisposition)
+		}
+		if bundleRestoresEnforcement(statement) && statement.ContractDisposition == "" {
+			return fmt.Errorf("contract enforcement statement %q has no typed gate disposition", statement.ID)
 		}
 		if _, exists := ids[statement.ID]; exists {
 			return fmt.Errorf("planned statement id %q is duplicated", statement.ID)
@@ -554,6 +626,106 @@ func validatePlanStatements(result protocol.Result) error {
 	}
 	if len(seen) != len(ids) {
 		return fmt.Errorf("planned batches cover %d of %d statements", len(seen), len(ids))
+	}
+	return nil
+}
+
+func bundleRestoresEnforcement(statement protocol.Statement) bool {
+	if statement.Phase != protocol.PhaseContract {
+		return false
+	}
+	upper := strings.ToUpper(strings.TrimSpace(statement.SQL))
+	if strings.Contains(upper, "ADD CONSTRAINT") && strings.Contains(upper, "NOT VALID") {
+		return false
+	}
+	if strings.Contains(upper, "VALIDATE CONSTRAINT") || strings.Contains(upper, " SET NOT NULL") || strings.HasPrefix(upper, "CREATE UNIQUE INDEX") {
+		return true
+	}
+	return strings.Contains(upper, "ADD CONSTRAINT") && (strings.Contains(upper, " UNIQUE ") || strings.Contains(upper, " PRIMARY KEY ") || strings.Contains(upper, " EXCLUDE ") || strings.Contains(upper, " CHECK ") || strings.Contains(upper, " FOREIGN KEY "))
+}
+
+func validateContractGates(result protocol.Result) error {
+	gates := make(map[string]protocol.ContractGate, len(result.ContractGates))
+	for _, gate := range result.ContractGates {
+		if !gateIDPattern.MatchString(gate.ID) || gates[gate.ID].ID != "" {
+			return fmt.Errorf("contract gate id %q is invalid or duplicated", gate.ID)
+		}
+		if !fingerprintPattern.MatchString(gate.ScopeFingerprint) {
+			return fmt.Errorf("contract gate %q has invalid scope fingerprint", gate.ID)
+		}
+		if strings.TrimSpace(gate.Reason) == "" || strings.ContainsAny(gate.Reason, "\r\n") {
+			return fmt.Errorf("contract gate %q requires a one-line reason", gate.ID)
+		}
+		switch gate.Kind {
+		case "catalog_checkpoint", "data_assertion", "manual_reconciliation":
+			if strings.TrimSpace(gate.BooleanSQL) == "" || len(gate.RequiredEvidence) != 0 {
+				return fmt.Errorf("contract gate %q requires boolean_sql and no external evidence", gate.ID)
+			}
+			upper := strings.ToUpper(strings.TrimSpace(gate.BooleanSQL))
+			if !strings.HasPrefix(upper, "SELECT ") && !strings.HasPrefix(upper, "WITH ") {
+				return fmt.Errorf("contract gate %q boolean_sql must be a read-only SELECT", gate.ID)
+			}
+		case "writer_attestation":
+			if strings.TrimSpace(gate.BooleanSQL) != "" || len(gate.RequiredEvidence) == 0 {
+				return fmt.Errorf("writer attestation gate %q requires external evidence and no boolean_sql", gate.ID)
+			}
+			previous := ""
+			for _, category := range gate.RequiredEvidence {
+				if strings.TrimSpace(category) == "" || previous != "" && category <= previous {
+					return fmt.Errorf("writer attestation gate %q evidence categories must be sorted and unique", gate.ID)
+				}
+				previous = category
+			}
+		default:
+			return fmt.Errorf("contract gate %q has invalid kind %q", gate.ID, gate.Kind)
+		}
+		gates[gate.ID] = gate
+	}
+	referenced := make(map[string]bool, len(gates))
+	for _, statement := range result.Statements {
+		seen := make(map[string]bool, len(statement.RequiresGates))
+		for _, id := range statement.RequiresGates {
+			if _, exists := gates[id]; !exists || seen[id] {
+				return fmt.Errorf("statement %q references missing or duplicate contract gate %q", statement.ID, id)
+			}
+			if statement.Phase != protocol.PhaseContract {
+				return fmt.Errorf("expand statement %q cannot require contract gate %q", statement.ID, id)
+			}
+			seen[id], referenced[id] = true, true
+		}
+	}
+	seenTransitions := make(map[string]bool, len(result.Reconciliations))
+	for _, reconciliation := range result.Reconciliations {
+		if strings.TrimSpace(reconciliation.TransitionID) == "" || seenTransitions[reconciliation.TransitionID] {
+			return fmt.Errorf("reconciliation transition id %q is empty or duplicated", reconciliation.TransitionID)
+		}
+		seenTransitions[reconciliation.TransitionID] = true
+		switch reconciliation.Strategy {
+		case "assert_only":
+			if reconciliation.Work != nil {
+				return fmt.Errorf("assert-only reconciliation %q cannot include manual work", reconciliation.TransitionID)
+			}
+		case "manual_sql":
+			if reconciliation.Work == nil || len(reconciliation.Work.Statements) == 0 || len(reconciliation.Work.VerificationSQL) == 0 {
+				return fmt.Errorf("manual reconciliation %q requires statements and boolean verification", reconciliation.TransitionID)
+			}
+		default:
+			return fmt.Errorf("planned reconciliation %q has invalid strategy %q", reconciliation.TransitionID, reconciliation.Strategy)
+		}
+		if len(reconciliation.GateIDs) == 0 {
+			return fmt.Errorf("reconciliation %q has no contract gates", reconciliation.TransitionID)
+		}
+		for _, id := range reconciliation.GateIDs {
+			if _, exists := gates[id]; !exists {
+				return fmt.Errorf("reconciliation %q references missing gate %q", reconciliation.TransitionID, id)
+			}
+			referenced[id] = true
+		}
+	}
+	for id := range gates {
+		if !referenced[id] {
+			return fmt.Errorf("contract gate %q is not referenced", id)
+		}
 	}
 	return nil
 }
@@ -647,8 +819,11 @@ func (m Manifest) Validate() error {
 	if m.PhaseSource != "" && m.PhaseSource != "generated" && m.PhaseSource != "edited" {
 		return fmt.Errorf("phase_source %q is invalid", m.PhaseSource)
 	}
-	if m.State != string(protocol.Planned) && m.State != string(protocol.NeedsSQLEdits) && (m.PhaseSource != "" || m.VerificationDigest != "") {
+	if m.State != string(protocol.Planned) && m.State != string(protocol.NeedsSQLEdits) && (m.PhaseSource != "" || m.VerificationDigest != "" || m.ExpandCheckpointDigest != "" || m.ContractGateOverridesDigest != "") {
 		return fmt.Errorf("only planned or needs_sql_edits bundles may contain phase receipts")
+	}
+	if m.ContractGateOverridesDigest != "" && (m.State != string(protocol.Planned) || m.PhaseSource != "edited") {
+		return fmt.Errorf("contract gate overrides require a planned bundle with edited phase SQL")
 	}
 	if m.State == string(protocol.NeedsSQLEdits) && m.VerificationDigest != "" {
 		return fmt.Errorf("needs_sql_edits bundle cannot contain a verification receipt")
@@ -690,7 +865,9 @@ func (m Manifest) Validate() error {
 	for name, digest := range map[string]string{
 		"result": m.ResultDigest, "plan": m.PlanDigest,
 		"answers": m.AnswersDigest, "questions": m.QuestionsDigest, "semantic_decisions": m.SemanticDigest,
-		"verification": m.VerificationDigest,
+		"verification": m.VerificationDigest, "contract_gates": m.ContractGatesDigest,
+		"contract_gate_overrides": m.ContractGateOverridesDigest,
+		"expand_checkpoint":       m.ExpandCheckpointDigest,
 	} {
 		if digest != "" && !fingerprintPattern.MatchString(digest) {
 			return fmt.Errorf("%s digest %q is invalid", name, digest)

@@ -15,6 +15,12 @@ The scratch cluster must still provide required roles, languages, and extension 
 
 Unsupported or ambiguous catalog shapes block instead of comparing equal. Rename, destructive, cast, authorization, and backfill decisions are bound to exact graph fingerprints. Product-specific SQL remains an editable TODO until it executes and converges in verification.
 
+Every contract statement that restores row enforcement has a typed disposition:
+an exact data/writer gate or a narrow catalog/atomic proof. A hazard label alone
+cannot authorize tightening. `contract check` evaluates live catalog, data, and
+writer evidence read-only, while contract SQL repeats data assertions at the
+actual enforcement boundary.
+
 Narrow ignore selectors acknowledge a blind spot; they do not declare ignored objects equivalent. Every selector is validated and exact exclusions are reported.
 
 ## Reviewer ownership
@@ -29,4 +35,3 @@ You remain responsible for:
 - dynamic SQL dependencies PostgreSQL itself does not catalog.
 
 Review generated files as deployment code. A green verification result is strong structural evidence, not a production safety oracle.
-

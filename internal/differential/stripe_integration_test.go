@@ -19,6 +19,7 @@ import (
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
+	"github.com/jokull/onwardpg/pgschema"
 )
 
 const pinnedStripeReferenceCommit = "6208f8f3ceccae8ca634055dc47907a6a864cb76"
@@ -363,7 +364,7 @@ CREATE INDEX orders_lookup_idx ON app.orders (account_id, created_at DESC);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	onward, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{ConcurrentIndexes: true})
+	onward, err := buildOnwardWithAssertions(current, desired, graphplan.Options{ConcurrentIndexes: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +480,7 @@ CREATE UNIQUE INDEX some_unique_idx ON schema_4.foobar_1 (id, foo);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	onward, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{ConcurrentIndexes: true})
+	onward, err := buildOnwardWithAssertions(current, desired, graphplan.Options{ConcurrentIndexes: true})
 	if err != nil || onward.Status != protocol.Planned || len(onward.Statements) != 9 {
 		t.Fatalf("onwardpg special-index replacement=%#v err=%v", onward, err)
 	}
@@ -488,8 +489,9 @@ CREATE UNIQUE INDEX some_unique_idx ON schema_4.foobar_1 (id, foo);`
 		t.Fatalf("onwardpg did not continuously replace the materialized-view index: %#v", onward)
 	}
 	for _, schema := range []string{"schema_2", "schema_4"} {
-		if !strings.Contains(onwardSQL, `ALTER INDEX "`+schema+`"."some_unique_idx" RENAME TO "onwardpg_tmpidx_`) {
-			t.Fatalf("onwardpg did not continuously replace the conflicting local index in %s: %#v", schema, onward)
+		if !strings.Contains(onwardSQL, `DROP INDEX CONCURRENTLY "`+schema+`"."some_unique_idx"`) ||
+			!strings.Contains(onwardSQL, `CREATE UNIQUE INDEX CONCURRENTLY "some_unique_idx" ON "`+schema+`"."foobar_1"`) {
+			t.Fatalf("onwardpg did not loosen the local unique index in expand and restore it behind a contract gate in %s: %#v", schema, onward)
 		}
 	}
 	for i, statement := range onward.Statements {
@@ -724,7 +726,7 @@ CREATE TABLE app.orders (
 	if err != nil {
 		t.Fatal(err)
 	}
-	onward, err := graphplan.Build(current, desired, protocol.Answers{}, graphplan.Options{ConcurrentIndexes: true})
+	onward, err := buildOnwardWithAssertions(current, desired, graphplan.Options{ConcurrentIndexes: true})
 	if err != nil || onward.Status != protocol.Planned {
 		t.Fatalf("onwardpg key/FK replacement=%#v err=%v", onward, err)
 	}
@@ -1389,6 +1391,30 @@ func joinOnwardSQL(plan protocol.Result) string {
 		parts[i] = statement.SQL
 	}
 	return strings.Join(parts, "\n")
+}
+
+func buildOnwardWithAssertions(current, desired *pgschema.Snapshot, options graphplan.Options) (protocol.Result, error) {
+	answers := protocol.Answers{}
+	for attempt := 0; attempt < 5; attempt++ {
+		result, err := graphplan.Build(current, desired, answers, options)
+		if err != nil || result.Status != protocol.NeedsInput {
+			return result, err
+		}
+		if answers.ProtocolVersion == "" {
+			answers.ProtocolVersion = protocol.Version
+			answers.CurrentFingerprint = result.CurrentFingerprint
+			answers.DesiredFingerprint = result.DesiredFingerprint
+		}
+		for _, question := range result.Questions {
+			if question.Kind != "reconcile_contract" || !containsChoice(question.Choices, "assert_only") {
+				return result, nil
+			}
+			answers.Answers = append(answers.Answers, protocol.Answer{
+				Kind: question.Kind, Key: question.Key, Value: "assert_only", QuestionFingerprint: question.ScopeFingerprint,
+			})
+		}
+	}
+	return protocol.Result{}, fmt.Errorf("onwardpg reconciliation questions did not converge")
 }
 
 func editOnwardTypeHandoff(plan protocol.Result, contractSQL string) protocol.Result {

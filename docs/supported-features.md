@@ -350,19 +350,21 @@ time.
 A nullable-to-`NOT NULL` transition offers `direct`, `staged`, and
 `staged_with_backfill`. The last option hands the application-owned backfill to
 an explicit contract SQL TODO after compatible writers are deployed. Contract
-installs the `NOT VALID` guard, runs the backfill, validates, sets `NOT NULL`,
-and removes the helper constraint. The guard is not placed in expand:
+installs the `NOT VALID` guard, runs the backfill, evaluates the exact NULL
+contract gate, validates, sets `NOT NULL`, and removes the helper constraint.
+The guard is not placed in expand:
 PostgreSQL enforces a `NOT VALID` check for new rows immediately, which could
 break old writers. onwardpg never derives the backfill expression from the
 schema.
 
 Adding a new `NOT NULL` column without a default is always staged. Expand adds
-the column as nullable so old writers and existing rows remain valid; contract
-contains an editable backfill TODO and then enforces `NOT NULL` after old
-writers drain.
-The result remains `needs_sql_edits` until the agent supplies the product-aware
-work. A new required column with a retained default can be added directly,
-subject to the reported lock/rewrite hazards.
+the column as nullable so old writers and existing rows remain valid. The
+planner then offers `assert_only`, `manual_sql`, or `split_plan`: assert-only
+generates the exact NULL gate before `SET NOT NULL`; manual SQL adds a reviewed
+contract cleanup pocket before that same gate; split-plan deliberately leaves
+the column loose for a later deployment. Only the manual choice returns
+`needs_sql_edits`. A new required column with a retained default can be added
+directly, subject to the reported lock/rewrite hazards.
 
 PostgreSQL's propagated parent/child indexes and constraints are graph-modeled
 with typed child→parent edges. This includes primary/unique constraints and

@@ -7,12 +7,12 @@
 -- ============================================================================
 -- onwardpg:batch transactional
 -- Batch batch-contract-001: transactional.
--- Review: safety=manual; hazards=manual_sql,table_rewrite_possible,access_exclusive_lock,single_deployment_bridge_required.
--- onwardpg:edit begin stmt-sha256-3c9a77c545f422f4d872127d2ccf22f38b996bbe1d6e98f46dd89b93e4e088a3
+-- Review: safety=manual; hazards=manual_sql,table_rewrite_possible,access_exclusive_lock,single_deployment_bridge_required; requires_gates=writers:legacy.
+-- onwardpg:edit begin stmt-sha256-d8f3d897e34cdfb771ae8eb7c6ed431dc41a8f757c8e14233974fca504f73108
 -- ONWARDPG TODO: replace this comment with reviewed CONTRACT SQL for column:app:accounts:age (text -> integer).
 -- After pre-deployment writers drain, perform final catch-up/assertions, remove compatibility objects, and converge to PostgreSQL type integer.
 -- Required mutation shape: convert "app"."accounts"."age" to integer with a reviewed expression; do not rely on an inferred cast.
 -- Add boolean assertions to verify.sql for every data-dependent conversion assumption.
--- onwardpg:edit end stmt-sha256-3c9a77c545f422f4d872127d2ccf22f38b996bbe1d6e98f46dd89b93e4e088a3
--- Review: safety=review; hazards=type_change_statistics_refresh,database_performance_impact.
+-- onwardpg:edit end stmt-sha256-d8f3d897e34cdfb771ae8eb7c6ed431dc41a8f757c8e14233974fca504f73108
+-- Review: safety=review; hazards=type_change_statistics_refresh,database_performance_impact; requires_gates=writers:legacy.
 ANALYZE "app"."accounts" ("age");

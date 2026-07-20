@@ -27,6 +27,8 @@ The planner's core safety rules are:
 - retain declarative physical column-order differences as stable compatibility
   evidence without forcing dangerous replacement-table migrations;
 - preserve execution constraints through explicit transactional batches; and
+- require every contract enforcement statement to name exact data/writer gates
+  or a narrow typed catalog proof; and
 - surface destructive, lock, rewrite, validation, and availability concerns as
   statement safety/hazard metadata for review.
 
@@ -96,6 +98,14 @@ The read-only `verify --check` gate additionally recompiles current configured
 DDL, requires the selected bundle to be the chain head, and compares its desired
 fingerprint before clone execution. Self-consistency with a stale recorded
 target is not sufficient.
+
+`onwardpg contract check` is a second, intentionally separate read-only
+surface. It validates the bundle head, compares a caller database with the
+receipted post-expand graph, and evaluates data gates plus expiring writer
+attestations inside one repeatable-read snapshot. It has no code path that
+loads or executes phase SQL. Its result cannot replace the inline assertion in
+contract SQL: readiness feedback can become stale between observation and
+execution.
 
 The agent, not onwardpg, manages Git. The preferred `plan` command derives its
 base by excluding the active local PlanID and validating the remaining

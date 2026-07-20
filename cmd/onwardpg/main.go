@@ -15,9 +15,11 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jokull/onwardpg/internal/activeplan"
 	"github.com/jokull/onwardpg/internal/bundle"
+	"github.com/jokull/onwardpg/internal/contractcheck"
 	"github.com/jokull/onwardpg/internal/devflow"
 	"github.com/jokull/onwardpg/internal/draftflow"
 	"github.com/jokull/onwardpg/internal/driftcheck"
@@ -68,6 +70,7 @@ Everyday workflow:
   plan             create, revise, or restack one feature migration
   status           inspect the worktree-local active feature plan
   verify           clone-verify one exact bundle
+  contract check   check live contract readiness read-only
   drift check      compare replayed history with a live catalog read-only
 
 Diagnostics and compatibility:
@@ -83,7 +86,7 @@ func main() { os.Exit(run()) }
 
 func run() int {
 	if len(os.Args) < 2 {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg <init|status|history|dev|draft|verify|drift|plan|diff|config|version>"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg <init|status|history|dev|draft|verify|contract|drift|plan|diff|config|version>"))
 	}
 	switch os.Args[1] {
 	case "help", "-h", "--help":
@@ -112,6 +115,8 @@ func run() int {
 		return runDraft(os.Args[2:])
 	case "verify":
 		return runVerify(os.Args[2:])
+	case "contract":
+		return runContractAt(os.Args[2:], ".")
 	case "drift":
 		return runDrift(os.Args[2:])
 	case "config":
@@ -264,6 +269,94 @@ func runHistoryStatusAt(arguments []string, start string) int {
 }
 
 func runDrift(arguments []string) int { return runDriftAt(arguments, ".") }
+
+func runContractAt(arguments []string, start string) int {
+	if helpRequested(arguments) {
+		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg contract check [--bundle ID] --environment NAME --database-env ENV [--evidence FILE] [--target NAME]")
+		return 0
+	}
+	if len(arguments) == 0 || arguments[0] != "check" {
+		return writeError("invalid_invocation", errors.New("usage: onwardpg contract check [--bundle ID] --environment NAME --database-env ENV [--evidence FILE]"))
+	}
+	flags := flag.NewFlagSet("contract check", flag.ContinueOnError)
+	targetName := flags.String("target", "", "configured database target name")
+	bundleID := flags.String("bundle", "", "history-head bundle to check")
+	environment := flags.String("environment", "", "deployment environment identity")
+	databaseEnv := flags.String("database-env", "", "environment variable containing a read-only PostgreSQL URL")
+	evidencePath := flags.String("evidence", "", "writer-drain evidence JSON")
+	statementTimeout := flags.Duration("statement-timeout", 30*time.Second, "timeout for each read-only data gate")
+	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
+	if help, err := parseFlagSet(flags, arguments[1:]); help {
+		return 0
+	} else if err != nil {
+		return writeError("invalid_invocation", err)
+	}
+	if code := rejectPositionals(flags, "contract check"); code != 0 {
+		return code
+	}
+	if *environment == "" || *databaseEnv == "" {
+		return writeError("invalid_invocation", errors.New("contract check requires --environment and --database-env"))
+	}
+	databaseURL := os.Getenv(*databaseEnv)
+	if databaseURL == "" {
+		return writeError("source_error", fmt.Errorf("environment variable %s is required", *databaseEnv))
+	}
+	configPath := *configName
+	if !filepath.IsAbs(configPath) {
+		configPath = filepath.Join(start, configPath)
+	}
+	configPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	config, err := workspace.Load(configPath)
+	if err != nil {
+		return writeError("invalid_config", err)
+	}
+	if _, err := resolveConfiguredTarget(config, targetName); err != nil {
+		return writeError("invalid_config", err)
+	}
+	chain, err := history.Load(filepath.Dir(configPath), config.BundleRoot, *targetName)
+	if err != nil {
+		return writeError("invalid_history", err)
+	}
+	if len(chain.Entries) == 0 {
+		return writeError("invalid_history", errors.New("target history is empty"))
+	}
+	entry := chain.Entries[len(chain.Entries)-1]
+	if *bundleID != "" && entry.Artifact.Manifest.BundleID != *bundleID {
+		return writeError("stale_bundle", fmt.Errorf("bundle %q is not the history head %q", *bundleID, entry.Artifact.Manifest.BundleID))
+	}
+	var evidence []byte
+	if *evidencePath != "" {
+		evidence, err = os.ReadFile(*evidencePath)
+		if err != nil {
+			return writeError("writer_evidence_error", err)
+		}
+	}
+	manifest := entry.Artifact.Manifest
+	options := graphplan.Options{
+		ConcurrentIndexes: manifest.Planner.Options.ConcurrentIndexes, IfNotExists: manifest.Planner.Options.IfNotExists,
+		IfExists: manifest.Planner.Options.IfExists, CascadeDrops: manifest.Planner.Options.CascadeDrops,
+		SchemaQualifier:         manifest.Planner.Options.SchemaQualifier,
+		IgnoreExtensionVersions: append([]string(nil), manifest.Planner.Options.IgnoreExtensionVersions...),
+	}
+	report, err := contractcheck.Run(context.Background(), contractcheck.Input{
+		Artifact: entry.Artifact, ExpectedHead: chain.HeadDigest, DatabaseURL: databaseURL, Environment: *environment,
+		Evidence: evidence, StatementTimeout: *statementTimeout, Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+	})
+	if err != nil {
+		return writeError("contract_check_error", err)
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(report)
+	if report.Status == "ready" {
+		return 0
+	}
+	if report.Status == "needs_evidence" {
+		return 2
+	}
+	return 4
+}
 
 func runDriftAt(arguments []string, start string) int {
 	if helpRequested(arguments) {
@@ -802,6 +895,11 @@ func runBundleAt(arguments []string, start string) int {
 		return writeError("invalid_history", err)
 	}
 	manifest := prefix.Entries[len(prefix.Entries)-1].Artifact.Manifest
+	if *check && manifest.ContractGatesDigest != "" && manifest.ExpandCheckpointDigest == "" {
+		return writeVerifyFinding(*targetName, *bundleID, prefix.HeadDigest, *through, "blocked", "missing_expand_checkpoint",
+			"the gated contract bundle has no receipted post-expand catalog checkpoint",
+			"rerun onwardpg plan or verify the edited bundle so disposable PostgreSQL can receipt its exact expand graph")
+	}
 	if selectedAnchor != nil && manifest.PlanID != selectedAnchor.PlanID {
 		return writeVerifyFinding(*targetName, *bundleID, prefix.HeadDigest, *through, "blocked", "active_plan_identity_mismatch",
 			fmt.Sprintf("local active plan %s does not match bundle plan id %s", selectedAnchor.PlanID, manifest.PlanID),
@@ -846,10 +944,44 @@ func runBundleAt(arguments []string, start string) int {
 		})
 		return 4
 	}
-	report, err := verify.Run(ctx, verify.Input{
-		AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: *through,
-		Ignores: manifest.Planner.IgnoreSelectors, Options: options,
-	})
+	verificationChain := chain
+	var checkpointArtifact *bundle.Artifact
+	var report verify.Report
+	if edited != nil {
+		expandReport, expandErr := verify.Run(ctx, verify.Input{
+			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: protocol.PhaseExpand,
+			Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+		})
+		if expandErr != nil {
+			return writeError("verification_error", expandErr)
+		}
+		if expandReport.Outcome != "verified" && expandReport.Outcome != "partial_verified" {
+			_ = json.NewEncoder(os.Stdout).Encode(expandReport)
+			return 4
+		}
+		receipted, receiptErr := bundle.WithExpandCheckpoint(edited.Artifact, expandReport.ObservedFingerprint)
+		if receiptErr != nil {
+			return writeError("bundle_receipt_update_failed", receiptErr)
+		}
+		checkpointArtifact = &receipted
+		verificationChain.Entries = append([]history.Entry(nil), chain.Entries...)
+		verificationChain.Entries[len(verificationChain.Entries)-1].Artifact = receipted
+		verificationChain.HeadDigest = receipted.Manifest.History.EntryDigest
+		if *through == protocol.PhaseExpand {
+			report = expandReport
+			report.HistoryHead = verificationChain.HeadDigest
+		} else {
+			report, err = verify.Run(ctx, verify.Input{
+				AdminURL: adminURL, Chain: verificationChain, BundleID: *bundleID, ThroughPhase: *through,
+				Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+			})
+		}
+	} else {
+		report, err = verify.Run(ctx, verify.Input{
+			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: *through,
+			Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+		})
+	}
 	if err != nil {
 		return writeError("verification_error", err)
 	}
@@ -893,7 +1025,7 @@ func runBundleAt(arguments []string, start string) int {
 			}
 		} else {
 			latestBase, latestSelected, loadErr := history.LoadEditedDraft(root, config.BundleRoot, *targetName, *bundleID)
-			if loadErr != nil || latestSelected == nil || latestBase.HeadDigest != edited.Artifact.Manifest.History.ParentDigest || !reflect.DeepEqual(latestSelected.Artifact, edited.Artifact) {
+			if loadErr != nil || latestSelected == nil || latestBase.HeadDigest != edited.Artifact.Manifest.History.ParentDigest || !reflect.DeepEqual(latestSelected.Artifact.Files, edited.Artifact.Files) {
 				message := "target history or edited SQL changed while clone verification was running"
 				if loadErr != nil {
 					message += ": " + loadErr.Error()
@@ -903,12 +1035,12 @@ func runBundleAt(arguments []string, start string) int {
 			}
 		}
 	}
-	if report.Outcome == "verified" && edited != nil && *through == "contract" {
+	if (report.Outcome == "verified" || report.Outcome == "partial_verified") && checkpointArtifact != nil {
 		destination, err := config.BundlePath(root, *targetName, *bundleID)
 		if err != nil {
 			return writeError("invalid_bundle", err)
 		}
-		if err := bundle.InstallReceipts(destination, edited.Artifact); err != nil {
+		if err := bundle.InstallReceipts(destination, *checkpointArtifact); err != nil {
 			return writeError("bundle_receipt_update_failed", err)
 		}
 		report.ReceiptsUpdated = true

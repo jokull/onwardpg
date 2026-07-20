@@ -121,7 +121,8 @@ function assertInOrder(body, fragments, label) {
 
 assertInOrder(planCommand, [
   expandStatement,
-  '-- ONWARDPG TODO: deploy code that writes column:app:bookings:status, then replace this comment with a reviewed backfill for existing rows.',
+  '-- PRODUCT-SPECIFIC SQL: ONWARDPG TODO: provide reconcile_contract_sql SQL for app.bookings.status',
+  'onwardpg contract gate failed: data:1c16b884027de910',
   'ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;',
 ], 'plan-command easy/medium ladder');
 
@@ -190,19 +191,51 @@ assertInOrder(dependencyContract, dependencyFragments, 'dependency type-change r
 assertInOrder(planCommand, dependencyFragments, 'plan-command nightmare ladder');
 
 const homepage = await readFile(path.join(repositoryRoot, 'website/src/pages/index.astro'), 'utf8');
-for (const expected of [
+const requiredCleanup = generatedRequiredContract
+  .split('\n')
+  .find((line) => line.includes('PRODUCT-SPECIFIC SQL: ONWARDPG TODO'));
+const requiredGate = generatedRequiredContract
+  .split('\n')
+  .find((line) => line.includes('onwardpg contract gate failed'));
+if (!requiredCleanup || !requiredGate) fail('required-column receipt is missing its cleanup or contract gate');
+assertInOrder(homepage, [
   '"protocol_version":"onwardpg.plan/v5"',
+  '"status":"needs_input"',
+  '["assert_only","manual_sql","split_plan"]',
+  '"kind":"reconcile","object":"column","name":["app","bookings","status"],"strategy":"manual_sql"',
+  '"kind":"manual_sql","action":"reconcile_contract_sql","object":"column","name":["app","bookings","status"]',
   '"status":"needs_sql_edits"',
   '"durable":&#123;"edit_files":["phases/contract.sql"]',
   expandStatement,
-  'ONWARDPG TODO: reviewed backfill',
+  requiredCleanup.trim(),
+  requiredGate.trim(),
   'ALTER COLUMN "status" SET NOT NULL;',
   'abridged from the checked black-box CLI receipt',
-]) {
-  if (!homepage.includes(expected)) fail(`homepage receipt is missing: ${expected}`);
+], 'homepage required-column receipt');
+
+const supportedFeatures = documents.get(path.join(repositoryRoot, 'docs/supported-features.md'));
+for (const choice of ['`assert_only`', '`manual_sql`', '`split_plan`']) {
+  if (!supportedFeatures.includes(choice)) fail(`supported-features omits required-column choice ${choice}`);
 }
-if (homepage.indexOf('ONWARDPG TODO: reviewed backfill') > homepage.indexOf('ALTER COLUMN "status" SET NOT NULL;')) {
-  fail('homepage puts required-column enforcement before its backfill pocket');
+const bundles = documents.get(path.join(repositoryRoot, 'docs/bundles.md'));
+for (const artifact of [
+  'contract-gates.json',
+  'contract-gate-overrides.json',
+  'expand-checkpoint.json',
+  'verify.sql',
+]) {
+  if (!bundles.includes(artifact)) fail(`bundle inventory omits ${artifact}`);
+}
+const decisionProtocol = documents.get(
+  path.join(repositoryRoot, 'skills/onwardpg/references/decision-protocol.md'),
+);
+if (!decisionProtocol.includes('required production readiness assertion') ||
+    !decisionProtocol.includes('They do not authorize production contract')) {
+  fail('agent decision protocol conflates contract gates with optional verify.sql assertions');
+}
+const cliReference = documents.get(path.join(repositoryRoot, 'docs/cli.md'));
+for (const expected of ['--statement-timeout 30s', 'onwardpg.contract-readiness/v1']) {
+  if (!cliReference.includes(expected)) fail(`CLI reference omits ${expected}`);
 }
 
 const goRoots = ['cmd', 'internal', 'pgschema', 'scripts'].map((name) =>

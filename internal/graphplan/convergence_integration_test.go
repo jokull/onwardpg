@@ -16,6 +16,40 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
+// Existing convergence receipts predate the product-facing reconciliation
+// question. Their fixtures contain no contaminating overlap rows, so they
+// explicitly choose the generated exact assertion while retaining every
+// other ambiguity for the individual test to resolve.
+func buildIntegration(current, desired *pgschema.Snapshot, answers protocol.Answers, options Options) (protocol.Result, error) {
+	for attempt := 0; attempt < 6; attempt++ {
+		result, err := Build(current, desired, answers, options)
+		if err != nil || result.Status != protocol.NeedsInput {
+			return result, err
+		}
+		var additions []protocol.Answer
+		for _, question := range result.Questions {
+			assertOnly := false
+			for _, choice := range question.Choices {
+				if choice == "assert_only" {
+					assertOnly = true
+					break
+				}
+			}
+			if question.Kind == "reconcile_contract" && assertOnly {
+				additions = append(additions, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "assert_only", QuestionFingerprint: question.ScopeFingerprint})
+			}
+		}
+		if len(additions) == 0 {
+			return result, nil
+		}
+		if answers.ProtocolVersion == "" {
+			answers.ProtocolVersion, answers.CurrentFingerprint, answers.DesiredFingerprint = protocol.Version, result.CurrentFingerprint, result.DesiredFingerprint
+		}
+		answers.Answers = append(answers.Answers, additions...)
+	}
+	return protocol.Result{}, fmt.Errorf("integration reconciliation did not converge")
+}
+
 func TestCreatePlanConvergesOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
@@ -62,7 +96,7 @@ CREATE INDEX orders_state_idx ON "` + schemaName + `".orders (state);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +158,7 @@ CREATE TABLE ` + qualified + `items (
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := Build(current, desired, protocol.Answers{}, Options{})
+	created, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || created.Status != protocol.Planned {
 		t.Fatalf("dependency create plan=%#v err=%v", created, err)
 	}
@@ -155,7 +189,7 @@ CREATE TABLE ` + qualified + `items (
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, empty, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, empty, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("dependency drop questions=%#v err=%v", pending, err)
 	}
@@ -168,7 +202,7 @@ CREATE TABLE ` + qualified + `items (
 			Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint,
 		})
 	}
-	dropped, err := Build(current, empty, answers, Options{})
+	dropped, err := buildIntegration(current, empty, answers, Options{})
 	if err != nil || dropped.Status != protocol.Planned {
 		t.Fatalf("dependency drop plan=%#v err=%v", dropped, err)
 	}
@@ -230,7 +264,7 @@ func TestSchemaAndSearchPathConvergeOnPostgreSQL(t *testing.T) {
 	applyWithDrops := func(label string, desired *pgschema.Snapshot) protocol.Result {
 		t.Helper()
 		current := loadCurrent(url)
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -242,7 +276,7 @@ func TestSchemaAndSearchPathConvergeOnPostgreSQL(t *testing.T) {
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -278,7 +312,7 @@ CREATE TABLE "` + schemaName + `".person (m "` + schemaName + `".mood);`
 	if normalFingerprint != hardenedFingerprint {
 		t.Fatalf("catalog introspection changed under an empty search_path: normal=%s hardened=%s", normalFingerprint, hardenedFingerprint)
 	}
-	unchanged, err := Build(hardened, full, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(hardened, full, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("empty-search_path identical graph plan=%#v err=%v", unchanged, err)
 	}
@@ -290,7 +324,7 @@ CREATE TABLE "` + schemaName + `".person (m "` + schemaName + `".mood);`
 		t.Fatalf("schema drop missing:\n%s", joinPlan(dropped))
 	}
 	empty := loadDesired("")
-	noWork, err := Build(loadCurrent(url), empty, protocol.Answers{}, Options{})
+	noWork, err := buildIntegration(loadCurrent(url), empty, protocol.Answers{}, Options{})
 	if err != nil || noWork.Status != protocol.Planned || len(noWork.Statements) != 0 {
 		t.Fatalf("identical empty databases generated work: plan=%#v err=%v", noWork, err)
 	}
@@ -330,7 +364,7 @@ func TestViewCreateAndReplaceConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +388,7 @@ func TestViewCreateAndReplaceConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +396,7 @@ func TestViewCreateAndReplaceConvergeOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected view rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +426,7 @@ func TestViewCreateAndReplaceConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +483,7 @@ func TestViewOptionsAndDependencyChainsConvergeOnPostgreSQL(t *testing.T) {
 		t.Helper()
 		desired := loadDesired(ddl)
 		current := loadCurrent()
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -461,7 +495,7 @@ func TestViewOptionsAndDependencyChainsConvergeOnPostgreSQL(t *testing.T) {
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -500,7 +534,7 @@ CREATE VIEW "` + apiSchema + `".checked AS SELECT x FROM "` + dataSchema + `".t`
 
 	reorderedOptions := views("security_barrier=true, security_invoker=true", "x", "")
 	reordered := loadDesired(reorderedOptions)
-	unchanged, err := Build(loadCurrent(), reordered, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), reordered, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("view option ordering or unchanged chain generated work: plan=%#v err=%v", unchanged, err)
 	}
@@ -581,12 +615,12 @@ CREATE VIEW "` + apiSchema + `".keep_view AS SELECT keep FROM "` + dataSchema + 
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
 		t.Fatalf("view-column type change must enter the reviewed handoff: plan=%#v err=%v", pending, err)
 	}
 	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.NeedsSQLEdits {
 		t.Fatalf("view-column type change handoff plan=%#v err=%v", plan, err)
 	}
@@ -668,12 +702,12 @@ func TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgr
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
 		t.Fatalf("materialized-view column type change must enter the reviewed handoff: plan=%#v err=%v", pending, err)
 	}
 	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.NeedsSQLEdits {
 		t.Fatalf("materialized-view type-change handoff plan=%#v err=%v", plan, err)
 	}
@@ -753,7 +787,7 @@ func TestChangedViewRequiresManualDependentMaterializedViewRefresh(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,7 +800,7 @@ func TestChangedViewRequiresManualDependentMaterializedViewRefresh(t *testing.T)
 			"REFRESH MATERIALIZED VIEW " + quote(schemaName) + ".order_cache;",
 		}, VerificationSQL: []string{"SELECT amount = 20 FROM " + quote(schemaName) + ".order_cache WHERE id = 1;"}},
 	}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -821,7 +855,7 @@ func TestDependentViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -829,7 +863,7 @@ func TestDependentViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T
 		t.Fatalf("expected dependent view rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -871,7 +905,7 @@ func TestPartitionAttachAndDetachConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -892,7 +926,7 @@ func TestPartitionAttachAndDetachConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -938,7 +972,7 @@ func TestManualPartitionReconfigurationContractConvergesOnPostgreSQL(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,7 +987,7 @@ func TestManualPartitionReconfigurationContractConvergesOnPostgreSQL(t *testing.
 			"ALTER TABLE " + quote(schemaName) + ".events ATTACH PARTITION " + quote(schemaName) + ".events_2026 FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');",
 		}, VerificationSQL: []string{"SELECT 1;"}},
 	}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -999,7 +1033,7 @@ func TestManualPartitionStrategyChangePreservesPrimaryKeyOnPostgreSQL(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1015,7 +1049,7 @@ func TestManualPartitionStrategyChangePreservesPrimaryKeyOnPostgreSQL(t *testing
 			"ALTER TABLE " + qualified(schemaName, "events") + " ADD CONSTRAINT events_pkey PRIMARY KEY (id);",
 		}, VerificationSQL: []string{"SELECT 1;"}},
 	}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1082,7 +1116,7 @@ func TestPartitionTopologyRunbookCoversNestedCrossSchemaClosureOnPostgreSQL(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := Build(current, desired, protocol.Answers{}, Options{})
+	result, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1148,7 +1182,7 @@ func TestManualDefaultPartitionReconfigurationContractConvergesOnPostgreSQL(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1163,7 +1197,7 @@ func TestManualDefaultPartitionReconfigurationContractConvergesOnPostgreSQL(t *t
 			"ALTER TABLE " + quote(schemaName) + ".events ATTACH PARTITION " + quote(schemaName) + ".events_other FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');",
 		}, VerificationSQL: []string{"SELECT 1;"}},
 	}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1205,7 +1239,7 @@ func TestPartitionedIndexAndConstraintCreateConvergesOnPostgreSQL(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1251,7 +1285,7 @@ func TestPartitionedIndexAndConstraintDropConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1262,7 +1296,7 @@ func TestPartitionedIndexAndConstraintDropConvergesOnPostgreSQL(t *testing.T) {
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop"})
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1305,7 +1339,7 @@ func TestPartitionedInheritedCheckDropConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1313,7 +1347,7 @@ func TestPartitionedInheritedCheckDropConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected exactly the parent destructive question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "drop"}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1360,7 +1394,7 @@ func TestCheckWideningAcceptsLegacyAndNewWritesAfterExpand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1419,7 +1453,7 @@ func TestCrossNameCheckTransitionAcceptsLegacyAndNewWritesAfterExpand(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1480,7 +1514,7 @@ func TestUniqueKeyRelaxationAcceptsLegacyAndNewWritesAfterExpand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1535,7 +1569,7 @@ func TestPartitionedInheritedCheckCreateAndRebuildConvergesOnPostgreSQL(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, first, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, first, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1558,7 +1592,7 @@ func TestPartitionedInheritedCheckCreateAndRebuildConvergesOnPostgreSQL(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, second, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, second, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1601,7 +1635,7 @@ func TestPartitionedParentIndexRebuildConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1655,7 +1689,7 @@ CREATE INDEX events_2026_lookup_idx ON "` + schemaName + `".events_2026 (id, cre
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("continuous special-index plan=%#v err=%v", plan, err)
 	}
@@ -1711,7 +1745,7 @@ CREATE TABLE "` + schemaName + `".events_2026 PARTITION OF "` + schemaName + `".
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || plan.Status != protocol.Planned || len(plan.Statements) != 9 {
 		t.Fatalf("continuous partition-parent plan=%#v err=%v", plan, err)
 	}
@@ -1806,7 +1840,7 @@ CREATE TABLE "` + schemaName + `".events_2026_1 PARTITION OF "` + schemaName + `
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("nested continuous plan=%#v err=%v", plan, err)
 	}
@@ -1870,7 +1904,7 @@ CREATE INDEX "Foobar_3_Part" ON "` + schemaName + `"."Foobar_3" (foo);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || plan.Status != protocol.Planned || len(plan.Statements) != 1 {
 		t.Fatalf("partition attach plan=%#v err=%v", plan, err)
 	}
@@ -1930,7 +1964,7 @@ ALTER INDEX "` + schemaName + `".uq_events_key ATTACH PARTITION "` + schemaName 
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if serverVersion >= 180000 {
 		if err != nil {
 			t.Fatal(err)
@@ -2010,7 +2044,7 @@ COMMENT ON CONSTRAINT accounts_pkey ON "` + schemaName + `".accounts IS 'stable 
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("continuous constraint plan=%#v err=%v", plan, err)
 	}
@@ -2062,7 +2096,7 @@ CREATE TABLE "` + schemaName + `".orders (account_id bigint);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("foreign-key drop should ask before strategy rejection: plan=%#v err=%v", pending, err)
 	}
@@ -2073,7 +2107,7 @@ CREATE TABLE "` + schemaName + `".orders (account_id bigint);`
 		}
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 	}
-	result, err := Build(current, desired, answers, Options{ConcurrentIndexes: true})
+	result, err := buildIntegration(current, desired, answers, Options{ConcurrentIndexes: true})
 	if err != nil || result.Status != protocol.Planned {
 		t.Fatalf("foreign-key dependent swap plan=%#v err=%v", result, err)
 	}
@@ -2156,7 +2190,7 @@ COMMENT ON CONSTRAINT orders_account_fkey ON "` + orderSchema + `".orders IS 'pr
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("cross-schema foreign-key plan=%#v err=%v", plan, err)
 	}
@@ -2269,7 +2303,7 @@ ALTER TABLE "` + schemaName + `".gamma ADD CONSTRAINT gamma_alpha_fkey FOREIGN K
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("cyclic foreign-key replacement plan=%#v err=%v", plan, err)
 	}
@@ -2298,8 +2332,10 @@ ALTER TABLE "` + schemaName + `".gamma ADD CONSTRAINT gamma_alpha_fkey FOREIGN K
 		}
 		if strings.Contains(batchSQL, "VALIDATE CONSTRAINT") {
 			validationBatches++
-			if len(batch.Statements) != 1 {
-				t.Fatalf("cyclic FK validation must be isolated: %#v", batch)
+			for _, statement := range batch.Statements {
+				if !strings.Contains(statement.SQL, "VALIDATE CONSTRAINT") && !strings.Contains(statement.SQL, "onwardpg contract gate failed") {
+					t.Fatalf("cyclic FK validation may share its transaction only with its immediate data assertion: %#v", batch)
+				}
 			}
 		}
 	}
@@ -2335,7 +2371,7 @@ CREATE TABLE "` + schemaName + `".orders (
   account_tenant_id bigint,
   CONSTRAINT orders_account_fkey FOREIGN KEY (account_email) REFERENCES "` + schemaName + `".accounts(email)
 );
-INSERT INTO "` + schemaName + `".accounts VALUES ('one', 1), ('two', 1);`
+INSERT INTO "` + schemaName + `".accounts VALUES ('one', 1), ('two', 2);`
 	if _, err := conn.Exec(ctx, currentDDL); err != nil {
 		t.Fatal(err)
 	}
@@ -2362,18 +2398,73 @@ CREATE TABLE "` + schemaName + `".orders (
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || plan.Status != protocol.Planned || len(plan.Statements) < 2 {
 		t.Fatalf("retryable key/FK plan=%#v err=%v", plan, err)
 	}
-	if !strings.HasPrefix(plan.Statements[0].SQL, "DROP INDEX CONCURRENTLY IF EXISTS ") || !strings.Contains(plan.Statements[1].SQL, "CREATE UNIQUE INDEX CONCURRENTLY") {
-		t.Fatalf("replacement must start with deterministic retry cleanup and build: %#v", plan.Statements[:2])
+	cleanupIndex, buildIndex := -1, -1
+	for index, statement := range plan.Statements {
+		if strings.HasPrefix(statement.SQL, "DROP INDEX CONCURRENTLY IF EXISTS ") && cleanupIndex == -1 {
+			cleanupIndex = index
+		}
+		if strings.Contains(statement.SQL, "CREATE UNIQUE INDEX CONCURRENTLY") && buildIndex == -1 {
+			buildIndex = index
+		}
 	}
-	if _, err := conn.Exec(ctx, plan.Statements[0].SQL); err != nil {
+	if cleanupIndex < 0 || buildIndex != cleanupIndex+1 {
+		t.Fatalf("replacement must retain adjacent deterministic retry cleanup and build: %#v", plan.Statements)
+	}
+	if _, err := conn.Exec(ctx, plan.Statements[cleanupIndex].SQL); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Exec(ctx, plan.Statements[1].SQL); err == nil {
-		t.Fatal("expected replacement unique-index build to reject duplicate tenant IDs")
+	writerConn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writerConn.Close(ctx)
+	writer, err := writerConn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec(ctx, "INSERT INTO "+quote(schemaName)+".accounts VALUES ('three', 2)"); err != nil {
+		t.Fatal(err)
+	}
+	buildConn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buildConn.Close(ctx)
+	buildResult := make(chan error, 1)
+	go func() {
+		_, buildErr := buildConn.Exec(context.Background(), plan.Statements[buildIndex].SQL)
+		buildResult <- buildErr
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var active bool
+		if err := conn.QueryRow(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_stat_activity
+WHERE pid = $1 AND state = 'active' AND query LIKE 'CREATE UNIQUE INDEX CONCURRENTLY%')`, buildConn.PgConn().PID()).Scan(&active); err != nil {
+			t.Fatal(err)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("concurrent unique-index build did not begin while the writer transaction was open")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-buildResult:
+		if err == nil {
+			t.Fatal("expected replacement unique-index build to reject the conflicting row committed by an in-flight writer")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("concurrent unique-index build did not finish after the writer committed")
 	}
 	var usableOldKey bool
 	if err := conn.QueryRow(ctx, `
@@ -2391,7 +2482,7 @@ WHERE n.nspname = $1 AND t.relname = 'accounts' AND c.conname = 'accounts_key'`,
 	if _, err := conn.Exec(ctx, "INSERT INTO "+quote(schemaName)+".orders (account_email) VALUES ('missing')"); err == nil {
 		t.Fatal("old inbound foreign key stopped enforcing after failed replacement build")
 	}
-	if _, err := conn.Exec(ctx, "UPDATE "+quote(schemaName)+".accounts SET tenant_id = 2 WHERE email = 'two'"); err != nil {
+	if _, err := conn.Exec(ctx, "DELETE FROM "+quote(schemaName)+".accounts WHERE email = 'three'"); err != nil {
 		t.Fatal(err)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -2430,7 +2521,7 @@ func TestPartitionedParentPrimaryKeyRebuildConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2473,7 +2564,7 @@ func TestPartitionedParentUniqueRebuildConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2517,7 +2608,7 @@ func TestPartitionedParentForeignKeyRebuildConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2561,7 +2652,7 @@ func TestPartitionedParentExclusionRebuildConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2605,7 +2696,7 @@ func TestDefaultPartitionAttachDetachConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2626,7 +2717,7 @@ func TestDefaultPartitionAttachDetachConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2671,7 +2762,7 @@ func TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2696,7 +2787,7 @@ func TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2713,7 +2804,7 @@ func TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2730,7 +2821,7 @@ func TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2751,7 +2842,7 @@ func TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2762,7 +2853,7 @@ func TestRoutineAndTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop"})
 	}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2813,7 +2904,7 @@ func TestTriggerEnableStatesConvergeOnPostgreSQL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2939,7 +3030,7 @@ func TestRoutineDependenciesAndReturnTypeChangesConvergeOnPostgreSQL(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2950,7 +3041,7 @@ func TestRoutineDependenciesAndReturnTypeChangesConvergeOnPostgreSQL(t *testing.
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3051,7 +3142,7 @@ func TestRoutineDependencyChangesRejectUnsafeShapesOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			plan, err := Build(current, desired, protocol.Answers{}, Options{})
+			plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -3060,7 +3151,7 @@ func TestRoutineDependencyChangesRejectUnsafeShapesOnPostgreSQL(t *testing.T) {
 				for _, question := range plan.Questions {
 					answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: question.Choices[0], QuestionFingerprint: question.ScopeFingerprint})
 				}
-				plan, err = Build(current, desired, answers, Options{})
+				plan, err = buildIntegration(current, desired, answers, Options{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -3104,7 +3195,7 @@ func TestRoutineViewDependencyOrderingConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3126,7 +3217,7 @@ func TestRoutineViewDependencyOrderingConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3137,7 +3228,7 @@ func TestRoutineViewDependencyOrderingConvergesOnPostgreSQL(t *testing.T) {
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop"})
 	}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3183,7 +3274,7 @@ func TestEnumViewDependencyDropOrderingConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3191,7 +3282,7 @@ func TestEnumViewDependencyDropOrderingConvergesOnPostgreSQL(t *testing.T) {
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop"})
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3236,7 +3327,7 @@ func TestRoutineRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3244,7 +3335,7 @@ func TestRoutineRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected routine rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3288,7 +3379,7 @@ func TestRoutineRenameWithMaterializedViewRequiresCompatibilityBridgeOnPostgreSQ
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3296,7 +3387,7 @@ func TestRoutineRenameWithMaterializedViewRequiresCompatibilityBridgeOnPostgreSQ
 		t.Fatalf("expected only routine-rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3338,7 +3429,7 @@ func TestRoutineReplacementRequiresMaterializedViewRefreshContract(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3351,7 +3442,7 @@ func TestRoutineReplacementRequiresMaterializedViewRefreshContract(t *testing.T)
 			"REFRESH MATERIALIZED VIEW " + quote(schemaName) + ".doubled_cache;",
 		}, VerificationSQL: []string{"SELECT value = 3 FROM " + quote(schemaName) + ".doubled_cache;"}},
 	}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3411,7 +3502,7 @@ INSERT INTO "` + storedSchema + `".measurements(value) VALUES (1);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked, err := Build(current, desired, protocol.Answers{}, Options{})
+	blocked, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3446,7 +3537,7 @@ CREATE INDEX score_idx ON "` + newSchema + `".measurements ("` + newSchema + `".
 	if err != nil {
 		t.Fatal(err)
 	}
-	planned, err := Build(current, desired, protocol.Answers{}, Options{})
+	planned, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || planned.Status != protocol.Planned {
 		t.Fatalf("new routine-dependent index plan=%#v err=%v", planned, err)
 	}
@@ -3501,7 +3592,7 @@ func TestRoutineRenameWithDependentTriggerRequiresCompatibilityBridgeOnPostgreSQ
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3509,7 +3600,7 @@ func TestRoutineRenameWithDependentTriggerRequiresCompatibilityBridgeOnPostgreSQ
 		t.Fatalf("expected routine rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_routine", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3556,7 +3647,7 @@ func TestTriggerRenameConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3564,7 +3655,7 @@ func TestTriggerRenameConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected trigger rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_trigger", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3615,7 +3706,7 @@ func TestConstraintTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, answers, Options{})
+		plan, err := buildIntegration(current, desired, answers, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3727,7 +3818,7 @@ func TestTriggerCommentsConvergeOnPostgreSQL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3806,7 +3897,7 @@ func TestRoutineOverloadsProceduresAndPartitionTriggersConvergeOnPostgreSQL(t *t
 		t.Helper()
 		desired := loadDesired(ddl)
 		current := loadCurrent()
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -3818,7 +3909,7 @@ func TestRoutineOverloadsProceduresAndPartitionTriggersConvergeOnPostgreSQL(t *t
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -3850,7 +3941,7 @@ CREATE FUNCTION "` + schemaName + `".log_change() RETURNS trigger LANGUAGE plpgs
 	if strings.Count(createdSQL, "CREATE TRIGGER") != 1 || strings.Count(createdSQL, "CREATE OR REPLACE FUNCTION") != 4 || strings.Count(createdSQL, "CREATE OR REPLACE PROCEDURE") != 1 || !strings.Contains(createdSQL, "COMMENT ON FUNCTION") {
 		t.Fatalf("routine/trigger create matrix was incomplete or leaked internal/partition triggers:\n%s", createdSQL)
 	}
-	unchanged, err := Build(loadCurrent(), desired, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("unchanged routine matrix plan=%#v err=%v", unchanged, err)
 	}
@@ -3916,7 +4007,7 @@ func TestViewTriggerLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, answers, Options{})
+		plan, err := buildIntegration(current, desired, answers, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -4065,7 +4156,7 @@ func TestMaterializedViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4073,7 +4164,7 @@ func TestMaterializedViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testin
 		t.Fatalf("expected materialized-view rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_view", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4117,7 +4208,7 @@ func TestMaterializedViewRenameWithDependentRequiresCompatibilityBridgeOnPostgre
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4125,7 +4216,7 @@ func TestMaterializedViewRenameWithDependentRequiresCompatibilityBridgeOnPostgre
 		t.Fatalf("expected direct materialized-view rename question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4166,7 +4257,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4175,7 +4266,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 	}
 	applyPlan(t, ctx, conn, plan)
 	assertGraphConverges(t, ctx, url, desired)
-	unchanged, err := Build(func() *pgschema.Snapshot {
+	unchanged, err := buildIntegration(func() *pgschema.Snapshot {
 		snapshot, loadErr := source.LoadGraph(ctx, source.Parse(url), "", nil)
 		if loadErr != nil {
 			t.Fatal(loadErr)
@@ -4198,7 +4289,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4223,7 +4314,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4231,7 +4322,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 		t.Fatalf("expected materialized-view rebuild question, got %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rebuild_materialized_view", Key: pending.Questions[0].Key, Value: "rebuild"}}}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4252,7 +4343,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err = Build(current, desired, protocol.Answers{}, Options{})
+	pending, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4260,7 +4351,7 @@ func TestMaterializedViewCreateRebuildAndDropConvergeOnPostgreSQL(t *testing.T) 
 		t.Fatalf("expected materialized-view drop confirmation, got %#v", pending)
 	}
 	answers = protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: pending.Questions[0].Key, Value: "drop"}}}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4302,7 +4393,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".columns AS SELECT table_schema FRO
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || plan.Status != protocol.Planned || strings.Count(joinPlan(plan), "CREATE MATERIALIZED VIEW") != 2 {
 		t.Fatalf("external-view materialized plan=%#v err=%v", plan, err)
 	}
@@ -4353,7 +4444,7 @@ func TestMaterializedViewIndexLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		t.Helper()
 		desired := loadDesired(ddl)
 		current := loadCurrent()
-		plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -4371,7 +4462,7 @@ func TestMaterializedViewIndexLifecycleConvergesOnPostgreSQL(t *testing.T) {
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{ConcurrentIndexes: true})
+			plan, err = buildIntegration(current, desired, answers, Options{ConcurrentIndexes: true})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -4394,7 +4485,7 @@ func TestMaterializedViewIndexLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if !strings.Contains(joinPlan(commentAdded), "COMMENT ON INDEX") || !strings.Contains(joinPlan(commentAdded), "IS 'by x'") {
 		t.Fatalf("materialized-view index comment add missing:\n%s", joinPlan(commentAdded))
 	}
-	unchanged, err := Build(loadCurrent(), desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	unchanged, err := buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("unchanged materialized-view indexes plan=%#v err=%v", unchanged, err)
 	}
@@ -4464,7 +4555,7 @@ func TestMaterializedViewDependencyChainsConvergeOnPostgreSQL(t *testing.T) {
 		t.Helper()
 		desired := loadDesired(ddl)
 		current := loadCurrent()
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -4482,7 +4573,7 @@ func TestMaterializedViewDependencyChainsConvergeOnPostgreSQL(t *testing.T) {
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -4516,7 +4607,7 @@ func TestMaterializedViewDependencyChainsConvergeOnPostgreSQL(t *testing.T) {
 			t.Fatalf("materialized dependency creation order was unsafe:\n%s", createdSQL)
 		}
 	}
-	unchanged, err := Build(loadCurrent(), desired, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("unchanged materialized dependency chain plan=%#v err=%v", unchanged, err)
 	}
@@ -4573,7 +4664,7 @@ func TestExtensionCreateConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4620,7 +4711,7 @@ func TestExtensionDropConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4628,7 +4719,7 @@ func TestExtensionDropConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatalf("expected extension-drop confirmation: %#v", pending)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: pending.Questions[0].Key, Value: "drop"}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4693,7 +4784,7 @@ ALTER EXTENSION pg_trgm ADD SCHEMA ext_schema;`
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || plan.Status != protocol.Planned || strings.Count(joinPlan(plan), "CREATE EXTENSION") != 1 || strings.Contains(joinPlan(plan), "spatial_ref_sys") || strings.Contains(joinPlan(plan), "ext_schema") || strings.Contains(joinPlan(plan), "ext_seq") {
 		t.Fatalf("extension members escaped the atomic boundary: plan=%#v err=%v", plan, err)
 	}
@@ -4718,7 +4809,7 @@ ALTER EXTENSION pg_trgm ADD SCHEMA ext_schema;`
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("dependent extension/table drops must ask: plan=%#v err=%v", pending, err)
 	}
@@ -4729,7 +4820,7 @@ ALTER EXTENSION pg_trgm ADD SCHEMA ext_schema;`
 		}
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 	}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("dependent extension/table drop plan=%#v err=%v", plan, err)
 	}
@@ -4778,7 +4869,7 @@ func TestExtensionSchemaMoveConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4824,14 +4915,14 @@ func TestExtensionVersionIgnoreBehaviorOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ignored, err := Build(current, desired, protocol.Answers{}, Options{IgnoreExtensionVersions: []string{"hstore"}})
+	ignored, err := buildIntegration(current, desired, protocol.Answers{}, Options{IgnoreExtensionVersions: []string{"hstore"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ignored.Status != protocol.Planned || len(ignored.Statements) != 0 {
 		t.Fatalf("matching extension version ignore was not honored: %#v", ignored)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{IgnoreExtensionVersions: []string{"some_other_extension"}})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{IgnoreExtensionVersions: []string{"some_other_extension"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4883,7 +4974,7 @@ func TestSequenceParameterUpdateConvergesOnPostgreSQL(t *testing.T) {
 	applyDesired := func(ddl string) *pgschema.Snapshot {
 		t.Helper()
 		desired := loadDesired(ddl)
-		plan, err := Build(loadCurrent(), desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{})
 		if err != nil || plan.Status != protocol.Planned {
 			t.Fatalf("sequence lifecycle plan=%#v err=%v", plan, err)
 		}
@@ -4893,7 +4984,7 @@ func TestSequenceParameterUpdateConvergesOnPostgreSQL(t *testing.T) {
 	}
 	createdDDL := baseDDL + " CREATE SEQUENCE " + quote(schemaName) + ".orders_seq AS integer START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 100 CACHE 1 NO CYCLE; COMMENT ON SEQUENCE " + quote(schemaName) + ".orders_seq IS 'order numbers';"
 	created := applyDesired(createdDDL)
-	unchanged, err := Build(loadCurrent(), created, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), created, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("unchanged sequence generated work: plan=%#v err=%v", unchanged, err)
 	}
@@ -4903,13 +4994,13 @@ func TestSequenceParameterUpdateConvergesOnPostgreSQL(t *testing.T) {
 	applyDesired(noCycleDDL)
 	desired := loadDesired(baseDDL)
 	current := loadCurrent()
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "drop" {
 		t.Fatalf("sequence drop must ask: plan=%#v err=%v", pending, err)
 	}
 	question := pending.Questions[0]
 	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned || !strings.Contains(joinPlan(plan), "DROP SEQUENCE") {
 		t.Fatalf("sequence drop plan=%#v err=%v", plan, err)
 	}
@@ -4960,7 +5051,7 @@ func TestSequencePersistenceConvergesOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			plan, err := Build(current, desired, protocol.Answers{}, Options{})
+			plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -5045,7 +5136,7 @@ func TestReplicaIdentityConvergesOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			plan, err := Build(current, desired, protocol.Answers{}, Options{})
+			plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -5103,7 +5194,7 @@ func TestTablePersistenceChangeConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5152,7 +5243,7 @@ func TestTablePersistenceRestoreLoggedConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5212,7 +5303,7 @@ func TestTableLifecycleAndPersistenceConvergeOnPostgreSQL(t *testing.T) {
 		t.Helper()
 		desired := loadDesired(ddl)
 		current := loadCurrent()
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -5224,7 +5315,7 @@ func TestTableLifecycleAndPersistenceConvergeOnPostgreSQL(t *testing.T) {
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -5251,7 +5342,7 @@ CREATE UNLOGGED TABLE "` + schemaName + `".events_lo PARTITION OF "` + schemaNam
 			t.Fatalf("table creation plan missing %q:\n%s", fragment, createdSQL)
 		}
 	}
-	unchanged, err := Build(loadCurrent(), loadDesired(base), protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), loadDesired(base), protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("unchanged table/persistence plan=%#v err=%v", unchanged, err)
 	}
@@ -5318,7 +5409,7 @@ CREATE INDEX orders_age_idx ON "` + schemaName + `".orders (age);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5333,7 +5424,7 @@ CREATE INDEX orders_age_idx ON "` + schemaName + `".orders (age);`
 			{Kind: "set_not_null", Key: idID, Value: "staged"},
 		},
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5365,7 +5456,7 @@ CREATE INDEX orders_age_idx ON "` + schemaName + `".orders (age);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5422,7 +5513,7 @@ func TestTableColumnLifecycleMatrixConvergesOnPostgreSQL(t *testing.T) {
 		var plan protocol.Result
 		for attempt := 0; attempt < 4; attempt++ {
 			var err error
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s plan attempt %d: %v", label, attempt, err)
 			}
@@ -5461,7 +5552,7 @@ func TestTableColumnLifecycleMatrixConvergesOnPostgreSQL(t *testing.T) {
 	if strings.Index(createdSQL, `"zebra" text`) > strings.Index(createdSQL, `"apple" text`) || strings.Index(createdSQL, `"apple" text`) > strings.Index(createdSQL, `"mango" text`) || !strings.Contains(createdSQL, `"age" integer DEFAULT 0 NOT NULL`) {
 		t.Fatalf("column physical order or inline attributes were lost:\n%s", createdSQL)
 	}
-	unchanged, err := Build(loadCurrent(), desired, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("unchanged column attributes generated work: plan=%#v err=%v", unchanged, err)
 	}
@@ -5486,7 +5577,7 @@ func TestTableColumnLifecycleMatrixConvergesOnPostgreSQL(t *testing.T) {
 	if !strings.Contains(joinPlan(droppedDefault), `ALTER COLUMN "email" DROP DEFAULT`) {
 		t.Fatalf("column default removal missing:\n%s", joinPlan(droppedDefault))
 	}
-	unchanged, err = Build(loadCurrent(), desired, protocol.Answers{}, Options{})
+	unchanged, err = buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("final unchanged columns generated work: plan=%#v err=%v", unchanged, err)
 	}
@@ -5521,7 +5612,7 @@ func TestTypeMutationProducesEditableExpandContractHandoffOnPostgreSQL(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5532,7 +5623,7 @@ func TestTypeMutationProducesEditableExpandContractHandoffOnPostgreSQL(t *testin
 		ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "type_change", Key: pending.Questions[0].Key, Value: "manual_sql"}},
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5572,19 +5663,15 @@ func TestRequiredColumnStagingConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Status != protocol.NeedsSQLEdits {
-		t.Fatalf("required column must wait for agent-owned data work: %#v", plan)
+	plan := buildWithManualReconciliation(t, current, desired, Options{},
+		`UPDATE "`+schemaName+`".customers SET email = 'customer-' || id::text || '@example.test' WHERE email IS NULL;`,
+		`SELECT NOT EXISTS (SELECT 1 FROM "`+schemaName+`".customers WHERE email IS NULL);`)
+	if plan.Status != protocol.Planned {
+		t.Fatalf("required column must capture agent-owned cleanup and its exact contract assertion: %#v", plan)
 	}
 	applyPlanPhase(t, ctx, conn, plan, "expand")
 	if _, err := conn.Exec(ctx, `INSERT INTO "`+schemaName+`".customers (id) VALUES (2)`); err != nil {
 		t.Fatalf("old writer broke during expand: %v", err)
-	}
-	if _, err := conn.Exec(ctx, `UPDATE "`+schemaName+`".customers SET email = 'customer-' || id::text || '@example.test' WHERE email IS NULL`); err != nil {
-		t.Fatal(err)
 	}
 	applyPlanPhase(t, ctx, conn, plan, "contract")
 	assertGraphConverges(t, ctx, url, desired)
@@ -5627,7 +5714,7 @@ CREATE TABLE "` + schemaName + `".orders (
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5685,7 +5772,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigserial);`
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -5697,7 +5784,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigserial);`
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "direct"})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -5761,7 +5848,7 @@ CREATE TABLE "` + schemaName + `".orders (
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -5814,7 +5901,7 @@ CREATE TABLE "` + schemaName + `".orders (value integer DEFAULT 2);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{DefaultEquivalent: func(left, right string) (bool, error) {
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{DefaultEquivalent: func(left, right string) (bool, error) {
 		var same bool
 		err := conn.QueryRow(ctx, "SELECT ("+left+") IS NOT DISTINCT FROM ("+right+")").Scan(&same)
 		return same, err
@@ -5868,7 +5955,7 @@ CREATE TABLE "` + schemaName + `".orders (value integer DEFAULT 2);`
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -5971,7 +6058,7 @@ COMMENT ON INDEX "` + schemaName + `".orders_id_idx IS 'index two';`
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -6027,7 +6114,7 @@ CREATE INDEX orders_name_pattern_idx ON "` + schemaName + `".orders USING btree 
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6081,7 +6168,7 @@ CREATE INDEX orders_name_idx ON "` + schemaName + `".orders USING btree (name CO
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6135,7 +6222,7 @@ CREATE INDEX events_bloom_brin ON "` + schemaName + `".events USING brin (bloom_
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6189,7 +6276,7 @@ CREATE UNIQUE INDEX orders_id_key ON "` + schemaName + `".orders (id);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6198,7 +6285,7 @@ CREATE UNIQUE INDEX orders_id_key ON "` + schemaName + `".orders (id);`
 	}
 	constraintID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_id_key"}).ObjectID()
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6266,7 +6353,7 @@ CREATE TABLE "` + schemaName + `".orders (
 		if err != nil {
 			t.Fatal(err)
 		}
-		pending, err := Build(current, desired, protocol.Answers{}, Options{})
+		pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -6277,7 +6364,7 @@ CREATE TABLE "` + schemaName + `".orders (
 			}
 			constraintID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_pkey"}).ObjectID()
 			answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -6335,7 +6422,7 @@ CREATE TABLE "` + schemaName + `".orders (
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6399,7 +6486,7 @@ func TestNullsNotDistinctScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	desired := loadDesired(desiredDDL)
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6414,14 +6501,14 @@ func TestNullsNotDistinctScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unchanged, err := Build(current, desired, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("NULLS NOT DISTINCT state was not stable: plan=%#v err=%v", unchanged, err)
 	}
 
 	renamedDDL := strings.Replace(desiredDDL, "person_fourth_idx", "person_fourth_renamed", 1)
 	renamedDesired := loadDesired(renamedDDL)
-	pending, err := Build(current, renamedDesired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, renamedDesired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6431,7 +6518,7 @@ func TestNullsNotDistinctScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 	oldIndex := pgschema.Index{Table: (pgschema.Table{Schema: schemaName, Name: "person"}).ObjectID(), Name: "person_fourth_idx"}.ObjectID().String()
 	newIndex := pgschema.Index{Table: (pgschema.Table{Schema: schemaName, Name: "person"}).ObjectID(), Name: "person_fourth_renamed"}.ObjectID().String()
 	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_index", Key: oldIndex, Value: newIndex, QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
-	plan, err = Build(current, renamedDesired, answers, Options{})
+	plan, err = buildIntegration(current, renamedDesired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned || !strings.Contains(joinPlan(plan), "ALTER INDEX") {
 		t.Fatalf("NULLS NOT DISTINCT index rename plan=%#v err=%v", plan, err)
 	}
@@ -6443,7 +6530,7 @@ func TestNullsNotDistinctScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	baseDesired := loadDesired(baseDDL)
-	pending, err = Build(current, baseDesired, protocol.Answers{}, Options{})
+	pending, err = buildIntegration(current, baseDesired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6454,7 +6541,7 @@ func TestNullsNotDistinctScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 		}
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 	}
-	plan, err = Build(current, baseDesired, answers, Options{})
+	plan, err = buildIntegration(current, baseDesired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned || !strings.Contains(joinPlan(plan), "DROP CONSTRAINT") || !strings.Contains(joinPlan(plan), "DROP INDEX") {
 		t.Fatalf("NULLS NOT DISTINCT removal plan=%#v err=%v", plan, err)
 	}
@@ -6507,7 +6594,7 @@ ALTER TABLE "` + schemaName + `".orders ADD CONSTRAINT orders_pkey PRIMARY KEY U
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6560,7 +6647,7 @@ ALTER TABLE "` + schemaName + `".orders ADD CONSTRAINT orders_id_key UNIQUE USIN
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6618,7 +6705,7 @@ COMMENT ON INDEX "` + schemaName + `".orders_value_idx IS 'stable lookup';`
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6685,7 +6772,7 @@ CREATE INDEX orders_new_idx ON "` + schemaName + `".orders (id);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6699,7 +6786,7 @@ CREATE INDEX orders_new_idx ON "` + schemaName + `".orders (id);`
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_index", Key: oldID, Value: newID}},
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6759,7 +6846,7 @@ func TestIndexRenameAndReusedNameCommentsConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6807,7 +6894,7 @@ CREATE TABLE "` + schemaName + `".keep (id bigint, retained_column text);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6827,7 +6914,7 @@ CREATE TABLE "` + schemaName + `".keep (id bigint, retained_column text);`
 			{Kind: "drop", Key: oldIndex.String(), Value: "drop"},
 		},
 	}
-	plan, err := Build(current, desired, answers, Options{ConcurrentIndexes: true})
+	plan, err := buildIntegration(current, desired, answers, Options{ConcurrentIndexes: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6888,7 +6975,7 @@ func TestPartitionedTableScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 			t.Fatalf("%s current graph: %v", label, err)
 		}
 		desired := loadDesired(ddl)
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -6900,7 +6987,7 @@ func TestPartitionedTableScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -7004,7 +7091,7 @@ CREATE TABLE "` + schemaName + `".names (name text) PARTITION BY RANGE (name COL
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7066,7 +7153,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_names_cache AS SELECT name F
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7080,7 +7167,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_names_cache AS SELECT name F
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_table", Key: oldID, Value: newID}},
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7163,7 +7250,7 @@ CREATE INDEX customers_email_idx ON "` + schemaName + `".customers (email);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7173,7 +7260,7 @@ CREATE INDEX customers_email_idx ON "` + schemaName + `".customers (email);`
 	from := (pgschema.Table{Schema: schemaName, Name: "accounts"}).ObjectID().String()
 	to := (pgschema.Table{Schema: schemaName, Name: "customers"}).ObjectID().String()
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: from, Value: to}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7237,7 +7324,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_cache AS SELECT new_name AS 
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7252,7 +7339,7 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_cache AS SELECT new_name AS 
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: oldID, Value: newID}},
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7293,7 +7380,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, new_name text);
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7308,7 +7395,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, new_name text);
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: oldID, Value: newID}},
 	}
-	strategyPending, err := Build(current, desired, answers, Options{})
+	strategyPending, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7316,7 +7403,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, new_name text);
 		t.Fatalf("expected explicit rename backfill strategy: %#v", strategyPending)
 	}
 	answers.Answers = append(answers.Answers, protocol.Answer{Kind: "rename_backfill_strategy", Key: oldID, Value: "single_transaction", QuestionFingerprint: strategyPending.Questions[0].ScopeFingerprint})
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7441,7 +7528,7 @@ func TestConstraintRenamesConvergeOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pending, err := Build(current, desired, protocol.Answers{}, Options{})
+			pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -7452,7 +7539,7 @@ func TestConstraintRenamesConvergeOnPostgreSQL(t *testing.T) {
 				ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 				Answers: []protocol.Answer{{Kind: "rename_constraint", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}},
 			}
-			plan, err := Build(current, desired, answers, Options{})
+			plan, err := buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -7529,7 +7616,7 @@ func TestDomainLifecycleConvergesOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			plan, err := Build(current, desired, protocol.Answers{}, Options{})
+			plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -7541,7 +7628,7 @@ func TestDomainLifecycleConvergesOnPostgreSQL(t *testing.T) {
 					ProtocolVersion: plan.ProtocolVersion, CurrentFingerprint: plan.CurrentFingerprint, DesiredFingerprint: plan.DesiredFingerprint,
 					Answers: []protocol.Answer{{Kind: "drop", Key: plan.Questions[0].Key, Value: "drop"}},
 				}
-				plan, err = Build(current, desired, answers, Options{})
+				plan, err = buildIntegration(current, desired, answers, Options{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -7573,7 +7660,7 @@ func TestDomainLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7614,7 +7701,7 @@ func TestDomainDependencyOrderingConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7654,7 +7741,7 @@ func TestNotValidDomainConstraintConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7713,7 +7800,7 @@ func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			plan, err := Build(current, desired, protocol.Answers{}, Options{})
+			plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -7725,7 +7812,7 @@ func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 					}
 					answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "cascade", QuestionFingerprint: question.ScopeFingerprint})
 				}
-				plan, err = Build(current, desired, answers, Options{})
+				plan, err = buildIntegration(current, desired, answers, Options{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -7759,7 +7846,7 @@ func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, reordered, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, reordered, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7773,7 +7860,7 @@ func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, dropped, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, dropped, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7781,7 +7868,7 @@ func TestCompositeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: "drop", Key: question.Key, Value: "drop"})
 	}
-	plan, err = Build(current, dropped, answers, Options{})
+	plan, err = buildIntegration(current, dropped, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7830,7 +7917,7 @@ func TestCompositeTypeDependenciesConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7856,7 +7943,7 @@ func TestCompositeTypeDependenciesConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, dropDesired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, dropDesired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7864,7 +7951,7 @@ func TestCompositeTypeDependenciesConvergeOnPostgreSQL(t *testing.T) {
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: "drop", Key: question.Key, Value: "drop"})
 	}
-	plan, err = Build(current, dropDesired, answers, Options{})
+	plan, err = buildIntegration(current, dropDesired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7933,7 +8020,7 @@ func TestTableOwnershipChangesConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7942,7 +8029,7 @@ func TestTableOwnershipChangesConvergeOnPostgreSQL(t *testing.T) {
 	}
 	question := pending.Questions[0]
 	answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "authorize", QuestionFingerprint: question.ScopeFingerprint}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7955,7 +8042,7 @@ func TestTableOwnershipChangesConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unchanged, err := Build(current, desired, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7974,7 +8061,7 @@ func TestTableOwnershipChangesConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ignored, err := Build(ignoredCurrent, ignoredDesired, protocol.Answers{}, Options{})
+	ignored, err := buildIntegration(ignoredCurrent, ignoredDesired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8023,7 +8110,7 @@ func TestColumnCollationChangesConvergeOnPostgreSQL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8084,7 +8171,7 @@ func TestGeneratedColumnExpressionChangesConvergeOnPostgreSQL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8093,7 +8180,7 @@ func TestGeneratedColumnExpressionChangesConvergeOnPostgreSQL(t *testing.T) {
 			for _, question := range plan.Questions {
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -8176,7 +8263,7 @@ func TestRangeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8191,7 +8278,7 @@ func TestRangeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unchanged, err := Build(current, desired, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8207,7 +8294,7 @@ func TestRangeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, recreated, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, recreated, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8231,7 +8318,7 @@ func TestRangeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, dependentDesired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, dependentDesired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8251,7 +8338,7 @@ func TestRangeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, dropDesired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, dropDesired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8259,7 +8346,7 @@ func TestRangeTypeLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: "drop", Key: question.Key, Value: "drop"})
 	}
-	plan, err = Build(current, dropDesired, answers, Options{})
+	plan, err = buildIntegration(current, dropDesired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8308,7 +8395,7 @@ CREATE TYPE "` + schemaName + `".state AS ENUM ('open', 'closed');`
 		if err != nil {
 			t.Fatal(err)
 		}
-		pending, err := Build(current, desired, protocol.Answers{}, Options{})
+		pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8319,7 +8406,7 @@ CREATE TYPE "` + schemaName + `".state AS ENUM ('open', 'closed');`
 			}
 			enumID := (pgschema.Enum{Schema: schemaName, Name: "state"}).ObjectID()
 			answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: enumID.String(), Value: "drop"}}}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -8382,7 +8469,7 @@ func TestEnumBasicLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8399,7 +8486,7 @@ func TestEnumBasicLifecycleConvergesOnPostgreSQL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		unchanged, err := Build(current, desired, protocol.Answers{}, Options{})
+		unchanged, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8453,7 +8540,7 @@ func TestEnumCommentsAndEmptyEnumConvergeOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			plan, err := Build(current, desired, protocol.Answers{}, Options{})
+			plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -8522,7 +8609,7 @@ func TestEnumRewriteConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8533,7 +8620,7 @@ func TestEnumRewriteConvergesOnPostgreSQL(t *testing.T) {
 	for _, question := range pending.Questions {
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "rewrite", QuestionFingerprint: question.ScopeFingerprint})
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8605,7 +8692,7 @@ func TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pending, err := Build(current, desired, protocol.Answers{}, Options{})
+			pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -8614,7 +8701,7 @@ func TestEnumRewriteRejectsUnsafeDependentsOnPostgreSQL(t *testing.T) {
 			}
 			question := pending.Questions[0]
 			answers := protocol.Answers{ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "rewrite", QuestionFingerprint: question.ScopeFingerprint}}}
-			plan, err := Build(current, desired, answers, Options{})
+			plan, err := buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -8660,7 +8747,7 @@ func TestEnumValueRenameConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8762,7 +8849,7 @@ LIMIT 1`).Scan(&extensionName, &extensionVersion)
 			if err != nil {
 				t.Fatal(err)
 			}
-			plan, err := Build(current, desired, protocol.Answers{}, Options{})
+			plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -8817,7 +8904,7 @@ CREATE TABLE "` + schemaName + `".orders (state "` + schemaName + `".new_state N
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8831,7 +8918,7 @@ CREATE TABLE "` + schemaName + `".orders (state "` + schemaName + `".new_state N
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_enum", Key: oldID, Value: newID}},
 	}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8874,7 +8961,7 @@ ALTER TABLE "` + schemaName + `".orders ADD CONSTRAINT orders_value_positive CHE
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8905,7 +8992,7 @@ ALTER TABLE "` + schemaName + `".orders ADD CONSTRAINT orders_value_positive CHE
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8914,7 +9001,7 @@ ALTER TABLE "` + schemaName + `".orders ADD CONSTRAINT orders_value_positive CHE
 	}
 	constraintID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_value_positive"}).ObjectID()
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
-	plan, err := Build(current, desired, answers, Options{})
+	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8967,7 +9054,7 @@ ALTER TABLE "` + schemaName + `".orders ADD CONSTRAINT orders_account_id_fkey FO
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9020,11 +9107,11 @@ CREATE TABLE "` + schemaName + `".orders (value integer CONSTRAINT orders_positi
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != protocol.Planned || len(plan.Statements) != 1 || !strings.Contains(plan.Statements[0].SQL, "VALIDATE CONSTRAINT") {
+	if plan.Status != protocol.Planned || len(plan.Statements) != 2 || !strings.Contains(plan.Statements[0].SQL, "DO $onwardpg$") || !strings.Contains(plan.Statements[1].SQL, "VALIDATE CONSTRAINT") {
 		t.Fatalf("expected validation plan: %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)
@@ -9079,7 +9166,7 @@ func TestConstraintsBecomeNotValidConvergeOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9131,18 +9218,48 @@ ALTER TABLE "` + schemaName + `".bookings ADD CONSTRAINT bookings_period_excl EX
 		if err != nil {
 			t.Fatal(err)
 		}
-		pending, err := Build(current, desired, protocol.Answers{}, Options{})
+		pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		plan := pending
+		if i < 2 && pending.Status == protocol.NeedsInput && len(pending.Questions) == 1 && pending.Questions[0].Kind == "reconcile_contract" {
+			operator := "&&"
+			if i == 1 {
+				operator = "-|-"
+			}
+			question := pending.Questions[0]
+			answers := protocol.Answers{
+				ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+				Answers: []protocol.Answer{{Kind: question.Kind, Key: question.Key, Value: "manual_sql", QuestionFingerprint: question.ScopeFingerprint}},
+			}
+			manualPending, buildErr := buildIntegration(current, desired, answers, Options{})
+			if buildErr != nil {
+				t.Fatal(buildErr)
+			}
+			if manualPending.Status != protocol.NeedsInput || len(manualPending.Questions) != 1 || manualPending.Questions[0].Kind != "reconcile_contract_sql" {
+				t.Fatalf("expected exclusion reconciliation SQL: %#v", manualPending)
+			}
+			manual := manualPending.Questions[0]
+			comparison := `a.period ` + operator + ` b.period`
+			answers.Answers = append(answers.Answers, protocol.Answer{
+				Kind: manual.Kind, Key: manual.Key, Value: "provided", QuestionFingerprint: manual.ScopeFingerprint,
+				Manual: &protocol.ManualWork{Summary: "remove conflicting booking ranges", ExecutionMode: "transactional",
+					Statements:      []string{`DELETE FROM "` + schemaName + `".bookings a USING "` + schemaName + `".bookings b WHERE a.ctid < b.ctid AND ` + comparison + `;`},
+					VerificationSQL: []string{`SELECT NOT EXISTS (SELECT 1 FROM "` + schemaName + `".bookings a JOIN "` + schemaName + `".bookings b ON a.ctid < b.ctid AND ` + comparison + `);`}},
+			})
+			plan, err = buildIntegration(current, desired, answers, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 		if i == 2 {
 			if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
 				t.Fatalf("expected exclusion-drop confirmation: %#v", pending)
 			}
 			constraintID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "bookings"}).ObjectID(), Name: "bookings_period_excl"}).ObjectID()
 			answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: constraintID.String(), Value: "drop"}}}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -9150,7 +9267,7 @@ ALTER TABLE "` + schemaName + `".bookings ADD CONSTRAINT bookings_period_excl EX
 		if plan.Status != protocol.Planned {
 			t.Fatalf("expected exclusion plan: %#v", plan)
 		}
-		if i == 1 && (len(plan.Statements) != 2 || plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[1].Phase != protocol.PhaseContract) {
+		if i == 1 && (len(plan.Statements) != 4 || plan.Statements[0].Phase != protocol.PhaseExpand || plan.Statements[3].Phase != protocol.PhaseContract) {
 			t.Fatalf("expected exclusion mutation to use a loose overlap envelope: %#v", plan)
 		}
 		applyPlan(t, ctx, conn, plan)
@@ -9210,7 +9327,7 @@ CREATE TABLE "` + schemaName + `".orders (
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9243,7 +9360,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, account_id bigi
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9252,7 +9369,7 @@ CREATE TABLE "` + schemaName + `".orders (id bigint PRIMARY KEY, account_id bigi
 	}
 	foreignKeyID := (pgschema.Constraint{Table: (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID(), Name: "orders_account_id_fkey"}).ObjectID()
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: foreignKeyID.String(), Value: "drop"}}}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9314,7 +9431,7 @@ func TestConstraintDeferrabilityScenarioMatrixConvergesOnPostgreSQL(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil || plan.Status != protocol.Planned {
 			t.Fatalf("%s plan=%#v err=%v", label, plan, err)
 		}
@@ -9368,7 +9485,7 @@ func TestForeignKeyDropOrderingScenarioMatrixConvergesOnPostgreSQL(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		pending, err := Build(current, desired, protocol.Answers{}, Options{})
+		pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -9379,7 +9496,7 @@ func TestForeignKeyDropOrderingScenarioMatrixConvergesOnPostgreSQL(t *testing.T)
 			}
 			answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 		}
-		plan, err := Build(current, desired, answers, Options{})
+		plan, err := buildIntegration(current, desired, answers, Options{})
 		if err != nil || plan.Status != protocol.Planned {
 			t.Fatalf("%s plan=%#v err=%v", label, plan, err)
 		}
@@ -9448,7 +9565,7 @@ ALTER TABLE "` + schemaName + `".profiles ADD CONSTRAINT profiles_account_fkey F
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9553,7 +9670,7 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 		t.Fatal(err)
 	}
 	current := loadCurrent()
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("temporal/enforcement add plan=%#v err=%v", plan, err)
 	}
@@ -9563,7 +9680,7 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 	}
 	applyPlan(t, ctx, conn, plan)
 	assertGraphConverges(t, ctx, url, desired)
-	unchanged, err := Build(loadCurrent(), desired, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("temporal/enforcement unchanged plan=%#v err=%v", unchanged, err)
 	}
@@ -9578,12 +9695,12 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 		t.Fatal(err)
 	}
 	current = loadCurrent()
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_constraint" {
 		t.Fatalf("temporal unique rename must ask: plan=%#v err=%v", pending, err)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_constraint", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0]}}}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("temporal unique rename plan=%#v err=%v", plan, err)
 	}
@@ -9593,7 +9710,7 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 	changedTemporal := strings.Replace(temporal, "CONSTRAINT room_uq UNIQUE (id, valid_at", "CONSTRAINT room_uq_new UNIQUE (id, code, valid_at", 1)
 	desired = loadDesired(changedTemporal)
 	current = loadCurrent()
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("temporal definition/enforcement reversal plan=%#v err=%v", plan, err)
 	}
@@ -9602,7 +9719,7 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 
 	desired = loadDesired("")
 	current = loadCurrent()
-	pending, err = Build(current, desired, protocol.Answers{}, Options{})
+	pending, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("temporal drops must ask: plan=%#v err=%v", pending, err)
 	}
@@ -9613,7 +9730,7 @@ ALTER TABLE "` + schemaName + `".booking ADD CONSTRAINT booking_room_fkey FOREIG
 		}
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 	}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("temporal drop plan=%#v err=%v", plan, err)
 	}
@@ -9666,7 +9783,7 @@ func TestSequenceOwnedByTransitionsConvergeOnPostgreSQL(t *testing.T) {
 		t.Helper()
 		desired := loadDesired(ddl)
 		current := loadCurrent()
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -9684,7 +9801,7 @@ func TestSequenceOwnedByTransitionsConvergeOnPostgreSQL(t *testing.T) {
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -9711,7 +9828,7 @@ func TestSequenceOwnedByTransitionsConvergeOnPostgreSQL(t *testing.T) {
 			t.Fatalf("owned sequence create order was lost:\n%s", sql)
 		}
 	})
-	unchanged, err := Build(loadCurrent(), created, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), created, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("unchanged owned sequence plan=%#v err=%v", unchanged, err)
 	}
@@ -9802,7 +9919,7 @@ CREATE TABLE "` + schemaName + `".items (
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || plan.Status != protocol.Planned || strings.Index(joinPlan(plan), "DROP DEFAULT") > strings.Index(joinPlan(plan), "ADD GENERATED ALWAYS AS IDENTITY") {
 		t.Fatalf("identity-add plan=%#v err=%v", plan, err)
 	}
@@ -9817,7 +9934,7 @@ CREATE TABLE "` + schemaName + `".items (
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err = Build(current, desired, protocol.Answers{}, Options{})
+	plan, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("identity-options plan=%#v err=%v", plan, err)
 	}
@@ -9829,12 +9946,12 @@ CREATE TABLE "` + schemaName + `".items (
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "drop_identity" {
 		t.Fatalf("identity drop must ask explicit intent: plan=%#v err=%v", pending, err)
 	}
 	answers := protocol.Answers{ProtocolVersion: protocol.Version, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop_identity", Key: pending.Questions[0].Key, Value: "drop", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned || strings.Index(joinPlan(plan), "DROP IDENTITY") > strings.Index(joinPlan(plan), "SET DEFAULT 9") {
 		t.Fatalf("identity-drop plan=%#v err=%v", plan, err)
 	}
@@ -9884,7 +10001,7 @@ func TestIdentityAndSerialScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 		t.Helper()
 		desired := loadDesired(ddl)
 		current := loadCurrent()
-		plan, err := Build(current, desired, protocol.Answers{}, Options{})
+		plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 		if err != nil {
 			t.Fatalf("%s initial plan: %v", label, err)
 		}
@@ -9902,7 +10019,7 @@ func TestIdentityAndSerialScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 				}
 				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
 			}
-			plan, err = Build(current, desired, answers, Options{})
+			plan, err = buildIntegration(current, desired, answers, Options{})
 			if err != nil {
 				t.Fatalf("%s answered plan: %v", label, err)
 			}
@@ -9930,7 +10047,7 @@ func TestIdentityAndSerialScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 			t.Fatalf("serial/identity creation omitted %q:\n%s", fragment, createdSQL)
 		}
 	}
-	unchanged, err := Build(loadCurrent(), desired, protocol.Answers{}, Options{})
+	unchanged, err := buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("unchanged serial/identity matrix plan=%#v err=%v", unchanged, err)
 	}
@@ -9968,7 +10085,7 @@ func TestIdentityAndSerialScenarioMatrixConvergesOnPostgreSQL(t *testing.T) {
 	if !strings.Contains(joinPlan(defaults), "SET NO CYCLE") || !strings.Contains(joinPlan(defaults), "SET MINVALUE 1") || !strings.Contains(joinPlan(defaults), "SET MAXVALUE 2147483647") {
 		t.Fatalf("identity default restoration missing:\n%s", joinPlan(defaults))
 	}
-	unchanged, err = Build(loadCurrent(), desired, protocol.Answers{}, Options{})
+	unchanged, err = buildIntegration(loadCurrent(), desired, protocol.Answers{}, Options{})
 	if err != nil || unchanged.Status != protocol.Planned || len(unchanged.Statements) != 0 {
 		t.Fatalf("default identity options generated residual work: plan=%#v err=%v", unchanged, err)
 	}
@@ -10028,7 +10145,7 @@ GRANT INSERT ON TABLE "` + schemaName + `".orders TO PUBLIC;`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(current, desired, protocol.Answers{}, Options{})
+	plan, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("initial authorization plan=%#v err=%v", plan, err)
 	}
@@ -10047,7 +10164,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("authorization contraction must ask: plan=%#v err=%v", pending, err)
 	}
@@ -10060,7 +10177,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 		}
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
 	}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("answered authorization plan=%#v err=%v", plan, err)
 	}
@@ -10081,7 +10198,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err = Build(current, desired, protocol.Answers{}, Options{})
+	pending, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "alter_policy" {
 		t.Fatalf("authorization tightening must ask for policy intent: plan=%#v err=%v", pending, err)
 	}
@@ -10089,7 +10206,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 		ProtocolVersion: pending.ProtocolVersion, CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: pending.Questions[0].Kind, Key: pending.Questions[0].Key, Value: "alter", QuestionFingerprint: pending.Questions[0].ScopeFingerprint}},
 	}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("authorization tightening plan=%#v err=%v", plan, err)
 	}
@@ -10110,7 +10227,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err = Build(current, desired, protocol.Answers{}, Options{})
+	pending, err = buildIntegration(current, desired, protocol.Answers{}, Options{})
 	if err != nil || pending.Status != protocol.NeedsInput {
 		t.Fatalf("RLS removal must ask: plan=%#v err=%v", pending, err)
 	}
@@ -10121,7 +10238,7 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 		}
 		answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: "drop", QuestionFingerprint: question.ScopeFingerprint})
 	}
-	plan, err = Build(current, desired, answers, Options{})
+	plan, err = buildIntegration(current, desired, answers, Options{})
 	if err != nil || plan.Status != protocol.Planned {
 		t.Fatalf("RLS-removal plan=%#v err=%v", plan, err)
 	}
@@ -10130,6 +10247,90 @@ GRANT SELECT ON TABLE "` + schemaName + `".orders TO "` + roleName + `";`)
 		t.Fatalf("RLS must be disabled before policy removal:\n%s", removalSQL)
 	}
 	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
+
+func TestLooseCheckOverlapContaminationGateAndCleanupConvergeOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_contract_contamination_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	table := quote(schemaName) + `.delivery`
+	currentDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE ` + table + ` (tier text NOT NULL, CONSTRAINT delivery_tier_check CHECK (tier IN ('shared', 'legacy')));`
+	if _, err := conn.Exec(ctx, currentDDL); err != nil {
+		t.Fatal(err)
+	}
+	desiredDDL := `CREATE SCHEMA "` + schemaName + `";
+CREATE TABLE ` + table + ` (tier text NOT NULL, CONSTRAINT delivery_tier_check CHECK (tier IN ('shared', 'new')));`
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := buildWithManualReconciliation(t, current, desired, Options{},
+		`UPDATE `+table+` SET tier = 'new' WHERE tier = 'legacy';`,
+		`SELECT NOT EXISTS (SELECT 1 FROM `+table+` WHERE (tier IN ('shared', 'new')) IS FALSE);`)
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseExpand)
+	// These are the two application contracts the overlap promises to admit.
+	if _, err := conn.Exec(ctx, `INSERT INTO `+table+` (tier) VALUES ('legacy'), ('new');`); err != nil {
+		t.Fatalf("legacy and new writes must both succeed after expand: %v", err)
+	}
+	// A third, neither-version value proves readiness is about production data,
+	// not merely whether the generated plan converged on an empty clone.
+	if _, err := conn.Exec(ctx, `INSERT INTO `+table+` (tier) VALUES ('pollution');`); err != nil {
+		t.Fatal(err)
+	}
+	failure := ""
+	for _, batch := range plan.Batches {
+		if batch.Phase != protocol.PhaseContract {
+			continue
+		}
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, statement := range batch.Statements {
+			if _, err := tx.Exec(ctx, statement.SQL); err != nil {
+				failure = err.Error()
+				break
+			}
+		}
+		_ = tx.Rollback(ctx)
+		if failure != "" {
+			break
+		}
+	}
+	if !strings.Contains(failure, "onwardpg contract gate failed") {
+		t.Fatalf("polluted overlap did not fail its named contract gate: %q", failure)
+	}
+	var constraintPresent bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = $1 AND t.relname = 'delivery' AND c.conname = 'delivery_tier_check')`, schemaName).Scan(&constraintPresent); err != nil {
+		t.Fatal(err)
+	}
+	if constraintPresent {
+		t.Fatal("failed contract batch partially restored CHECK enforcement")
+	}
+	if _, err := conn.Exec(ctx, `DELETE FROM `+table+` WHERE tier = 'pollution';`); err != nil {
+		t.Fatal(err)
+	}
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseContract)
 	assertGraphConverges(t, ctx, url, desired)
 }
 

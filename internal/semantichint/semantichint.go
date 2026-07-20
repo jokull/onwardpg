@@ -159,6 +159,20 @@ func choicesForQuestion(question protocol.Question, current, desired *pgschema.S
 			}, Hazards: hazards})
 		}
 		return result, nil
+	case "reconcile_contract":
+		result := make([]protocol.DecisionChoice, 0, len(question.Choices))
+		for _, strategy := range question.Choices {
+			hazards := []string{"contract_readiness_gate"}
+			if strategy == "manual_sql" {
+				hazards = append(hazards, "manual_sql")
+			} else if strategy == "split_plan" {
+				hazards = append(hazards, "additional_deployment")
+			}
+			result = append(result, protocol.DecisionChoice{Hint: protocol.Hint{
+				Kind: "reconcile", Object: object, Name: name, Strategy: strategy,
+			}, Hazards: hazards})
+		}
+		return result, nil
 	}
 
 	if isManualQuestion(question.Kind) {
@@ -230,7 +244,7 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 	if !equal(hint.Name, name) {
 		return answer, false, nil
 	}
-	if hint.Kind != "type_change" && hint.Kind != "rollout" && hint.Kind != "rename_backfill" && hint.Object != object {
+	if hint.Kind != "type_change" && hint.Kind != "rollout" && hint.Kind != "rename_backfill" && hint.Kind != "reconcile" && hint.Object != object {
 		return answer, false, nil
 	}
 	switch question.Kind {
@@ -254,6 +268,11 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 			answer.Value = hint.Strategy
 			return answer, true, nil
 		}
+	case "reconcile_contract":
+		if hint.Kind == "reconcile" && hint.Object == object && contains(question.Choices, hint.Strategy) {
+			answer.Value = hint.Strategy
+			return answer, true, nil
+		}
 	default:
 		if isManualQuestion(question.Kind) && hint.Kind == "manual_sql" && hint.Action == question.Kind {
 			displayName := strings.Join(name, ".")
@@ -268,10 +287,8 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 						"-- Add boolean assertions to verify.sql for every data-dependent assumption.",
 				},
 			}
-			if question.Kind == "rename_backfill" {
-				answer.Manual.VerificationSQL = []string{
-					"SELECT false; -- ONWARDPG TODO: replace with a boolean old/new equality assertion",
-				}
+			answer.Manual.VerificationSQL = []string{
+				"SELECT false; -- ONWARDPG TODO: replace with an exact boolean postcondition",
 			}
 			return answer, true, nil
 		}
@@ -285,7 +302,7 @@ func matchQuestion(question protocol.Question, hint protocol.Hint, current, desi
 
 func isManualQuestion(kind string) bool {
 	switch kind {
-	case "refresh_materialized_view", "partition_reconfiguration", "backfill_not_null", "rename_compatibility_bridge", "rename_backfill":
+	case "refresh_materialized_view", "partition_reconfiguration", "backfill_not_null", "rename_compatibility_bridge", "rename_backfill", "reconcile_contract_sql":
 		return true
 	default:
 		return false

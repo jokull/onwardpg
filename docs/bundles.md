@@ -81,19 +81,24 @@ in the relevant phase. This is an incomplete handoff, not a successful plan.
 The agent replaces the TODO directly in SQL; full disposable clone verification
 is required before the manifest becomes `planned`.
 
-## Generated files
+## Generated and receipted files
 
-A decision-bearing bundle can contain all of these generated files:
+A decision-bearing bundle can contain all of these generated or receipted
+files:
 
 ~~~text
 customer-profile/
 ├── manifest.json
 ├── decisions.json            # semantic intent and bound evidence
 ├── questions.json
-├── decisions/
-│   └── attempt-001.json
 ├── answers.json
 ├── plan.json
+├── contract-gates.json       # generated production-readiness queries
+├── contract-gate-overrides.json # after a manual gate is receipted
+├── expand-checkpoint.json    # after successful gated verification
+├── verify.sql                # optional clone-only assertions
+├── decisions/
+│   └── attempt-001.json
 └── phases/
     ├── expand.sql
     └── contract.sql
@@ -101,19 +106,24 @@ customer-profile/
 
 Only non-empty phases are written. Phase SQL preserves planner comments,
 transaction boundaries, hazards, and deterministic statement IDs. Decision,
-question, answer, and verification files exist only when that plan actually
-uses them; a simple additive plan is correspondingly smaller.
+question, answer, gate, checkpoint, override, and verification files exist only
+when that plan actually uses them; a simple additive plan is correspondingly
+smaller.
 
-The manifest is `onwardpg.bundle/v2`. Older three-phase developer-preview
+The manifest is `onwardpg.bundle/v3`. Older developer-preview
 bundles are rejected with a regeneration action. It records:
 
 - logical bundle ID, generation, target, and purpose;
 - redacted source descriptions and typed graph fingerprints;
 - planner version and normalized options;
 - history parent and canonical entry digest;
-- decision, question, and answer receipts; and
-- semantic-decision receipts without caller-supplied fingerprints; and
-- plan and phase digests.
+- decision, question, and answer receipts;
+- semantic-decision receipts without caller-supplied fingerprints;
+- plan and phase digests;
+- typed contract gates, any manually resolved gate overrides, and
+  reconciliations; and
+- the exact catalog fingerprint observed after expand in disposable
+  verification.
 
 Database URLs and absolute DDL paths are never stored.
 
@@ -124,6 +134,8 @@ Generated and receipted bundles are strict receipts:
 - every recorded file must exist;
 - unrecorded files are rejected;
 - plan, answers, questions, intent, and phases must match their digests;
+- contract gates, gate overrides, and the expand checkpoint must match their
+  digests and history binding;
 - generated phase SQL must match plan.json;
 - the history entry digest commits to its parent and manifest;
 - forks, gaps, disconnected entries, and altered parents are rejected.
@@ -133,6 +145,20 @@ verifier prepares refreshed receipts in memory, executes the exact phase files
 only in disposable PostgreSQL, runs verify.sql boolean assertions, proves an
 empty residual, then atomically updates manifest receipts. Failure writes
 nothing. verify --check never updates receipts.
+
+For a gated plan, successful verification also writes
+`expand-checkpoint.json`. Its digest changes the history entry identity, so a
+checkpoint cannot be copied between plans without breaking the chain.
+`contract-gates.json` is canonical plan output; contract statements name the
+gate IDs they require, and their stable IDs commit to those references.
+
+When PostgreSQL catalogs cannot derive a product-specific Boolean, the
+generated assertion itself is a bounded SQL edit pocket. The developer or agent
+edits that SQL in `contract.sql`, never the metadata. Successful verification
+extracts the resolved query into `contract-gate-overrides.json`, digests it
+separately, and binds it to the same generated gate ID and history entry. The
+override file is therefore verifier-written evidence, not an authoring surface.
+Optional `verify.sql` assertions remain separate clone postconditions.
 
 `verify --check` also requires the selected bundle to be the history head and
 materializes the repository's current configured DDL. A bundle that converges

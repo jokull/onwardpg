@@ -116,7 +116,12 @@ The agent can now justify a conversion instead of assuming one:
 NULLIF(trim(age), '')::integer
 ```
 
-It should also record the production precondition—such as `non_numeric = 0`—for the deployment runbook or a read-only preflight gate. Disposable verification cannot prove that live rows still satisfy it.
+It should also turn the production precondition—such as `non_numeric = 0`—into
+the exact reviewed Boolean contract gate requested by the planner. That gate
+stays in `contract.sql`, is receipted, and runs again immediately before
+enforcement. Disposable verification cannot prove that live rows still satisfy
+it; the read-only `contract check` evaluates the same effective gate after
+expand and writer drain.
 
 :::danger[Production access is evidence, not authority]
 Use a dedicated role with only `CONNECT` and `SELECT` on approved schemas, views, or columns. Enforce read-only transactions, statement timeouts, row limits, and audited access. Never give the agent onwardpg’s scratch administrator, write credentials, secrets, or unrestricted access to sensitive columns.
@@ -149,6 +154,7 @@ The distinction matters:
 - the production MCP query discovers value shapes and live preconditions;
 - the synthetic `VALUES` assertion tests the product rule repeatably;
 - the edited phase SQL performs the reviewed migration work;
+- the contract gate checks live rows before production enforcement;
 - clone verification proves the bundle executes and reaches W; and
 - the deployment system rechecks live preconditions, volume, locks, and drain state.
 
@@ -163,9 +169,12 @@ For a product-specific type transition, ask the agent to return evidence at each
 3. **Production evidence:** bounded read-only counts or classifications, with no secrets copied into the bundle.
 4. **Intent:** semantic hints supplied up front or in response to real questions.
 5. **Executable work:** reviewed edits inside generated phase pockets.
-6. **Semantic examples:** synthetic Boolean assertions in `verify.sql`.
-7. **Structural proof:** successful `onwardpg verify` with an empty residual diff.
-8. **Operational gates:** live preconditions, lock budgets, replica health, deployment, and drain evidence owned by the release system.
+6. **Production invariant:** the planner-named Boolean gate in `contract.sql`.
+7. **Semantic examples:** optional synthetic Boolean assertions in `verify.sql`.
+8. **Structural proof:** successful `onwardpg verify` with an empty residual diff.
+9. **Operational gates:** `contract check` over the post-expand catalog, exact
+   data gates, and expiring writer evidence, plus lock budgets, replica health,
+   execution, and approval owned by the release system.
 
 This makes agent participation reviewable. The agent contributes context and SQL; onwardpg constrains what that context is allowed to authorize.
 
@@ -177,7 +186,8 @@ Give the agent the feature and boundaries, not just “make a migration”:
 Run onwardpg plan for this feature. Read the application paths that touch the
 changed columns. Supply semantic hints only when code or product context proves
 them. If product SQL is required, edit only the named onwardpg pockets and add
-synthetic verify.sql assertions for each conversion rule. Treat production MCP
+the requested contract-gate Boolean in contract.sql. Add synthetic verify.sql
+assertions for representative conversion rules. Treat production MCP
 access as read-only evidence: use aggregates and value-shape classifications,
 do not copy sensitive rows, and record any live precondition that must be
 rechecked before deployment. Finish with onwardpg verify and summarize hazards

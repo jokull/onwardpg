@@ -23,9 +23,30 @@ If expand partially fails, stop. Diagnose the exact batch and reconcile forward;
 
 Deploy the dual-compatible application. Prove old instances and writers are gone, including background workers, scheduled jobs, queues, stale connection pools, and rollback traffic. Run any separately operated backfill required by the reviewed plan. A backfill embedded in a contract edit pocket runs later, as part of the exact contract batch, before its dependent enforcement statement.
 
+Potential writers matter, not only current sessions. Include scaled-to-zero or
+stale previews with production credentials and ad-hoc/third-party writers.
+Create expiring evidence bound to the exact PlanID, bundle entry, environment,
+and release.
+
+```sh
+onwardpg contract check \
+  --target app \
+  --bundle "$BUNDLE" \
+  --environment production \
+  --database-env PROD_READONLY_DATABASE_URL \
+  --evidence deploy-readiness.json
+```
+
+Proceed only on `ready`. `needs_evidence`, `blocked`, and `stale` are distinct
+stops; the command never applies migration SQL.
+
 ## Apply contract
 
-Recheck production preconditions in `verify.sql` where applicable. Then apply contract with the same batch and timeout discipline. Contract may validate constraints, revoke behavior, remove bridges, or perform a final rewrite; “after deploy” does not mean “low risk.”
+Apply the exact contract with the same batch and timeout discipline. Generated
+contract SQL repeats data assertions after cleanup, so the prior readiness
+check is not stale authority. Contract may validate constraints, revoke
+behavior, remove bridges, or perform a final rewrite; “after deploy” does not
+mean “low risk.”
 
 ## After contract
 

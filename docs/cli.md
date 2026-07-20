@@ -9,6 +9,7 @@ onwardpg plan NAME
 onwardpg plan --output sql
 onwardpg status
 onwardpg verify
+onwardpg contract check --environment production --database-env PROD_READONLY_DATABASE_URL
 onwardpg drift check --database URL
 onwardpg diff --from SOURCE --to SOURCE
 ~~~
@@ -270,6 +271,33 @@ It also does not normalize historical physical object names to a newer DDL
 exporter's naming convention. Such a difference is drift evidence. If a later
 feature must touch the object, the developer or agent owns an explicit,
 reviewed physical-to-declarative transition in the migration bundle.
+
+## contract check
+
+~~~sh
+onwardpg contract check \
+  [--target NAME] [--bundle ID] \
+  --environment NAME \
+  --database-env ENV \
+  [--evidence writer-evidence.json] \
+  [--statement-timeout 30s] [--config .onwardpg.toml]
+~~~
+
+Checks whether the selected history-head bundle is ready for contract without
+executing migration SQL. The environment variable supplies the database URL so
+credentials do not enter bundle receipts. The command validates the hash chain,
+requires the disposable-verification post-expand checkpoint, inspects the
+caller database in one repeatable-read/read-only transaction, compares its
+typed graph, runs receipted Boolean data gates, and validates expiring writer
+evidence bound to the exact plan and environment.
+
+The report uses `onwardpg.contract-readiness/v1` and includes the selected
+target, environment, bundle and PlanID identity, generation, entry digest,
+expected and observed fingerprints, check time, gate results, findings, and a
+report digest. Its status is `ready`, `needs_evidence`, `blocked`, or `stale`.
+`--statement-timeout` limits each read-only catalog or data-gate query and
+defaults to 30 seconds. `ready` does not execute or schedule contract. See
+[contract readiness](contract-readiness.md) for the evidence format.
 
 ## diff (and compatibility `plan --from --to`)
 

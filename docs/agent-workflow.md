@@ -58,9 +58,11 @@ dev-scoped rename choice. A confirmed choice renders one direct local rename;
 `preserve` keeps the old development object. The production bundle never
 inherits a development-only rename.
 
-Production is deliberately outside the per-PR critical path. Run
+Production is deliberately outside planning and clone verification. Run
 `onwardpg drift check --database "$PROD_URL"` periodically or
-after an incident; resolve a finding with a reviewed forward migration.
+after an incident; resolve a finding with a reviewed forward migration. After
+expand and deployment, use `onwardpg contract check` for the separate live
+catalog, data-gate, and writer-evidence boundary before contract.
 
 ## Decision loop
 
@@ -116,7 +118,12 @@ type-change receipt requires both an expand compatibility interface and a
 contract cutover. The agent replaces the exact TODO pockets around product SQL
 such as this and preserves their markers.
 
-Add boolean assertions in `verify.sql` when useful. Then run:
+If the planner leaves a named Boolean contract-gate pocket, resolve it in
+`contract.sql`; it is the production precondition repeated immediately before
+enforcement. Add separate Boolean assertions in `verify.sql` when synthetic
+conversion examples or clone-only postconditions are useful. Those optional
+assertions strengthen disposable verification but do not authorize production
+contract. Then run:
 
 ```sh
 onwardpg verify
@@ -126,6 +133,13 @@ Verification executes exact bundle bytes only in onwardpg-created disposable
 PostgreSQL databases and proves a final empty residual diff. It does not run
 anything on D, P, staging, or production. The deployment-aware developer or
 agent owns the actual execution and any dual-write/application rollout.
+
+For a plan that loosens enforcement, `verify` also receipts the exact graph it
+observed after expand. A release system or agent with read-only production
+access can later run `contract check` against that checkpoint. The command
+evaluates exact data gates and expiring evidence for web, workers, queues,
+schedules, pools, previews, and ad-hoc writers; it never treats a lack of active
+database sessions as proof that an old writer cannot reconnect.
 
 ## Rebase and restack
 

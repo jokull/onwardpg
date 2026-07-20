@@ -81,7 +81,7 @@ func renderUniqueIndexAcceptanceReplacement(before, after pgschema.Index, curren
 	return statements, nil, nil
 }
 
-func renderForeignKeyAcceptanceReplacement(before, after pgschema.Constraint) []protocol.Statement {
+func renderForeignKeyAcceptanceReplacement(before, after pgschema.Constraint, desired *pgschema.Snapshot) []protocol.Statement {
 	table := qualified(after.Table.Schema, after.Table.Name)
 	drop := withTimeoutGuidance(statement(
 		"ALTER TABLE "+table+" DROP CONSTRAINT "+quote(before.Name)+";",
@@ -89,7 +89,8 @@ func renderForeignKeyAcceptanceReplacement(before, after pgschema.Constraint) []
 		"foreign_key_acceptance_relaxed", "referential_enforcement_removed", "orphan_rows_possible", "referential_action_behavior_change", "brief_lock", "access_exclusive_lock",
 	), 30000, 3000)
 	definition := strings.TrimSpace(after.Definition)
-	if !containsNotValid(definition) {
+	partitioned := tableIsPartitioned(desired, after.Table)
+	if !partitioned && !containsNotValid(definition) {
 		definition += " NOT VALID"
 	}
 	add := withTimeoutGuidance(statement(
@@ -98,7 +99,7 @@ func renderForeignKeyAcceptanceReplacement(before, after pgschema.Constraint) []
 		"restore_foreign_key_enforcement", "new_writes_fenced", "post_drain_writers_required", "orphan_rows_possible", "access_exclusive_lock",
 	), 30000, 3000)
 	statements := []protocol.Statement{drop, add}
-	if after.Validated {
+	if after.Validated && !partitioned {
 		validate := withTimeoutGuidance(statement(
 			"ALTER TABLE "+table+" VALIDATE CONSTRAINT "+quote(after.Name)+";",
 			protocol.PhaseContract, "review", true,
@@ -168,6 +169,15 @@ func hasExternalDependentExcept(snapshot *pgschema.Snapshot, dependency pgschema
 	return false
 }
 
+func tableIsPartitioned(snapshot *pgschema.Snapshot, id pgschema.ID) bool {
+	if snapshot == nil {
+		return false
+	}
+	object, exists := snapshot.Object(id)
+	table, ok := object.(pgschema.Table)
+	return exists && ok && table.Partition != nil
+}
+
 func renderRelaxedUniqueConstraintReplacement(before, after pgschema.Constraint, current, desired *pgschema.Snapshot, options Options) ([]protocol.Statement, []pgschema.ID, []string, error) {
 	if options.ConcurrentIndexes {
 		statements, consumed, unsupported, err := renderContinuousConstraintReplacement(before, after, current, desired)
@@ -194,10 +204,18 @@ func renderRelaxedUniqueConstraintReplacement(before, after pgschema.Constraint,
 	return statements, nil, nil, nil
 }
 
-func renderUnknownKeyConstraintReplacement(before, after pgschema.Constraint, current *pgschema.Snapshot) ([]protocol.Statement, []pgschema.ID, []string, error) {
+func renderUnknownKeyConstraintReplacement(before, after pgschema.Constraint, current, desired *pgschema.Snapshot, options Options) ([]protocol.Statement, []pgschema.ID, []string, error) {
+	if options.ConcurrentIndexes {
+		statements, consumed, unsupported, err := renderContinuousConstraintReplacement(before, after, current, desired)
+		if err != nil || len(unsupported) > 0 {
+			return nil, consumed, unsupported, err
+		}
+		return withPhase(statements, protocol.PhaseContract, "review", "post_drain_unique_replacement"), consumed, nil, nil
+	}
 	oldIndex, exists := backingIndexForConstraint(current, before)
-	if !exists || hasExternalDependentExcept(current, before.ObjectID(), oldIndex.ObjectID()) ||
-		hasExternalDependentExcept(current, oldIndex.ObjectID(), before.ObjectID()) {
+	partitioned := tableIsPartitioned(current, before.Table)
+	if !exists || (!partitioned && (hasExternalDependentExcept(current, before.ObjectID(), oldIndex.ObjectID()) ||
+		hasExternalDependentExcept(current, oldIndex.ObjectID(), before.ObjectID()))) {
 		return nil, nil, []string{"unique_constraint_acceptance_dependent:" + before.ObjectID().String()}, nil
 	}
 	table := qualified(after.Table.Schema, after.Table.Name)
