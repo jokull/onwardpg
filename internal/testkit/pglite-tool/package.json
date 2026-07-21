@@ -1,0 +1,13 @@
+{
+  "name": "onwardpg-pglite-preflight-tool",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.4.5",
+    "@electric-sql/pglite-socket": "0.1.5"
+  }
+}

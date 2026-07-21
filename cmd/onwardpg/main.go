@@ -1665,6 +1665,28 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 			Choices: []workflowActionChoice{{Hint: hint, Argv: argv}},
 		})
 	}
+	if development.Status == protocol.NeedsSQLEdits {
+		argv := []string{"onwardpg", "dev", "plan"}
+		if durable.Target != "" {
+			argv = append(argv, "--target", durable.Target)
+		}
+		for _, hint := range development.AppliedHints {
+			encoded, err := json.Marshal(hint)
+			if err != nil {
+				continue
+			}
+			argv = append(argv, "--hint", string(encoded))
+		}
+		result = append(result, workflowNextAction{
+			Scope:       "development",
+			Kind:        "inspect_manual_sql_handoff",
+			Reason:      "development_reconciliation_requires_product_sql",
+			Argv:        argv,
+			JSONPointer: "/development",
+			Purpose:     "inspect the full typed SQL handoff for the caller-owned development database",
+			Resolution:  "author a complete manual_sql work hint and rerun onwardpg plan with it as --dev-hint, or rebuild the development database; the durable bundle is unchanged",
+		})
+	}
 	for index, check := range development.Postconditions {
 		if check.Status != "passed" {
 			result = append(result, workflowNextAction{
@@ -1781,6 +1803,8 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 					_, _ = fmt.Fprintf(writer, "  development review: %s\n", action.JSONPointer)
 				case "review_unsupported":
 					_, _ = fmt.Fprintf(writer, "  development review: %s (%s)\n", action.JSONPointer, action.Purpose)
+				case "inspect_manual_sql_handoff":
+					_, _ = fmt.Fprintf(writer, "  development SQL handoff: %s (%s)\n", renderArgv(action.Argv), action.Resolution)
 				case "merge_edit_conflict":
 					_, _ = fmt.Fprintf(writer, "  durable merge conflict: %s (%s); then %s\n", action.Path, action.Resolution, renderArgv(action.Argv))
 				case "workspace_fast_forward":

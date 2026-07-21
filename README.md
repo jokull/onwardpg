@@ -343,7 +343,8 @@ onwardpg config check     validate sources, PostgreSQL majors, and ignores
 See [migration workflow](docs/migration-workflow.md),
 [supported features](docs/supported-features.md),
 [safety model](docs/safety-model.md), [CLI reference](docs/cli.md), and
-[contract readiness](docs/contract-readiness.md), and [bundle format](docs/bundles.md).
+[contract readiness](docs/contract-readiness.md), [bundle format](docs/bundles.md),
+and the [testing strategy and claim receipts](docs/testing-strategy.md).
 onwardpg is an MIT-licensed developer preview
 with no production apply command, embedded agent, framework adapter, or down
 migration generator.

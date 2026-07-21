@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "mandatory_checkpoints": [
+    "planned",
+    "expanded_legacy",
+    "expanded_new",
+    "contract_blocked",
+    "contract_ready",
+    "converged"
+  ],
+  "claims": [
+    {
+      "id": "claim.additive-expand-only",
+      "source": "website/src/content/docs/concepts/plan-command.md",
+      "match": "There is no empty `contract.sql` for ceremony's sake.",
+      "summary": "A nullable additive column is emitted in expand without an empty contract phase."
+    },
+    {
+      "id": "claim.required-column-staging",
+      "source": "website/src/content/docs/concepts/plan-command.md",
+      "match": "developer supplies the historical value; onwardpg keeps that edit ahead of its",
+      "summary": "A required column is added nullable, reconciled explicitly, gated, and tightened after drain."
+    },
+    {
+      "id": "claim.acceptance-envelope",
+      "source": "README.md",
+      "match": "Expand is an **acceptance-compatible envelope**",
+      "summary": "Expand may temporarily loosen enforcement so legacy and new writes coexist."
+    },
+    {
+      "id": "claim.rename-bridge",
+      "source": "README.md",
+      "match": "onwardpg creates a temporary second column",
+      "summary": "A confirmed same-type rename can use a deterministic bidirectional bridge and final native rename."
+    },
+    {
+      "id": "claim.dependent-view-handoff",
+      "source": "README.md",
+      "match": "planner adds three bounded edit",
+      "summary": "An unproved dependent-view rename stays inside three ordered, dependency-scoped edit pockets."
+    },
+    {
+      "id": "claim.cross-type-handoff",
+      "source": "README.md",
+      "match": "closures. Exactly two edit pockets remain",
+      "summary": "A confirmed cross-name/type transition owns both endpoint columns and the entire dependent closure."
+    },
+    {
+      "id": "claim.materialized-dependencies",
+      "source": "website/src/content/docs/concepts/plan-command.md",
+      "match": "dependency order for recreation, materialized-view population state, index",
+      "summary": "Materialized dependencies and their indexes are ordered and freshness remains an explicit product boundary."
+    },
+    {
+      "id": "claim.restack-one-plan",
+      "source": "website/src/content/docs/concepts/plan-command.md",
+      "match": "rebuilds the existing `PlanID` as **H(new) → W**.",
+      "summary": "Plain plan reruns keep one feature identity while accepted history changes underneath it."
+    },
+    {
+      "id": "claim.optional-development-observer",
+      "source": "docs/migration-workflow.md",
+      "match": "remain visible. Omit `dev_database_env` entirely when this optional D → W view",
+      "summary": "Development inspection is optional and its observer-only ACL overlay is not durable drift."
+    },
+    {
+      "id": "claim.contract-readiness",
+      "source": "README.md",
+      "match": "Contract is now an evidence boundary rather than a phase-name convention.",
+      "summary": "Contract cleanup is blocked on exact live catalog, data, and expiring writer evidence."
+    },
+    {
+      "id": "claim.agent-remediation",
+      "source": "website/src/content/docs/agents/agent-assisted-planning.mdx",
+      "match": "JSON is the default and each document leads with a status or error code.",
+      "summary": "Agent output exposes status, copyable decisions, edit paths, and scoped remediation."
+    },
+    {
+      "id": "claim.final-convergence",
+      "source": "website/src/content/docs/concepts/verification.md",
+      "match": "the final semantic diff is empty",
+      "summary": "Disposable verification requires exact execution and an empty final semantic residual."
+    },
+    {
+      "id": "claim.split-plan-refusal",
+      "source": "README.md",
+      "match": "deployments, onwardpg says so instead of hiding one inside a phase name.",
+      "summary": "A transition that cannot fit one rolling deployment is split or refused rather than mislabeled safe."
+    }
+  ],
+  "owners": [
+    {"id":"native.additive","status":"existing","engine":"native_postgres","path":"cmd/onwardpg/main_integration_test.go","test":"TestOrdinaryAdditiveDraftIsStableAndConvergesOnPostgreSQL"},
+    {"id":"native.required","status":"existing","engine":"native_postgres","path":"internal/graphplan/convergence_integration_test.go","test":"TestRequiredColumnStagingConvergesOnPostgreSQL"},
+    {"id":"native.check-widen","status":"existing","engine":"native_postgres","path":"internal/graphplan/convergence_integration_test.go","test":"TestCheckWideningAcceptsLegacyAndNewWritesAfterExpand"},
+    {"id":"native.check-envelope","status":"existing","engine":"native_postgres","path":"internal/graphplan/convergence_integration_test.go","test":"TestLooseCheckOverlapContaminationGateAndCleanupConvergeOnPostgreSQL"},
+    {"id":"native.rename","status":"existing","engine":"native_postgres","path":"internal/contractcheck/blind_gauntlet_integration_test.go","test":"TestBlindGauntletCompatibilityWindowKeepsPreparedLegacySQLAliveOnPostgreSQL"},
+    {"id":"native.rename-view","status":"existing","engine":"native_postgres","path":"internal/contractcheck/blind_gauntlet_run_a_integration_test.go","test":"TestBlindGauntletRunADependentViewRenameOnPostgreSQL"},
+    {"id":"native.cross-type","status":"existing","engine":"native_postgres","path":"internal/graphplan/blind_gauntlet_b_integration_test.go","test":"TestBlindGauntletCrossNameTypeTransitionKeepsLegacySQLAliveOnPostgreSQL"},
+    {"id":"native.materialized","status":"existing","engine":"native_postgres","path":"internal/graphplan/convergence_integration_test.go","test":"TestChangedViewRequiresManualDependentMaterializedViewRefresh"},
+    {"id":"native.restack","status":"existing","engine":"native_postgres","path":"cmd/onwardpg/main_integration_test.go","test":"TestPlanAnchorsAndRestacksOneFeatureWithoutExplicitAfterOnPostgreSQL"},
+    {"id":"native.scratch-only","status":"existing","engine":"native_postgres","path":"cmd/onwardpg/main_integration_test.go","test":"TestConfigCheckAllowsScratchOnlyTarget"},
+    {"id":"native.observer","status":"existing","engine":"native_postgres","path":"internal/contractcheck/observer_catalog_integration_test.go","test":"TestInspectObserverCatalogProjectsOnlyDedicatedAccess"},
+    {"id":"native.contract-readiness","status":"existing","engine":"native_postgres","path":"internal/contractcheck/contractcheck_integration_test.go","test":"TestContractCheckUsesOneReadOnlySnapshotAndRequiresWriterEvidence"},
+    {"id":"native.output-text","status":"existing","engine":"native_postgres","path":"cmd/onwardpg/main_test.go","test":"TestWorkflowTextIncludesPlannerAnalysisFindings"},
+    {"id":"native.output-edits","status":"existing","engine":"native_postgres","path":"cmd/onwardpg/main_test.go","test":"TestWorkflowEditActionsRequireWrittenReceipts"},
+    {"id":"native.split-refusal","status":"existing","engine":"native_postgres","path":"internal/graphplan/convergence_integration_test.go","test":"TestEnumRenameRequiresAnotherDeploymentWithoutCompatibilityBridgeOnPostgreSQL"},
+    {"id":"native.verify","status":"existing","engine":"native_postgres","path":"cmd/onwardpg/main_integration_test.go","test":"TestBundleVerifyReportsPartialResidualAndFullConvergenceOnPostgreSQL"},
+
+    {"id":"planned.acceptance-additive","status":"existing","engine":"native_postgres","path":"acceptance/release_contract_test.go","test":"TestReleaseContractNullableColumn"},
+    {"id":"planned.acceptance-required","status":"existing","engine":"native_postgres","path":"acceptance/release_contract_test.go","test":"TestReleaseContractRequiredColumnWithReviewedCleanup"},
+    {"id":"planned.acceptance-check-widen","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceCheckWidening"},
+    {"id":"planned.acceptance-check-envelope","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceCheckEnvelope"},
+    {"id":"planned.acceptance-rename","status":"existing","engine":"native_postgres","path":"acceptance/release_contract_test.go","test":"TestReleaseContractSameTypeRename"},
+    {"id":"planned.acceptance-rename-view","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceRenameBeneathView"},
+    {"id":"planned.acceptance-cross-type","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceCrossNameTypeTransition"},
+    {"id":"planned.acceptance-materialized","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceMaterializedDependency"},
+    {"id":"planned.acceptance-restack","status":"existing","engine":"native_postgres","path":"acceptance/plan_loop_test.go","test":"TestPlanLoopRestackMatrix"},
+    {"id":"planned.acceptance-development","status":"existing","engine":"native_postgres","path":"acceptance/plan_loop_test.go","test":"TestPlanLoopDevelopmentAheadWorkIsNotAbsorbed"},
+    {"id":"native.development-manual-handoff","status":"existing","engine":"native_postgres","path":"acceptance/plan_loop_test.go","test":"TestPlanLoopDevelopmentManualSQLHasAction"},
+    {"id":"planned.acceptance-contract","status":"existing","engine":"native_postgres","path":"acceptance/contract_readiness_test.go","test":"TestNativeContractReadinessRequiresEvidenceAndReconciliation"},
+    {"id":"planned.acceptance-composite","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceCompositeNightmare"},
+
+    {"id":"pglite.additive","status":"existing","engine":"pglite","path":"acceptance/pglite_preflight_test.go","test":"TestPGlitePreflight"},
+    {"id":"pglite.required","status":"existing","engine":"pglite","path":"acceptance/pglite_preflight_test.go","test":"TestPGlitePreflight"},
+    {"id":"pglite.checks","status":"existing","engine":"pglite","path":"acceptance/pglite_preflight_test.go","test":"TestPGlitePreflight"},
+    {"id":"pglite.rename","status":"existing","engine":"pglite","path":"acceptance/pglite_preflight_test.go","test":"TestPGlitePreflight"},
+    {"id":"pglite.views","status":"existing","engine":"pglite","path":"acceptance/pglite_preflight_test.go","test":"TestPGlitePreflight"},
+    {"id":"pglite.type-conversion","status":"planned","engine":"pglite","path":"acceptance/pglite_preflight_test.go","test":"TestPGliteTypeConversionVariants"},
+    {"id":"pglite.materialized","status":"existing","engine":"pglite","path":"acceptance/pglite_preflight_test.go","test":"TestPGlitePreflight"},
+    {"id":"pglite.composite","status":"planned","engine":"pglite","path":"acceptance/pglite_preflight_test.go","test":"TestPGliteCompositePhaseVariants"}
+  ],
+  "scenarios": [
+    {
+      "id":"additive.nullable-column",
+      "family":"additive_schema",
+      "title":"Add a nullable column without ceremonial contract SQL",
+      "proof_modes":["generated_automation"],
+      "public_claim_ids":["claim.additive-expand-only","claim.final-convergence"],
+      "protected_invariant":"The generated bundle adds the nullable column in expand, writes no empty contract phase, and converges.",
+      "native_owner_ids":["native.additive","planned.acceptance-additive"],
+      "pglite":{"eligibility":"eligible","owner_id":"pglite.additive","native_owner_id":"native.additive","capabilities":["basic_ddl","insert_select_update"]},
+      "dimensions":{"ddl":"nullable_column","data":"empty_and_nonempty","client":"new_insert_select_update","decision":"generated","plan_evolution":"first_plan_plain_rerun","environment":"native_pg15_18"},
+      "checkpoints":{"planned":{"owner_ids":["native.additive"]},"expanded_legacy":{"omitted_reason":"Legacy SQL cannot reference the new nullable column and no existing write contract is tightened."},"expanded_new":{"owner_ids":["planned.acceptance-additive"]},"contract_blocked":{"omitted_reason":"The generated scenario has no contract work or live readiness gate."},"contract_ready":{"omitted_reason":"The generated scenario has no contract work or live readiness gate."},"converged":{"owner_ids":["native.additive"]}}
+    },
+    {
+      "id":"required-column.manual-cleanup",
+      "family":"required_column",
+      "title":"Add a future-required column while old writers omit it",
+      "proof_modes":["reviewed_sql_handoff"],
+      "public_claim_ids":["claim.required-column-staging","claim.final-convergence"],
+      "protected_invariant":"Expand stays nullable; reviewed cleanup precedes the exact NULL gate and final NOT NULL enforcement.",
+      "native_owner_ids":["native.required","planned.acceptance-required"],
+      "pglite":{"eligibility":"eligible","owner_id":"pglite.required","native_owner_id":"native.required","capabilities":["basic_ddl","trigger_free_overlap","data_assertion"]},
+      "dimensions":{"ddl":"new_not_null_column","data":"mixed_null_and_filled","client":"legacy_omits_new_writer_sets","decision":"manual_contract_sql","plan_evolution":"edited_plain_rerun","environment":"native_pg15_18"},
+      "checkpoints":{"planned":{"owner_ids":["native.required"]},"expanded_legacy":{"owner_ids":["planned.acceptance-required"]},"expanded_new":{"owner_ids":["planned.acceptance-required"]},"contract_blocked":{"owner_ids":["planned.acceptance-required"]},"contract_ready":{"owner_ids":["planned.acceptance-required"]},"converged":{"owner_ids":["native.required"]}}
+    },
+    {
+      "id":"check.expand-only-widening",
+      "family":"check_transition",
+      "title":"Widen a finite CHECK in expand only",
+      "proof_modes":["generated_automation"],
+      "public_claim_ids":["claim.acceptance-envelope","claim.final-convergence"],
+      "protected_invariant":"Old and new values are accepted after expand and no later tightening is invented.",
+      "native_owner_ids":["native.check-widen","planned.acceptance-check-widen"],
+      "pglite":{"eligibility":"eligible","owner_id":"pglite.checks","native_owner_id":"native.check-widen","capabilities":["check_constraints","insert_select_update"]},
+      "dimensions":{"ddl":"finite_check_widening","data":"old_new_and_boundary_values","client":"legacy_and_new_writes","decision":"generated_implication","plan_evolution":"first_plan","environment":"native_pg15_18"},
+      "checkpoints":{"planned":{"owner_ids":["native.check-widen"]},"expanded_legacy":{"owner_ids":["native.check-widen"]},"expanded_new":{"owner_ids":["native.check-widen"]},"contract_blocked":{"omitted_reason":"A proven widening is complete in expand and has no contract gate."},"contract_ready":{"omitted_reason":"A proven widening is complete in expand and has no contract gate."},"converged":{"owner_ids":["native.check-widen"]}}
+    },
+    {
+      "id":"check.loose-overlap-cleanup",
+      "family":"check_transition",
+      "title":"Temporarily remove incompatible CHECK enforcement and restore it after cleanup",
+      "proof_modes":["generated_automation","reviewed_sql_handoff"],
+      "public_claim_ids":["claim.acceptance-envelope","claim.contract-readiness","claim.final-convergence"],
+      "protected_invariant":"Neither old nor new writers are rejected in overlap; contamination blocks restoration until reviewed cleanup succeeds.",
+      "native_owner_ids":["native.check-envelope","planned.acceptance-check-envelope"],
+      "pglite":{"eligibility":"eligible","owner_id":"pglite.checks","native_owner_id":"native.check-envelope","capabilities":["check_constraints","data_assertion"]},
+      "dimensions":{"ddl":"incomparable_check_sets","data":"retired_new_and_contaminating_values","client":"prepared_old_and_new_writes","decision":"manual_cleanup","plan_evolution":"edited_rerun","environment":"native_pg15_18"},
+      "checkpoints":{"planned":{"owner_ids":["native.check-envelope"]},"expanded_legacy":{"owner_ids":["native.check-envelope"]},"expanded_new":{"owner_ids":["native.check-envelope"]},"contract_blocked":{"owner_ids":["native.check-envelope"]},"contract_ready":{"owner_ids":["native.check-envelope"]},"converged":{"owner_ids":["native.check-envelope"]}}
+    },
+    {
+      "id":"rename.same-type-bridge",
+      "family":"same_type_rename",
+      "title":"Keep prepared legacy SQL and new SQL alive through a two-way column bridge",
+      "proof_modes":["generated_automation","reviewed_sql_handoff"],
+      "public_claim_ids":["claim.rename-bridge","claim.contract-readiness","claim.final-convergence"],
+      "protected_invariant":"One-sided old and new writes synchronize, conflicting dual writes fail, and physical cutover waits for drain and equality.",
+      "native_owner_ids":["native.rename","planned.acceptance-rename"],
+      "pglite":{"eligibility":"eligible","owner_id":"pglite.rename","native_owner_id":"native.rename","capabilities":["plpgsql_triggers","prepared_statements","sqlstate_assertions"]},
+      "dimensions":{"ddl":"same_type_column_rename","data":"null_matching_and_conflicting_rows","client":"prepared_old_new_and_dual_writes","decision":"rename_plus_single_transaction","plan_evolution":"decision_rerun","environment":"native_pg18"},
+      "checkpoints":{"planned":{"owner_ids":["native.rename"]},"expanded_legacy":{"owner_ids":["native.rename"]},"expanded_new":{"owner_ids":["native.rename"]},"contract_blocked":{"owner_ids":["native.rename"]},"contract_ready":{"owner_ids":["native.rename"]},"converged":{"owner_ids":["native.rename"]}}
+    },
+    {
+      "id":"rename.dependent-view",
+      "family":"rename_beneath_views",
+      "title":"Rename a column while preserving the old view output prefix",
+      "proof_modes":["generated_automation","reviewed_sql_handoff"],
+      "public_claim_ids":["claim.dependent-view-handoff","claim.rename-bridge","claim.final-convergence"],
+      "protected_invariant":"The overlap view is legal PostgreSQL, old prepared view reads survive, and drop/cutover/recreation stays dependency ordered.",
+      "native_owner_ids":["native.rename-view","planned.acceptance-rename-view"],
+      "pglite":{"eligibility":"eligible","owner_id":"pglite.views","native_owner_id":"native.rename-view","capabilities":["views","prepared_statements","plpgsql_triggers"]},
+      "dimensions":{"ddl":"column_rename_with_view_output_change","data":"mixed_old_and_new_rows","client":"prepared_old_view_and_new_view_projection","decision":"three_manual_view_pockets","plan_evolution":"edited_dependency_scope_rerun","environment":"native_pg18"},
+      "checkpoints":{"planned":{"owner_ids":["native.rename-view"]},"expanded_legacy":{"owner_ids":["native.rename-view"]},"expanded_new":{"owner_ids":["native.rename-view"]},"contract_blocked":{"owner_ids":["native.rename-view"]},"contract_ready":{"owner_ids":["native.rename-view"]},"converged":{"owner_ids":["native.rename-view"]}}
+    },
+    {
+      "id":"type.cross-name-materialized-closure",
+      "family":"type_conversion",
+      "title":"Change a column name and type beneath views, a materialized view, and an index",
+      "proof_modes":["reviewed_sql_handoff"],
+      "public_claim_ids":["claim.cross-type-handoff","claim.materialized-dependencies","claim.final-convergence"],
+      "protected_invariant":"Explicit identity owns both columns and the full closure; reviewed conversion handles malformed and overflow values without stray generated DDL.",
+      "native_owner_ids":["native.cross-type","planned.acceptance-cross-type"],
+      "pglite":{"eligibility":"eligible_planned","owner_id":"pglite.type-conversion","native_owner_id":"native.cross-type","capabilities":["views","materialized_views","conversion_data_cases"]},
+      "dimensions":{"ddl":"cross_name_text_to_integer_with_dependency_closure","data":"null_blank_malformed_signed_and_overflow","client":"prepared_old_and_new_conversion_queries","decision":"explicit_identity_plus_manual_type_sql","plan_evolution":"closure_bound_rerun","environment":"native_pg18"},
+      "checkpoints":{"planned":{"owner_ids":["native.cross-type"]},"expanded_legacy":{"owner_ids":["native.cross-type"]},"expanded_new":{"owner_ids":["native.cross-type"]},"contract_blocked":{"omitted_reason":"The current native owner proves the compatibility handoff and final convergence, but a compiled live-readiness gate for this family remains planned."},"contract_ready":{"omitted_reason":"The current native owner proves the compatibility handoff and final convergence, but a compiled live-readiness gate for this family remains planned."},"converged":{"owner_ids":["native.cross-type"]}}
+    },
+    {
+      "id":"materialized.refresh-and-index",
+      "family":"materialized_dependency",
+      "title":"Rebuild a dependent materialized view and index with explicit freshness",
+      "proof_modes":["reviewed_sql_handoff"],
+      "public_claim_ids":["claim.materialized-dependencies","claim.final-convergence"],
+      "protected_invariant":"Dependency destruction is reversed, recreation is forward ordered, and freshness is never inferred from catalog shape alone.",
+      "native_owner_ids":["native.materialized","planned.acceptance-materialized"],
+      "pglite":{"eligibility":"eligible","owner_id":"pglite.materialized","native_owner_id":"native.materialized","capabilities":["views","materialized_views","indexes"]},
+      "dimensions":{"ddl":"view_change_with_materialized_dependent_and_index","data":"empty_and_aggregated_rows","client":"old_new_materialized_queries","decision":"manual_freshness_boundary","plan_evolution":"first_plan_edited_contract","environment":"native_pg15_18"},
+      "checkpoints":{"planned":{"owner_ids":["native.materialized"]},"expanded_legacy":{"omitted_reason":"The current native owner proves dependency ordering, the explicit freshness handoff, and convergence; compiled old-client execution remains planned."},"expanded_new":{"omitted_reason":"The current native owner proves dependency ordering, the explicit freshness handoff, and convergence; compiled new-client execution remains planned."},"contract_blocked":{"omitted_reason":"A compiled live-readiness refusal for materialized-view refresh remains planned."},"contract_ready":{"omitted_reason":"A compiled live-readiness authorization for materialized-view refresh remains planned."},"converged":{"owner_ids":["native.materialized"]}}
+    },
+    {
+      "id":"plan.restack-unrelated-upstream",
+      "family":"rebase_restack",
+      "title":"Restack one active feature on a changed accepted-history head",
+      "proof_modes":["generated_automation","refusal"],
+      "public_claim_ids":["claim.restack-one-plan","claim.final-convergence"],
+      "protected_invariant":"PlanID remains stable, generation advances only for material change, and accepted upstream work is not absorbed from the development database.",
+      "native_owner_ids":["native.restack","planned.acceptance-restack"],
+      "pglite":{"eligibility":"not_eligible","reason":"Restacking requires compiled CLI state, accepted-history replay, and independent native PostgreSQL databases."},
+      "dimensions":{"ddl":"unrelated_upstream_addition","data":"retained_feature_fixture","client":"phase_sql_and_workspace_scope_after_restack","decision":"retain_or_invalidate_scoped_receipts","plan_evolution":"accepted_head_restack","environment":"native_pg15_18_plus_worktree"},
+      "checkpoints":{"planned":{"owner_ids":["native.restack"]},"expanded_legacy":{"omitted_reason":"The restack owner proves generated SQL and workspace scoping; release client execution is owned by the release-contract scenarios."},"expanded_new":{"omitted_reason":"The restack owner proves generated SQL and workspace scoping; release client execution is owned by the release-contract scenarios."},"contract_blocked":{"omitted_reason":"This canonical restack variant uses an additive feature result; gated restack variants are separate planned matrix rows."},"contract_ready":{"omitted_reason":"This canonical restack variant uses an additive feature result; gated restack variants are separate planned matrix rows."},"converged":{"owner_ids":["native.restack"]}}
+    },
+    {
+      "id":"development.scratch-only-observer",
+      "family":"development_observer",
+      "title":"Plan without a development database and normalize a dedicated read-only observer",
+      "proof_modes":["generated_automation","refusal"],
+      "public_claim_ids":["claim.optional-development-observer","claim.agent-remediation"],
+      "protected_invariant":"Scratch-only planning works; observer access is projected away while genuine application grants remain visible.",
+      "native_owner_ids":["native.scratch-only","native.observer","planned.acceptance-development"],
+      "pglite":{"eligibility":"not_eligible","reason":"Roles, ownership, ACLs, and separate observer backends are outside the PGlite authority boundary."},
+      "dimensions":{"ddl":"unchanged_catalog_with_acl_overlay","data":"not_applicable","client":"read_only_catalog_observer","decision":"project_observer_or_review_real_grant","plan_evolution":"optional_development_toggle","environment":"native_pg18_roles"},
+      "checkpoints":{"planned":{"owner_ids":["native.scratch-only","native.observer"]},"expanded_legacy":{"omitted_reason":"Development reconciliation is read-only catalog inspection and does not apply a release expand phase."},"expanded_new":{"omitted_reason":"Development reconciliation is read-only catalog inspection and does not apply a release expand phase."},"contract_blocked":{"omitted_reason":"Development reconciliation cannot authorize or execute production contract."},"contract_ready":{"omitted_reason":"Development reconciliation cannot authorize or execute production contract."},"converged":{"owner_ids":["planned.acceptance-development"]}}
+    },
+    {
+      "id":"contract.live-readiness",
+      "family":"contract_readiness",
+      "title":"Refuse contract until live writer and data evidence matches the exact plan",
+      "proof_modes":["refusal","reviewed_sql_handoff"],
+      "public_claim_ids":["claim.contract-readiness","claim.final-convergence"],
+      "protected_invariant":"One repeatable-read, read-only snapshot checks the receipted expand catalog, data gates, and expiring writer cohorts before cleanup.",
+      "native_owner_ids":["native.contract-readiness","planned.acceptance-contract"],
+      "pglite":{"eligibility":"not_eligible","reason":"Writer drain evidence and independent read-only backend behavior require native PostgreSQL."},
+      "dimensions":{"ddl":"gated_contract_enforcement","data":"dirty_then_clean","client":"legacy_writes_verified_then_drained_before_readiness","decision":"exact_writer_and_data_evidence","plan_evolution":"verified_expand_checkpoint","environment":"native_pg18_multiple_backends"},
+      "checkpoints":{"planned":{"owner_ids":["planned.acceptance-contract"]},"expanded_legacy":{"owner_ids":["planned.acceptance-contract"]},"expanded_new":{"owner_ids":["planned.acceptance-contract"]},"contract_blocked":{"owner_ids":["native.contract-readiness"]},"contract_ready":{"owner_ids":["native.contract-readiness"]},"converged":{"owner_ids":["planned.acceptance-contract"]}}
+    },
+    {
+      "id":"development.manual-sql-handoff",
+      "family":"development_manual_sql",
+      "title":"Keep optional development reconciliation actionable when product SQL is required",
+      "proof_modes":["generated_automation","refusal"],
+      "public_claim_ids":["claim.agent-remediation"],
+      "protected_invariant":"A blocking development SQL handoff exposes cumulative inspection argv and the same resolution in JSON and text without changing the durable bundle.",
+      "native_owner_ids":["native.development-manual-handoff"],
+      "pglite":{"eligibility":"not_eligible","reason":"The receipt covers compiled high-level and low-level CLI handoff behavior against an independent development database."},
+      "dimensions":{"ddl":"future_required_column_in_local_baseline","data":"existing_development_rows","client":"json_and_text_agent_consumers","decision":"manual_development_product_sql","plan_evolution":"verified_durable_with_local_database_behind","environment":"native_pg15_18_development_database"},
+      "checkpoints":{"planned":{"owner_ids":["native.development-manual-handoff"]},"expanded_legacy":{"omitted_reason":"This protocol receipt stops at the optional development SQL handoff; release-contract scenarios own expand clients."},"expanded_new":{"omitted_reason":"This protocol receipt stops at the optional development SQL handoff; release-contract scenarios own expand clients."},"contract_blocked":{"omitted_reason":"The durable bundle and its contract lifecycle are independently covered by the required-column scenario."},"contract_ready":{"omitted_reason":"The durable bundle and its contract lifecycle are independently covered by the required-column scenario."},"converged":{"omitted_reason":"The receipt proves actionable development remediation, not execution of caller-owned local SQL."}}
+    },
+    {
+      "id":"cli.agent-remediation",
+      "family":"agent_output",
+      "title":"Expose findings, written edit paths, and copyable next actions",
+      "proof_modes":["generated_automation","refusal"],
+      "public_claim_ids":["claim.agent-remediation","claim.cross-type-handoff"],
+      "protected_invariant":"Default JSON and text preserve safety findings; edit actions name existing receipts; commands are shell-copyable and scoped.",
+      "native_owner_ids":["native.output-text","native.output-edits"],
+      "pglite":{"eligibility":"not_eligible","reason":"This is a compiled CLI protocol contract, not a phase-SQL engine variant."},
+      "dimensions":{"ddl":"cross_type_identity_prompt","data":"not_applicable","client":"json_and_text_consumers","decision":"copyable_semantic_hint_and_edit_path","plan_evolution":"hint_consumed_then_rerun","environment":"compiled_cli_without_database"},
+      "checkpoints":{"planned":{"owner_ids":["native.output-text","native.output-edits"]},"expanded_legacy":{"omitted_reason":"The protocol-only scenario stops before phase execution; release scenarios own legacy SQL checks."},"expanded_new":{"omitted_reason":"The protocol-only scenario stops before phase execution; release scenarios own new SQL checks."},"contract_blocked":{"omitted_reason":"The protocol-only scenario validates remediation rendering rather than live readiness."},"contract_ready":{"omitted_reason":"The protocol-only scenario validates remediation rendering rather than live readiness."},"converged":{"omitted_reason":"The protocol-only scenario validates remediation rendering; native release owners prove convergence."}}
+    },
+    {
+      "id":"split-plan.unsupported-one-rollout",
+      "family":"split_plan_refusal",
+      "title":"Require another deployment when one rolling compatibility window is unproved",
+      "proof_modes":["split_plan","refusal"],
+      "public_claim_ids":["claim.split-plan-refusal"],
+      "protected_invariant":"The planner does not disguise an unsupported enum identity transition as safe expand/contract SQL.",
+      "native_owner_ids":["native.split-refusal"],
+      "pglite":{"eligibility":"not_eligible","reason":"The protected invariant is planner refusal and deployment-count honesty, not executable phase compatibility."},
+      "dimensions":{"ddl":"enum_value_identity_transition","data":"retained_enum_rows","client":"old_and_new_enum_contracts_incompatible","decision":"split_plan_required","plan_evolution":"decision_boundary","environment":"native_pg15_18"},
+      "checkpoints":{"planned":{"owner_ids":["native.split-refusal"]},"expanded_legacy":{"omitted_reason":"Refusal prevents generation of a misleading one-rollout expand phase."},"expanded_new":{"omitted_reason":"Refusal prevents generation of a misleading one-rollout expand phase."},"contract_blocked":{"omitted_reason":"No contract is generated until the product is split into compatible deployments."},"contract_ready":{"omitted_reason":"No contract is generated until the product is split into compatible deployments."},"converged":{"omitted_reason":"The refusal is the expected result; convergence belongs to the later intermediate and cleanup plans."}}
+    },
+    {
+      "id":"composite.rename-required-check-drain",
+      "family":"composite_nightmare",
+      "title":"Combine rename, future-required column, incompatible CHECK, drain, cleanup, and final proof",
+      "proof_modes":["generated_automation","reviewed_sql_handoff"],
+      "public_claim_ids":["claim.acceptance-envelope","claim.rename-bridge","claim.required-column-staging","claim.contract-readiness","claim.final-convergence"],
+      "protected_invariant":"The composed plan preserves prepared legacy SQL and new SQL after expand, rejects bridge conflicts, blocks early cleanup, and removes every compatibility artifact.",
+      "native_owner_ids":["native.rename","native.verify","planned.acceptance-composite"],
+      "pglite":{"eligibility":"eligible_planned","owner_id":"pglite.composite","native_owner_id":"native.rename","capabilities":["basic_ddl","check_constraints","plpgsql_triggers","prepared_statements"]},
+      "dimensions":{"ddl":"rename_plus_required_plus_incompatible_check","data":"legacy_new_null_and_retired_values","client":"prepared_legacy_new_and_conflicting_dual_writes","decision":"rename_backfill_and_two_manual_cleanups","plan_evolution":"multi_decision_edit_plain_rerun","environment":"native_pg18_multiple_backends"},
+      "checkpoints":{"planned":{"owner_ids":["native.rename"]},"expanded_legacy":{"owner_ids":["native.rename"]},"expanded_new":{"owner_ids":["native.rename"]},"contract_blocked":{"owner_ids":["native.rename"]},"contract_ready":{"owner_ids":["native.rename"]},"converged":{"owner_ids":["native.rename","native.verify"]}}
+    }
+  ]
+}

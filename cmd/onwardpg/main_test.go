@@ -224,6 +224,38 @@ func TestWorkflowPlanDevelopmentChoiceArgvCarriesAppliedHints(t *testing.T) {
 	}
 }
 
+func TestWorkflowPlanDevelopmentSQLEditsExposeInspectionAction(t *testing.T) {
+	first := protocol.Hint{Kind: "reconcile", Object: "column", Name: []string{"app", "accounts", "status"}, Strategy: "manual_sql"}
+	second := protocol.Hint{Kind: "manual_sql", Object: "column", Name: []string{"app", "accounts", "status"}, Action: "reconcile_contract_sql"}
+	durable := draftflow.Report{Outcome: string(protocol.Planned), Target: "app", Path: "migrations/onward/app/add-status"}
+	development := devflow.Report{Status: protocol.NeedsSQLEdits, AppliedHints: []protocol.Hint{first, second}}
+	report := newWorkflowPlanReport(durable, development)
+	action := findNextAction(report.NextActions, "inspect_manual_sql_handoff")
+	if report.Status != "needs_action" || action == nil || action.Scope != "development" || action.JSONPointer != "/development" {
+		t.Fatalf("manual SQL handoff report = %#v", report)
+	}
+	if len(action.Argv) != 9 || !reflect.DeepEqual(action.Argv[:5], []string{"onwardpg", "dev", "plan", "--target", "app"}) || action.Argv[5] != "--hint" || action.Argv[7] != "--hint" {
+		t.Fatalf("manual SQL inspection argv = %#v", action.Argv)
+	}
+	var decodedFirst, decodedSecond protocol.Hint
+	if err := json.Unmarshal([]byte(action.Argv[6]), &decodedFirst); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(action.Argv[8]), &decodedSecond); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodedFirst, first) || !reflect.DeepEqual(decodedSecond, second) || action.Resolution == "" {
+		t.Fatalf("manual SQL inspection action = %#v", action)
+	}
+	var output bytes.Buffer
+	if err := writeWorkflowPlanReport(&output, "text", durable, development); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "development SQL handoff:") || !strings.Contains(output.String(), "'onwardpg' 'dev' 'plan'") || !strings.Contains(output.String(), action.Resolution) {
+		t.Fatalf("manual SQL text handoff:\n%s", output.String())
+	}
+}
+
 func TestWorkflowPlanOmitsPersistedGeneratedPlan(t *testing.T) {
 	generated := protocol.Result{Status: protocol.NeedsSQLEdits, Statements: []protocol.Statement{{SQL: "SELECT 'persisted artifact';"}}}
 	durable := draftflow.Report{Outcome: string(protocol.Planned), Path: "migrations/onward/app/example", Plan: &generated}

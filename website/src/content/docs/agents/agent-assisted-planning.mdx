@@ -80,9 +80,18 @@ Accepted hints are captured in the evolving bundle. On the next model edit or re
 - `verify` executes the exact edited artifact that will be reviewed.
 
 Choice argv is cumulative across ephemeral development decisions: always use
-the newest response, whose command carries earlier `applied_hints`. It assumes
-the same repository directory, environment, and framework toolchain as the
-planner invocation; it deliberately never embeds credentials.
+the newest response, whose command carries every earlier accepted dev hint.
+The compact high-level envelope deliberately leaves out the planner's internal
+`applied_hints` list. Each emitted command is self-contained for the same
+repository directory, environment, and framework toolchain, and never embeds
+credentials.
+
+If the local D → W comparison itself needs product-specific SQL, high-level
+`plan` returns an `inspect_manual_sql_handoff` action with cumulative
+`onwardpg dev plan` argv. Run it to see the full typed work template, then
+either complete the `manual_sql` hint and pass it back as a `--dev-hint`, or
+rebuild the local database. This is local workspace repair; it never creates a
+second migration pocket or changes the reviewed H → W bundle.
 
 A good agent loop is deliberately boring:
 

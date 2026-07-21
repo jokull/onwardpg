@@ -3,6 +3,7 @@ package bundle
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -65,6 +66,28 @@ func TestTransplantEditedPocketsRefreshesGeneratorOwnedSurroundings(t *testing.T
 	outsideEdit := []byte("-- developer changed generated text\n-- onwardpg:edit begin stmt-1\nUPDATE app.events SET ready = true;\n-- onwardpg:edit end stmt-1\nSELECT 'tail';\n")
 	if _, transplanted, err := transplantEditedPockets(oldGenerated, outsideEdit, newGenerated); err != nil || transplanted {
 		t.Fatalf("outside-pocket edit must remain a phase conflict: transplanted=%v err=%v", transplanted, err)
+	}
+}
+
+func TestReplaceEditPocketsPreservesGeneratorOwnedBytes(t *testing.T) {
+	body := []byte("before\n-- onwardpg:edit begin pocket-a\n-- ONWARDPG TODO: a\n-- onwardpg:edit end pocket-a\nmiddle\n-- onwardpg:edit begin pocket-b\n-- ONWARDPG TODO: b\n-- onwardpg:edit end pocket-b\nafter\n")
+	ids, err := EditPocketIDs(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ids, []string{"pocket-a", "pocket-b"}) {
+		t.Fatalf("pocket ids = %#v", ids)
+	}
+	edited, err := ReplaceEditPockets(body, map[string][]byte{"pocket-b": []byte("SELECT true;\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "before\n-- onwardpg:edit begin pocket-a\n-- ONWARDPG TODO: a\n-- onwardpg:edit end pocket-a\nmiddle\n-- onwardpg:edit begin pocket-b\nSELECT true;\n-- onwardpg:edit end pocket-b\nafter\n"
+	if string(edited) != want {
+		t.Fatalf("edited body:\n%s\nwant:\n%s", edited, want)
+	}
+	if _, err := ReplaceEditPockets(body, map[string][]byte{"missing": []byte("SELECT 1;\n")}); err == nil {
+		t.Fatal("expected unknown pocket error")
 	}
 }
 

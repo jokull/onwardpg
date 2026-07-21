@@ -295,13 +295,19 @@ handoff when D → W has safe statements. That handoff includes the rendered SQL
 statement count, preserved D-only objects, and `plan --output sql` argv. Its
 reason is `accepted_history_changed` after a rebase and otherwise
 `development_database_behind_desired_schema`. It never changes the durable
-bundle. Any consumed ephemeral development hints appear in `applied_hints` and
-are repeated in the handoff argv, so rendering the SQL does not ask the same
-question again. Remaining development decision choices likewise prepend all
-`applied_hints`, making the newest argv cumulatively executable without
-enumerating every combination of independent choices. Argv is scoped to the
-same configured repository context; it does not embed environment secrets or
-recreate the framework runtime.
+bundle. The compact high-level envelope does not expose the planner's internal
+`applied_hints` list. Instead, every handoff or remaining decision choice
+repeats the consumed ephemeral development hints in its argv, making the newest
+command cumulatively executable without enumerating every combination of
+independent choices. Argv is scoped to the same configured repository context;
+it does not embed environment secrets or recreate the framework runtime.
+If D → W reaches `needs_sql_edits`, the high-level envelope emits an
+`inspect_manual_sql_handoff` action instead of leaving the agent at a blocking
+status. Its cumulative `onwardpg dev plan` argv exposes the full typed manual
+work template. The developer can complete that `manual_sql` hint and return it
+to high-level `plan` as a `--dev-hint`, or rebuild the caller-owned development
+database. This never creates a second durable edit pocket or changes H → W.
+
 Top-level `ready` describes the durable artifact and is intentionally
 non-mutating; consumers still inspect `next_actions` for an optional
 `workspace_fast_forward`. If no durable bundle remains active because H already

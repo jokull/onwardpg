@@ -45,15 +45,7 @@ jobs:
       - name: Check documentation invariants
         run: node scripts/check-documentation.mjs
       - name: Check documentation website
-        run: |
-          corepack enable
-          pnpm --dir website install --frozen-lockfile
-          pnpm --dir website audit --audit-level high
-          pnpm --dir website check
-          pnpm --dir website validate
-          pnpm --dir website build
-          pnpm --dir website audit:site
-          pnpm --dir website check:agent-docs
+        run: scripts/test-website-clean-room.sh
       - name: Check whitespace errors
         run: git diff --check
 
@@ -120,3 +112,62 @@ jobs:
         env:
           ONWARDPG_TEST_DATABASE_URL: postgres://pgmig:pgmig@localhost:5432/pgmig?sslmode=disable
         run: scripts/test-documentation-receipts.sh
+
+  acceptance:
+    name: Release acceptance · PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['15', '16', '17', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: onwardpg
+          POSTGRES_PASSWORD: onwardpg
+          POSTGRES_DB: onwardpg
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U onwardpg -d onwardpg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Compiled-CLI release contract
+        env:
+          ONWARDPG_ACCEPTANCE_DATABASE_URL: postgres://onwardpg:onwardpg@localhost:5432/onwardpg?sslmode=disable
+          ONWARDPG_ACCEPTANCE_ARTIFACT_DIR: ${{ github.workspace }}/.artifacts/acceptance-pg${{ matrix.postgres }}
+          ONWARDPG_EXPECTED_POSTGRES_MAJOR: ${{ matrix.postgres }}
+        run: scripts/test-acceptance.sh
+      - name: Upload acceptance evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-pg${{ matrix.postgres }}
+          path: .artifacts/acceptance-pg${{ matrix.postgres }}
+          if-no-files-found: error
+          retention-days: 7
+
+  pglite-preflight:
+    name: PGlite preflight · PostgreSQL 17 subset
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: internal/testkit/pglite-tool/package-lock.json
+      - name: Scoped sequential compatibility preflight
+        run: scripts/test-pglite-preflight.sh

@@ -354,6 +354,29 @@ func executeRawBatch(ctx context.Context, connection *pgx.Conn, batch bundle.SQL
 	return nil
 }
 
+// ExecutePhaseSQL applies the exact batches encoded in one persisted phase
+// file to a caller-owned connection. It is the shared execution path for
+// release acceptance workloads; production deployment remains caller-owned.
+func ExecutePhaseSQL(ctx context.Context, connection *pgx.Conn, body []byte, fallback *bool) (int, error) {
+	batches, err := bundle.ParsePhaseSQL(body, fallback)
+	if err != nil {
+		return 0, err
+	}
+	for index, batch := range batches {
+		if err := executeRawBatch(ctx, connection, batch); err != nil {
+			return index, fmt.Errorf("execute phase batch %d: %w", index+1, err)
+		}
+	}
+	return len(batches), nil
+}
+
+// ExecutePhaseBatch applies one batch previously parsed from a persisted phase
+// file. It lets acceptance checks stop between contract batches without
+// reimplementing transaction semantics.
+func ExecutePhaseBatch(ctx context.Context, connection *pgx.Conn, batch bundle.SQLBatch) error {
+	return executeRawBatch(ctx, connection, batch)
+}
+
 func executeBatch(ctx context.Context, connection *pgx.Conn, batch protocol.Batch) error {
 	if !batch.Transactional {
 		for _, statement := range batch.Statements {

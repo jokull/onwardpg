@@ -440,6 +440,36 @@ func (document editPocketDocument) render(replacements map[string][]byte) []byte
 	return append(result, document.body[at:]...)
 }
 
+// EditPocketIDs returns the stable pocket identifiers in their phase-file
+// order. It validates the marker document before exposing any identifiers.
+func EditPocketIDs(body []byte) ([]string, error) {
+	document, err := parseEditPocketDocument(body)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(document.ranges))
+	for _, pocket := range document.ranges {
+		result = append(result, pocket.id)
+	}
+	return result, nil
+}
+
+// ReplaceEditPockets replaces only the developer-owned bytes between stable
+// edit markers. Every requested pocket must exist; generator-owned bytes are
+// preserved exactly.
+func ReplaceEditPockets(body []byte, replacements map[string][]byte) ([]byte, error) {
+	document, err := parseEditPocketDocument(body)
+	if err != nil {
+		return nil, err
+	}
+	for id := range replacements {
+		if _, exists := document.contents[id]; !exists {
+			return nil, fmt.Errorf("edit pocket %q does not exist", id)
+		}
+	}
+	return document.render(replacements), nil
+}
+
 func optionalSQL(body []byte, exists bool) *string {
 	if !exists {
 		return nil
