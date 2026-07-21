@@ -139,6 +139,27 @@ ignore = ["extension:pg*"]
 	}
 }
 
+func TestLoadAllowsOptionalDevelopmentDatabase(t *testing.T) {
+	name := filepath.Join(t.TempDir(), ".onwardpg.toml")
+	data := `version = 1
+bundle_root = "onward-bundles"
+[targets.db]
+schema_file = "schema.sql"
+scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
+`
+	if err := os.WriteFile(name, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := Load(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := config.Targets["db"]
+	if target.DevDatabaseEnv != "" || target.ScratchEnv() != "ONWARDPG_SCRATCH_DATABASE_URL" {
+		t.Fatalf("optional development target = %#v", target)
+	}
+}
+
 func TestTargetScratchEnvFallsBackToDevelopmentEnvironment(t *testing.T) {
 	target := Target{DevDatabaseEnv: "DEV_DATABASE_URL"}
 	if got := target.ScratchEnv(); got != "DEV_DATABASE_URL" {

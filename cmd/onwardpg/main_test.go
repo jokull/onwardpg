@@ -10,11 +10,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/devflow"
 	"github.com/jokull/onwardpg/internal/draftflow"
 	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
 )
+
+func findNextAction(actions []workflowNextAction, kind string) *workflowNextAction {
+	for index := range actions {
+		if actions[index].Kind == kind {
+			return &actions[index]
+		}
+	}
+	return nil
+}
 
 func TestReadHintsAcceptsPredictableInlineIntent(t *testing.T) {
 	hints, err := readHints([]string{`{"kind":"rename","object":"column","from":["public","users","name"],"to":["public","users","display_name"]}`}, "")
@@ -213,16 +224,102 @@ func TestWorkflowPlanDevelopmentChoiceArgvCarriesAppliedHints(t *testing.T) {
 	}
 }
 
-func TestWorkflowPlanLabelsPreEditPlannerResultAsGeneratedPlan(t *testing.T) {
-	generated := protocol.Result{Status: protocol.NeedsSQLEdits}
-	durable := draftflow.Report{Outcome: string(protocol.Planned), Plan: &generated}
+func TestWorkflowPlanOmitsPersistedGeneratedPlan(t *testing.T) {
+	generated := protocol.Result{Status: protocol.NeedsSQLEdits, Statements: []protocol.Statement{{SQL: "SELECT 'persisted artifact';"}}}
+	durable := draftflow.Report{Outcome: string(protocol.Planned), Path: "migrations/onward/app/example", Plan: &generated}
 	development := devflow.Report{Status: protocol.Status("not_available")}
 	var output bytes.Buffer
 	if err := writeWorkflowPlanReport(&output, "json", durable, development); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"generated_plan":{"status":"needs_sql_edits"`) || strings.Contains(output.String(), `"plan":{"status"`) {
-		t.Fatalf("ambiguous generated plan JSON = %s", output.String())
+	if strings.Contains(output.String(), "generated_plan") || strings.Contains(output.String(), "persisted artifact") {
+		t.Fatalf("ordinary JSON repeated the persisted generated plan: %s", output.String())
+	}
+}
+
+func TestWorkflowPlanJSONIsCompactDecisionEnvelope(t *testing.T) {
+	hint := protocol.Hint{Kind: "rename", Object: "column", From: []string{"app", "accounts", "name"}, To: []string{"app", "accounts", "full_name"}}
+	statementSQL := `ALTER TABLE "app"."accounts" ADD COLUMN "timezone" text;`
+	durable := draftflow.Report{
+		Outcome: string(protocol.Planned), Target: "primary", BundleID: "account-profile", PlanID: "plan_example",
+		Generation: 4, Path: "migrations/onward/primary/account-profile",
+		Plan:            &protocol.Result{Status: protocol.Planned, Statements: []protocol.Statement{{SQL: "SELECT 'durable duplicate';"}}},
+		Decisions:       []protocol.Decision{{Choices: []protocol.DecisionChoice{{Hint: hint}}}},
+		WrittenReceipts: []string{"manifest.json", "phases/expand.sql", "phases/contract.sql"},
+	}
+	development := devflow.Report{
+		Status:       protocol.Planned,
+		Result:       protocol.Result{Status: protocol.Planned, Statements: []protocol.Statement{{SQL: statementSQL}}, Preserved: []string{"column:app:accounts:branch_note"}},
+		AppliedHints: []protocol.Hint{hint},
+	}
+	var output bytes.Buffer
+	if err := writeWorkflowPlanReport(&output, "json", durable, development); err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document) != 4 || document["status"] == nil || document["durable"] == nil || document["development"] == nil || document["next_actions"] == nil {
+		t.Fatalf("top-level JSON shape = %s", output.String())
+	}
+	for _, forbidden := range []string{"generated_plan", "effective_plan", `"result"`, `"decisions"`, `"answers"`, `"questions"`, `"statements"`, `"batches"`, "durable duplicate", `"applied_hints"`} {
+		if bytes.Contains(output.Bytes(), []byte(forbidden)) {
+			t.Fatalf("ordinary JSON contains duplicated field %q: %s", forbidden, output.String())
+		}
+	}
+	var compact workflowPlanReport
+	if err := json.Unmarshal(output.Bytes(), &compact); err != nil {
+		t.Fatal(err)
+	}
+	fastForward := findNextAction(compact.NextActions, "workspace_fast_forward")
+	if fastForward == nil || strings.Count(fastForward.SQL, statementSQL) != 1 || !strings.Contains(output.String(), `"kind":"workspace_fast_forward"`) {
+		t.Fatalf("workspace fast-forward SQL was not preserved exactly once: %s", output.String())
+	}
+	if len(output.Bytes()) > 2500 {
+		t.Fatalf("ordinary JSON grew beyond the decision-envelope budget: %d bytes\n%s", len(output.Bytes()), output.String())
+	}
+}
+
+func TestWorkflowPlanJSONSummarizesVerificationWithoutResidualPlan(t *testing.T) {
+	durable := draftflow.Report{
+		Outcome: string(protocol.Planned),
+		Verification: &verify.Report{
+			Outcome: "verified", ThroughPhase: "contract", ExecutedBatches: 7,
+			VerifiedAssertions: []string{"status_backfilled"},
+			Residual:           &protocol.Result{Status: protocol.Planned, Statements: []protocol.Statement{{SQL: "SELECT 'residual duplicate';"}}},
+			Findings:           []verify.Finding{{Code: "verification_note", Message: "checked"}},
+		},
+	}
+	var output bytes.Buffer
+	if err := writeWorkflowPlanReport(&output, "json", durable, devflow.Report{Status: protocol.Status("not_available")}); err != nil {
+		t.Fatal(err)
+	}
+	var report workflowPlanReport
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	summary := report.Durable.Verification
+	if summary == nil || summary.Outcome != "verified" || summary.ExecutedBatches != 7 || !reflect.DeepEqual(summary.VerifiedAssertions, []string{"status_backfilled"}) || len(summary.Findings) != 1 {
+		t.Fatalf("verification summary = %#v", summary)
+	}
+	if strings.Contains(output.String(), "residual") || strings.Contains(output.String(), "SELECT") {
+		t.Fatalf("verification residual plan leaked into ordinary JSON: %s", output.String())
+	}
+}
+
+func TestWorkflowPlanSurfacesPlannerAnalysisAsDurableFinding(t *testing.T) {
+	durable := draftflow.Report{
+		Outcome: string(protocol.NeedsInput),
+		Plan: &protocol.Result{Analysis: []protocol.DecisionAnalysis{{
+			Kind: "cross_type_column_identity", From: "column:app:people:age_text", To: "column:app:people:age",
+			Reason: "rerun with an explicit rename hint before approving the drop",
+		}}},
+	}
+	report := newWorkflowPlanReport(durable, devflow.Report{Status: protocol.Status("not_available")})
+	if len(report.Durable.Findings) != 1 || report.Durable.Findings[0].Code != "cross_type_column_identity" ||
+		!strings.Contains(report.Durable.Findings[0].Message, "before approving the drop") {
+		t.Fatalf("compact planner analysis = %#v", report.Durable.Findings)
 	}
 }
 
@@ -326,6 +423,157 @@ func TestWorkflowPostconditionFailureNeedsDevelopmentReview(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "postcondition failed") || !strings.Contains(output.String(), "assertion returned false") {
 		t.Fatalf("SQL evidence = %s", output.String())
+	}
+}
+
+func TestWorkflowPlanStatusAndExitCodeMatrix(t *testing.T) {
+	developmentCases := []struct {
+		name   string
+		status protocol.Status
+		want   string
+		exit   int
+	}{
+		{name: "not available", status: protocol.Status("not_available"), want: "ready", exit: 0},
+		{name: "converged", status: protocol.Planned, want: "ready", exit: 0},
+		{name: "needs input", status: protocol.NeedsInput, want: "needs_action", exit: 2},
+		{name: "needs SQL edits", status: protocol.NeedsSQLEdits, want: "needs_action", exit: 2},
+		{name: "optional unsupported", status: protocol.Unsupported, want: "ready", exit: 0},
+		{name: "unknown", status: protocol.Status("unknown"), want: "blocked", exit: 1},
+	}
+	for _, durable := range []string{string(protocol.Planned), "no_changes", "absorbed"} {
+		for _, development := range developmentCases {
+			t.Run(durable+"/"+development.name, func(t *testing.T) {
+				report := devflow.Report{Status: development.status}
+				if got := workflowPlanStatus(durable, report); got != development.want {
+					t.Fatalf("status = %q, want %q", got, development.want)
+				}
+				if got := workflowPlanExitCode(durable, report); got != development.exit {
+					t.Fatalf("exit = %d, want %d", got, development.exit)
+				}
+			})
+		}
+	}
+
+	for _, durable := range []struct {
+		outcome string
+		want    string
+		exit    int
+	}{
+		{outcome: "stale", want: "stale", exit: 4},
+		{outcome: "blocked", want: "blocked", exit: 4},
+		{outcome: string(protocol.Unsupported), want: "blocked", exit: 3},
+		{outcome: string(protocol.NeedsInput), want: "needs_action", exit: 2},
+		{outcome: string(protocol.NeedsSQLEdits), want: "needs_action", exit: 2},
+		{outcome: "unknown", want: "blocked", exit: 1},
+	} {
+		for _, development := range developmentCases {
+			t.Run(durable.outcome+"/"+development.name, func(t *testing.T) {
+				report := devflow.Report{Status: development.status}
+				if got := workflowPlanStatus(durable.outcome, report); got != durable.want {
+					t.Fatalf("status = %q, want %q", got, durable.want)
+				}
+				if got := workflowPlanExitCode(durable.outcome, report); got != durable.exit {
+					t.Fatalf("exit = %d, want %d", got, durable.exit)
+				}
+			})
+		}
+	}
+
+	for _, development := range developmentCases {
+		t.Run("required postcondition/"+development.name, func(t *testing.T) {
+			report := devflow.Report{Status: development.status, Postconditions: []devflow.PostconditionResult{{Status: "failed"}}}
+			if got := workflowPlanStatus(string(protocol.Planned), report); got != "needs_action" {
+				t.Fatalf("status = %q", got)
+			}
+			if got := workflowPlanExitCode(string(protocol.Planned), report); got != 2 {
+				t.Fatalf("exit = %d", got)
+			}
+		})
+	}
+}
+
+func TestUnsupportedDevelopmentReconciliationDoesNotMaskDurableReadiness(t *testing.T) {
+	durable := draftflow.Report{Outcome: string(protocol.Planned)}
+	development := devflow.Report{Status: protocol.Unsupported, Result: protocol.Result{
+		Status: protocol.Unsupported, Unsupported: []string{"view:app:account_directory"},
+	}}
+	report := newWorkflowPlanReport(durable, development)
+	if report.Status != "ready" || report.Development.Status != protocol.Unsupported {
+		t.Fatalf("report = %#v", report)
+	}
+	if len(report.Development.Findings) != 1 || report.Development.Findings[0].Message != "view:app:account_directory" {
+		t.Fatalf("development findings = %#v", report.Development.Findings)
+	}
+	if len(report.NextActions) != 1 || report.NextActions[0].Scope != "development" || report.NextActions[0].Kind != "review_unsupported" || report.NextActions[0].JSONPointer != "/development/findings" {
+		t.Fatalf("next actions = %#v", report.NextActions)
+	}
+}
+
+func TestWorkflowEditActionsRequireWrittenReceipts(t *testing.T) {
+	base := draftflow.Report{
+		Outcome: string(protocol.NeedsSQLEdits), Path: "migrations/onward/app/change-type",
+		EditFiles: []string{"phases/expand.sql", "phases/contract.sql"},
+		EditRequirements: []draftflow.EditRequirement{
+			{Path: "phases/expand.sql", PocketID: "expand-pocket"},
+			{Path: "phases/contract.sql", PocketID: "contract-pocket"},
+		},
+	}
+	if actions := workflowNextActions(base, devflow.Report{}); len(actions) != 0 {
+		t.Fatalf("unwritten actions = %#v", actions)
+	}
+	base.WrittenReceipts = []string{"manifest.json", "phases/expand.sql"}
+	actions := workflowNextActions(base, devflow.Report{})
+	if len(actions) != 1 || actions[0].Path != "migrations/onward/app/change-type/phases/expand.sql" || actions[0].PocketID != "expand-pocket" {
+		t.Fatalf("written actions = %#v", actions)
+	}
+	compact := newWorkflowPlanReport(base, devflow.Report{})
+	if len(compact.Durable.Edits) != 1 || compact.Durable.Edits[0].Path != actions[0].Path || len(compact.Durable.WrittenReceipts) != 2 {
+		t.Fatalf("compact edit references = %#v", compact.Durable)
+	}
+	base.Outcome = "blocked"
+	if actions := workflowNextActions(base, devflow.Report{}); len(actions) != 0 {
+		t.Fatalf("blocked report emitted edit actions = %#v", actions)
+	}
+}
+
+func TestWorkflowConflictActionIncludesTheMergeInputsAndPath(t *testing.T) {
+	currentSQL := "-- developer-owned SQL\nSELECT 1;"
+	generatedSQL := "-- regenerated SQL\nSELECT 2;"
+	durable := draftflow.Report{
+		Outcome: "blocked", Target: "app", BundleID: "account-rollout",
+		Path: "migrations/onward/app/account-rollout",
+		EditReconciliation: &bundle.EditReconciliation{Outcome: "conflict", Conflicts: []bundle.EditConflict{{
+			Path: "phases/contract.sql", Reason: "both phase projections changed",
+			CurrentSQL: &currentSQL, NewGeneratedSQL: &generatedSQL,
+			Resolution: "merge current SQL into the regenerated phase",
+		}}},
+	}
+	report := newWorkflowPlanReport(durable, devflow.Report{Status: protocol.Status("not_available")})
+	if len(report.NextActions) != 1 {
+		t.Fatalf("conflict actions = %#v", report.NextActions)
+	}
+	action := report.NextActions[0]
+	if action.Kind != "merge_edit_conflict" || action.Path != "migrations/onward/app/account-rollout/phases/contract.sql" ||
+		action.CurrentSQL != currentSQL || action.NewGeneratedSQL != generatedSQL ||
+		!reflect.DeepEqual(action.Argv, []string{"onwardpg", "verify", "--target", "app", "--bundle", "account-rollout"}) {
+		t.Fatalf("conflict action = %#v", action)
+	}
+}
+
+func TestWorkflowTextIncludesPlannerAnalysisFindings(t *testing.T) {
+	durable := draftflow.Report{
+		Outcome: string(protocol.NeedsInput),
+		Plan: &protocol.Result{Analysis: []protocol.DecisionAnalysis{{
+			Kind: "cross_type_column_identity", From: "column:app:people:age_text", To: "column:app:people:age",
+			Reason: "rerun with the explicit rename hint",
+		}}},
+	}
+	var output bytes.Buffer
+	if err := writeWorkflowPlanReport(&output, "text", durable, devflow.Report{Status: protocol.Status("not_available")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "finding cross_type_column_identity:") || !strings.Contains(output.String(), "rerun with the explicit rename hint") {
+		t.Fatalf("text output omitted planner analysis:\n%s", output.String())
 	}
 }
 

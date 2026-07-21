@@ -161,20 +161,29 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("compare verification result with planner equivalence: %w", err)
 	}
-	report.Residual = &residual
+	converged := equivalent && residual.Status == protocol.Planned && len(residual.Statements) == 0
+	outwardResidual := residualForReport(residual, converged)
+	report.Residual = &outwardResidual
 	if len(report.RemainingPhases) > 0 {
 		// The same exact prefix followed by the remaining phases converged in
 		// the independent full execution above. Residual work is therefore an
 		// expected checkpoint, not a failed verification.
 		report.Outcome = "partial_verified"
 		report.ContinuationAssertions = assertionIDs
-	} else if equivalent && residual.Status == protocol.Planned && len(residual.Statements) == 0 {
+	} else if converged {
 		report.Outcome = "verified"
 		report.VerifiedAssertions = assertionIDs
 	} else {
 		report.Outcome = "residual"
 	}
 	return report, nil
+}
+
+func residualForReport(residual protocol.Result, converged bool) protocol.Result {
+	if converged {
+		residual.Status = protocol.Status("converged")
+	}
+	return residual
 }
 
 func selectedBatchCount(artifact bundle.Artifact, throughPhase string) (int, error) {

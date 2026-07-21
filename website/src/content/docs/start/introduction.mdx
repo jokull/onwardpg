@@ -117,6 +117,15 @@ materialized views. It asks for help when PostgreSQL cannot know whether two
 names mean the same thing, which duplicate should win, how malformed values
 should convert, or whether a large backfill needs application-specific batching.
 
+That handoff stays bounded to the transition PostgreSQL can prove. A generated
+same-type rename bridge can surround an intentional dependent-view change with
+three ordered edit pockets: overlap in expand, remove before cutover, recreate
+afterward. A confirmed rename plus type change gets exactly two pockets—one per
+phase—which own both columns and the current and desired view, materialized-view,
+and index closure. The developer or agent supplies conversion and freshness
+meaning; onwardpg prevents adjacent drop/create work from escaping that owned
+transition.
+
 ## The plan command is the core product
 
 Start a feature plan once, then run the same command as the work changes:

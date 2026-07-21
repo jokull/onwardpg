@@ -26,6 +26,16 @@ type Report struct {
 	ActualFingerprint   string       `json:"actual_fingerprint"`
 	Differences         []Difference `json:"differences,omitempty"`
 	Ignored             []string     `json:"ignored,omitempty"`
+	Observer            *Observer    `json:"observer,omitempty"`
+}
+
+// Observer describes environmental catalog state proven to belong only to a
+// dedicated read-only inspection role and projected before comparison.
+type Observer struct {
+	Role            string   `json:"role"`
+	DatabaseOwner   string   `json:"database_owner"`
+	Mode            string   `json:"mode"`
+	ProjectedAccess []string `json:"projected_access,omitempty"`
 }
 
 func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (Report, error) {

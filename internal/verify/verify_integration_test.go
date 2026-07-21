@@ -28,6 +28,21 @@ func TestFailureDiagnosticsDistinguishExecutionBoundariesAndAssertions(t *testin
 	}
 }
 
+func TestResidualForReportPresentsEmptyEquivalentPlanAsConverged(t *testing.T) {
+	internal := protocol.Result{Status: protocol.Planned, CurrentFingerprint: "same", DesiredFingerprint: "same"}
+	outward := residualForReport(internal, true)
+	if internal.Status != protocol.Planned {
+		t.Fatalf("internal residual was mutated: %#v", internal)
+	}
+	if outward.Status != protocol.Status("converged") {
+		t.Fatalf("outward status = %q", outward.Status)
+	}
+	nonempty := protocol.Result{Status: protocol.Planned, Statements: []protocol.Statement{{SQL: "SELECT 1"}}}
+	if got := residualForReport(nonempty, false); got.Status != protocol.Planned {
+		t.Fatalf("non-converged residual = %#v", got)
+	}
+}
+
 func TestTransactionalBatchRollsBackWhenManualVerificationFails(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {

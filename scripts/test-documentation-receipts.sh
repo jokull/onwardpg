@@ -23,7 +23,7 @@ questions_exit=$?
 set -e
 test "$questions_exit" -eq 2
 jq -e '.status == "needs_action" and .durable.status == "needs_input"' questions.json >/dev/null
-jq '{status, durable: {status: .durable.status, generated_plan: {questions: [.durable.generated_plan.questions[0] | {choices}]}}}' \
+jq '{status, durable: {status: .durable.status}, next_actions: [.next_actions[] | select(.scope == "durable" and .kind == "semantic_hint") | {kind, choices: [.choices[].hint.strategy]}]}' \
   questions.json >questions.projection.json
 diff -u "$receipt_root/questions.projection.json" questions.projection.json
 
@@ -44,7 +44,7 @@ if [[ "${ONWARDPG_DOC_RECEIPTS_PRINT:-}" == "1" ]]; then
 fi
 
 jq -e '.status == "needs_action" and .durable.status == "needs_sql_edits"' plan.json >/dev/null
-jq '{status, durable: {status: .durable.status, edit_files: .durable.edit_files}}' \
+jq '{status, durable: {status: .durable.status, edits: [.durable.edits[] | {path, phase}]}}' \
   plan.json >plan.projection.json
 diff -u "$receipt_root/plan.projection.json" plan.projection.json
 
@@ -136,7 +136,12 @@ diff -u "$receipt_root/draft-needs-sql-edits.json" draft-needs-sql-edits.json
 cd "$repository_root"
 ONWARDPG_TEST_DATABASE_URL="$ONWARDPG_TEST_DATABASE_URL" \
   go test "$repository_root/internal/graphplan" \
-  -run '^(TestRequiredColumnStagingConvergesOnPostgreSQL|TestViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL|TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL)$' \
+  -run '^(TestRequiredColumnStagingConvergesOnPostgreSQL|TestViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL|TestMaterializedViewColumnTypeChangeHandoffPreservesDependencyScopeOnPostgreSQL|TestBlindGauntletCrossNameTypeTransitionKeepsLegacySQLAliveOnPostgreSQL)$' \
+  -count=1
+
+ONWARDPG_TEST_DATABASE_URL="$ONWARDPG_TEST_DATABASE_URL" \
+  go test "$repository_root/internal/contractcheck" \
+  -run '^(TestBlindGauntletRunADependentViewRenameOnPostgreSQL|TestBlindGauntletCompatibilityWindowKeepsPreparedLegacySQLAliveOnPostgreSQL)$' \
   -count=1
 
 type_receipt_root="$repository_root/docs/receipts/type-change"
@@ -157,7 +162,7 @@ type_plan_exit=$?
 set -e
 test "$type_plan_exit" -eq 2
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"needs_sql_edits"' plan.json
-grep -Eq '"edit_files"[[:space:]]*:[[:space:]]*\["phases/contract.sql","phases/expand.sql"\]' plan.json
+jq -e '[.durable.edits[].phase] | sort == ["contract", "expand"]' plan.json >/dev/null
 
 type_bundle_root="migrations/onward/app/account-age"
 type_expand="$type_bundle_root/phases/expand.sql"

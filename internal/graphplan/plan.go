@@ -102,8 +102,12 @@ type notNullConstraintRename struct {
 }
 
 type renameColumn struct {
-	from pgschema.Column
-	to   pgschema.Column
+	from                    pgschema.Column
+	to                      pgschema.Column
+	crossType               bool
+	manualDependencyClosure bool
+	dependencyClosure       []pgschema.ID
+	desiredViewDefinitions  []string
 }
 
 type renameEnum struct {
@@ -189,6 +193,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	}
 
 	changes := change.Between(current, desired)
+	result.Analysis = append(result.Analysis, crossTypeColumnIdentityAnalysis(changes, options.IdentityHints)...)
 	result.Compatibility = append(result.Compatibility, ignoredExtensionVersionEvidence(changes, options.IgnoreExtensionVersions)...)
 	if len(changes) == 0 && currentFingerprint != desiredFingerprint {
 		return unsupportedResult(result, resolver, []string{"dependency_only_graph_difference"})
@@ -289,7 +294,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return result, nil
 	}
 	changes, extensionMoves := resolveExtensionMoves(changes)
-	changes, columnRenames, columnRenameQuestions, columnRenameUnsupported, err := resolveColumnRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint, options.DirectColumnRenames, options.PreserveSurplus)
+	changes, columnRenames, columnRenameQuestions, columnRenameUnsupported, err := resolveColumnRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint, options.DirectColumnRenames, options.PreserveSurplus, options.IdentityHints)
 	if err != nil {
 		return protocol.Result{}, err
 	}
@@ -400,6 +405,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	for _, rename := range enumRenames {
 		contractProviders[rename.to.ObjectID()] = true
 	}
+	var deferredColumnRenameExpandHandoffs []protocol.Statement
 	for _, rename := range columnRenames {
 		contractProviders[rename.to.ObjectID()] = true
 	}
@@ -482,6 +488,15 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			appendStatement(&result, manualWorkStatement(work, "rename_compatibility_bridge", "application_contract"))
 			continue
 		}
+		if rename.crossType {
+			if choices.typeUsing[rename.from.ObjectID()] == "split_plan" {
+				continue
+			}
+			for _, statement := range renderCrossTypeColumnTransition(rename) {
+				appendStatement(&result, statement)
+			}
+			continue
+		}
 		if options.DirectColumnRenames {
 			for _, statement := range renderDirectColumnRename(rename) {
 				appendStatement(&result, statement)
@@ -494,11 +509,22 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		strategy := choices.renameStrategy[rename.from.ObjectID()]
 		work := choices.renameBackfill[rename.from.ObjectID()]
 		statements := renderColumnRename(rename, strategy, work)
+		if rename.manualDependencyClosure {
+			statements = renderColumnRenameDependencyHandoff(rename, statements)
+		}
 		transitionID := rename.from.ObjectID().String() + "->" + rename.to.ObjectID().String()
 		for index := range statements {
 			statements[index].TransitionID = transitionID
 		}
 		for _, statement := range statements {
+			// A reviewed dependent-view overlap can refer to additive columns
+			// created by the ordinary scheduled graph. Emit that handoff after
+			// those base providers, while leaving the contract drop/cutover/
+			// recreate sequence in its original dependency-safe position.
+			if rename.manualDependencyClosure && statement.Phase == protocol.PhaseExpand && stringIn(statement.Hazards, "dependent_view_overlap") {
+				deferredColumnRenameExpandHandoffs = append(deferredColumnRenameExpandHandoffs, statement)
+				continue
+			}
 			appendStatement(&result, statement)
 		}
 		attachColumnRenameReadiness(&result, rename, strategy, work, currentFingerprint, desiredFingerprint)
@@ -611,6 +637,9 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 				}
 			}
 		}
+	}
+	for _, statement := range deferredColumnRenameExpandHandoffs {
+		appendStatement(&result, statement)
 	}
 	if len(dynamicUnsupported) > 0 {
 		return unsupportedResult(result, resolver, dynamicUnsupported)
@@ -746,6 +775,47 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		}
 	}
 	return result, nil
+}
+
+func crossTypeColumnIdentityAnalysis(changes []change.Change, identityHints []protocol.Hint) []protocol.DecisionAnalysis {
+	var drops, creates []pgschema.Column
+	for _, item := range changes {
+		switch {
+		case item.Kind == change.Drop && item.ID.Kind == pgschema.KindColumn:
+			drops = append(drops, item.Before.(pgschema.Column))
+		case item.Kind == change.Create && item.ID.Kind == pgschema.KindColumn:
+			creates = append(creates, item.After.(pgschema.Column))
+		}
+	}
+	var result []protocol.DecisionAnalysis
+	for _, from := range drops {
+		for _, to := range creates {
+			if from.Table != to.Table || from.Type == to.Type {
+				continue
+			}
+			if assertedColumnIdentity(identityHints, from, to) {
+				continue
+			}
+			hint := protocol.Hint{
+				Kind: "rename", Object: "column",
+				From: []string{from.Table.Schema, from.Table.Name, from.Name},
+				To:   []string{to.Table.Schema, to.Table.Name, to.Name},
+			}
+			encoded, _ := json.Marshal(hint)
+			result = append(result, protocol.DecisionAnalysis{
+				Kind: "cross_type_column_identity", From: from.ObjectID().String(), To: to.ObjectID().String(),
+				Outcome: "explicit_hint_required",
+				Reason:  "types differ, so onwardpg will not infer identity; if these columns are the same product field, rerun before approving the drop with --hint '" + string(encoded) + "'",
+			})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].From != result[j].From {
+			return result[i].From < result[j].From
+		}
+		return result[i].To < result[j].To
+	})
+	return result
 }
 
 // Equivalent reports whether two snapshots differ only in semantics explicitly
@@ -1048,6 +1118,14 @@ func questionScopeObjects(snapshot *pgschema.Snapshot, question protocol.Questio
 			continue
 		}
 		object, _ := snapshot.Object(id)
+		// PostgreSQL appends new columns physically. Position can therefore
+		// change for a participating column when an unrelated accepted column
+		// lands ahead of it in declarative DDL; that does not change the product
+		// identity, conversion, cleanup, or enforcement decision being scoped.
+		if column, ok := object.(pgschema.Column); ok {
+			column.Position = 0
+			object = column
+		}
 		definition, err := json.Marshal(object)
 		if err != nil {
 			definition = []byte("null")
@@ -1730,7 +1808,7 @@ func dependsOnMovedExtension(snapshot *pgschema.Snapshot, id pgschema.ID, moves 
 	return visit(id)
 }
 
-func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, direct, preserveSurplus bool) ([]change.Change, []renameColumn, []protocol.Question, []string, error) {
+func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, direct, preserveSurplus bool, identityHints []protocol.Hint) ([]change.Change, []renameColumn, []protocol.Question, []string, error) {
 	var drops, creates []change.Change
 	for _, item := range changes {
 		if item.ID.Kind != pgschema.KindColumn {
@@ -1751,7 +1829,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 		var candidates []change.Change
 		for _, create := range creates {
 			to := create.After.(pgschema.Column)
-			if from.Table == to.Table && equivalentColumnForRename(from, to) {
+			if from.Table == to.Table && (equivalentColumnForRename(from, to) || assertedColumnIdentity(identityHints, from, to)) {
 				candidates = append(candidates, create)
 			}
 		}
@@ -1797,10 +1875,21 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 				return nil, nil, nil, nil, fmt.Errorf("desired column %s was selected as more than one rename target", candidate.ID)
 			}
 			to := candidate.After.(pgschema.Column)
+			crossType := from.Type != to.Type
+			if crossType {
+				consumed[drop.ID], consumed[candidate.ID] = true, true
+				closure := consumeColumnTransitionChanges(changes, current, desired, from, to, consumed)
+				renames = append(renames, renameColumn{
+					from: from, to: to, crossType: true, dependencyClosure: closure,
+					desiredViewDefinitions: desiredViewDefinitions(desired, closure),
+				})
+				continue
+			}
 			if reason := columnTriggerBridgeUnsupported(current, desired, from, to); !direct && reason != "" {
 				return nil, nil, nil, []string{"single_deployment_column_bridge_required:" + drop.ID.String() + ":" + reason}, nil
 			}
 			consumed[drop.ID], consumed[candidate.ID] = true, true
+			manualDependencyClosure := false
 			// PostgreSQL rewrites catalog references to a renamed column.  Keep
 			// only modifications which are exactly that automatic rewrite out of
 			// the plan; a real change to a dependent object must still be planned.
@@ -1817,18 +1906,24 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 						consumed[view.ObjectID()] = true
 						continue
 					}
-					// The database may have rewritten this dependent view, but a
-					// non-trivial desired definition could also be an explicit API
-					// change. Do not render CREATE OR REPLACE before the column
-					// rename or guess a destructive rebuild sequence.
-					return nil, nil, nil, []string{"column_rename_dependent_view:" + view.ObjectID().String()}, nil
+					// A non-trivial desired view definition is an explicit API
+					// change. The generated table bridge remains useful, but the
+					// overlap view and final dependency cutover require bounded SQL
+					// owned by the developer or agent.
+					manualDependencyClosure = true
+					continue
 				}
 				if !exists || !equivalentAutomaticColumnReferenceAfterRename(object, afterObject, from, to) {
 					continue
 				}
 				consumed[object.ObjectID()] = true
 			}
-			renames = append(renames, renameColumn{from: from, to: to})
+			rename := renameColumn{from: from, to: to, manualDependencyClosure: manualDependencyClosure}
+			if manualDependencyClosure {
+				rename.dependencyClosure = consumeColumnTransitionChanges(changes, current, desired, from, to, consumed)
+				rename.desiredViewDefinitions = desiredViewDefinitions(desired, rename.dependencyClosure)
+			}
+			renames = append(renames, rename)
 		}
 	}
 	if len(consumed) == 0 {
@@ -1841,6 +1936,80 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 		}
 	}
 	return filtered, renames, questions, nil, nil
+}
+
+func assertedColumnIdentity(hints []protocol.Hint, from, to pgschema.Column) bool {
+	for _, hint := range hints {
+		if hint.Kind != "rename" || hint.Object != "column" {
+			continue
+		}
+		if reflect.DeepEqual(hint.From, []string{from.Table.Schema, from.Table.Name, from.Name}) &&
+			reflect.DeepEqual(hint.To, []string{to.Table.Schema, to.Table.Name, to.Name}) {
+			return true
+		}
+	}
+	return false
+}
+
+// consumeColumnTransitionChanges removes the entire typed dependent closure
+// from ordinary rendering. A cross-name/type transition owns those objects;
+// allowing a view or index diff to render beside the unresolved transition can
+// produce SQL which is invalid before either endpoint exists.
+func consumeColumnTransitionChanges(changes []change.Change, current, desired *pgschema.Snapshot, from, to pgschema.Column, consumed map[pgschema.ID]bool) []pgschema.ID {
+	currentClosure := dependentClosure(current, from.ObjectID())
+	desiredClosure := dependentClosure(desired, to.ObjectID())
+	for _, item := range changes {
+		if currentClosure[item.ID] || desiredClosure[item.ID] {
+			consumed[item.ID] = true
+		}
+	}
+	ids := make([]pgschema.ID, 0, len(currentClosure)+len(desiredClosure))
+	seen := make(map[pgschema.ID]bool)
+	for id := range currentClosure {
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	for id := range desiredClosure {
+		if !seen[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	return ids
+}
+
+func dependentClosure(snapshot *pgschema.Snapshot, root pgschema.ID) map[pgschema.ID]bool {
+	closure := map[pgschema.ID]bool{root: true}
+	queue := []pgschema.ID{root}
+	ids := snapshot.IDs()
+	for len(queue) > 0 {
+		dependency := queue[0]
+		queue = queue[1:]
+		for _, candidate := range ids {
+			if closure[candidate] || !containsID(snapshot.Dependencies(candidate), dependency) {
+				continue
+			}
+			closure[candidate] = true
+			queue = append(queue, candidate)
+		}
+	}
+	return closure
+}
+
+func desiredViewDefinitions(snapshot *pgschema.Snapshot, closure []pgschema.ID) []string {
+	var result []string
+	for _, id := range closure {
+		object, exists := snapshot.Object(id)
+		view, isView := object.(pgschema.View)
+		if !exists || !isView {
+			continue
+		}
+		sql, unsupported := renderViewCreate(view, false)
+		if unsupported == "" {
+			result = append(result, sql)
+		}
+	}
+	return result
 }
 
 func equivalentColumnForRename(from, to pgschema.Column) bool {
@@ -2411,11 +2580,29 @@ func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []
 		}
 		choices.renameBridge[bridge.id] = work
 	}
-	if directColumnRenames {
-		return questions, nil
-	}
 	for _, rename := range columns {
 		id := rename.from.ObjectID()
+		if rename.crossType {
+			typeQuestion := protocol.Question{
+				ID: "type_change:" + id.String(), Kind: "type_change", Key: id.String(),
+				Message: "Column " + id.String() + " is explicitly identified as " + rename.to.ObjectID().String() + " while changing from " + rename.from.Type + " to " + rename.to.Type + ". Choose reviewed expand/contract SQL that preserves both names and types around one deployment, or split the feature because it needs two deployments.",
+				Choices: []string{"manual_sql", "split_plan"}, ScopeObjects: []string{rename.to.ObjectID().String()},
+				CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+			}
+			strategy, found, err := resolver.Resolve(typeQuestion)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				questions = append(questions, typeQuestion)
+				continue
+			}
+			choices.typeUsing[id] = strategy
+			continue
+		}
+		if directColumnRenames {
+			continue
+		}
 		strategyQuestion := protocol.Question{
 			ID: "rename_backfill_strategy:" + id.String(), Kind: "rename_backfill_strategy", Key: id.String(),
 			Message:            "Column " + id.String() + " will overlap with " + rename.to.ObjectID().String() + ". Choose an operator-authored backfill, explicitly accept a single unbounded transaction for a known-small table, or split the work into a later plan.",
@@ -2451,6 +2638,104 @@ func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []
 		choices.renameBackfill[id] = work
 	}
 	return questions, nil
+}
+
+func renderCrossTypeColumnTransition(rename renameColumn) []protocol.Statement {
+	table := qualified(rename.from.Table.Schema, rename.from.Table.Name)
+	transitionID := rename.from.ObjectID().String() + "->" + rename.to.ObjectID().String()
+	closure := make([]string, 0, len(rename.dependencyClosure))
+	for _, id := range rename.dependencyClosure {
+		if id != rename.from.ObjectID() && id != rename.to.ObjectID() {
+			closure = append(closure, id.String())
+		}
+	}
+	dependencyGuidance := ""
+	if len(closure) > 0 {
+		dependencyGuidance = "\n-- This edit owns the dependent closure; preserve or recreate it here in dependency order: " + strings.Join(closure, ", ") + "."
+	}
+	desiredGuidance := desiredViewDefinitionGuidance(rename.desiredViewDefinitions)
+	statements := []protocol.Statement{
+		statement(
+			"-- ONWARDPG TODO: replace this comment with reviewed EXPAND SQL for "+transitionID+" ("+rename.from.Type+" -> "+rename.to.Type+").\n"+
+				"-- Add "+table+"."+quote(rename.to.Name)+" without removing "+quote(rename.from.Name)+", then define forward conversion, reverse conversion, conflict precedence, retry/idempotency behavior, and the initial backfill.\n"+
+				"-- Preserve both application contracts while legacy code is live; onwardpg will not infer product conversion semantics from PostgreSQL type names."+dependencyGuidance,
+			protocol.PhaseExpand, "manual", true, "manual_sql", "single_deployment_bridge_required", "product_semantics_required",
+		),
+		statement(
+			"-- ONWARDPG TODO: replace this comment with reviewed CONTRACT SQL for "+transitionID+".\n"+
+				"-- After legacy writers drain, perform final catch-up and boolean conversion assertions, remove compatibility objects and "+table+"."+quote(rename.from.Name)+", and converge the owned dependency closure to the desired schema.\n"+
+				"-- Include blocking Boolean assertions in this pocket for every data-dependent conversion assumption, including NULL, malformed input, and target-type range behavior; onwardpg verification executes this exact SQL."+desiredGuidance,
+			protocol.PhaseContract, "manual", true, "manual_sql", "single_deployment_bridge_required", "data_movement",
+		),
+	}
+	for index := range statements {
+		statements[index].TransitionID = transitionID
+	}
+	return statements
+}
+
+func renderColumnRenameDependencyHandoff(rename renameColumn, generated []protocol.Statement) []protocol.Statement {
+	transitionID := rename.from.ObjectID().String() + "->" + rename.to.ObjectID().String()
+	closure := make([]string, 0, len(rename.dependencyClosure))
+	for _, id := range rename.dependencyClosure {
+		if id != rename.from.ObjectID() && id != rename.to.ObjectID() {
+			closure = append(closure, id.String())
+		}
+	}
+	closureText := strings.Join(closure, ", ")
+	expand := statement(
+		"-- ONWARDPG TODO: replace this comment with reviewed EXPAND SQL for the dependent catalog closure of "+transitionID+".\n"+
+			"-- Keep every existing view output name and order usable by legacy code, and append the new output required by the new release where PostgreSQL permits it.\n"+
+			"-- Owned dependency closure: "+closureText+". Do not rename an existing view output with CREATE OR REPLACE VIEW.",
+		protocol.PhaseExpand, "manual", true, "manual_sql", "single_deployment_bridge_required", "dependent_view_overlap",
+	)
+	drop := statement(
+		"-- ONWARDPG TODO: replace this comment with reviewed CONTRACT SQL that removes the overlap views before the physical column cutover for "+transitionID+".\n"+
+			"-- Drop or detach the owned closure in reverse dependency order after legacy readers and writers drain: "+closureText+".",
+		protocol.PhaseContract, "manual", true, "manual_sql", "single_deployment_bridge_required", "dependent_view_cutover", "compatibility_removal", "blocking_lock_possible",
+	)
+	recreate := statement(
+		"-- ONWARDPG TODO: replace this comment with reviewed CONTRACT SQL that recreates the exact desired dependency closure for "+transitionID+".\n"+
+			"-- Recreate in desired dependency order and restore view options, ownership, comments, grants, triggers, materialized data/freshness, and indexes as applicable: "+closureText+"."+desiredViewDefinitionGuidance(rename.desiredViewDefinitions),
+		protocol.PhaseContract, "manual", true, "manual_sql", "single_deployment_bridge_required", "dependent_view_recreate", "blocking_lock_possible",
+	)
+	for _, item := range []*protocol.Statement{&expand, &drop, &recreate} {
+		item.TransitionID = transitionID
+	}
+
+	result := make([]protocol.Statement, 0, len(generated)+3)
+	expandInserted, contractDropInserted := false, false
+	for _, item := range generated {
+		if item.Phase == protocol.PhaseContract && !expandInserted {
+			result = append(result, expand)
+			expandInserted = true
+		}
+		if item.Phase == protocol.PhaseContract && !contractDropInserted {
+			result = append(result, drop)
+			contractDropInserted = true
+		}
+		result = append(result, item)
+	}
+	if !expandInserted {
+		result = append(result, expand)
+	}
+	if !contractDropInserted {
+		result = append(result, drop)
+	}
+	return append(result, recreate)
+}
+
+func desiredViewDefinitionGuidance(definitions []string) string {
+	if len(definitions) == 0 {
+		return ""
+	}
+	lines := []string{"", "-- Exact desired view definitions from the typed destination (copy into the reviewed dependency-order recreation as applicable):"}
+	for _, definition := range definitions {
+		for _, line := range strings.Split(definition, "\n") {
+			lines = append(lines, "-- "+line)
+		}
+	}
+	return "\n" + strings.Join(lines, "\n")
 }
 
 func resolveTableRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, preserveSurplus bool, identityHints []protocol.Hint) ([]change.Change, []renameTable, []protocol.Question, []string, []protocol.DecisionAnalysis, error) {
@@ -2860,6 +3145,9 @@ func dependentViewRewrites(changes []change.Change, current, desired *pgschema.S
 				return nil, nil, false
 			}
 			if _, unsupported := renderViewCreate(after, true); unsupported != "" {
+				return nil, nil, false
+			}
+			if legality, _ := classifyViewReplacement(view, after); legality != viewReplacementLegal {
 				return nil, nil, false
 			}
 			item, changed := changeByID[view.ObjectID()]
@@ -5568,6 +5856,15 @@ func renderModify(before, after pgschema.Object, choices decisions, options Opti
 			}
 			return renderMaterializedViewRebuildClosure(before, next, current, desired, options)
 		}
+		beforeDefinition, nextDefinition := before, next
+		beforeDefinition.Comment, nextDefinition.Comment = nil, nil
+		if reflect.DeepEqual(beforeDefinition, nextDefinition) {
+			return commentModification("VIEW", qualified(next.Schema, next.Name), before.Comment, next.Comment), nil, nil, nil
+		}
+		legality, reason := classifyViewReplacement(before, next)
+		if legality != viewReplacementLegal {
+			return nil, nil, []string{"view_replace_output_signature:" + next.ObjectID().String() + ":" + reason}, nil
+		}
 		sql, unsupported := renderViewCreate(next, true)
 		if unsupported != "" {
 			return nil, nil, []string{unsupported}, nil
@@ -6846,8 +7143,12 @@ func renderEnumDefinition(object pgschema.Enum) string {
 func mutationQuestions(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, decisions, error) {
 	decisions := decisions{typeUsing: make(map[pgschema.ID]string), notNullStrategy: make(map[pgschema.ID]string), notNullBackfill: make(map[pgschema.ID]protocol.ManualWork), matViewRebuild: make(map[pgschema.ID]bool), matViewRefresh: make(map[pgschema.ID]protocol.ManualWork), partitionManual: make(map[pgschema.ID]protocol.ManualWork), identityDrop: make(map[pgschema.ID]bool), enumRewrite: make(map[pgschema.ID]bool), authorization: make(map[pgschema.ID]bool), renameBridge: make(map[pgschema.ID]protocol.ManualWork), renameBackfill: make(map[pgschema.ID]protocol.ManualWork), renameStrategy: make(map[pgschema.ID]string), reconciliation: make(map[pgschema.ID]reconciliationDecision)}
 	var questions []protocol.Question
+	columnTypeClosure := columnTypeTransitionClosureIDs(changes, current, desired)
 	refreshes := dependentMaterializedViewsNeedingRefresh(changes, current, desired)
 	for _, view := range refreshes {
+		if columnTypeClosure[view.ObjectID()] {
+			continue
+		}
 		question := protocol.Question{
 			ID: "refresh_materialized_view:" + view.ObjectID().String(), Kind: "refresh_materialized_view", Key: view.ObjectID().String(),
 			Message:            "Materialized view " + view.ObjectID().String() + " depends on a changed ordinary view. Supply an explicit reviewed refresh and verification contract; onwardpg will not infer refresh mode, locking, or data checks.",
@@ -7051,6 +7352,9 @@ func mutationQuestions(changes []change.Change, current, desired *pgschema.Snaps
 			}
 		}
 		if item.Kind == change.Modify && item.ID.Kind == pgschema.KindMatView {
+			if columnTypeClosure[item.ID] {
+				continue
+			}
 			before, after := item.Before.(pgschema.View), item.After.(pgschema.View)
 			if !materializedViewRequiresRebuild(before, after) {
 				continue
@@ -7558,7 +7862,11 @@ func splitPlanGuidance(changes []change.Change, columnRenames []renameColumn, ch
 		})
 	}
 	for _, rename := range columnRenames {
-		if choices.renameStrategy[rename.from.ObjectID()] != "split_plan" {
+		strategy := choices.renameStrategy[rename.from.ObjectID()]
+		if rename.crossType {
+			strategy = choices.typeUsing[rename.from.ObjectID()]
+		}
+		if strategy != "split_plan" {
 			continue
 		}
 		table := qualified(rename.to.Table.Schema, rename.to.Table.Name)
@@ -8312,7 +8620,7 @@ func renderColumnModify(before, after pgschema.Column, choices decisions, curren
 					"-- ONWARDPG TODO: replace this comment with reviewed CONTRACT SQL for "+after.ObjectID().String()+" ("+before.Type+" -> "+after.Type+").\n"+
 						"-- After pre-deployment writers drain, perform final catch-up/assertions, remove compatibility objects, and converge to PostgreSQL type "+after.Type+".\n"+
 						"-- Required mutation shape: convert "+table+"."+column+" to "+after.Type+" with a reviewed expression; do not rely on an inferred cast.\n"+
-						"-- Add boolean assertions to verify.sql for every data-dependent conversion assumption.",
+						"-- Include blocking Boolean assertions in this pocket for every data-dependent conversion assumption; onwardpg verification executes this exact SQL.",
 					protocol.PhaseContract, "manual", true, "manual_sql", "table_rewrite_possible", "access_exclusive_lock", "single_deployment_bridge_required",
 				),
 				statement(
@@ -8475,6 +8783,30 @@ func coordinatedColumnDerivedChangeIDs(changes []change.Change, current, desired
 			if closure.objectIDs[candidate.ID] {
 				result[candidate.ID] = true
 			}
+		}
+	}
+	return result
+}
+
+// columnTypeTransitionClosureIDs identifies derived catalog work owned by a
+// column type transition before the transition decision has been answered.
+// Materialized-view output signatures make those dependents appear as normal
+// modifications, but asking separate rebuild/refresh questions would split one
+// dependency-closed handoff into contradictory adjacent decisions.
+func columnTypeTransitionClosureIDs(changes []change.Change, current, desired *pgschema.Snapshot) map[pgschema.ID]bool {
+	result := make(map[pgschema.ID]bool)
+	for _, item := range changes {
+		if item.Kind != change.Modify || item.ID.Kind != pgschema.KindColumn {
+			continue
+		}
+		before, beforeOK := item.Before.(pgschema.Column)
+		after, afterOK := item.After.(pgschema.Column)
+		if !beforeOK || !afterOK || before.Type == after.Type || generatedColumnTypeChange(before, after) {
+			continue
+		}
+		closure := buildColumnDerivedViewClosure(before, after, current, desired)
+		for id := range closure.objectIDs {
+			result[id] = true
 		}
 	}
 	return result

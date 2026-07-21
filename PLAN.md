@@ -1,183 +1,173 @@
-# Plan-loop shipping checkpoint
+# Plan-loop blind gauntlet closure
 
-Status: shipped on `main`. The implementation, PostgreSQL 15–18 matrix, blind
-DX retests, documentation receipts, commit, and push are complete. The exact
-commit is recorded in the final handoff rather than hard-coded into its own
-tree.
+Status: delivered. This is the record of the blind-agent hill climb, not a list
+of unshipped promises.
 
 ## Outcome
 
-Ship one elegant authoring loop:
+onwardpg now has a tested path from accepted history and final DDL to one
+rolling-release migration:
 
-```sh
-onwardpg plan FEATURE-NAME
-# edit schema, answer a decision, switch branches, or rebase
-onwardpg plan
+```text
+accepted history + final DDL + explicit product decisions
+                              |
+                              v
+                 dependency-closed transition
+                              |
+                   expand -> drain -> contract
 ```
 
-The command maintains one evolving durable migration from accepted history
-(`H`) to the declarative working schema (`W`) while independently describing
-how a caller-owned development database (`D`) can catch up. It never treats
-local database state as migration history and never applies SQL automatically.
+The planner generates compatibility SQL where PostgreSQL facts are enough. If
+the missing information is product meaning—a cast, cleanup rule, conflict
+policy, view overlap, or materialized-view freshness choice—it creates a
+bounded, named SQL pocket instead. Verification executes that exact edited
+plan and checks convergence on disposable PostgreSQL.
 
-This checkpoint fixes only correctness, safety, and material DX failures found
-by the field tests. Broader release simulations and exhaustive ecosystem
-harnesses are follow-up work, not gates for this shipment.
+The public promise is deliberately narrower than “automatic migrations”:
 
-## Delivered in the working tree
+- old and new application SQL must both work after expand;
+- contract may remove the old interface only after writer and data gates pass;
+- an agent or developer may supply product-specific SQL, but onwardpg owns the
+  dependency boundary, ordering, edit markers, hazards, and final residual;
+- optional development-database reconciliation must never obscure whether the
+  durable release bundle is merge-ready.
 
-### One automatic plan lifecycle
+## What the blind runs changed
 
-- `plan FEATURE-NAME` creates a local PlanID once; later plain `plan` calls
-  revise that same logical migration.
-- Branch switches park and restore identities based on the bundle visible in
-  the checkout.
-- Rebases recalculate the same bundle from the new accepted history.
-- When accepted history absorbs a generated bundle, `plan` removes the empty
-  bundle and retires its local selector automatically.
-- No lifecycle verbs, planner modes, scopes, or speculative protocol versions
-  were added; machine output is status-oriented.
+### Wave 1 — Permanent compatibility workloads
 
-### Durable planning stays separate from local reconciliation
+- [x] Run A prepares legacy SQL before expand for a same-type column rename
+  beneath an intentionally changed ordinary view. It proves the old and new
+  view outputs coexist, then proves final catalog convergence.
+- [x] Run B covers `age_text text -> age integer`, an ordinary view, a
+  materialized view, and its index. Its reviewed pockets handle conversion,
+  reverse conversion, malformed values, overflow, synchronization, conflicts,
+  dependency teardown, and final recreation.
+- [x] Run B prepares the legacy materialized-view query before expand and
+  executes both old `age_text` and new `age` queries against the overlap shape.
+- [x] Run C keeps one backend alive across expand with prepared legacy
+  INSERT/SELECT/UPDATE statements. It proves a rename bridge, nullable staging
+  for a future required column, a loosened CHECK, contradictory-write
+  rejection, writer drain, cleanup, and final enforcement.
+- [x] A, B, and C are repository-owned integration tests rather than `/tmp`
+  reports or prose-only examples.
 
-- The durable bundle remains strictly `H → W`.
-- Development reconciliation remains strictly `D → W`.
-- Workspace mode preserves objects found only in `D`, so parallel branch work
-  is neither deleted nor absorbed into the durable migration.
-- Incompatible changes to the same local object stop for a development-only
-  decision.
+### Wave 2 — One transition owns the dependency closure
 
-### Agent-ready workspace fast-forward
+- [x] Explicit column identity is independent of type equality. A precise
+  rename hint can bind `age_text text` to `age integer`; automatic suggestions
+  remain conservative and same-type.
+- [x] A confirmed rename/type change consumes both endpoint diffs and the
+  current and desired dependent closures. It no longer leaks out as an
+  unrelated drop, create, and illegal view replacement.
+- [x] View snapshots carry ordered output signatures. Every ordinary-view
+  replacement passes one PostgreSQL legality check; an output rename or type
+  change cannot reach `CREATE OR REPLACE VIEW`.
+- [x] Provable append-compatible ordinary views stay generated. Intentional or
+  unprovable overlap semantics get bounded expand/removal/recreation pockets,
+  the exact desired view definitions, and the owned view/materialized-view/
+  index closure.
+- [x] Cross-name/type transitions produce exactly two product-owned pockets:
+  expand establishes both physical interfaces and conversion behavior;
+  contract performs catch-up and blocking assertions, removes the bridge, and
+  recreates the final closure.
+- [x] Materialized-view rebuild/freshness remains an explicit reviewed choice.
+  The planner does not pretend an overlap aggregation is semantically
+  equivalent to the final aggregation merely because both SQL interfaces work.
 
-When `D → W` has safe statements, ordinary `plan` output includes a
-`workspace_fast_forward` action containing:
+### Wave 3 — A plan loop an agent can drive safely
 
-- rendered SQL;
-- statement count;
-- `accepted_history_changed` after a rebase, otherwise
-  `development_database_behind_desired_schema`;
-- every preserved D-only object; and
-- exact replay argv for `onwardpg plan --output sql`.
+- [x] Ordinary `plan` JSON is a compact decision envelope: stable plan
+  identity, generation, durable/development outcomes, findings, written edit
+  paths, verification summary, and executable next actions.
+- [x] Cross-type identity ambiguity is raised before a destructive drop choice,
+  with an exact copyable rename hint. The finding disappears once consumed and
+  is present in both JSON and text output.
+- [x] Edit actions are emitted only for files that were actually written.
+  Product assertions live in the named phase pocket that verification runs.
+- [x] Rebase reruns retain the PlanID and fingerprint-scoped decisions when
+  upstream history changes without changing their meaning.
+- [x] Edited-plan conflicts include the path, current SQL, newly generated SQL,
+  merge instructions, and exact verification command.
+- [x] A scratch-only target is valid. With no development database configured,
+  `config check` succeeds and `plan` reports
+  `development.status: not_available`.
+- [x] A ready durable plan stays top-level ready when optional development
+  reconciliation is unsupported. Genuine development findings remain visible
+  and scoped.
+- [x] Read-only observer ownership and minimum inspection grants are projected
+  explicitly rather than misreported as drift. Real application grants and
+  authorization changes remain visible.
+- [x] An empty verified residual is reported as `converged`.
 
-Consumed `--dev-hint` values are repeated cumulatively in later choice and SQL
-argv. If `H = W` or an absorbed bundle has already retired, replay argv names
-the plan explicitly and remains executable without an active durable bundle.
+### Wave 4 — Ground the public narrative
 
-Top-level `ready` means the durable artifact is ready. A development
-fast-forward remains an explicit optional `next_actions` item because onwardpg
-does not mutate caller-owned databases.
+- [x] README, compatibility, workflow, readiness, safety, agent, plan-command,
+  expand-contract, introduction, and comparison documentation distinguish
+  generated SQL from dependency-scoped human/agent handoff.
+- [x] Required-column, rename, type-change, and dependency-type-change examples
+  are checked against current generated phase files.
+- [x] Documentation explains that cleanup values are product decisions, not
+  values inferred from declarative DDL.
+- [x] Documentation explains the evolving plan: plain `plan` reruns restack the
+  same feature plan when a rebase introduces a new accepted-history chain.
+- [x] CLI documentation is checked from the real help surface, and the Blume
+  website emits human pages plus raw Markdown/agent artifacts.
 
-### Legible decisions, edits, and verification
+## Shipping evidence
 
-- Durable and development statuses are separate and accompanied by ordered
-  executable next actions.
-- Raw pre-edit planner output is named `durable.generated_plan`; the effective
-  bundle state remains `durable.status`.
-- `base_history_head` identifies accepted history, while verification
-  `history_head` identifies the finalized chain including the selected bundle.
-- Decision history is normalized before clone verification, so embedded,
-  installed, and standalone verification digests agree.
-- Manual SQL handoffs write the candidate and bounded edit pocket before
-  returning.
-- A pocket has one executable `ONWARDPG TODO`; unresolved SQL is rejected
-  structurally with the exact file and line before PostgreSQL execution.
-- Required contract gates, optional clone assertions, and operator work remain
-  distinct artifacts.
+| Gate | Result |
+| --- | --- |
+| A/B/C and focused view-legality tests | pass on PostgreSQL 15.18, 16.14, 17.10, and 18.4 |
+| Strengthened B old/new materialized-view receipt | pass on PostgreSQL 15–18 |
+| Full graph planner and contract-check integration suites | pass on PostgreSQL 18.4 |
+| Differential suite | pass on PostgreSQL 18.4 |
+| Full CLI integration suite | pass on PostgreSQL 18.4 |
+| `go test ./... -count=1` without a database | pass |
+| `go vet ./...` | pass |
+| README and documentation SQL receipts | pass |
+| Documentation consistency checker | pass |
+| Blume strict check and production build | pass |
+| Three final source-blind DX retests | pass |
+| Independent PostgreSQL review | no release blocker after the strengthened materialized-view receipt |
+| Disposable container audit | no matrix or blind-run containers/volumes remain |
 
-### Contract readiness and PostgreSQL correctness
+The source-blind retests specifically confirmed compact output, exact hints,
+scratch-only configuration, same-PlanID restacking, decision retention, exact
+desired view DDL, actionable edited-plan conflict recovery, and dedicated
+read-only observer access.
 
-- Contract enforcement binds to typed data and writer gates.
-- Operator-batched and externally attested work is represented separately from
-  transactional phase SQL.
-- A dedicated observer can inspect readiness through a validated
-  least-privilege overlay without hiding unrelated application ACL drift.
-- CHECK, uniqueness, exclusion, foreign-key, required-column, rename, and
-  type-transition paths retain the loose expand / gated contract safety model.
-- A standalone unique index recreated after dropping its owning constraint now
-  carries its reconciliation gates on the real deferred `CREATE INDEX`.
-- Partitioned exclusion replacement permits PostgreSQL-owned child
-  dependencies while still requiring reviewed reconciliation.
+## Honest remaining edges
 
-### Framework and agent documentation
+These are real boundaries, but they do not invalidate the delivered release:
 
-- Django has a deterministic ProjectState exporter that does not execute
-  historical `RunPython` or `RunSQL`.
-- Drizzle has a checked `pgSchema()` wrapper that emits named schema DDL and a
-  standalone config example.
-- Prisma 7 has a `prisma.config.ts` recipe and a wrapper that rejects empty
-  successful export output.
-- The README, plan narrative, framework guides, production runbook, and agent
-  skill describe the same `H/W/D` model and plan-only lifecycle.
-- Documentation SQL is tied to executable receipts.
+- Adding a column to the same table can change a contract gate fingerprint.
+  Authored SQL is not silently absorbed; the developer or agent must merge the
+  current and regenerated phase using the now-complete conflict payload.
+- A materialized overlap grouped by both old and new values proves interface
+  compatibility, not equivalence to the final aggregation when conversion is
+  non-injective. The reviewed pocket or `split_plan` owns that product choice.
+- Observer projections are intentionally visible as informational findings.
+  This is somewhat noisy, but makes the security normalization auditable.
+- Verification proves SQL execution and catalog convergence. It cannot prove
+  production capacity, acceptable lock duration, replica lag, application
+  correctness, or that every old process has drained.
+- Prepared-statement receipts use explicit target lists. Rigid `SELECT *`
+  consumers remain an application compatibility concern.
 
-## Blind field evidence
+## Future hills, not part of this delivery
 
-The agents began with the README and public docs, used isolated `/tmp`
-projects and disposable PostgreSQL 17 containers, and did not patch onwardpg.
+- Reduce same-table rebase conflicts by making more contract gate identities
+  semantic without weakening invalidation.
+- Improve presentation of observer projection evidence if real usage shows it
+  obscures more important drift.
+- Add exhaustive ORM/framework harnesses only when they expose planner gaps not
+  already represented by SQL workloads.
+- Add deployment, queue, preview-environment, replica-lag, and capacity
+  simulations as separate operational goals.
+- Broaden automatic dependency handling only where PostgreSQL catalog facts
+  prove the transformation. Do not add a general SQL rewriter, new lifecycle
+  commands, or output protocol versions.
 
-Initial reports:
-
-- Drizzle: `/tmp/onwardpg-drizzle-blind.tUbm4z/`
-- Prisma: `/tmp/onwardpg-prisma-dx-itMkTU/REPORT.md`
-- SQLAlchemy: `/tmp/onwardpg-dx-sqlalchemy-6/REPORT.md`
-
-Targeted retests on the repaired worktree:
-
-- Drizzle: `/tmp/onwardpg-drizzle-retest.Lz6CFa/`
-- Drizzle no-change replay:
-  `/tmp/onwardpg-drizzle-bootstrap-retest.rwfziG/`
-- Prisma 7: `/tmp/onwardpg-prisma-retest-wKAUBr/REPORT.md`
-- SQLAlchemy: `/tmp/onwardpg-dx-targeted-7/REPORT.md`
-
-The targeted claims passed: cumulative development argv, executable workspace
-fast-forward, unambiguous generated/effective plan naming, identical finalized
-history digests, exact unresolved-TODO diagnostics, deterministic checked
-framework exports, repeated plain `plan`, and the next-feature lifecycle.
-
-## Shipping gates
-
-Only failures in these gates may expand this checkpoint:
-
-- [x] complete the full repository matrix on PostgreSQL 15, 16, 17, and 18;
-  after the final PostgreSQL 18-only classification fix, rerun the affected
-  graph-plan package on 15–17 and the full suite on 18;
-- [x] keep the focused plan-loop, fast-forward, edit, digest, reconciliation,
-  and least-privilege regressions green;
-- [x] run `go test ./... -count=1` without a database;
-- [x] run `scripts/test-readme-workflow.sh`;
-- [x] run `scripts/test-documentation-receipts.sh`;
-- [x] run `node scripts/check-documentation.mjs`;
-- [x] run `pnpm --dir website check` and `pnpm --dir website build`;
-- [x] run `git diff --check` and review the complete staged scope;
-- [x] stop the disposable containers created for this work;
-- [x] commit the intended working tree and push `main`.
-
-## Deferred follow-up
-
-These are worthwhile but are explicitly not blockers for this checkpoint:
-
-- an exhaustive closure test that replays every emitted decision choice through
-  the public CLI;
-- repository-owned Drizzle, Django, Prisma, SQLAlchemy, and plain-SQL framework
-  projects in CI;
-- a high-fidelity old/new-writer deployment harness with queues, reconnecting
-  previews, writer evidence, retries, and contract application;
-- an end-to-end large-table operator-batched rename journey;
-- direct normalization receipts for every default-equivalent owner ACL form;
-- a retained hidden-developer/two-agent relay and separate blind-human review;
-- richer standalone dirty-build identity;
-- cosmetic normalization of every nested question/action shape.
-
-Reopen one of these only as a focused goal. Do not infer that it is already
-implemented from the current documentation or field reports.
-
-## Final handoff
-
-The shipping report records:
-
-1. the exact commit pushed to `main`;
-2. PostgreSQL 15–18 matrix outcomes;
-3. documentation, website, README, and receipt outcomes;
-4. the three blind retest verdicts;
-5. any matrix-discovered correctness fixes; and
-6. confirmation that disposable containers were removed.
+The next useful goal should start from one of those measured edges. It should
+not reopen this release for cosmetic protocol polish or framework busywork.

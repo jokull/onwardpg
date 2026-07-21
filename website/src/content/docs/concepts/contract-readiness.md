@@ -105,3 +105,12 @@ Zero current sessions is therefore not drain evidence.
 Contract SQL repeats its data assertion after cleanup, immediately before
 enforcement. Your release system still owns batch execution, lock budgets,
 replica health, approval, and the final cutover.
+
+This ordering also covers dependency-scoped column transitions. Expand may
+leave a prepared legacy view query running while new code uses appended view
+outputs. Contract cannot remove that overlap until legacy reader and writer
+cohorts drain and the transition's data gates pass. Reviewed contract SQL then
+removes dependent views before the physical column cutover and recreates the
+desired closure afterward. Materialized views require the reviewer-chosen
+refresh or rebuild postcondition as well; matching catalog definitions do not
+prove stored rows are fresh.

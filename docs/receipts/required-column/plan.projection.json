@@ -2,8 +2,11 @@
   "status": "needs_action",
   "durable": {
     "status": "needs_sql_edits",
-    "edit_files": [
-      "phases/contract.sql"
+    "edits": [
+      {
+        "path": "migrations/onward/app/add-booking-status/phases/contract.sql",
+        "phase": "contract"
+      }
     ]
   }
 }

@@ -115,7 +115,7 @@ func (t Target) Validate() error {
 			}
 		}
 	}
-	if !envNamePattern.MatchString(t.DevDatabaseEnv) {
+	if t.DevDatabaseEnv != "" && !envNamePattern.MatchString(t.DevDatabaseEnv) {
 		return fmt.Errorf("dev_database_env must name an environment variable, not contain a URL")
 	}
 	if t.ScratchDatabaseEnv != "" && !envNamePattern.MatchString(t.ScratchDatabaseEnv) {

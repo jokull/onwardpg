@@ -1490,10 +1490,33 @@ func inspectGraphViews(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapsh
 	rows, err := tx.Query(ctx, `
 SELECT n.nspname, c.relname, COALESCE(CASE WHEN owner.rolname <> current_user THEN owner.rolname END, ''),
        c.relkind = 'm', pg_get_viewdef(c.oid, true),
-       c.relispopulated, c.reloptions, obj_description(c.oid, 'pg_class')
+       c.relispopulated, c.reloptions, obj_description(c.oid, 'pg_class'),
+       outputs.names, outputs.formatted_types, outputs.type_mods,
+       outputs.type_schemas, outputs.type_names, outputs.type_kinds,
+       outputs.collations
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_roles owner ON owner.oid = c.relowner
+JOIN LATERAL (
+  SELECT array_agg(a.attname ORDER BY a.attnum) AS names,
+         array_agg(format_type(a.atttypid, a.atttypmod) ORDER BY a.attnum) AS formatted_types,
+         array_agg(a.atttypmod ORDER BY a.attnum) AS type_mods,
+         array_agg(tn.nspname ORDER BY a.attnum) AS type_schemas,
+         array_agg(t.typname ORDER BY a.attnum) AS type_names,
+         array_agg(t.typtype::text ORDER BY a.attnum) AS type_kinds,
+         array_agg(
+           CASE WHEN a.attcollation <> 0 AND a.attcollation IS DISTINCT FROM t.typcollation
+                THEN quote_ident(cn.nspname) || '.' || quote_ident(coll.collname)
+                ELSE '' END
+           ORDER BY a.attnum
+         ) AS collations
+  FROM pg_attribute a
+  JOIN pg_type t ON t.oid = a.atttypid
+  JOIN pg_namespace tn ON tn.oid = t.typnamespace
+  LEFT JOIN pg_collation coll ON coll.oid = a.attcollation
+  LEFT JOIN pg_namespace cn ON cn.oid = coll.collnamespace
+  WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+) outputs ON true
 WHERE c.relkind IN ('v', 'm')
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (
@@ -1507,9 +1530,29 @@ ORDER BY n.nspname, c.relname`)
 	defer rows.Close()
 	for rows.Next() {
 		var options []string
+		var names, formattedTypes, typeSchemas, typeNames, typeKinds, collations []string
+		var typeMods []int32
 		object := pgschema.View{}
-		if err := rows.Scan(&object.Schema, &object.Name, &object.Owner, &object.Materialized, &object.Definition, &object.Populated, &options, &object.Comment); err != nil {
+		if err := rows.Scan(
+			&object.Schema, &object.Name, &object.Owner, &object.Materialized,
+			&object.Definition, &object.Populated, &options, &object.Comment,
+			&names, &formattedTypes, &typeMods, &typeSchemas, &typeNames,
+			&typeKinds, &collations,
+		); err != nil {
 			return err
+		}
+		if len(names) != len(formattedTypes) || len(names) != len(typeMods) ||
+			len(names) != len(typeSchemas) || len(names) != len(typeNames) ||
+			len(names) != len(typeKinds) || len(names) != len(collations) {
+			return fmt.Errorf("view %s.%s returned inconsistent output signature", object.Schema, object.Name)
+		}
+		object.OutputColumns = make([]pgschema.ViewColumn, len(names))
+		for index := range names {
+			object.OutputColumns[index] = pgschema.ViewColumn{
+				Name: names[index], Type: formattedTypes[index], TypeMod: typeMods[index],
+				TypeSchema: typeSchemas[index], TypeName: typeNames[index],
+				TypeKind: typeKinds[index], Collation: collations[index],
+			}
 		}
 		object.Options = parseOptions(options)
 		selector := "view:" + object.Schema + "." + object.Name

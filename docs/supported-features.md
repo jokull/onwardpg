@@ -197,22 +197,42 @@ a materialized view's result: replacing a function changes behavior but not
 the materialized definition or stored rows. A routine rename proven to retain
 the same routine OID does not request a refresh.
 
-For a confirmed column rename, onwardpg also recognizes PostgreSQL's native
-rewrite of a direct ordinary or materialized dependent only for the strict
-deparsed shape `SELECT column FROM relation`. PostgreSQL preserves the view
-output name by rendering `SELECT new_column AS old_column`; PostgreSQL may qualify
-the projected column, which is handled without parsing arbitrary SQL. Any
-expression, multi-column projection, alias, quoted identifier, or other
-dependent-view change is a structured unsupported result rather than an
-out-of-order `CREATE OR REPLACE` or guessed rebuild. Even the narrow recognized
-case is not emitted as a bare rename. Eligible same-type columns use two
-physical columns plus a bidirectional trigger through expand. A second,
+For a confirmed same-type column rename, eligible columns use two physical
+columns plus a bidirectional trigger through expand. A second,
 fingerprint-bound choice requires reviewed manual SQL with an equality
 assertion, explicit consent to a hazardous single-transaction update, or a
 split plan. Contract asserts equality before the native identity-preserving
-rename. Defaults,
-generated/identity values, partitions, existing trigger ordering, RLS, and
-unproven dependent rewrites block the automatic bridge.
+rename. Defaults, generated/identity values, partitions, existing trigger
+ordering, and RLS can still block the automatic bridge.
+
+Typed view dependencies are owned by that transition. A retained definition
+whose PostgreSQL rewrite is catalog-provable stays on the generated path. If
+the desired view output changes intentionally or the overlap query cannot be
+proved, the planner keeps the generated column bridge and emits three bounded
+manual pockets: an expand overlap preserving the existing output names and
+order while adding the new interface, a contract removal before physical
+cutover, and exact desired recreation afterward. Each pocket names the
+ordinary views, materialized views, and indexes in scope. Materialized-view
+freshness and availability remain reviewer-owned.
+
+Ordinary `CREATE OR REPLACE VIEW` has an independent output-signature guard.
+Existing output names, order, type identity, typmod/domain identity, and
+collation must remain stable; only compatible appended outputs may be added.
+An existing output rename or type change never reaches that renderer.
+
+A confirmed cross-name/type transition, such as `age_text text` to
+`age integer`, is one transition rather than an unrelated drop and create.
+Automatic suggestions remain same-type only, so this identity requires an
+explicit rename hint. After the existing `type_change` choice selects
+`manual_sql`, exactly two transition-bound pockets own both endpoint columns
+and the full current/desired dependency closure. Expand must supply the new
+column, forward and reverse conversion, conflict precedence, retry behavior,
+and initial backfill. Contract must provide final catch-up and Boolean
+assertions, remove compatibility objects and the legacy column, recreate the
+desired closure, and establish any materialized-view freshness postcondition.
+The planner does not invent how NULL, blank, malformed, signed, decimal, or
+out-of-range values map. `split_plan` remains available when that honest
+compatibility route does not fit one deployment.
 
 Functions, procedures, and triggers are graph-modeled. Their canonical
 PostgreSQL definitions support create, replace/recreate, enable-state changes,

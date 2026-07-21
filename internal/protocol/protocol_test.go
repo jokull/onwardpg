@@ -310,3 +310,30 @@ func TestRenderSQLBoundsEditableTODOWithStableMarkers(t *testing.T) {
 		t.Fatalf("editable SQL pocket is not stable and bounded: %q", rendered)
 	}
 }
+
+func TestRenderSQLExplainsSameTypeRenameShadowCleanup(t *testing.T) {
+	drop := Statement{
+		SQL: "ALTER TABLE \"app\".\"accounts\" DROP COLUMN \"full_name\";", Phase: PhaseContract,
+		Safety: "dangerous", Hazards: []string{"compatibility_removal", "data_loss"},
+	}
+	rename := Statement{
+		SQL: "ALTER TABLE \"app\".\"accounts\" RENAME COLUMN \"display_name\" TO \"full_name\";", Phase: PhaseContract,
+		Safety: "review", Hazards: []string{"compatibility_removal"},
+	}
+	rendered := RenderSQL(Result{Batches: []Batch{{
+		ID: "batch-contract-001", Phase: PhaseContract, Transactional: true, Statements: []Statement{drop, rename},
+	}}}, "")
+	for _, explanation := range []string{
+		"equality was asserted; remove the synchronized shadow",
+		"original column keeps its storage and dependencies and now takes the final name",
+	} {
+		if !strings.Contains(rendered, explanation) {
+			t.Fatalf("rename choreography omitted %q:\n%s", explanation, rendered)
+		}
+	}
+	unrelated := rename
+	unrelated.SQL = "ALTER TABLE \"app\".\"other_accounts\" RENAME COLUMN \"display_name\" TO \"full_name\";"
+	if rendered := RenderSQL(Result{Statements: []Statement{drop, unrelated}}, ""); strings.Contains(rendered, "onwardpg rename transition") {
+		t.Fatalf("unrelated DROP/RENAME pair received rename choreography guidance:\n%s", rendered)
+	}
+}

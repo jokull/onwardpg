@@ -208,6 +208,63 @@ func TestBuildPlanTurnsManualTypeIntentIntoEditableIncompleteSQL(t *testing.T) {
 	}
 }
 
+func TestBuildPlanComposesExplicitRenameAndTypeChangeIntoOneManualTransition(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "people"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "age_text", Type: "text"}
+	after := pgschema.Column{Table: table.ObjectID(), Name: "age", Type: "integer"}
+	beforeView := pgschema.View{Schema: "app", Name: "people_age", Definition: `SELECT age_text FROM app.people`}
+	afterView := pgschema.View{Schema: "app", Name: "people_age", Definition: `SELECT age FROM app.people`}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		if err := snapshot.Add(schema); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{before, beforeView} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{after, afterView} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{before.ObjectID(), table.ObjectID()}, {beforeView.ObjectID(), before.ObjectID()}} {
+		if err := current.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{after.ObjectID(), table.ObjectID()}, {afterView.ObjectID(), after.ObjectID()}} {
+		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hints := []protocol.Hint{
+		{Kind: "rename", Object: "column", From: []string{"app", "people", "age_text"}, To: []string{"app", "people", "age"}},
+		{Kind: "type_change", Name: []string{"app", "people", "age_text"}, Strategy: "manual_sql"},
+	}
+	plan, _, answers, questions, used, err := buildPlan(current, desired, Input{
+		Hints: hints, HintsGiven: true, PlannerOptions: graphplan.Options{},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.NeedsSQLEdits || len(plan.Statements) != 2 || !planContains(plan, "age_text->column:app:people:age") {
+		t.Fatalf("cross-name/type plan = %#v", plan)
+	}
+	if planContains(plan, "CREATE OR REPLACE VIEW") || planContains(plan, `DROP COLUMN "age_text"`) {
+		t.Fatalf("dependent diff escaped the owned manual transition: %#v", plan)
+	}
+	if answers == nil || len(answers.Answers) != 2 || len(questions) != 2 || !reflect.DeepEqual(used, hints) {
+		t.Fatalf("answers=%#v questions=%#v hints=%#v", answers, questions, used)
+	}
+}
+
 func TestBuildPlanConsumesAheadOfTimeNotNullAndBackfillHintsAcrossStages(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "public", Name: "events"}

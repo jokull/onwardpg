@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,9 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if drifted.Outcome != "drifted" || len(drifted.Differences) == 0 {
 		t.Fatalf("drift report = %#v", drifted)
 	}
+	if drifted.Observer == nil || drifted.Observer.Mode != "database_owner" || drifted.Observer.Role == "" || drifted.Observer.DatabaseOwner != drifted.Observer.Role {
+		t.Fatalf("drift observer boundary = %#v", drifted.Observer)
+	}
 	foundIndex := false
 	for _, difference := range drifted.Differences {
 		if difference.Kind == "unexpected_in_actual" && strings.Contains(difference.ObjectID, "users_email_manual_idx") {
@@ -144,7 +148,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := json.Unmarshal([]byte(cleanOutput.stdout), &clean); err != nil {
 		t.Fatal(err)
 	}
-	if clean.Outcome != "drift_free" || len(clean.Differences) != 0 {
+	if clean.Outcome != "drift_free" || len(clean.Differences) != 0 || clean.Observer == nil {
 		t.Fatalf("clean drift report = %#v", clean)
 	}
 }
@@ -344,8 +348,9 @@ dev_mode = "workspace"
 	if err := json.Unmarshal([]byte(second.stdout), &secondReport); err != nil {
 		t.Fatal(err)
 	}
-	if len(secondReport.Development.Result.Statements) != 1 || !strings.Contains(secondReport.Development.Result.Statements[0].SQL, `ADD COLUMN "note"`) {
-		t.Fatalf("feature revision should emit only the local note residual: %#v", secondReport.Development.Result)
+	secondFastForward := findWorkflowAction(secondReport, "workspace_fast_forward")
+	if secondFastForward == nil || secondFastForward.StatementCount != 1 || !strings.Contains(secondFastForward.SQL, `ADD COLUMN "note"`) {
+		t.Fatalf("feature revision should emit only the local note residual: %#v", secondReport)
 	}
 	secondLocalSQL := captureStdout(t, func() int {
 		return runWorkflowPlanAt([]string{"--target", "primary", "--output", "sql"}, repository)
@@ -405,11 +410,11 @@ dev_mode = "workspace"
 	if err := json.Unmarshal([]byte(restacked.stdout), &restackedReport); err != nil {
 		t.Fatal(err)
 	}
-	if !restackedReport.Durable.ParentChanged || restackedReport.Durable.PlanID != anchor.PlanID {
+	if restackedReport.Durable.PlanID != anchor.PlanID {
 		t.Fatalf("restacked workflow report = %#v", restackedReport)
 	}
-	if len(restackedReport.Development.Postconditions) != 1 || restackedReport.Development.Postconditions[0].Status != "passed" || restackedReport.Development.Postconditions[0].ID != "accepted_history_is_reviewed" {
-		t.Fatalf("restacked development evidence = %#v", restackedReport.Development.Postconditions)
+	if len(restackedReport.Development.Verification) != 1 || restackedReport.Development.Verification[0].Status != "passed" || restackedReport.Development.Verification[0].ID != "accepted_history_is_reviewed" {
+		t.Fatalf("restacked development evidence = %#v", restackedReport.Development.Verification)
 	}
 	var fastForward *workflowNextAction
 	for index := range restackedReport.NextActions {
@@ -455,8 +460,8 @@ dev_mode = "workspace"
 	if err := json.Unmarshal([]byte(converged.stdout), &convergedReport); err != nil {
 		t.Fatal(err)
 	}
-	if len(convergedReport.Development.Result.Statements) != 0 || len(convergedReport.Development.Result.Preserved) != 0 || len(convergedReport.Development.Result.Compatibility) == 0 || !strings.Contains(strings.Join(convergedReport.Development.Result.Compatibility, "\n"), "column_physical_order") {
-		t.Fatalf("development did not reach the expected workspace-compatible state after deliberate external SQL: %#v", convergedReport.Development.Result)
+	if findWorkflowAction(convergedReport, "workspace_fast_forward") != nil || !workflowFindingsContain(convergedReport.Development.Findings, "column_physical_order") {
+		t.Fatalf("development did not reach the expected workspace-compatible state after deliberate external SQL: %#v", convergedReport.Development)
 	}
 }
 
@@ -506,12 +511,15 @@ dev_mode = "workspace"
 	if err := json.Unmarshal([]byte(pendingOutput.stdout), &pending); err != nil {
 		t.Fatal(err)
 	}
-	if pending.Durable.Outcome != string(protocol.Planned) || pending.Development.Status != protocol.NeedsInput || pending.Development.NextAction != "rerun_plan_with_dev_hints" {
+	if pending.Durable.Outcome != string(protocol.Planned) || pending.Development.Status != protocol.NeedsInput {
 		t.Fatalf("scoped decision report = %#v", pending)
 	}
 	var renameHint *protocol.Hint
-	for _, decision := range pending.Development.Decisions {
-		for _, choice := range decision.Choices {
+	for _, action := range pending.NextActions {
+		if action.Scope != "development" || action.Kind != "semantic_hint" {
+			continue
+		}
+		for _, choice := range action.Choices {
 			if choice.Hint.Kind == "rename" {
 				hint := choice.Hint
 				renameHint = &hint
@@ -519,7 +527,7 @@ dev_mode = "workspace"
 		}
 	}
 	if renameHint == nil {
-		t.Fatalf("development rename decision = %#v", pending.Development.Decisions)
+		t.Fatalf("development rename decision = %#v", pending.NextActions)
 	}
 	hintData, err := json.Marshal(renameHint)
 	if err != nil {
@@ -535,11 +543,8 @@ dev_mode = "workspace"
 	if err := json.Unmarshal([]byte(plannedOutput.stdout), &planned); err != nil {
 		t.Fatal(err)
 	}
-	if planned.Durable.Outcome != string(protocol.Planned) || planned.Development.Status != protocol.Planned || planned.Development.NextAction != "" {
+	if planned.Durable.Outcome != string(protocol.Planned) || planned.Development.Status != protocol.Planned {
 		t.Fatalf("scoped planned report = %#v", planned)
-	}
-	if len(planned.Development.AppliedHints) != 1 || !reflect.DeepEqual(planned.Development.AppliedHints[0], *renameHint) {
-		t.Fatalf("applied development hints = %#v", planned.Development.AppliedHints)
 	}
 	var replayAction *workflowNextAction
 	for index := range planned.NextActions {
@@ -551,7 +556,7 @@ dev_mode = "workspace"
 	if replayAction == nil || len(replayAction.Argv) < 6 || replayAction.Argv[2] != "--dev-hint" || replayAction.Argv[len(replayAction.Argv)-2] != "--output" || replayAction.Argv[len(replayAction.Argv)-1] != "sql" {
 		t.Fatalf("development SQL replay action = %#v", replayAction)
 	}
-	statements := protocol.RenderSQL(planned.Development.Result, "")
+	statements := replayAction.SQL
 	if !strings.Contains(statements, `RENAME TO "customers"`) ||
 		!strings.Contains(statements, `CREATE VIEW "app"."customers" WITH (security_invoker = true)`) ||
 		!strings.Contains(statements, `DROP VIEW "app"."customers"`) ||
@@ -928,13 +933,12 @@ dev_mode = "workspace"
 	if err := json.Unmarshal([]byte(first.stdout), &initial); err != nil {
 		t.Fatal(err)
 	}
-	if initial.Durable.PlanID == "" || initial.Development.Status != protocol.Planned || len(initial.Development.Result.Statements) != 1 {
+	initialFastForward := findWorkflowAction(initial, "workspace_fast_forward")
+	if initial.Durable.PlanID == "" || initial.Development.Status != protocol.Planned || initialFastForward == nil || initialFastForward.StatementCount != 1 {
 		t.Fatalf("initial plan report = %#v", initial)
 	}
-	for _, statement := range initial.Development.Result.Statements {
-		if _, err := connection.Exec(context.Background(), statement.SQL); err != nil {
-			t.Fatalf("apply intermediate development SQL: %v", err)
-		}
+	if _, err := connection.Exec(context.Background(), initialFastForward.SQL); err != nil {
+		t.Fatalf("apply intermediate development SQL: %v", err)
 	}
 
 	// The intermediate column has already been applied locally, but it was never
@@ -952,20 +956,21 @@ dev_mode = "workspace"
 	if pendingReport.Durable.Outcome != string(protocol.Planned) || pendingReport.Durable.PlanID != initial.Durable.PlanID || pendingReport.Development.Status != protocol.NeedsInput {
 		t.Fatalf("rename decision report = %#v", pendingReport)
 	}
-	if pendingReport.Durable.Plan == nil || len(pendingReport.Durable.Plan.Statements) != 1 {
-		t.Fatalf("collapsed durable plan = %#v", pendingReport.Durable.Plan)
+	pendingArtifact, err := bundle.Read(filepath.Join(repository, pendingReport.Durable.Path))
+	if err != nil {
+		t.Fatal(err)
 	}
-	durableSQL := pendingReport.Durable.Plan.Statements[0].SQL
+	durableSQL := string(pendingArtifact.Files["phases/expand.sql"]) + "\n" + string(pendingArtifact.Files["phases/contract.sql"])
 	if !strings.Contains(durableSQL, `ADD COLUMN "pricing_mode"`) || strings.Contains(durableSQL, "quote_mode") || strings.Contains(durableSQL, "RENAME COLUMN") {
 		t.Fatalf("durable plan did not collapse intermediate name: %s", durableSQL)
 	}
-	if len(pendingReport.Development.Result.Questions) != 1 || pendingReport.Development.Result.Questions[0].Kind != "rename_column" {
-		t.Fatalf("development rename question = %#v", pendingReport.Development.Result.Questions)
-	}
 	var renameHint *protocol.Hint
 	var preserveChoice bool
-	for _, decision := range pendingReport.Development.Decisions {
-		for _, choice := range decision.Choices {
+	for _, action := range pendingReport.NextActions {
+		if action.Scope != "development" || action.Kind != "semantic_hint" {
+			continue
+		}
+		for _, choice := range action.Choices {
 			switch choice.Hint.Kind {
 			case "rename":
 				hint := choice.Hint
@@ -976,7 +981,7 @@ dev_mode = "workspace"
 		}
 	}
 	if renameHint == nil || !preserveChoice {
-		t.Fatalf("development choices = %#v", pendingReport.Development.Decisions)
+		t.Fatalf("development choices = %#v", pendingReport.NextActions)
 	}
 	hintJSON, err := json.Marshal(renameHint)
 	if err != nil {
@@ -996,23 +1001,20 @@ dev_mode = "workspace"
 	if postgresMajor >= 18 {
 		wantDevelopmentStatements = 2
 	}
-	if confirmedReport.Durable.PlanID != initial.Durable.PlanID || len(confirmedReport.Development.Result.Statements) != wantDevelopmentStatements {
+	confirmedFastForward := findWorkflowAction(confirmedReport, "workspace_fast_forward")
+	if confirmedReport.Durable.PlanID != initial.Durable.PlanID || confirmedFastForward == nil || confirmedFastForward.StatementCount != wantDevelopmentStatements {
 		t.Fatalf("confirmed development rename report = %#v", confirmedReport)
 	}
-	direct := confirmedReport.Development.Result.Statements[0].SQL
-	if direct != `ALTER TABLE "app"."accounts" RENAME COLUMN "quote_mode" TO "pricing_mode";` {
-		t.Fatalf("development direct rename = %q", direct)
+	if !strings.Contains(confirmedFastForward.SQL, `ALTER TABLE "app"."accounts" RENAME COLUMN "quote_mode" TO "pricing_mode";`) {
+		t.Fatalf("development direct rename missing from %q", confirmedFastForward.SQL)
 	}
 	if postgresMajor >= 18 {
-		constraintRename := confirmedReport.Development.Result.Statements[1].SQL
-		if constraintRename != `ALTER TABLE "app"."accounts" RENAME CONSTRAINT "accounts_quote_mode_not_null" TO "accounts_pricing_mode_not_null";` {
-			t.Fatalf("development NOT NULL constraint rename = %q", constraintRename)
+		if !strings.Contains(confirmedFastForward.SQL, `ALTER TABLE "app"."accounts" RENAME CONSTRAINT "accounts_quote_mode_not_null" TO "accounts_pricing_mode_not_null";`) {
+			t.Fatalf("development NOT NULL constraint rename missing from %q", confirmedFastForward.SQL)
 		}
 	}
-	for _, item := range confirmedReport.Development.Result.Statements {
-		if _, err := connection.Exec(context.Background(), item.SQL); err != nil {
-			t.Fatalf("apply direct development rename statement %q: %v", item.SQL, err)
-		}
+	if _, err := connection.Exec(context.Background(), confirmedFastForward.SQL); err != nil {
+		t.Fatalf("apply direct development rename SQL: %v", err)
 	}
 	destination := filepath.Join(repository, "onward-bundles", "primary", "account-mode")
 	before, err := bundle.Read(destination)
@@ -1027,8 +1029,8 @@ dev_mode = "workspace"
 	if err := json.Unmarshal([]byte(converged.stdout), &convergedReport); err != nil {
 		t.Fatal(err)
 	}
-	if len(convergedReport.Development.Result.Statements) != 0 || len(convergedReport.Development.Result.Preserved) != 0 {
-		t.Fatalf("development residual = %#v", convergedReport.Development.Result)
+	if findWorkflowAction(convergedReport, "workspace_fast_forward") != nil || workflowFindingsContain(convergedReport.Development.Findings, "workspace_object_preserved") {
+		t.Fatalf("development residual = %#v", convergedReport.Development)
 	}
 	after, err := bundle.Read(destination)
 	if err != nil {
@@ -1145,7 +1147,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := json.Unmarshal([]byte(absorbed.stdout), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Durable.Outcome != "absorbed" || !report.Durable.RemovedBundle {
+	if report.Durable.Outcome != "absorbed" {
 		t.Fatalf("absorbed workflow report = %#v", report)
 	}
 	if _, found, err := activeplan.Load(repository, "primary"); err != nil || found {
@@ -1634,15 +1636,21 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		t.Fatalf("manual draft exit = %d, stdout = %s", drafted.code, drafted.stdout)
 	}
 	var handoff struct {
-		Status string   `json:"status"`
-		Path   string   `json:"path"`
-		Edit   []string `json:"edit"`
+		Status          string   `json:"status"`
+		Path            string   `json:"path"`
+		Edit            []string `json:"edit"`
+		WrittenReceipts []string `json:"written_receipts"`
 	}
 	if err := json.Unmarshal([]byte(drafted.stdout), &handoff); err != nil {
 		t.Fatal(err)
 	}
 	if handoff.Status != string(protocol.NeedsSQLEdits) || !reflect.DeepEqual(handoff.Edit, []string{"phases/contract.sql", "phases/expand.sql"}) {
 		t.Fatalf("handoff = %#v", handoff)
+	}
+	for _, edit := range handoff.Edit {
+		if !slices.Contains(handoff.WrittenReceipts, edit) {
+			t.Fatalf("edit action %q lacks a durable write receipt: %#v", edit, handoff.WrittenReceipts)
+		}
 	}
 	bundlePath := filepath.Join(repository, filepath.FromSlash(handoff.Path))
 	artifact, err := bundle.Read(bundlePath)
@@ -1884,6 +1892,41 @@ scratch_database_env = "ONWARDPG_CONFIG_CHECK_URL"
 	}
 }
 
+func TestConfigCheckAllowsScratchOnlyTarget(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	t.Setenv("ONWARDPG_SCRATCH_ONLY_URL", url)
+	writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+scratch_database_env = "ONWARDPG_SCRATCH_ONLY_URL"
+`)
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA app; CREATE TABLE app.scratch_only (id bigint PRIMARY KEY);\n")
+	output := captureStdout(t, func() int {
+		return runConfig([]string{"check", "--config", filepath.Join(repository, ".onwardpg.toml")})
+	})
+	if output.code != 0 {
+		t.Fatalf("scratch-only config check = %d, %s", output.code, output.stdout)
+	}
+	var report struct {
+		Status  string `json:"status"`
+		Targets []struct {
+			DevPostgresMajor     int `json:"dev_postgres_major"`
+			ScratchPostgresMajor int `json:"scratch_postgres_major"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal([]byte(output.stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "valid" || len(report.Targets) != 1 || report.Targets[0].DevPostgresMajor != 0 || report.Targets[0].ScratchPostgresMajor < 15 {
+		t.Fatalf("scratch-only config report = %#v", report)
+	}
+}
+
 func TestDevPlanQuestionsNeverApplyAndConvergesAfterDeliberateApplication(t *testing.T) {
 	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if adminURL == "" {
@@ -2035,7 +2078,7 @@ dev_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if err := json.Unmarshal([]byte(full.stdout), &fullReport); err != nil {
 		t.Fatal(err)
 	}
-	if fullReport.Outcome != "verified" || fullReport.ObservedFingerprint != fullReport.DesiredFingerprint || fullReport.Residual == nil || len(fullReport.Residual.Statements) != 0 || !reflect.DeepEqual(fullReport.VerifiedAssertions, []string{"obsolete_removed"}) || len(fullReport.ContinuationAssertions) != 0 {
+	if fullReport.Outcome != "verified" || fullReport.ObservedFingerprint != fullReport.DesiredFingerprint || fullReport.Residual == nil || fullReport.Residual.Status != protocol.Status("converged") || len(fullReport.Residual.Statements) != 0 || !reflect.DeepEqual(fullReport.VerifiedAssertions, []string{"obsolete_removed"}) || len(fullReport.ContinuationAssertions) != 0 {
 		t.Fatalf("full report = %#v", fullReport)
 	}
 	if after := disposableDatabaseCount(t, url); after != before {
@@ -2342,6 +2385,24 @@ func randomToken(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return hex.EncodeToString(random)
+}
+
+func findWorkflowAction(report workflowPlanReport, kind string) *workflowNextAction {
+	for index := range report.NextActions {
+		if report.NextActions[index].Kind == kind {
+			return &report.NextActions[index]
+		}
+	}
+	return nil
+}
+
+func workflowFindingsContain(findings []workflowFinding, fragment string) bool {
+	for _, finding := range findings {
+		if strings.Contains(finding.Code, fragment) || strings.Contains(finding.Message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func createTestDatabase(t *testing.T, adminURL string) (string, func()) {

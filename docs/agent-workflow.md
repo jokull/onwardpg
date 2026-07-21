@@ -23,6 +23,24 @@ onwardpg verify
 onwardpg status
 ```
 
+For a confirmed cross-name/type transition, keep using that same loop. Supply
+the explicit rename hint first, then choose `type_change: manual_sql`. onwardpg
+writes exactly two transition-bound pockets and lists the current and desired
+dependency closure in them. The agent fills expand with the new column,
+forward/reverse conversion, conflict and retry behavior, and initial backfill;
+it fills contract with final catch-up and Boolean assertions, compatibility
+removal, desired view/materialized-view recreation, index recreation, and the
+chosen freshness proof. It must test NULL, blank, malformed, and target-range
+cases from application and read-only production evidence rather than assuming
+a cast from the type names.
+
+A same-type rename with an intentionally changed dependent view is narrower:
+onwardpg still owns the generated two-way column bridge and provides three
+view pockets around it. The agent preserves the legacy output prefix in
+expand, removes the overlap before cutover, and recreates the exact desired
+closure afterward. It does not replace generated bridge SQL or add unrelated
+objects to those pockets.
+
 `init` establishes accepted history. The first `plan NAME` creates a
 worktree-local active-plan anchor and a durable bundle. Subsequent `plan`
 calls replace that same bundle: there is no finalize state and no accumulating

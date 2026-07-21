@@ -3,7 +3,7 @@ title: Comparison
 description: See why onwardpg plans one compatibility-safe PostgreSQL migration around one merge and one rolling application deployment.
 ---
 
-_Reviewed 20 July 2026 against the primary documentation linked on this page._
+_Reviewed 21 July 2026 against the primary documentation linked on this page._
 
 Most migration tools answer one question: **how do I move this database to the
 schema my code declares?**
@@ -163,6 +163,15 @@ business decision or data cleanup that the schema cannot explain:
   concurrent replacement where supported, coordinated foreign keys, and safe
   removal and recreation of views and materialized views when a dependency
   changes.
+
+The boundary is explicit. A simple catalog-proven rename keeps its dependents
+on the generated path. If the same-type rename intentionally changes a view,
+onwardpg keeps the generated column bridge and adds three bounded pockets for
+the overlap, pre-cutover removal, and final recreation. A confirmed rename plus
+type change gets two larger pockets—expand and contract—which own both columns
+and the entire current/desired dependency closure. That path needs more help,
+but it no longer leaks an unrelated column drop or illegal view replacement
+beside the handoff.
 
 PostgreSQL can describe tables, constraints, and dependencies. It cannot tell
 onwardpg whether two names mean the same thing, which duplicate row should win,

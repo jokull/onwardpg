@@ -500,9 +500,16 @@ func runDriftAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
-	actual, err := source.LoadGraphForComparison(ctx, source.Parse(*databaseURL), "", selectors)
+	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, *databaseURL, selectors, 30*time.Second)
 	if err != nil {
-		return writeError("source_error", fmt.Errorf("inspect live catalog: %w", err))
+		return writeError("drift_observer_error", fmt.Errorf("inspect live catalog through the read-only observer boundary: %w", err))
+	}
+	if observerFinding != nil {
+		message := observerFinding.Message
+		if observerFinding.Remediation != "" {
+			message += "; " + observerFinding.Remediation
+		}
+		return writeError("drift_"+observerFinding.Code, errors.New(message))
 	}
 	if err := source.ValidateIgnoreSelectors(ignores, expected, actual); err != nil {
 		return writeError("invalid_ignore", err)
@@ -510,6 +517,10 @@ func runDriftAt(arguments []string, start string) int {
 	report, err := driftcheck.Compare(*targetName, chain.HeadDigest, expected, actual)
 	if err != nil {
 		return writeError("drift_error", err)
+	}
+	report.Observer = &driftcheck.Observer{
+		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode,
+		ProjectedAccess: append([]string(nil), observer.ProjectedAccess...),
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
 	if report.Outcome == "drift_free" {
@@ -1398,28 +1409,75 @@ func developmentPostconditions(checks []draftflow.DevelopmentPostcondition) []de
 }
 
 type workflowPlanReport struct {
-	Status      string               `json:"status"`
-	Durable     draftflow.Report     `json:"durable"`
-	Development devflow.Report       `json:"development"`
-	NextActions []workflowNextAction `json:"next_actions,omitempty"`
+	Status      string                     `json:"status"`
+	Durable     workflowDurableOutcome     `json:"durable"`
+	Development workflowDevelopmentOutcome `json:"development"`
+	NextActions []workflowNextAction       `json:"next_actions,omitempty"`
+}
+
+// workflowDurableOutcome is the deliberately small plan-command envelope.
+// The bundle path is the authority for generated SQL, decisions, answers, and
+// batch detail; repeating those persisted artifacts here made ordinary output
+// both ambiguous and needlessly large.
+type workflowDurableOutcome struct {
+	Outcome         string                       `json:"status"`
+	Target          string                       `json:"target,omitempty"`
+	BundleID        string                       `json:"bundle_id,omitempty"`
+	PlanID          string                       `json:"plan_id,omitempty"`
+	Generation      int                          `json:"generation,omitempty"`
+	Path            string                       `json:"path,omitempty"`
+	Verification    *workflowVerificationSummary `json:"verification,omitempty"`
+	Findings        []draftflow.Finding          `json:"findings,omitempty"`
+	WrittenReceipts []string                     `json:"written_receipts,omitempty"`
+	Edits           []workflowEditReference      `json:"edits,omitempty"`
+}
+
+type workflowVerificationSummary struct {
+	Outcome            string           `json:"status"`
+	ThroughPhase       string           `json:"through_phase,omitempty"`
+	ExecutedBatches    int              `json:"executed_batches,omitempty"`
+	VerifiedAssertions []string         `json:"verified_assertions,omitempty"`
+	Failure            *verify.Failure  `json:"failure,omitempty"`
+	Findings           []verify.Finding `json:"findings,omitempty"`
+}
+
+type workflowEditReference struct {
+	Path     string `json:"path"`
+	PocketID string `json:"pocket_id,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+}
+
+type workflowDevelopmentOutcome struct {
+	Status       protocol.Status               `json:"status"`
+	Verification []devflow.PostconditionResult `json:"verification,omitempty"`
+	Findings     []workflowFinding             `json:"findings,omitempty"`
+}
+
+type workflowFinding struct {
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+	Remediation string `json:"remediation,omitempty"`
 }
 
 type workflowNextAction struct {
-	Scope          string                 `json:"scope"`
-	Kind           string                 `json:"kind"`
-	Reason         string                 `json:"reason,omitempty"`
-	Argv           []string               `json:"argv,omitempty"`
-	SQL            string                 `json:"sql,omitempty"`
-	StatementCount int                    `json:"statement_count,omitempty"`
-	Preserved      []string               `json:"preserved,omitempty"`
-	Choices        []workflowActionChoice `json:"choices,omitempty"`
-	Path           string                 `json:"path,omitempty"`
-	JSONPointer    string                 `json:"json_pointer,omitempty"`
-	PocketID       string                 `json:"pocket_id,omitempty"`
-	Purpose        string                 `json:"purpose,omitempty"`
-	Phase          string                 `json:"phase,omitempty"`
-	ExecutionMode  string                 `json:"execution_mode,omitempty"`
-	RequiredProof  string                 `json:"required_proof,omitempty"`
+	Scope           string                 `json:"scope"`
+	Kind            string                 `json:"kind"`
+	Reason          string                 `json:"reason,omitempty"`
+	Argv            []string               `json:"argv,omitempty"`
+	SQL             string                 `json:"sql,omitempty"`
+	StatementCount  int                    `json:"statement_count,omitempty"`
+	Preserved       []string               `json:"preserved,omitempty"`
+	Choices         []workflowActionChoice `json:"choices,omitempty"`
+	Path            string                 `json:"path,omitempty"`
+	JSONPointer     string                 `json:"json_pointer,omitempty"`
+	PocketID        string                 `json:"pocket_id,omitempty"`
+	Purpose         string                 `json:"purpose,omitempty"`
+	Phase           string                 `json:"phase,omitempty"`
+	ExecutionMode   string                 `json:"execution_mode,omitempty"`
+	RequiredProof   string                 `json:"required_proof,omitempty"`
+	CurrentSQL      string                 `json:"current_sql,omitempty"`
+	NewGeneratedSQL string                 `json:"new_generated_sql,omitempty"`
+	Resolution      string                 `json:"resolution,omitempty"`
 }
 
 type workflowActionChoice struct {
@@ -1431,10 +1489,85 @@ type workflowActionChoice struct {
 func newWorkflowPlanReport(durable draftflow.Report, development devflow.Report) workflowPlanReport {
 	return workflowPlanReport{
 		Status:      workflowPlanStatus(durable.Outcome, development),
-		Durable:     durable,
-		Development: development,
+		Durable:     compactDurableOutcome(durable),
+		Development: compactDevelopmentOutcome(development),
 		NextActions: workflowNextActions(durable, development),
 	}
+}
+
+func compactDurableOutcome(report draftflow.Report) workflowDurableOutcome {
+	result := workflowDurableOutcome{
+		Outcome: report.Outcome, Target: report.Target, BundleID: report.BundleID,
+		PlanID: report.PlanID, Generation: report.Generation, Path: report.Path,
+		Findings:        append([]draftflow.Finding(nil), report.Findings...),
+		WrittenReceipts: append([]string(nil), report.WrittenReceipts...),
+	}
+	if report.Verification != nil {
+		result.Verification = &workflowVerificationSummary{
+			Outcome: report.Verification.Outcome, ThroughPhase: report.Verification.ThroughPhase,
+			ExecutedBatches:    report.Verification.ExecutedBatches,
+			VerifiedAssertions: append([]string(nil), report.Verification.VerifiedAssertions...),
+			Failure:            report.Verification.Failure,
+			Findings:           append([]verify.Finding(nil), report.Verification.Findings...),
+		}
+	}
+	written := make(map[string]struct{}, len(report.WrittenReceipts))
+	for _, path := range report.WrittenReceipts {
+		written[filepath.ToSlash(path)] = struct{}{}
+	}
+	for _, edit := range report.EditRequirements {
+		if _, exists := written[filepath.ToSlash(edit.Path)]; !exists {
+			continue
+		}
+		result.Edits = append(result.Edits, workflowEditReference{
+			Path: filepath.ToSlash(filepath.Join(report.Path, edit.Path)), PocketID: edit.PocketID, Phase: edit.Phase,
+		})
+	}
+	if len(report.EditRequirements) == 0 {
+		for _, path := range report.EditFiles {
+			if _, exists := written[filepath.ToSlash(path)]; !exists {
+				continue
+			}
+			result.Edits = append(result.Edits, workflowEditReference{Path: filepath.ToSlash(filepath.Join(report.Path, path))})
+		}
+	}
+	for _, step := range report.AcceptedSteps {
+		if !step.RequiresReview {
+			continue
+		}
+		result.Findings = append(result.Findings, draftflow.Finding{
+			Code:    "accepted_history_requires_review",
+			Message: fmt.Sprintf("accepted %s is not provable from the catalog: %s", step.Kind, step.Path),
+		})
+	}
+	if report.Plan != nil {
+		for _, analysis := range report.Plan.Analysis {
+			result.Findings = append(result.Findings, draftflow.Finding{
+				Code:    analysis.Kind,
+				Message: fmt.Sprintf("%s -> %s: %s", analysis.From, analysis.To, analysis.Reason),
+			})
+		}
+	}
+	return result
+}
+
+func compactDevelopmentOutcome(report devflow.Report) workflowDevelopmentOutcome {
+	result := workflowDevelopmentOutcome{
+		Status: report.Status, Verification: append([]devflow.PostconditionResult(nil), report.Postconditions...),
+	}
+	for _, item := range report.Result.Unsupported {
+		result.Findings = append(result.Findings, workflowFinding{Code: "unsupported", Message: item})
+	}
+	for _, item := range report.Result.Preserved {
+		result.Findings = append(result.Findings, workflowFinding{Code: "workspace_object_preserved", Message: item})
+	}
+	for _, item := range report.Result.Compatibility {
+		result.Findings = append(result.Findings, workflowFinding{Code: "workspace_compatible_difference", Message: item})
+	}
+	for _, item := range report.Result.Guidance {
+		result.Findings = append(result.Findings, workflowFinding{Code: item.Kind, Message: item.Summary})
+	}
+	return result
 }
 
 func workflowNextActions(durable draftflow.Report, development devflow.Report) []workflowNextAction {
@@ -1467,6 +1600,22 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 		}
 	}
 	appendDecisions("durable", "--hint", nil, durable.Decisions)
+	if durable.EditReconciliation != nil && durable.EditReconciliation.Outcome == "conflict" {
+		for _, conflict := range durable.EditReconciliation.Conflicts {
+			action := workflowNextAction{
+				Scope: "durable", Kind: "merge_edit_conflict", Reason: conflict.Reason,
+				Path: filepath.ToSlash(filepath.Join(durable.Path, conflict.Path)), Resolution: conflict.Resolution,
+				Argv: []string{"onwardpg", "verify", "--target", durable.Target, "--bundle", durable.BundleID},
+			}
+			if conflict.CurrentSQL != nil {
+				action.CurrentSQL = *conflict.CurrentSQL
+			}
+			if conflict.NewGeneratedSQL != nil {
+				action.NewGeneratedSQL = *conflict.NewGeneratedSQL
+			}
+			result = append(result, action)
+		}
+	}
 	for _, hint := range durable.DeferredHints {
 		encoded, err := json.Marshal(hint)
 		if err != nil {
@@ -1478,7 +1627,14 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 		})
 	}
 	if durable.Outcome == string(protocol.NeedsSQLEdits) {
+		written := make(map[string]struct{}, len(durable.WrittenReceipts))
+		for _, path := range durable.WrittenReceipts {
+			written[filepath.ToSlash(path)] = struct{}{}
+		}
 		for _, edit := range durable.EditRequirements {
+			if _, exists := written[filepath.ToSlash(edit.Path)]; !exists {
+				continue
+			}
 			result = append(result, workflowNextAction{
 				Scope: "durable", Kind: "edit_file", Path: filepath.ToSlash(filepath.Join(durable.Path, edit.Path)),
 				PocketID: edit.PocketID, Purpose: edit.Purpose, Phase: edit.Phase,
@@ -1487,6 +1643,9 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 		}
 		if len(durable.EditRequirements) == 0 {
 			for _, path := range durable.EditFiles {
+				if _, exists := written[filepath.ToSlash(path)]; !exists {
+					continue
+				}
 				result = append(result, workflowNextAction{Scope: "durable", Kind: "edit_file", Path: filepath.ToSlash(filepath.Join(durable.Path, path))})
 			}
 		}
@@ -1510,9 +1669,17 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 		if check.Status != "passed" {
 			result = append(result, workflowNextAction{
 				Scope: "development", Kind: "review_postcondition",
-				JSONPointer: fmt.Sprintf("/development/accepted_postconditions/%d", index),
+				JSONPointer: fmt.Sprintf("/development/verification/%d", index),
 			})
 		}
+	}
+	if durablePlanReady(durable.Outcome) && development.Status == protocol.Unsupported {
+		result = append(result, workflowNextAction{
+			Scope: "development", Kind: "review_unsupported",
+			Reason:      "optional_development_reconciliation_unsupported",
+			JSONPointer: "/development/findings",
+			Purpose:     "review the unsupported local catalog shape; the durable plan remains merge-ready",
+		})
 	}
 	if durablePlanReady(durable.Outcome) && development.Status == protocol.Planned && len(development.Result.Statements) > 0 {
 		reason := "development_database_behind_desired_schema"
@@ -1594,7 +1761,7 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 	}
 	if output == "text" {
 		envelope := newWorkflowPlanReport(durable, development)
-		if _, err := fmt.Fprintf(writer, "status: %s\ndurable: %s\ndevelopment: %s\n", envelope.Status, durable.Outcome, development.Status); err != nil {
+		if _, err := fmt.Fprintf(writer, "status: %s\ndurable: %s\ndevelopment: %s\n", envelope.Status, envelope.Durable.Outcome, envelope.Development.Status); err != nil {
 			return err
 		}
 		if durable.Path != "" {
@@ -1612,6 +1779,10 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 					_, _ = fmt.Fprintf(writer, "  durable edit: %s (%s; proof: %s)\n", action.Path, action.Purpose, action.RequiredProof)
 				case "review_postcondition":
 					_, _ = fmt.Fprintf(writer, "  development review: %s\n", action.JSONPointer)
+				case "review_unsupported":
+					_, _ = fmt.Fprintf(writer, "  development review: %s (%s)\n", action.JSONPointer, action.Purpose)
+				case "merge_edit_conflict":
+					_, _ = fmt.Fprintf(writer, "  durable merge conflict: %s (%s); then %s\n", action.Path, action.Resolution, renderArgv(action.Argv))
 				case "workspace_fast_forward":
 					_, _ = fmt.Fprintf(writer, "  development fast-forward: %s (%d statement(s); %s)\n", renderArgv(action.Argv), action.StatementCount, action.Reason)
 				}
@@ -1623,7 +1794,7 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 				return err
 			}
 		}
-		for _, finding := range durable.Findings {
+		for _, finding := range envelope.Durable.Findings {
 			_, _ = fmt.Fprintf(writer, "finding %s: %s\n", finding.Code, finding.Message)
 		}
 		if len(development.Postconditions) > 0 {
@@ -1684,35 +1855,36 @@ func workflowPlanStatus(durable string, development devflow.Report) string {
 	default:
 		return "blocked"
 	}
-	if development.Status == protocol.Status("not_available") {
-		return "ready"
-	}
-	if development.Status == protocol.NeedsInput {
-		return "needs_action"
-	}
-	if development.Status == protocol.Unsupported {
-		return "blocked"
-	}
 	if failedDevelopmentPostconditions(development.Postconditions) {
 		return "needs_action"
 	}
-	return "ready"
+	switch development.Status {
+	case protocol.Status("not_available"), protocol.Planned, protocol.Unsupported:
+		return "ready"
+	case protocol.NeedsInput, protocol.NeedsSQLEdits:
+		return "needs_action"
+	default:
+		return "blocked"
+	}
 }
 
 func workflowPlanExitCode(durable string, development devflow.Report) int {
 	switch durable {
-	case "blocked":
+	case "stale", "blocked":
 		return 4
 	case string(protocol.Unsupported):
 		return 3
 	case string(protocol.NeedsInput), string(protocol.NeedsSQLEdits):
 		return 2
 	case string(protocol.Planned), "no_changes", "absorbed":
+		if failedDevelopmentPostconditions(development.Postconditions) {
+			return 2
+		}
 		if development.Status == protocol.Status("not_available") {
 			return 0
 		}
-		if failedDevelopmentPostconditions(development.Postconditions) {
-			return 2
+		if development.Status == protocol.Unsupported {
+			return 0
 		}
 		return resultExitCode(development.Status)
 	default:
@@ -1919,7 +2091,7 @@ func runConfig(arguments []string) int {
 		Name                 string   `json:"name"`
 		Provenance           string   `json:"provenance"`
 		Fingerprint          string   `json:"fingerprint"`
-		DevPostgresMajor     int      `json:"dev_postgres_major"`
+		DevPostgresMajor     int      `json:"dev_postgres_major,omitempty"`
 		ScratchPostgresMajor int      `json:"scratch_postgres_major"`
 		HistoryPostgresMajor int      `json:"history_postgres_major,omitempty"`
 		Ignored              []string `json:"ignored,omitempty"`
@@ -1929,8 +2101,11 @@ func runConfig(arguments []string) int {
 	root := filepath.Dir(configPath)
 	for _, targetName := range targets {
 		target := config.Targets[targetName]
-		devURL := os.Getenv(target.DevDatabaseEnv)
-		if devURL == "" {
+		devURL := ""
+		if target.DevDatabaseEnv != "" {
+			devURL = os.Getenv(target.DevDatabaseEnv)
+		}
+		if target.DevDatabaseEnv != "" && devURL == "" {
 			return writeError("source_error", fmt.Errorf("target %s requires environment variable %s", targetName, target.DevDatabaseEnv))
 		}
 		adminEnv := target.ScratchEnv()
@@ -1948,7 +2123,7 @@ func runConfig(arguments []string) int {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
 		}
 		var ignored []string
-		if len(selectors) > 0 {
+		if len(selectors) > 0 && devURL != "" {
 			development, loadErr := source.LoadGraphForComparison(ctx, source.Parse(devURL), "", selectors)
 			if loadErr != nil {
 				return writeError("source_error", fmt.Errorf("target %s development catalog: %w", targetName, loadErr))
@@ -1957,6 +2132,11 @@ func runConfig(arguments []string) int {
 				return writeError("invalid_ignore", fmt.Errorf("target %s: %w", targetName, validateErr))
 			}
 			ignored = sortedUniqueStrings(append(append([]string(nil), graph.Ignored()...), development.Ignored()...))
+		} else if len(selectors) > 0 {
+			if validateErr := source.ValidateIgnoreSelectors(selectors, graph, graph); validateErr != nil {
+				return writeError("invalid_ignore", fmt.Errorf("target %s: %w", targetName, validateErr))
+			}
+			ignored = sortedUniqueStrings(graph.Ignored())
 		}
 		fingerprint, err := graph.Fingerprint()
 		if err != nil {
@@ -1966,9 +2146,12 @@ func runConfig(arguments []string) int {
 		if err != nil {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
 		}
-		devMajor, err := source.PostgresMajor(ctx, devURL)
-		if err != nil {
-			return writeError("source_error", fmt.Errorf("target %s development database: %w", targetName, err))
+		devMajor := 0
+		if devURL != "" {
+			devMajor, err = source.PostgresMajor(ctx, devURL)
+			if err != nil {
+				return writeError("source_error", fmt.Errorf("target %s development database: %w", targetName, err))
+			}
 		}
 		chain, err := history.Load(root, config.BundleRoot, targetName)
 		if err != nil {
@@ -1985,8 +2168,11 @@ func runConfig(arguments []string) int {
 			}
 			historyMajor = recorded
 		}
-		if historyMajor != 0 && (historyMajor != scratchMajor || historyMajor != devMajor) {
-			return writeError("incompatible_postgres_major", fmt.Errorf("target %s history requires PostgreSQL %d; development is %d and scratch is %d", targetName, historyMajor, devMajor, scratchMajor))
+		if historyMajor != 0 && historyMajor != scratchMajor {
+			return writeError("incompatible_postgres_major", fmt.Errorf("target %s history requires PostgreSQL %d; scratch is %d", targetName, historyMajor, scratchMajor))
+		}
+		if historyMajor != 0 && devMajor != 0 && historyMajor != devMajor {
+			return writeError("incompatible_postgres_major", fmt.Errorf("target %s history requires PostgreSQL %d; development is %d", targetName, historyMajor, devMajor))
 		}
 		checked = append(checked, checkedTarget{
 			Name: targetName, Provenance: compiled.Provenance, Fingerprint: fingerprint,
@@ -2122,11 +2308,15 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 	}
 	if report.Outcome == string(protocol.NeedsSQLEdits) {
 		return json.NewEncoder(writer).Encode(struct {
-			Status     string   `json:"status"`
-			NextAction string   `json:"next_action"`
-			Path       string   `json:"path"`
-			Edit       []string `json:"edit"`
-		}{Status: string(protocol.NeedsSQLEdits), NextAction: "edit_files_then_verify", Path: report.Path, Edit: report.EditFiles})
+			Status          string   `json:"status"`
+			NextAction      string   `json:"next_action"`
+			Path            string   `json:"path"`
+			Edit            []string `json:"edit"`
+			WrittenReceipts []string `json:"written_receipts"`
+		}{
+			Status: string(protocol.NeedsSQLEdits), NextAction: "edit_files_then_verify", Path: report.Path,
+			Edit: report.EditFiles, WrittenReceipts: report.WrittenReceipts,
+		})
 	}
 	return json.NewEncoder(writer).Encode(report)
 }

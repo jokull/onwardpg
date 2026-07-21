@@ -184,13 +184,29 @@ backfilled:
 Contract first asserts that both values agree. Only then does it remove the
 bridge and perform the native rename. Defaults, generated values, partitions,
 existing trigger ordering, RLS, and other shapes that make this bridge
-ambiguous remain explicit refusals or editable handoffs.
+ambiguous remain explicit refusals or editable handoffs. When the rename also
+changes a dependent view in a way onwardpg cannot prove automatically, the
+generated column bridge stays intact and the planner adds three bounded edit
+pockets: install a legacy-and-new overlap view in expand, remove that overlap
+before the physical cutover in contract, and recreate the exact desired
+dependency closure afterward. The planner names the owned views, materialized
+views, and indexes and will not emit an illegal `CREATE OR REPLACE VIEW` output
+rename.
 
 ## Example: change a type without guessing
 
 Changing `age text` to `age integer` does not tell onwardpg what an empty,
 malformed, or product-specific value means. It identifies the dependent views,
 materialized views, and indexes, then asks for reviewed expand/contract SQL.
+For a simultaneous rename and type change such as `age_text text` to
+`age integer`, provide the explicit rename hint first; onwardpg deliberately
+does not suggest cross-type identity from names alone. Once confirmed, the
+transition owns both endpoint columns and its current and desired dependency
+closures. Exactly two edit pockets remain: expand must create the new physical
+column, conversion in both directions, conflict behavior, and initial
+backfill; contract must catch up, assert the product rules, remove the old
+interface, and recreate the desired closure. No adjacent drop/create or view
+replacement escapes that handoff.
 For `manual_sql`, the actual generated edit pockets say:
 
 ~~~sql

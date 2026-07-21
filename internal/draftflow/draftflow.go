@@ -590,7 +590,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if selected == nil {
 		report.CreatedBundle = true
 	}
-	if report.Outcome == string(protocol.NeedsInput) {
+	if report.Outcome == string(protocol.NeedsInput) || report.Outcome == string(protocol.NeedsSQLEdits) {
 		report.WrittenReceipts = bundle.SortedFiles(artifact.Files)
 	}
 	return report, nil
@@ -842,10 +842,14 @@ func buildPlan(current, desired *pgschema.Snapshot, input Input, selected *histo
 		}
 		return plan, nil, nil, questions, receiptHints(previousHints, questions, nil, current, desired), nil
 	}
+	plannerOptions := input.PlannerOptions
+	if _, err := semantichint.ApplyIdentityHints(current, desired, previousHints, &plannerOptions); err != nil {
+		return protocol.Result{}, nil, nil, nil, nil, err
+	}
 
 	data, hasAnswers := selected.Artifact.Files["answers.json"]
 	if !hasAnswers {
-		plan, err := graphplan.Build(current, desired, protocol.Answers{}, input.PlannerOptions)
+		plan, err := graphplan.Build(current, desired, protocol.Answers{}, plannerOptions)
 		if err != nil {
 			return protocol.Result{}, nil, nil, nil, nil, err
 		}
@@ -859,7 +863,7 @@ func buildPlan(current, desired *pgschema.Snapshot, input Input, selected *histo
 	if err != nil {
 		return protocol.Result{}, nil, nil, nil, nil, err
 	}
-	plan, rebind, receipt, questions, err := buildWithReboundAnswers(current, desired, previous, previousQuestions, input.PlannerOptions)
+	plan, rebind, receipt, questions, err := buildWithReboundAnswers(current, desired, previous, previousQuestions, plannerOptions)
 	if err != nil {
 		return protocol.Result{}, nil, nil, nil, nil, err
 	}

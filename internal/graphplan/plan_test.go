@@ -1971,8 +1971,8 @@ func TestBuildPlansFingerprintBoundViewRenameWithDependentRewrite(t *testing.T) 
 	current, desired := pgschema.New(), pgschema.New()
 	oldView := pgschema.View{Schema: "app", Name: "orders_view", Definition: "SELECT 1"}
 	newView := pgschema.View{Schema: "app", Name: "reporting_orders", Definition: "SELECT 1"}
-	oldDependent := pgschema.View{Schema: "app", Name: "dashboard", Definition: "SELECT * FROM orders_view"}
-	newDependent := pgschema.View{Schema: "app", Name: "dashboard", Definition: "SELECT * FROM reporting_orders"}
+	oldDependent := pgschema.View{Schema: "app", Name: "dashboard", Definition: "SELECT * FROM orders_view", OutputColumns: []pgschema.ViewColumn{testViewColumn("one", "int4")}}
+	newDependent := pgschema.View{Schema: "app", Name: "dashboard", Definition: "SELECT * FROM reporting_orders", OutputColumns: []pgschema.ViewColumn{testViewColumn("one", "int4")}}
 	for _, object := range []pgschema.Object{oldView, oldDependent} {
 		if err := current.Add(object); err != nil {
 			t.Fatal(err)
@@ -2957,6 +2957,292 @@ func TestBuildRequiresFingerprintBoundColumnRenameAnswer(t *testing.T) {
 	if split.Status != protocol.Planned || len(split.Statements) != 0 || len(split.Guidance) != 1 || split.Guidance[0].Kind != "split_plan" {
 		t.Fatalf("split rename plan = %#v", split)
 	}
+}
+
+func TestExplicitCrossTypeColumnRenameOwnsDependentClosure(t *testing.T) {
+	current, desired, before, after := crossTypeColumnRenameSnapshots(t, "age_text")
+	hint := protocol.Hint{
+		Kind: "rename", Object: "column",
+		From: []string{"app", "people", "age_text"}, To: []string{"app", "people", "age"},
+	}
+	options := Options{IdentityHints: []protocol.Hint{hint}}
+
+	withoutHint, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, question := range withoutHint.Questions {
+		if question.Kind == "rename_column" {
+			t.Fatalf("cross-type identity was suggested without an explicit hint: %#v", withoutHint)
+		}
+	}
+	if len(withoutHint.Analysis) != 1 || withoutHint.Analysis[0].Kind != "cross_type_column_identity" ||
+		!strings.Contains(withoutHint.Analysis[0].Reason, `--hint '{"kind":"rename","object":"column"`) {
+		t.Fatalf("cross-type destructive path lacks proactive identity guidance: %#v", withoutHint.Analysis)
+	}
+
+	renamePending, err := Build(current, desired, protocol.Answers{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamePending.Status != protocol.NeedsInput || len(renamePending.Questions) != 1 || renamePending.Questions[0].Kind != "rename_column" {
+		t.Fatalf("explicit cross-type identity did not become one rename decision: %#v", renamePending)
+	}
+	if len(renamePending.Analysis) != 0 {
+		t.Fatalf("accepted cross-type identity retained stale suggestion: %#v", renamePending.Analysis)
+	}
+	renameQuestion := renamePending.Questions[0]
+	if !containsString(renameQuestion.Choices, after.ObjectID().String()) || renameQuestion.ScopeFingerprint == "" {
+		t.Fatalf("cross-type rename choice is not fingerprint-bound: %#v", renameQuestion)
+	}
+	answers := protocol.Answers{
+		CurrentFingerprint: renamePending.CurrentFingerprint, DesiredFingerprint: renamePending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: renameQuestion.Kind, Key: renameQuestion.Key, Value: after.ObjectID().String(), QuestionFingerprint: renameQuestion.ScopeFingerprint}},
+	}
+	typePending, err := Build(current, desired, answers, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typePending.Status != protocol.NeedsInput || len(typePending.Questions) != 1 || typePending.Questions[0].Kind != "type_change" {
+		t.Fatalf("cross-type rename did not ask for conversion ownership: %#v", typePending)
+	}
+	typeQuestion := typePending.Questions[0]
+	if !reflect.DeepEqual(typeQuestion.Choices, []string{"manual_sql", "split_plan"}) || !containsString(typeQuestion.ScopeObjects, after.ObjectID().String()) {
+		t.Fatalf("cross-type conversion decision = %#v", typeQuestion)
+	}
+	answers.Answers = append(answers.Answers, protocol.Answer{
+		Kind: typeQuestion.Kind, Key: typeQuestion.Key, Value: "manual_sql", QuestionFingerprint: typeQuestion.ScopeFingerprint,
+	})
+	planned, err := Build(current, desired, answers, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.NeedsSQLEdits || len(planned.Statements) != 2 {
+		t.Fatalf("cross-type transition should be exactly two owned edit pockets: %#v", planned)
+	}
+	joined := joinSQL(planned)
+	for _, fragment := range []string{"age_text", "integer", "forward conversion", "reverse conversion", "view:app:people_age", "index:app:people:people_age_idx", "Exact desired view definitions", "SELECT age FROM app.people"} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("cross-type transition missing %q:\n%s", fragment, joined)
+		}
+	}
+	for _, forbidden := range []string{"CREATE OR REPLACE VIEW", `DROP COLUMN "age_text"`, `ADD COLUMN "age" integer`} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("dependent or endpoint DDL escaped the owned transition (%q):\n%s", forbidden, joined)
+		}
+	}
+	transitionID := before.ObjectID().String() + "->" + after.ObjectID().String()
+	for _, statement := range planned.Statements {
+		if statement.TransitionID != transitionID {
+			t.Fatalf("statement is not bound to transition %q: %#v", transitionID, statement)
+		}
+	}
+
+	splitAnswers := answers
+	splitAnswers.Answers = append([]protocol.Answer(nil), answers.Answers...)
+	splitAnswers.Answers[len(splitAnswers.Answers)-1].Value = "split_plan"
+	split, err := Build(current, desired, splitAnswers, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if split.Status != protocol.Planned || len(split.Statements) != 0 || len(split.Guidance) != 1 || split.Guidance[0].Kind != "split_plan" {
+		t.Fatalf("cross-type split plan regressed: %#v", split)
+	}
+}
+
+func TestColumnTypeTransitionOwnsMaterializedViewDecision(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "facts"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "value", Position: 1, Type: "integer"}
+	after := before
+	after.Type = "bigint"
+	currentView := pgschema.View{
+		Schema: "app", Name: "fact_values", Materialized: true, Definition: "SELECT value FROM app.facts", Populated: true,
+		OutputColumns: []pgschema.ViewColumn{testViewColumn("value", "int4")},
+	}
+	desiredView := currentView
+	desiredView.OutputColumns = []pgschema.ViewColumn{testViewColumn("value", "int8")}
+	for _, item := range []struct {
+		snapshot *pgschema.Snapshot
+		objects  []pgschema.Object
+		column   pgschema.Column
+		view     pgschema.View
+	}{
+		{current, []pgschema.Object{pgschema.Schema{Name: "app"}, table, before, currentView}, before, currentView},
+		{desired, []pgschema.Object{pgschema.Schema{Name: "app"}, table, after, desiredView}, after, desiredView},
+	} {
+		for _, object := range item.objects {
+			if err := item.snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, edge := range [][2]pgschema.ID{{table.ObjectID(), (pgschema.Schema{Name: "app"}).ObjectID()}, {item.column.ObjectID(), table.ObjectID()}, {item.view.ObjectID(), item.column.ObjectID()}} {
+			if err := item.snapshot.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
+		t.Fatalf("column-owned materialized-view change asked adjacent decisions: %#v", pending)
+	}
+}
+
+func TestCrossTypeColumnTransitionFingerprintRebindsOnlyForSameClosure(t *testing.T) {
+	current, desired, _, _ := crossTypeColumnRenameSnapshots(t, "age_text")
+	hint := protocol.Hint{Kind: "rename", Object: "column", From: []string{"app", "people", "age_text"}, To: []string{"app", "people", "age"}}
+	oldQuestion, oldResult := crossTypeConversionQuestion(t, current, desired, hint)
+	previous := protocol.Answers{
+		CurrentFingerprint: oldResult.CurrentFingerprint, DesiredFingerprint: oldResult.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: oldQuestion.Kind, Key: oldQuestion.Key, Value: "manual_sql", QuestionFingerprint: oldQuestion.ScopeFingerprint}},
+	}
+
+	unrelatedCurrent, unrelatedDesired, _, _ := crossTypeColumnRenameSnapshots(t, "age_text")
+	unrelated := pgschema.Table{Schema: "app", Name: "audit_log"}
+	for _, snapshot := range []*pgschema.Snapshot{unrelatedCurrent, unrelatedDesired} {
+		if err := snapshot.Add(unrelated); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newQuestion, newResult := crossTypeConversionQuestion(t, unrelatedCurrent, unrelatedDesired, hint)
+	rebound, err := protocol.RebindAnswers(previous, []protocol.Question{oldQuestion}, []protocol.Question{newQuestion}, newResult.CurrentFingerprint, newResult.DesiredFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rebound.Carried, []string{"type_change:" + oldQuestion.Key}) || len(rebound.Invalidated) != 0 {
+		t.Fatalf("unrelated rebase did not retain conversion ownership: %#v", rebound)
+	}
+
+	changedCurrent, changedDesired, _, _ := crossTypeColumnRenameSnapshots(t, "age_text", `SELECT age, age + 1 AS next_age FROM app.people`)
+	changedQuestion, changedResult := crossTypeConversionQuestion(t, changedCurrent, changedDesired, hint)
+	invalidated, err := protocol.RebindAnswers(previous, []protocol.Question{oldQuestion}, []protocol.Question{changedQuestion}, changedResult.CurrentFingerprint, changedResult.DesiredFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invalidated.Carried) != 0 || len(invalidated.Invalidated) != 1 || invalidated.Invalidated[0].Reason != "question_scope_changed" {
+		t.Fatalf("dependent change retained stale conversion ownership: %#v", invalidated)
+	}
+}
+
+func TestColumnDecisionScopeIgnoresUnrelatedPhysicalPositionShift(t *testing.T) {
+	current := pgschema.New()
+	desiredBefore := pgschema.New()
+	desiredAfter := pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	old := pgschema.Column{Table: table.ObjectID(), Name: "display_name", Position: 2, Type: "text", NotNull: true}
+	full := pgschema.Column{Table: table.ObjectID(), Name: "full_name", Position: 2, Type: "text", NotNull: true}
+	statusBefore := pgschema.Column{Table: table.ObjectID(), Name: "account_status", Position: 3, Type: "text", NotNull: true}
+	statusAfter := statusBefore
+	statusAfter.Position = 4
+	createdAt := pgschema.Column{Table: table.ObjectID(), Name: "created_at", Position: 3, Type: "timestamp with time zone"}
+	if err := current.Add(table); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Add(old); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		snapshot *pgschema.Snapshot
+		columns  []pgschema.Column
+	}{
+		{desiredBefore, []pgschema.Column{full, statusBefore}},
+		{desiredAfter, []pgschema.Column{full, createdAt, statusAfter}},
+	} {
+		if err := item.snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		for _, column := range item.columns {
+			if err := item.snapshot.Add(column); err != nil {
+				t.Fatal(err)
+			}
+			if err := item.snapshot.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := current.AddDependency(old.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	question := protocol.Question{
+		Kind: "rename_column", Key: old.ObjectID().String(),
+		Choices: []string{full.ObjectID().String(), statusBefore.ObjectID().String(), "create"},
+	}
+	before := questionScopeFingerprint(question, current, desiredBefore)
+	after := questionScopeFingerprint(question, current, desiredAfter)
+	if before == "" || before != after {
+		t.Fatalf("unrelated additive column shifted decision scope: before=%s after=%s", before, after)
+	}
+}
+
+func crossTypeConversionQuestion(t *testing.T, current, desired *pgschema.Snapshot, hint protocol.Hint) (protocol.Question, protocol.Result) {
+	t.Helper()
+	options := Options{IdentityHints: []protocol.Hint{hint}}
+	pending, err := Build(current, desired, protocol.Answers{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rename := pending.Questions[0]
+	answers := protocol.Answers{
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: rename.Kind, Key: rename.Key, Value: rename.Choices[0], QuestionFingerprint: rename.ScopeFingerprint}},
+	}
+	pending, err = Build(current, desired, answers, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending.Questions) != 1 || pending.Questions[0].Kind != "type_change" {
+		t.Fatalf("conversion question = %#v", pending)
+	}
+	return pending.Questions[0], pending
+}
+
+func crossTypeColumnRenameSnapshots(t *testing.T, oldName string, desiredViewDefinition ...string) (*pgschema.Snapshot, *pgschema.Snapshot, pgschema.Column, pgschema.Column) {
+	t.Helper()
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "app"}
+	table := pgschema.Table{Schema: "app", Name: "people"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: oldName, Position: 1, Type: "text"}
+	after := pgschema.Column{Table: table.ObjectID(), Name: "age", Position: 1, Type: "integer"}
+	beforeView := pgschema.View{Schema: "app", Name: "people_age", Definition: `SELECT age_text FROM app.people`}
+	afterDefinition := `SELECT age FROM app.people`
+	if len(desiredViewDefinition) > 0 {
+		afterDefinition = desiredViewDefinition[0]
+	}
+	afterView := pgschema.View{Schema: "app", Name: "people_age", Definition: afterDefinition}
+	beforeIndex := pgschema.Index{Table: table.ObjectID(), Name: "people_age_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: oldName}}}
+	afterIndex := pgschema.Index{Table: table.ObjectID(), Name: "people_age_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "age"}}}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		for _, object := range []pgschema.Object{schema, table} {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, object := range []pgschema.Object{before, beforeView, beforeIndex} {
+		if err := current.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, object := range []pgschema.Object{after, afterView, afterIndex} {
+		if err := desired.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{table.ObjectID(), schema.ObjectID()}, {before.ObjectID(), table.ObjectID()}, {beforeView.ObjectID(), before.ObjectID()}, {beforeIndex.ObjectID(), before.ObjectID()}} {
+		if err := current.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]pgschema.ID{{table.ObjectID(), schema.ObjectID()}, {after.ObjectID(), table.ObjectID()}, {afterView.ObjectID(), after.ObjectID()}, {afterIndex.ObjectID(), after.ObjectID()}} {
+		if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return current, desired, before, after
 }
 
 func TestBuildDevelopmentColumnRenameIgnoresPositionAndRendersDirectDDL(t *testing.T) {
@@ -4094,7 +4380,7 @@ func TestAutomaticSimpleViewColumnRenameDefinition(t *testing.T) {
 	}
 }
 
-func TestColumnRenameRejectsUnprovenDependentViewRewrite(t *testing.T) {
+func TestColumnRenameHandsOffUnprovenDependentViewClosure(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	table := pgschema.Table{Schema: "app", Name: "orders"}
 	oldColumn := pgschema.Column{Table: table.ObjectID(), Name: "old_name", Position: 1, Type: "text"}
@@ -4127,13 +4413,33 @@ func TestColumnRenameRejectsUnprovenDependentViewRewrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_column", Key: oldColumn.ObjectID().String(), Value: newColumn.ObjectID().String()}}}
+	strategyPending, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategyPending.Status != protocol.NeedsInput || len(strategyPending.Questions) != 1 || strategyPending.Questions[0].Kind != "rename_backfill_strategy" {
+		t.Fatalf("expected rename backfill strategy before view handoff, got %#v", strategyPending)
+	}
+	answers.Answers = append(answers.Answers, protocol.Answer{Kind: "rename_backfill_strategy", Key: oldColumn.ObjectID().String(), Value: "single_transaction"})
 	result, err := Build(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "column_rename_dependent_view:" + before.ObjectID().String()
-	if result.Status != protocol.Unsupported || !containsString(result.Unsupported, want) {
-		t.Fatalf("expected structured unproven-view rejection, got %#v", result)
+	joined := joinSQL(result)
+	if result.Status != protocol.NeedsSQLEdits || strings.Count(joined, "ONWARDPG TODO") != 3 || !strings.Contains(joined, before.ObjectID().String()) {
+		t.Fatalf("expected bounded dependent-view edit handoff, got %#v", result)
+	}
+	if !strings.Contains(joined, "Exact desired view definitions") || !strings.Contains(joined, "SELECT new_name || 'x' FROM app.orders") {
+		t.Fatalf("dependent-view handoff omitted the exact desired definition: %s", joined)
+	}
+	if strings.Contains(joined, `CREATE OR REPLACE VIEW "`) {
+		t.Fatalf("unproven view rewrite escaped as CREATE OR REPLACE: %s", joined)
+	}
+	dropPocket := strings.Index(joined, "removes the overlap views")
+	columnCutover := strings.Index(joined, `DROP COLUMN "new_name"`)
+	recreatePocket := strings.Index(joined, "recreates the exact desired dependency closure")
+	if dropPocket < 0 || columnCutover < 0 || recreatePocket < 0 || !(dropPocket < columnCutover && columnCutover < recreatePocket) {
+		t.Fatalf("dependent cutover order is unsafe: %s", joined)
 	}
 }
 

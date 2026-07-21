@@ -15,7 +15,9 @@ DO $onwardpg$ BEGIN IF EXISTS (SELECT 1 FROM "app"."accounts" WHERE "full_name" 
 DROP TRIGGER "onwardpg_sync_column_4cff936be08db67c" ON "app"."accounts";
 -- Review: safety=review; hazards=compatibility_removal; requires_gates=data:53fe35210481b9df,writers:legacy.
 DROP FUNCTION "app"."onwardpg_sync_column_4cff936be08db67c"();
+-- onwardpg rename transition: equality was asserted; remove the synchronized shadow before promoting the original column.
 -- Review: safety=dangerous; hazards=compatibility_removal,data_loss,access_exclusive_lock; requires_gates=data:53fe35210481b9df,writers:legacy.
 ALTER TABLE "app"."accounts" DROP COLUMN "full_name";
+-- onwardpg rename transition: the original column keeps its storage and dependencies and now takes the final name.
 -- Review: safety=review; hazards=compatibility_removal,access_exclusive_lock; requires_gates=data:53fe35210481b9df,writers:legacy.
 ALTER TABLE "app"."accounts" RENAME COLUMN "display_name" TO "full_name";

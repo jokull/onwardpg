@@ -7,8 +7,10 @@ package devflow
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jokull/onwardpg/internal/contractcheck"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/semantichint"
@@ -79,9 +81,15 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("compile desired schema: %w", err)
 	}
-	current, err := source.LoadGraphForComparison(ctx, source.Parse(input.DevURL), "", input.Ignores)
+	current, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, input.DevURL, input.Ignores, 30*time.Second)
 	if err != nil {
 		return Report{}, fmt.Errorf("inspect development catalog: %w", err)
+	}
+	if observerFinding != nil {
+		return Report{Status: protocol.Unsupported, Result: protocol.Result{
+			Status:      protocol.Unsupported,
+			Unsupported: []string{"development_observer_" + observerFinding.Code + ":" + observerFinding.Message},
+		}}, nil
 	}
 	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
 	if err != nil {
@@ -100,6 +108,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	report := Report{
 		Status: resolution.Result.Status, Result: resolution.Result,
 		AppliedHints: resolution.Hints, DeferredHints: resolution.Deferred,
+	}
+	for _, projected := range observer.ProjectedAccess {
+		report.Result.Compatibility = append(report.Result.Compatibility, "observer_access_projected:"+projected)
 	}
 	if report.Status == protocol.NeedsInput {
 		report.NextAction = "rerun_same_command_with_hints"

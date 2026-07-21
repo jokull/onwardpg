@@ -202,3 +202,26 @@ that clone convergence cannot prove.
 ```
 
 The result is not unattended migration generation. It is a disciplined collaboration between application understanding, PostgreSQL evidence, and explicit human review.
+
+## When the field changes name and type
+
+Treat `age_text text` to `age integer` as one product transition. Give `plan`
+the explicit rename hint—onwardpg intentionally will not infer cross-type
+identity—then choose the printed `type_change: manual_sql` path. The two edit
+pockets list every current and desired view, materialized view, and index in
+scope.
+
+The expand edit must establish both columns, conversion in both directions,
+conflict behavior, retry/idempotency behavior, and initial backfill while
+legacy SQL remains live. The contract edit must catch up, assert conversion
+coverage, remove compatibility objects and the legacy column, recreate the
+desired closure, and establish materialized-view freshness. Probe or synthesize
+NULL, blank, malformed, signed, decimal, and out-of-range values. Do not reduce
+the rule to a digit regex or an unchecked cast.
+
+For a same-type rename whose view output also changes, do less: leave the
+generated column bridge alone and fill the three bounded view pockets in their
+named order—expand overlap, contract removal, final recreation. In either path,
+run legacy and new application queries against the post-expand database before
+accepting the work. `verify` proves the edited bundle converges; the release
+owner still supplies real drain and capacity evidence.

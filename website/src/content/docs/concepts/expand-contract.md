@@ -68,8 +68,8 @@ application-owned cleanup pocket and an exact generated assertion:
 -- Batch batch-contract-002: transactional.
 -- Review: safety=review; hazards=contract_data_assertion,table_scan_possible; requires_gates=writers:legacy.
 -- Suggested session timeouts: statement_timeout=20m, lock_timeout=3s.
-DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:1c16b884027de910'; END IF; END $onwardpg$;
--- Review: safety=review; hazards=table_scan,access_exclusive_lock,compatibility_removal; requires_gates=data:1c16b884027de910,writers:legacy.
+DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:c6703912502bd497'; END IF; END $onwardpg$;
+-- Review: safety=review; hazards=table_scan,access_exclusive_lock,compatibility_removal; requires_gates=data:c6703912502bd497,writers:legacy.
 ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
 ```
 
@@ -109,3 +109,13 @@ evidence. The deployment system still owns execution and approval. See
 The new application version must work immediately after expand and still work after contract. If removing the old shape requires another code release, keep the compatibility object and choose a split plan. The later feature owns its removal.
 
 Backfills are not a third deployment phase. They are explicit work scheduled where old and new contracts remain safe. Contract should never be used as a vague container for “do risky things later.”
+
+The same envelope can span dependencies. An eligible same-type column rename
+keeps its generated two-way bridge even when a dependent view needs human
+semantics. In that case onwardpg adds bounded pockets for an expand view that
+keeps the legacy output prefix, removal before the contract cutover, and exact
+desired recreation afterward. If name and type change together, the confirmed
+transition uses two broader pockets—one per phase—that own both columns and
+the full view, materialized-view, and index closure. The planner never invents
+the cast, conflict policy, or freshness rule, and it never emits an illegal
+`CREATE OR REPLACE VIEW` output rename alongside the handoff.

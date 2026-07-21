@@ -94,6 +94,24 @@ queried against a caller-owned development database, and it runs inside a
 PostgreSQL read-only transaction. Its result is narrow evidence about a
 historical data effect, never authorization to replay phase SQL or infer a
 repair.
+
+An editable transition is still dependency-bounded. A same-type rename with
+an unproved dependent-view change keeps the generated column bridge and adds
+three ordered pockets for the overlap view, pre-cutover removal, and exact
+desired recreation. A confirmed cross-name/type transition instead owns both
+endpoint columns and its whole current/desired dependency closure in exactly
+two pockets, one per phase. In both cases the pocket text names that closure,
+and verification rejects unresolved TODOs or a final catalog that does not
+converge. This is not permission to place unrelated migration work inside the
+pocket.
+
+Ordinary-view replacement has a separate structural guard: onwardpg emits
+`CREATE OR REPLACE VIEW` only when the existing output prefix retains the same
+names, order, and PostgreSQL type identities. It may append compatible outputs;
+it never uses replacement to rename an existing output column. Materialized
+views are not passed through that shortcut: their rebuild and freshness
+semantics remain explicit reviewed work.
+
 The read-only `verify --check` gate additionally recompiles current configured
 DDL, requires the selected bundle to be the chain head, and compares its desired
 fingerprint before clone execution. Self-consistency with a stale recorded

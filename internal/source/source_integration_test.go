@@ -961,6 +961,11 @@ func TestLoadGraphCapturesViewsAndTypedDependencies(t *testing.T) {
 	if !ok || view.Materialized || view.Definition == "" || view.Comment == nil || *view.Comment != "public order totals" || len(view.Options) != 1 || view.Options[0] != (pgschema.Option{Name: "security_barrier", Value: "true"}) {
 		t.Fatalf("view catalog semantics missing: %#v", object)
 	}
+	if len(view.OutputColumns) != 2 ||
+		view.OutputColumns[0].Name != "id" || view.OutputColumns[0].Type != "bigint" || view.OutputColumns[0].TypeSchema != "pg_catalog" || view.OutputColumns[0].TypeName != "int8" || view.OutputColumns[0].TypeKind != "b" ||
+		view.OutputColumns[1].Name != "amount" || view.OutputColumns[1].Type != "bigint" || view.OutputColumns[1].TypeSchema != "pg_catalog" || view.OutputColumns[1].TypeName != "int8" || view.OutputColumns[1].TypeKind != "b" {
+		t.Fatalf("view output signature missing: %#v", view.OutputColumns)
+	}
 	orders := (pgschema.Table{Schema: schemaName, Name: "orders"}).ObjectID()
 	amount := (pgschema.Column{Table: orders, Name: "amount"}).ObjectID()
 	if !containsID(snapshot.Dependencies(viewID), amount) {
@@ -970,6 +975,14 @@ func TestLoadGraphCapturesViewsAndTypedDependencies(t *testing.T) {
 	state := (pgschema.Enum{Schema: schemaName, Name: "state"}).ObjectID()
 	if !containsID(snapshot.Dependencies(stateView), state) {
 		t.Fatalf("enum view dependencies = %#v, want enum %s", snapshot.Dependencies(stateView), state)
+	}
+	stateObject, exists := snapshot.Object(stateView)
+	if !exists {
+		t.Fatalf("enum view %s missing", stateView)
+	}
+	stateOutput := stateObject.(pgschema.View).OutputColumns
+	if len(stateOutput) != 1 || stateOutput[0].Name != "state" || stateOutput[0].TypeSchema != schemaName || stateOutput[0].TypeName != "state" || stateOutput[0].TypeKind != "e" {
+		t.Fatalf("enum view output identity = %#v", stateOutput)
 	}
 }
 

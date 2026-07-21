@@ -91,6 +91,15 @@ const introduction = documents.get(
   path.join(repositoryRoot, 'website/src/content/docs/start/introduction.mdx'),
 );
 const protocolDoc = documents.get(path.join(repositoryRoot, 'docs/protocol.md'));
+const compatibilityDoc = documents.get(path.join(repositoryRoot, 'docs/compatibility.md'));
+const runATest = await readFile(
+  path.join(repositoryRoot, 'internal/contractcheck/blind_gauntlet_run_a_integration_test.go'),
+  'utf8',
+);
+const runBTest = await readFile(
+  path.join(repositoryRoot, 'internal/graphplan/blind_gauntlet_b_integration_test.go'),
+  'utf8',
+);
 
 function markedFence(markdown, marker) {
   const markerText = `<!-- onwardpg-receipt: ${marker} -->`;
@@ -147,7 +156,7 @@ if (!hasSQLFence(comparison, requiredEnforcement)) {
   fail('comparison required-column enforcement differs from actual onwardpg output');
 }
 for (const fragment of [
-  'Reviewed 20 July 2026',
+  'Reviewed 21 July 2026',
   'APPLY EXPAND — before the pull request merges',
   'temporarily makes the database **more permissive than both the old and',
   'Why this almost never breaks locally',
@@ -210,6 +219,56 @@ for (const fragment of [
     fail(`introduction is missing its core product explanation: ${fragment}`);
   }
 }
+for (const fragment of [
+  'Advanced: one rollout, several compatibility problems',
+  'adds three dependency-scoped pockets',
+  'CREATE OR REPLACE VIEW app.account_directory AS',
+  "SET account_status = 'active'",
+  "SET delivery_tier = 'push'",
+  'same prepared statements afterward',
+  'Only after it closes and its\nbackend disappears',
+  'age_text text` to `age integer',
+  'exactly two edit pockets',
+]) {
+  if (!planCommand.includes(fragment)) {
+    fail(`plan-command advanced walkthrough is missing grounded evidence: ${fragment}`);
+  }
+}
+for (const fragment of [
+  'TestBlindGauntletRunADependentViewRenameOnPostgreSQL',
+  'legacy_account_insert',
+  'legacy_directory_select',
+  'CREATE OR REPLACE VIEW app.account_directory AS',
+  "UPDATE app.accounts SET account_status = 'active' WHERE account_status IS NULL;",
+  "UPDATE app.accounts SET delivery_tier = 'push' WHERE delivery_tier = 'email';",
+  'waitForBlindGauntletBackendDrain(t, ctx, deploy, legacyPID)',
+]) {
+  if (!runATest.includes(fragment)) {
+    fail(`run-A PostgreSQL receipt no longer proves documented behavior: ${fragment}`);
+  }
+}
+for (const fragment of [
+  'TestBlindGauntletCrossNameTypeTransitionKeepsLegacySQLAliveOnPostgreSQL',
+  'compound transition must produce exactly two editable SQL pockets',
+  'prepared legacy INSERT failed after expand',
+  'prepared legacy view query failed after overlap view replacement',
+  'materialized overlap freshness boundary',
+]) {
+  if (!runBTest.includes(fragment)) {
+    fail(`run-B PostgreSQL receipt no longer proves documented behavior: ${fragment}`);
+  }
+}
+for (const fragment of [
+  'Same-type column rename',
+  'Same-name column type change',
+  'Cross-name/type column transition',
+  'Ordinary view inside a column transition',
+  'Materialized view inside a column transition',
+]) {
+  if (!compatibilityDoc.includes(fragment)) {
+    fail(`compatibility matrix omits transition support class: ${fragment}`);
+  }
+}
 if (
   markedFence(protocolDoc, 'draft-needs-sql-edits') !== draftNeedsSQLEdits.trimEnd()
 ) {
@@ -228,7 +287,7 @@ function assertInOrder(body, fragments, label) {
 assertInOrder(planCommand, [
   expandStatement,
   '-- PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status',
-  'onwardpg contract gate failed: data:1c16b884027de910',
+  'onwardpg contract gate failed: data:c6703912502bd497',
   'ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;',
 ], 'plan-command easy/medium ladder');
 

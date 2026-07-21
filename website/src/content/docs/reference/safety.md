@@ -35,3 +35,15 @@ You remain responsible for:
 - dynamic SQL dependencies PostgreSQL itself does not catalog.
 
 Review generated files as deployment code. A green verification result is strong structural evidence, not a production safety oracle.
+
+Editable SQL is scoped, not free-form. A same-type rename with an unproved
+dependent view gets three ordered pockets around the generated bridge. A
+confirmed cross-name/type transition gets exactly two pockets that own both
+columns and the full current/desired dependency closure. Unresolved TODOs,
+escaped endpoint DDL, or a non-converged final catalog block verification.
+
+`CREATE OR REPLACE VIEW` is emitted only when existing output names, order,
+and PostgreSQL type identities remain stable; only compatible appended outputs
+may be added. Existing output renames and type changes must use the owning
+transition handoff. Materialized-view refresh, rebuild availability, and
+freshness remain explicit reviewer decisions.

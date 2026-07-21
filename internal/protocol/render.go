@@ -2,8 +2,14 @@ package protocol
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
+)
+
+var (
+	renameShadowDropPattern = regexp.MustCompile(`^ALTER TABLE (.+) DROP COLUMN ("(?:[^"]|"")+");$`)
+	renamePromotionPattern  = regexp.MustCompile(`^ALTER TABLE (.+) RENAME COLUMN ("(?:[^"]|"")+") TO ("(?:[^"]|"")+");$`)
 )
 
 // RenderSQL renders a reviewable, forward-only migration file. JSON remains
@@ -35,7 +41,10 @@ func RenderSQL(result Result, indent string) string {
 			lines = append(lines, "")
 		}
 		lines = append(lines, batchDirective(batch), batchComment(batch))
-		for _, statement := range batch.Statements {
+		for index, statement := range batch.Statements {
+			if comment := renameTransitionComment(batch.Statements, index); comment != "" {
+				lines = append(lines, comment)
+			}
 			if review := reviewComment(statement); review != "" {
 				lines = append(lines, review)
 			}
@@ -56,6 +65,34 @@ func RenderSQL(result Result, indent string) string {
 		}
 	}
 	return indentLines(lines, indent)
+}
+
+func renameTransitionComment(statements []Statement, index int) string {
+	if index+1 < len(statements) && isRenameShadowPromotion(statements[index], statements[index+1]) {
+		return "-- onwardpg rename transition: equality was asserted; remove the synchronized shadow before promoting the original column."
+	}
+	if index > 0 && isRenameShadowPromotion(statements[index-1], statements[index]) {
+		return "-- onwardpg rename transition: the original column keeps its storage and dependencies and now takes the final name."
+	}
+	return ""
+}
+
+func isRenameShadowPromotion(drop, rename Statement) bool {
+	if !hasHazard(drop.Hazards, "compatibility_removal") || !hasHazard(drop.Hazards, "data_loss") {
+		return false
+	}
+	dropParts := renameShadowDropPattern.FindStringSubmatch(drop.SQL)
+	renameParts := renamePromotionPattern.FindStringSubmatch(rename.SQL)
+	return len(dropParts) == 3 && len(renameParts) == 4 && dropParts[1] == renameParts[1] && dropParts[2] == renameParts[3]
+}
+
+func hasHazard(hazards []string, wanted string) bool {
+	for _, hazard := range hazards {
+		if hazard == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func reviewComment(statement Statement) string {

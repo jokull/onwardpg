@@ -27,6 +27,16 @@ replaces the same unexecuted logical bundle. It is therefore natural to run
 after a schema edit, after resolving an ambiguity, and after rebasing onto new
 accepted history.
 
+The same loop covers dependency-scoped changes. A same-type rename with an
+intentional dependent-view change retains onwardpg's generated two-way column
+bridge and adds three ordered SQL pockets for expand overlap, contract removal,
+and exact desired recreation. A confirmed cross-name/type transition uses two
+larger pockets, one per phase, that own both endpoint columns and the full
+current/desired view, materialized-view, and index closure. In either case,
+rerunning `plan` carries reviewed edits only while that exact transition scope
+still matches; a changed dependency closure invalidates the decision instead
+of replaying stale SQL.
+
 The durable migration starts at replayed accepted history (H), not at a
 developer database. Its destination is current exported CREATE-statement DDL
 (W). This provides the PR-level guarantee: accepted history plus the reviewed
@@ -74,6 +84,13 @@ mode, objects that exist in D but not W are preserved rather than proposed for
 drop. That makes branch switching and long-lived test data safe enough to be
 useful. The SQL is D → W, not the PR bundle; it does not prove that local state
 followed accepted migration order.
+
+The read-only inspection boundary treats the database owner's ambient identity
+and the dedicated observer's minimum `USAGE`/`SELECT` grants as an explained
+inspection overlay. Those facts do not become workspace drift. Grants to an
+application role, grant options, ownership transfers, RLS, and policy changes
+remain visible. Omit `dev_database_env` entirely when this optional D → W view
+is not useful; `scratch_database_env` still supplies disposable verification.
 
 A common feature-iteration case is different from a production rename. Suppose
 an unmerged plan added `quote_mode` and the developer applied it to D, then the

@@ -169,6 +169,35 @@ func hintReachable(current, desired *pgschema.Snapshot, target protocol.Hint, op
 func ApplyIdentityHints(current, desired *pgschema.Snapshot, hints []protocol.Hint, options *graphplan.Options) (map[int]bool, error) {
 	used := make(map[int]bool)
 	for index, hint := range hints {
+		if hint.Kind == "rename" && hint.Object == "column" {
+			from := pgschema.Column{Table: pgschema.Table{Schema: hint.From[0], Name: hint.From[1]}.ObjectID(), Name: hint.From[2]}.ObjectID()
+			to := pgschema.Column{Table: pgschema.Table{Schema: hint.To[0], Name: hint.To[1]}.ObjectID(), Name: hint.To[2]}.ObjectID()
+			fromObject, fromOK := current.Object(from)
+			toObject, toOK := desired.Object(to)
+			fromColumn, fromIsColumn := fromObject.(pgschema.Column)
+			toColumn, toIsColumn := toObject.(pgschema.Column)
+			if !fromOK || !fromIsColumn {
+				return nil, fmt.Errorf("column rename hint %d source %s is absent from the current schema", index+1, from)
+			}
+			if !toOK || !toIsColumn {
+				return nil, fmt.Errorf("column rename hint %d target %s is absent from the desired schema", index+1, to)
+			}
+			if fromColumn.Table != toColumn.Table {
+				// Cross-table movement is not column identity. Leave the hint for
+				// ordinary matching so it is rejected as unused rather than
+				// silently broadening rename candidacy.
+				continue
+			}
+			if fromColumn.Type == toColumn.Type {
+				// Same-type rename discovery already has a conservative structural
+				// candidate path. Do not change its hint consumption or question
+				// behavior merely because this pre-candidacy hook exists.
+				continue
+			}
+			options.IdentityHints = append(options.IdentityHints, hint)
+			used[index] = true
+			continue
+		}
 		if hint.Kind != "identity" {
 			continue
 		}

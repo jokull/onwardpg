@@ -185,3 +185,13 @@ The readiness report is operational feedback, not durable authority. Contract
 SQL repeats its data assertions after any cleanup, immediately before restoring
 enforcement. The deployment system still executes the receipted batches and
 owns release ordering, lock budgets, replica health, and approval.
+
+The same rule applies when one transition owns a rename bridge and dependent
+views. Expand can keep a prepared legacy view query alive while the new
+application writes through appended outputs. Contract is blocked until the
+legacy reader and writer cohorts have drained and every transition-specific
+data gate is true. Only then may reviewed SQL remove the overlap view, the
+generated bridge perform its physical cutover, and the final view or
+materialized-view closure be recreated. A materialized view also needs the
+reviewer-chosen freshness postcondition; catalog equality alone does not prove
+its stored rows are current.

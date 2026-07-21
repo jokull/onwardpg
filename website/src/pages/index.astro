@@ -153,13 +153,13 @@ const features = [
             <div class="terminal-bar"><span></span><span></span><span></span><small>add-booking-status / plan</small></div>
             <pre><code><span class="muted">$</span> onwardpg plan add-booking-status
 
-<span class="warn">&#123;"status":"needs_action","durable":&#123;"status":"needs_input","generated_plan":&#123;"questions":[&#123;"choices":["assert_only","manual_sql","split_plan"]&#125;]&#125;&#125;&#125;</span>
+<span class="warn">&#123;"status":"needs_action","durable":&#123;"status":"needs_input"&#125;,"next_actions":[&#123;"kind":"semantic_hint","choices":["assert_only","manual_sql","split_plan"]&#125;]&#125;</span>
 
 <span class="muted">$</span> onwardpg plan add-booking-status \
   --hint '&#123;"kind":"reconcile","object":"column","name":["app","bookings","status"],"strategy":"manual_sql"&#125;' \
   --hint '&#123;"kind":"manual_sql","action":"reconcile_contract_sql","object":"column","name":["app","bookings","status"]&#125;'
 
-<span class="warn">&#123;"status":"needs_action","durable":&#123;"status":"needs_sql_edits","edit_files":["phases/contract.sql"]&#125;&#125;</span>
+<span class="warn">&#123;"status":"needs_action","durable":&#123;"status":"needs_sql_edits","edits":[&#123;"path":"migrations/onward/app/add-booking-status/phases/contract.sql","phase":"contract"&#125;]&#125;&#125;</span>
 
 <span class="phase">EXPAND</span>
   ALTER TABLE "app"."bookings" ADD COLUMN "status" text;
@@ -169,7 +169,7 @@ const features = [
 <span class="phase">CONTRACT</span>
   -- PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status
   -- Verify: SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);
-  DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:1c16b884027de910'; END IF; END $onwardpg$;
+  DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:c6703912502bd497'; END IF; END $onwardpg$;
   ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
 
 </code></pre>

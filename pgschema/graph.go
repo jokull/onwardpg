@@ -406,7 +406,23 @@ type View struct {
 	// and security_invoker). Retaining it avoids treating a view whose access
 	// semantics changed as equal merely because its SELECT text is equal.
 	Options []Option
-	Comment *string
+	// OutputColumns records PostgreSQL's ordered relation signature. It is the
+	// authority for deciding whether CREATE OR REPLACE VIEW is legal: query text
+	// alone cannot prove that existing output names, order, and types remain
+	// stable. TypeSchema/TypeName/TypeKind retain domain and user-defined type
+	// identity even when format_type is affected by search_path visibility.
+	OutputColumns []ViewColumn `json:"output_columns,omitempty"`
+	Comment       *string
+}
+
+type ViewColumn struct {
+	Name       string
+	Type       string
+	TypeMod    int32
+	TypeSchema string
+	TypeName   string
+	TypeKind   string
+	Collation  string
 }
 
 func (o View) ObjectID() ID {

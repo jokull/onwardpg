@@ -51,7 +51,7 @@ ALTER TABLE "app"."bookings" ADD COLUMN "status" text;
 -- contract.sql
 -- PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status
 -- Verify: SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);
-DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:1c16b884027de910'; END IF; END $onwardpg$;
+DO $onwardpg$ BEGIN IF NOT COALESCE((SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL)), false) THEN RAISE EXCEPTION 'onwardpg contract gate failed: data:c6703912502bd497'; END IF; END $onwardpg$;
 ALTER TABLE "app"."bookings" ALTER COLUMN "status" SET NOT NULL;
 ```
 
@@ -89,6 +89,115 @@ and equality assertion before cleanup. For a large table, provide
 idempotency notes, and generated equality completion query. It is not rendered
 into a phase transaction. `contract check` reports that exact operation as
 `reconciliation_required` until the equality gate is true.
+
+### Advanced: one rollout, several compatibility problems
+
+Real features rarely change one isolated column. The PostgreSQL gauntlet keeps
+this older table and view live:
+
+```sql
+CREATE TABLE app.accounts (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  display_name text NOT NULL,
+  delivery_tier text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  region text,
+  CONSTRAINT accounts_delivery_tier_check
+    CHECK (delivery_tier IN ('email', 'slack'))
+);
+
+CREATE VIEW app.account_directory AS
+SELECT id, display_name, delivery_tier, region
+FROM app.accounts;
+```
+
+The feature renames `display_name` to `full_name`, adds
+`account_status text NOT NULL`, changes the accepted tiers to `slack | push`,
+and intentionally changes the view output. The requested destination is clear;
+the safe route needs four different kinds of reasoning.
+
+After the rename and backfill decisions, onwardpg generates the two-way column
+bridge. It adds `account_status` without `NOT NULL`, because the legacy writer
+still omits it, and removes the old CHECK in expand because neither the old nor
+new value set contains the other:
+
+```sql
+ALTER TABLE "app"."accounts" ADD COLUMN "full_name" text;
+ALTER TABLE "app"."accounts" ADD COLUMN "account_status" text;
+ALTER TABLE "app"."accounts"
+  DROP CONSTRAINT "accounts_delivery_tier_check";
+```
+
+The view change cannot be guessed from the final definition. The rename
+transition therefore adds three dependency-scoped pockets around its generated
+bridge:
+
+1. expand installs a view that preserves every existing output name and order,
+   then appends the outputs needed by new code;
+2. contract removes that overlap before the physical column cutover; and
+3. contract recreates the exact desired view afterward.
+
+In this workload, the reviewed expand pocket is:
+
+```sql
+CREATE OR REPLACE VIEW app.account_directory AS
+SELECT accounts.id,
+       accounts.display_name,
+       accounts.delivery_tier,
+       accounts.region,
+       accounts.full_name,
+       accounts.account_status
+FROM app.accounts AS accounts;
+```
+
+That replacement is legal because it retains the old output prefix and only
+appends columns. onwardpg will not use `CREATE OR REPLACE VIEW` to rename an
+existing output column; PostgreSQL rejects that shape too.
+
+The application meaning still comes from the feature. In the test, the
+developer supplies reviewed contract work declaring that historical accounts
+become `active` and retired `email` rows become `push`:
+
+```sql
+UPDATE app.accounts
+SET account_status = 'active'
+WHERE account_status IS NULL;
+
+UPDATE app.accounts
+SET delivery_tier = 'push'
+WHERE delivery_tier = 'email';
+```
+
+Those values are not inferred from the destination DDL. The corresponding
+manual-work answers also contain Boolean verification queries. onwardpg places
+the cleanup before its generated `NOT NULL` and CHECK gates, installs the new
+CHECK as `NOT VALID`, validates it after cleanup, removes the overlap view,
+performs the generated column cutover, and recreates the final view in
+dependency order.
+
+The integration workload prepares these legacy statements before expand and
+executes the same prepared statements afterward:
+
+```sql
+INSERT INTO app.accounts (display_name, delivery_tier, region)
+VALUES ($1, $2, $3);
+
+SELECT id, display_name, delivery_tier, region
+FROM app.account_directory
+WHERE id = $1;
+```
+
+It also runs new inserts through `full_name`, `account_status`, and `push`, and
+reads them through both view contracts. The legacy connection remains visible
+in `pg_stat_activity` until the simulated drain. Only after it closes and its
+backend disappears does the workload apply contract, prove there are no NULL
+statuses or retired tiers, and compare the final PostgreSQL catalog with the
+requested schema.
+
+That is the complete division of labor: onwardpg generates what follows from
+schema and dependency facts, creates exact edit boundaries where product
+meaning begins, and refuses contract until the operational drain boundary is
+real.
 
 ### Nightmare: change a type beneath views and indexes
 
@@ -133,6 +242,24 @@ The fourth rung is the payoff: onwardpg does not become less useful when an
 agent enters the loop. The agent supplies facts PostgreSQL cannot know; the
 planner keeps those facts inside a dependency-correct, evolving, verifiable
 migration.
+
+If the field changes name and type together—`age_text text` to `age integer`—
+the developer or agent must provide the explicit rename hint. onwardpg does
+not infer cross-type identity from similar names. After that hint and the
+`type_change: manual_sql` decision, it creates exactly two edit pockets. The
+expand pocket owns both physical columns, forward and reverse conversion,
+conflict handling, idempotency, and initial backfill. The contract pocket owns
+final catch-up and assertions, removal of the old interface, the desired view
+and materialized-view definitions, their indexes, and freshness. All current
+and desired dependency IDs are printed in the pocket; no independent column
+drop, add, or `CREATE OR REPLACE VIEW` is emitted beside it.
+
+This larger handoff is deliberate. A test conversion maps blank, malformed,
+and out-of-range legacy text to NULL while accepting signed integers in range;
+another product could reject or map those inputs differently. The reviewed SQL
+must exercise those cases, keep prepared legacy and new statements working
+after expand, and prove the materialized view's chosen freshness postcondition
+before contract can converge.
 
 ## First question: what is “the current schema”?
 
@@ -187,6 +314,12 @@ onwardpg plan --output sql | psql "$ONWARDPG_DEV_WRITE_URL"
 `ONWARDPG_DEV_WRITE_URL` is an optional developer-controlled credential for
 applying reviewed local SQL. onwardpg itself still applies nothing to D, P,
 staging, or production.
+
+The observer's minimum `USAGE`/`SELECT` access and the database owner's ambient
+identity are reported as inspection overlay, not workspace drift. Application
+grants, grant options, ownership transfers, RLS, and policies remain real
+differences. If D → W is not useful, omit `dev_database_env`; only the separate
+`scratch_database_env` is needed for disposable planning and verification.
 
 When D → W has safe statements, ordinary JSON output also adds a
 `workspace_fast_forward` next action containing the SQL and exact argv. After a
