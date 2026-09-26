@@ -1,4 +1,4 @@
-// Package contractcheck proves contract preconditions without providing any
+// Package contractcheck checks contract preconditions without providing any
 // path that can execute migration SQL against the caller's database.
 package contractcheck
 
@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
+	"github.com/jokull/onwardpg/internal/sqlcheck"
 	"github.com/jokull/onwardpg/pgschema"
 )
 
@@ -475,19 +477,16 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Findings = append(report.Findings, *finding)
 		return finalize(report), nil
 	}
-	if observer.Role != observer.DatabaseOwner {
-		for _, object := range actual.Objects() {
-			rowSecurity, ok := object.(pgschema.RowSecurity)
-			if !ok || !rowSecurity.Enabled {
-				continue
-			}
-			report.Findings = append(report.Findings, Finding{
-				Code:        "observer_rls_incomplete",
-				Message:     rowSecurity.Table.String() + " has row-level security enabled; a dedicated observer cannot prove complete-table data gates",
-				Remediation: "run contract check through the database owner, or remove data-gate dependence on RLS-filtered tables",
-			})
-			return finalize(report), nil
+	if err := sqlcheck.RequireUnfilteredRows(ctx, tx); err != nil {
+		if !errors.Is(err, sqlcheck.ErrRowSecurity) {
+			return Report{}, err
 		}
+		report.Findings = append(report.Findings, Finding{
+			Code:        "observer_rls_incomplete",
+			Message:     err.Error(),
+			Remediation: "use an observer with complete row visibility for every RLS-enabled table; database ownership alone does not bypass FORCE RLS or policies on another role's tables",
+		})
+		return finalize(report), nil
 	}
 	report.ActualFingerprint, err = graphplan.Fingerprint(actual, input.Options)
 	if err != nil {
@@ -714,25 +713,7 @@ func queryBoolean(ctx context.Context, tx pgx.Tx, sql string) (bool, error) {
 	if !strings.HasPrefix(upper, "SELECT ") && !strings.HasPrefix(upper, "WITH ") {
 		return false, fmt.Errorf("gate SQL must be one read-only SELECT")
 	}
-	rows, err := tx.Query(ctx, trimmed)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	if len(rows.FieldDescriptions()) != 1 || !rows.Next() {
-		return false, fmt.Errorf("gate must return exactly one Boolean column and one row")
-	}
-	var result bool
-	if err := rows.Scan(&result); err != nil {
-		return false, fmt.Errorf("scan Boolean gate: %w", err)
-	}
-	if rows.Next() {
-		return false, fmt.Errorf("gate returned more than one row")
-	}
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	return result, nil
+	return sqlcheck.Boolean(ctx, tx, trimmed)
 }
 
 func requiredEvidenceCategories(gates []protocol.ContractGate) []string {

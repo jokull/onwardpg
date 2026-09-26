@@ -18,7 +18,7 @@ With the Go toolchain declared in `go.mod` available, install a tagged version
 without cloning the repository:
 
 ```sh
-go install github.com/jokull/onwardpg/cmd/onwardpg@v0.1.0-preview.1
+go install github.com/jokull/onwardpg/cmd/onwardpg@v0.1.0-preview.3
 onwardpg version
 ```
 
@@ -73,7 +73,7 @@ GitHub also records build-provenance attestations for the release assets. With
 the GitHub CLI installed, verify an archive with:
 
 ```sh
-gh attestation verify onwardpg_0.1.0-preview.1_darwin_arm64.tar.gz \
+gh attestation verify onwardpg_0.1.0-preview.3_darwin_arm64.tar.gz \
   --repo jokull/onwardpg
 ```
 
@@ -86,7 +86,7 @@ release tag.
 The release workflow calls the same repository script available locally:
 
 ```sh
-scripts/build-release.sh v0.1.0-preview.1 ./dist
+scripts/build-release.sh v0.1.0-preview.3 ./dist
 ```
 
 The builder uses `CGO_ENABLED=0`, `-trimpath`, stable archive metadata, and
@@ -113,10 +113,10 @@ See [PostgreSQL version policy](postgresql-version-policy.md) and
 ## Release process
 
 Pushing a SemVer-shaped `v*` tag triggers
-[the release workflow](../.github/workflows/release.yml). It runs quality
-checks, builds deterministic archives and a tap Formula, verifies checksums and
+[the release workflow](../.github/workflows/release.yml). It requires the full CI workflow, including native and differential tests and
+compiled-CLI release acceptance on PostgreSQL 15–18, then builds deterministic archives and a tap Formula, verifies checksums and
 embedded version metadata, records provenance attestations, then creates the
-GitHub release. The generated `onwardpg.rb` is published to
+GitHub release from its reviewed changelog section. Preview tags remain prereleases. The generated `onwardpg.rb` is published to
 [`jokull/homebrew-tap`](https://github.com/jokull/homebrew-tap) after the
 release assets exist. Release application or database deployment is not part
 of this workflow.

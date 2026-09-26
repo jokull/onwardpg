@@ -111,6 +111,8 @@
     {"id":"planned.acceptance-check-widen","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceCheckWidening"},
     {"id":"planned.acceptance-check-envelope","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceCheckEnvelope"},
     {"id":"planned.acceptance-rename","status":"existing","engine":"native_postgres","path":"acceptance/release_contract_test.go","test":"TestReleaseContractSameTypeRename"},
+    {"id":"native.operational-rename-workload","status":"existing","engine":"native_postgres","path":"acceptance/operational_rehearsal_test.go","test":"TestReleaseOperationalRenameWorkload"},
+    {"id":"native.operational-lock-retry","status":"existing","engine":"native_postgres","path":"acceptance/operational_rehearsal_test.go","test":"TestReleaseOperationalTransactionalLockCancellation"},
     {"id":"planned.acceptance-rename-view","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceRenameBeneathView"},
     {"id":"planned.acceptance-cross-type","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceCrossNameTypeTransition"},
     {"id":"planned.acceptance-materialized","status":"planned","engine":"native_postgres","path":"acceptance/release_acceptance_test.go","test":"TestReleaseAcceptanceMaterializedDependency"},
@@ -185,10 +187,10 @@
       "proof_modes":["generated_automation","reviewed_sql_handoff"],
       "public_claim_ids":["claim.rename-bridge","claim.contract-readiness","claim.final-convergence"],
       "protected_invariant":"One-sided old and new writes synchronize, conflicting dual writes fail, and physical cutover waits for drain and equality.",
-      "native_owner_ids":["native.rename","planned.acceptance-rename"],
+      "native_owner_ids":["native.rename","planned.acceptance-rename","native.operational-rename-workload","native.operational-lock-retry"],
       "pglite":{"eligibility":"eligible","owner_id":"pglite.rename","native_owner_id":"native.rename","capabilities":["plpgsql_triggers","prepared_statements","sqlstate_assertions"]},
       "dimensions":{"ddl":"same_type_column_rename","data":"null_matching_and_conflicting_rows","client":"prepared_old_new_and_dual_writes","decision":"rename_plus_single_transaction","plan_evolution":"decision_rerun","environment":"native_pg18"},
-      "checkpoints":{"planned":{"owner_ids":["native.rename"]},"expanded_legacy":{"owner_ids":["native.rename"]},"expanded_new":{"owner_ids":["native.rename"]},"contract_blocked":{"owner_ids":["native.rename"]},"contract_ready":{"owner_ids":["native.rename"]},"converged":{"owner_ids":["native.rename"]}}
+      "checkpoints":{"planned":{"owner_ids":["native.rename","native.operational-rename-workload"]},"expanded_legacy":{"owner_ids":["native.rename","native.operational-rename-workload"]},"expanded_new":{"owner_ids":["native.rename","native.operational-rename-workload"]},"contract_blocked":{"owner_ids":["native.rename"]},"contract_ready":{"owner_ids":["native.rename"]},"converged":{"owner_ids":["native.rename","native.operational-rename-workload","native.operational-lock-retry"]}}
     },
     {
       "id":"rename.dependent-view",

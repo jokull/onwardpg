@@ -1,11 +1,12 @@
-// Package verify executes reviewed onwardpg history only in databases it
-// creates and destroys itself. It has no API for applying to an existing
-// database.
+// Package verify checks reviewed history in databases it creates and destroys.
+// Its phase executors are also used by acceptance workloads; the CLI does not
+// expose them as a deployment command.
 package verify
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,7 @@ import (
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/internal/source"
+	"github.com/jokull/onwardpg/internal/sqlcheck"
 	"github.com/jokull/onwardpg/pgschema"
 )
 
@@ -224,8 +226,13 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 		return nil, 0, nil, err
 	}
 	defer func() {
-		if err := database.Close(); err != nil && resultErr == nil {
-			resultErr = err
+		if cleanupErr := database.Close(); cleanupErr != nil {
+			// SQL and assertion failures use the structured result. Keep their
+			// cause when cleanup forces an error return instead of that result.
+			if failure != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("verification failed (%s): %s", failure.Code, failure.Message))
+			}
+			resultErr = errors.Join(resultErr, cleanupErr)
 		}
 	}()
 	connection, err := database.Connect(ctx)
@@ -293,8 +300,8 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 				return nil, batches, nil, fmt.Errorf("parse bundle %s verify.sql: %w", entry.Directory, err)
 			}
 			for _, assertion := range assertions {
-				var passed bool
-				if err := connection.QueryRow(ctx, assertion.SQL).Scan(&passed); err != nil {
+				passed, err := sqlcheck.Boolean(ctx, connection, assertion.SQL)
+				if err != nil {
 					connection.Close(context.Background())
 					return nil, batches, assertionFailure(entry.Directory, assertion.ID, "assertion_query_failed", err.Error()), nil
 				}
@@ -336,16 +343,30 @@ func assertionFailure(bundleID, checkID, code, message string) *Failure {
 }
 
 func executeRawBatch(ctx context.Context, connection *pgx.Conn, batch bundle.SQLBatch) error {
+	if connection.PgConn().TxStatus() != 'I' {
+		return fmt.Errorf("batch requires an idle connection")
+	}
 	if !batch.Transactional {
 		_, err := connection.PgConn().Exec(ctx, batch.SQL).ReadAll()
+		if connection.PgConn().TxStatus() != 'I' {
+			_, _ = connection.Exec(context.Background(), "ROLLBACK")
+			return fmt.Errorf("non-transactional batch left a transaction open: %w", errors.Join(err, errBatchTransaction))
+		}
 		return err
 	}
 	transaction, err := connection.Begin(ctx)
 	if err != nil {
 		return err
 	}
+	defer transaction.Rollback(context.Background())
+	identity, err := transactionID(ctx, transaction)
+	if err != nil {
+		return err
+	}
 	if _, err := transaction.Conn().PgConn().Exec(ctx, batch.SQL).ReadAll(); err != nil {
-		_ = transaction.Rollback(context.Background())
+		return err
+	}
+	if err := requireTransaction(ctx, transaction, identity); err != nil {
 		return err
 	}
 	if err := transaction.Commit(ctx); err != nil {
@@ -380,19 +401,30 @@ func ExecutePhaseBatch(ctx context.Context, connection *pgx.Conn, batch bundle.S
 func executeBatch(ctx context.Context, connection *pgx.Conn, batch protocol.Batch) error {
 	if !batch.Transactional {
 		for _, statement := range batch.Statements {
-			if _, err := connection.Exec(ctx, statement.SQL); err != nil {
+			if err := executeRawBatch(ctx, connection, bundle.SQLBatch{SQL: statement.SQL}); err != nil {
 				return err
 			}
 		}
 		return executeVerification(ctx, connection, batch)
 	}
+	if connection.PgConn().TxStatus() != 'I' {
+		return fmt.Errorf("batch requires an idle connection")
+	}
 	transaction, err := connection.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback(context.Background())
+	identity, err := transactionID(ctx, transaction)
 	if err != nil {
 		return err
 	}
 	for _, statement := range batch.Statements {
 		if _, err := transaction.Exec(ctx, statement.SQL); err != nil {
 			_ = transaction.Rollback(context.Background())
+			return err
+		}
+		if err := requireTransaction(ctx, transaction, identity); err != nil {
 			return err
 		}
 	}
@@ -406,18 +438,39 @@ func executeBatch(ctx context.Context, connection *pgx.Conn, batch protocol.Batc
 	return nil
 }
 
-type rowQuerier interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+var errBatchTransaction = errors.New("batch SQL changed its declared transaction boundary")
+
+func transactionID(ctx context.Context, tx pgx.Tx) (string, error) {
+	var identity string
+	err := tx.QueryRow(ctx, "SELECT pg_catalog.pg_current_xact_id()::text", pgx.QueryExecModeExec).Scan(&identity)
+	return identity, err
 }
 
-func executeVerification(ctx context.Context, connection rowQuerier, batch protocol.Batch) error {
+// TxStatus alone cannot detect COMMIT; BEGIN. Compare the assigned transaction
+// ID too. This rejects invalid verification evidence; it cannot undo an explicit
+// commit already executed in the disposable database.
+func requireTransaction(ctx context.Context, tx pgx.Tx, expected string) error {
+	if tx.Conn().PgConn().TxStatus() != 'T' {
+		return errBatchTransaction
+	}
+	actual, err := transactionID(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return errBatchTransaction
+	}
+	return nil
+}
+
+func executeVerification(ctx context.Context, connection sqlcheck.Beginner, batch protocol.Batch) error {
 	for _, statement := range batch.Statements {
 		if statement.Manual == nil {
 			continue
 		}
 		for _, query := range statement.Manual.VerificationSQL {
-			var passed bool
-			if err := connection.QueryRow(ctx, query).Scan(&passed); err != nil {
+			passed, err := sqlcheck.Boolean(ctx, connection, query)
+			if err != nil {
 				return fmt.Errorf("manual verification failed: %w", err)
 			}
 			if !passed {

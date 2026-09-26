@@ -109,7 +109,7 @@ for (const expected of ['--statement-timeout 30s', 'PlanID']) {
   if (!cliReference.includes(expected)) fail(`CLI reference omits ${expected}`);
 }
 
-const goRoots = ['cmd', 'internal', 'pgschema', 'scripts'].map((name) =>
+const goRoots = ['acceptance', 'cmd', 'internal', 'pgschema', 'scripts'].map((name) =>
   path.join(repositoryRoot, name),
 );
 const testPaths = [];

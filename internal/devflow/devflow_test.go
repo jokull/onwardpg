@@ -3,6 +3,7 @@ package devflow
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -42,11 +43,23 @@ func TestEvaluatePostconditionsUsesReadOnlyTransactions(t *testing.T) {
 		{BundleID: "upstream", Path: "upstream/verify.sql", ID: "write_rejected", SQL: "UPDATE " + quoteIdentifier(schema) + ".state SET value = 1 RETURNING true;"},
 		{BundleID: "upstream", Path: "upstream/verify.sql", ID: "still_zero", SQL: "SELECT value = 0 FROM " + quoteIdentifier(schema) + ".state;"},
 	}
-	results, err := evaluatePostconditions(ctx, databaseURL, checks)
+	// A caller may configure simple protocol (for example behind a pooler).
+	parsed, err := url.Parse(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 3 || results[0].Status != "passed" || results[1].Status != "failed" || results[2].Status != "passed" {
+	params := parsed.Query()
+	params.Set("default_query_exec_mode", "simple_protocol")
+	parsed.RawQuery = params.Encode()
+	checks = append(checks,
+		Postcondition{ID: "escape", SQL: "SELECT true; COMMIT; UPDATE " + quoteIdentifier(schema) + ".state SET value = 1;"},
+		Postcondition{ID: "extra_rows", SQL: "SELECT true UNION ALL SELECT false"},
+		Postcondition{ID: "after_failures", SQL: "SELECT value = 0 FROM " + quoteIdentifier(schema) + ".state"})
+	results, err := evaluatePostconditions(ctx, parsed.String(), checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 6 || results[0].Status != "passed" || results[1].Status != "failed" || results[2].Status != "passed" || results[3].Status != "failed" || results[4].Status != "failed" || results[5].Status != "passed" {
 		t.Fatalf("results = %#v", results)
 	}
 	var value int

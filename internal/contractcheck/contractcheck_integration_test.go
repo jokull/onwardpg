@@ -102,6 +102,16 @@ func TestContractCheckUsesOneReadOnlySnapshotAndRequiresWriterEvidence(t *testin
 	if report.Status != "blocked" || len(report.Findings) != 1 || report.Findings[0].Code != "catalog_drift" {
 		t.Fatalf("post-expand drift report=%#v", report)
 	}
+	if _, err := conn.Exec(ctx, "CREATE TABLE public.filtered_state (value integer); INSERT INTO public.filtered_state VALUES (NULL); ALTER TABLE public.filtered_state ENABLE ROW LEVEL SECURITY; ALTER TABLE public.filtered_state FORCE ROW LEVEL SECURITY"); err != nil {
+		t.Fatal(err)
+	}
+	report, err = Run(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "blocked" || len(report.Findings) != 1 || report.Findings[0].Code != "observer_rls_incomplete" || len(report.GateResults) != 0 {
+		t.Fatalf("forced RLS must block owner readiness before running gates: %#v", report)
+	}
 }
 
 func TestContractCheckProjectsDedicatedObserverAccessAndFailsClosed(t *testing.T) {

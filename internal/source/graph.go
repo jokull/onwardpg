@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,8 +48,8 @@ func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devUR
 		return nil, err
 	}
 	defer func() {
-		if err := database.Close(); err != nil && resultErr == nil {
-			resultErr = err
+		if err := database.Close(); err != nil {
+			resultErr = errors.Join(resultErr, err)
 		}
 	}()
 	target, err := database.Connect(ctx)

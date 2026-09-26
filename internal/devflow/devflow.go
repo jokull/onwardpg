@@ -1,5 +1,5 @@
 // Package devflow plans a caller-owned development catalog toward exported
-// working DDL. It never writes bundles or executes SQL. In workspace mode it
+// working DDL. It never writes bundles or executes migration SQL. In workspace mode it
 // preserves surplus state so branch switches cannot turn absence from DDL into
 // a destructive local cleanup proposal.
 package devflow
@@ -15,6 +15,7 @@ import (
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/semantichint"
 	"github.com/jokull/onwardpg/internal/source"
+	"github.com/jokull/onwardpg/internal/sqlcheck"
 	"github.com/jokull/onwardpg/internal/workspace"
 )
 
@@ -144,20 +145,13 @@ func evaluatePostconditions(ctx context.Context, databaseURL string, checks []Po
 	results := make([]PostconditionResult, 0, len(checks))
 	for _, check := range checks {
 		result := PostconditionResult{BundleID: check.BundleID, Path: check.Path, ID: check.ID, Status: "failed"}
-		transaction, beginErr := connection.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-		if beginErr != nil {
-			return nil, beginErr
-		}
-		var passed bool
-		if err := transaction.QueryRow(ctx, check.SQL).Scan(&passed); err != nil {
+		passed, err := sqlcheck.Boolean(ctx, connection, check.SQL)
+		if err != nil {
 			result.Message = "read-only assertion query failed: " + err.Error()
 		} else if !passed {
 			result.Message = "assertion returned false"
 		} else {
 			result.Status = "passed"
-		}
-		if rollbackErr := transaction.Rollback(ctx); rollbackErr != nil {
-			return nil, rollbackErr
 		}
 		results = append(results, result)
 	}

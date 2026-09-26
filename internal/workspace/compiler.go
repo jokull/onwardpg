@@ -4,16 +4,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const maxCompilerOutput = 64 << 20
+const maxCompilerDuration = 5 * time.Minute
+const compilerOutputCheckInterval = 20 * time.Millisecond
 
 type CompiledDDL struct {
 	DDL        []byte
@@ -35,7 +40,7 @@ func CompileDDL(ctx context.Context, root, targetName string, target Target) (Co
 	if first.Provenance != second.Provenance || !bytes.Equal(first.DDL, second.DDL) {
 		return CompiledDDL{}, fmt.Errorf("DDL export is nondeterministic: two consecutive schema_command runs produced different bytes (first %s, second %s); remove timestamps, random identifiers, environment-dependent ordering, and tool chatter from stdout", ddlDigest(first.DDL), ddlDigest(second.DDL))
 	}
-	return CompiledDDL{DDL: append([]byte(nil), first.DDL...), Provenance: first.Provenance}, nil
+	return first, nil
 }
 
 func compileDDLOnce(ctx context.Context, root, targetName string, target Target) (CompiledDDL, error) {
@@ -50,14 +55,14 @@ func compileDDLOnce(ctx context.Context, root, targetName string, target Target)
 	}
 	if target.SchemaFile != "" {
 		name := filepath.Join(root, filepath.FromSlash(target.SchemaFile))
-		data, err := os.ReadFile(name)
+		data, err := readCompilerOutput(ctx, name)
 		if err != nil {
 			return CompiledDDL{}, fmt.Errorf("read declarative schema file: %w", err)
 		}
-		return CompiledDDL{DDL: append([]byte(nil), data...), Provenance: "schema_file:" + target.SchemaFile}, nil
+		return CompiledDDL{DDL: data, Provenance: "schema_file:" + target.SchemaFile}, nil
 	}
 
-	before, err := digestTree(root)
+	before, err := digestTree(ctx, root)
 	if err != nil {
 		return CompiledDDL{}, fmt.Errorf("fingerprint DDL export tree before command: %w", err)
 	}
@@ -68,14 +73,10 @@ func compileDDLOnce(ctx context.Context, root, targetName string, target Target)
 	stdoutName := stdout.Name()
 	defer os.Remove(stdoutName)
 	defer stdout.Close()
-	command := exec.CommandContext(ctx, target.SchemaCommand[0], target.SchemaCommand[1:]...)
-	command.Dir = root
-	command.Env = os.Environ()
 	stderr := &limitedBuffer{limit: 1 << 20}
-	command.Stdout, command.Stderr = stdout, stderr
-	commandErr := command.Run()
+	commandErr := runSchemaCommand(ctx, root, target.SchemaCommand, stdout, stderr, maxCompilerDuration)
 	closeErr := stdout.Close()
-	after, digestErr := digestTree(root)
+	after, digestErr := digestTree(ctx, root)
 	if digestErr != nil {
 		return CompiledDDL{}, fmt.Errorf("fingerprint DDL export tree after command: %w", digestErr)
 	}
@@ -97,18 +98,102 @@ func compileDDLOnce(ctx context.Context, root, targetName string, target Target)
 	if closeErr != nil {
 		return CompiledDDL{}, fmt.Errorf("close DDL export capture: %w", closeErr)
 	}
-	info, err := os.Stat(stdoutName)
-	if err != nil {
-		return CompiledDDL{}, fmt.Errorf("inspect DDL export capture: %w", err)
-	}
-	if info.Size() > maxCompilerOutput {
-		return CompiledDDL{}, fmt.Errorf("DDL export output exceeds %d bytes", maxCompilerOutput)
-	}
-	ddl, err := os.ReadFile(stdoutName)
+	ddl, err := readCompilerOutput(ctx, stdoutName)
 	if err != nil {
 		return CompiledDDL{}, fmt.Errorf("read DDL export capture: %w", err)
 	}
 	return CompiledDDL{DDL: ddl, Provenance: "schema_command"}, nil
+}
+
+// Keep stdout as an *os.File: some schema exporters inspect their stdout and
+// truncate output when it is a pipe. The size watcher cancels a running
+// exporter after detecting excess output. It is not a strict disk quota: a
+// fast writer can grow the file between checks.
+func runSchemaCommand(ctx context.Context, root string, args []string, stdout *os.File, stderr *limitedBuffer, timeout time.Duration) error {
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, args[0], args[1:]...)
+	command.Dir = root
+	command.Env = os.Environ()
+	command.Stdout, command.Stderr = stdout, stderr
+	// If a child inherits the stderr pipe, do not wait forever for its EOF.
+	command.WaitDelay = 5 * time.Second
+	group, err := newExporterProcessGroup()
+	if err != nil {
+		return fmt.Errorf("prepare DDL export process group: %w", err)
+	}
+	defer group.close()
+	group.configure(command)
+	command.Cancel = func() error { return group.stop(command) }
+	if err := command.Start(); err != nil {
+		return err
+	}
+	if err := group.attach(command); err != nil {
+		_ = group.stop(command)
+		_ = command.Wait()
+		if commandCtx.Err() != nil {
+			return fmt.Errorf("DDL export command stopped: %w", commandCtx.Err())
+		}
+		return fmt.Errorf("attach DDL exporter to process group: %w", err)
+	}
+	// Closing the group also stops descendants that kept stdout open after
+	// their parent exited. This happens on every return path, including success.
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	ticker := time.NewTicker(compilerOutputCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			if commandCtx.Err() != nil {
+				return fmt.Errorf("DDL export command stopped: %w", commandCtx.Err())
+			}
+			return err
+		case <-ticker.C:
+			info, err := stdout.Stat()
+			if err != nil {
+				cancel()
+				<-done
+				return fmt.Errorf("inspect DDL export capture: %w", err)
+			}
+			if info.Size() > maxCompilerOutput {
+				cancel()
+				<-done
+				return fmt.Errorf("DDL export output exceeds %d bytes", maxCompilerOutput)
+			}
+		case <-commandCtx.Done():
+			<-done
+			return fmt.Errorf("DDL export command stopped: %w", commandCtx.Err())
+		}
+	}
+}
+
+// LimitReader enforces the bound even if a file changes after Stat. The
+// initial size check avoids allocating for a known oversized regular file.
+func readCompilerOutput(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := openRegularCompilerFile(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxCompilerOutput {
+		return nil, fmt.Errorf("DDL export output exceeds %d bytes", maxCompilerOutput)
+	}
+	data, err := io.ReadAll(io.LimitReader(contextReader{ctx: ctx, reader: file}, maxCompilerOutput+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxCompilerOutput {
+		return nil, fmt.Errorf("DDL export output exceeds %d bytes", maxCompilerOutput)
+	}
+	return data, nil
 }
 
 func ddlDigest(body []byte) string {
@@ -139,9 +224,12 @@ func (b *limitedBuffer) Write(data []byte) (int, error) {
 
 func (b *limitedBuffer) String() string { return b.buffer.String() }
 
-func digestTree(root string) (string, error) {
+func digestTree(ctx context.Context, root string) (string, error) {
 	var names []string
 	err := filepath.WalkDir(root, func(name string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -167,6 +255,9 @@ func digestTree(root string) (string, error) {
 	sort.Strings(names)
 	hash := sha256.New()
 	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		full := filepath.Join(root, filepath.FromSlash(name))
 		info, err := os.Lstat(full)
 		if err != nil {
@@ -188,13 +279,43 @@ func digestTree(root string) (string, error) {
 		if !info.Mode().IsRegular() {
 			return "", fmt.Errorf("compiler tree contains unsupported path %s", name)
 		}
-		data, err := os.ReadFile(full)
+		file, err := openRegularCompilerFile(full)
 		if err != nil {
 			return "", err
 		}
-		writeDigestFrame(hash, data)
+		var length [10]byte
+		n := binary.PutUvarint(length[:], uint64(info.Size()))
+		_, _ = hash.Write(length[:n])
+		copied, copyErr := io.CopyN(hash, contextReader{ctx: ctx, reader: file}, info.Size())
+		var extra [1]byte
+		extraCount, extraErr := file.Read(extra[:])
+		closeErr := file.Close()
+		if copyErr != nil && copyErr != io.EOF {
+			return "", copyErr
+		}
+		if extraErr != nil && extraErr != io.EOF {
+			return "", extraErr
+		}
+		if closeErr != nil {
+			return "", closeErr
+		}
+		if copied != info.Size() || extraCount != 0 {
+			return "", fmt.Errorf("compiler tree file changed while fingerprinting: %s", name)
+		}
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(data []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(data)
 }
 
 // Dependency installations and VCS internals are not repository inputs to a

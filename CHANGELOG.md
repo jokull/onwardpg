@@ -5,6 +5,57 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ## Unreleased
 
+## v0.1.0-preview.3 — 2026-09-26
+
+This release hardens verification and the scratch execution boundary. Rebuild
+or upgrade the CLI and rerun `onwardpg verify --check` on existing bundles before
+relying on earlier verification receipts.
+
+### Fixed
+
+- Assertions now run through one read-only executor that rejects multiple SQL
+  statements, writes, NULL or non-Boolean values, and extra rows or columns.
+  A connection configured for simple protocol cannot escape a read-only check
+  with `COMMIT` followed by a write. Statements are described before execution
+  so a standalone transaction command cannot commit the surrounding work.
+- Contract checks and assertions reject incomplete row visibility under RLS,
+  including forced policies affecting a database owner and function-local RLS
+  settings. The visibility check conservatively covers the whole database.
+- Verification rejects transactional batches that commit, roll back, or replace
+  their transaction, and non-transactional batches that leave a transaction open.
+- Schema input reads are capped at 64 MiB; running exporters have output-size
+  monitoring, a five-minute deadline, and process-group/job containment while
+  retaining regular-file stdout. Checkout hashing streams file contents.
+- Scratch cleanup has deadlines, reconnects after connection loss, preserves
+  original and cleanup errors together, and identifies exact resources for retry.
+- Go 1.26.8 and `golang.org/x/text` 0.42.0 replace versions with four reachable
+  vulnerability advisories in the ownership review.
+
+### Changed
+
+- Release publication now depends on the full PostgreSQL 15–18 integration,
+  differential, compiled-CLI acceptance, PGlite, documentation, and quality gates.
+  Preview tags publish as prereleases with reviewed changelog notes.
+- Public documentation is one narrative quick start with concrete migration
+  scenarios. Blume is updated to 2.0.3.
+
+### Verification and limits
+
+- Adversarial assertion and transaction regressions cover the reproduced
+  failures. The ownership review records their prerequisites and remaining
+  production rollout responsibilities.
+- Compiled-CLI release rehearsals cover populated renames with prepared old/new
+  clients contending on the same rows, exact counter preservation, and blocked
+  transactional DDL cancellation followed by retry. Both tests are mandatory on
+  PostgreSQL 15–18; exporter process containment is tested on native Windows.
+- The pinned Stripe comparison harness isolates temporary resources per run,
+  cleans them by exact owner, and surfaces incomplete cleanup.
+- Clone verification establishes catalog convergence and declared assertions.
+  Production data, load, writer drainage, and deployment timing still need
+  application-specific review.
+
+## v0.1.0-preview.2 — 2026-07-21
+
 ### Added
 
 - Stripe pg-schema-diff drift-close recipes for reviewed column-type handoffs,

@@ -6,8 +6,12 @@ package differential
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +27,8 @@ import (
 )
 
 const pinnedStripeReferenceCommit = "6208f8f3ceccae8ca634055dc47907a6a864cb76"
+
+var errStripeTempCleanup = errors.New("stripe temporary resource cleanup failed")
 
 type stripePlan struct {
 	Statements        []stripeStatement `json:"statements"`
@@ -1129,7 +1135,11 @@ func TestPinnedStripeAndOnwardPGRowSecurityPoliciesAndPrivileges(t *testing.T) {
 	if _, err := admin.Exec(ctx, "CREATE ROLE "+quote(roleName)); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(roleName)) })
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(roleName)); err != nil {
+			t.Errorf("drop Stripe fixture role %s: %v", roleName, err)
+		}
+	})
 	currentDDL := `CREATE SCHEMA app;
 CREATE TABLE app.orders (tenant_id bigint NOT NULL, amount bigint NOT NULL);
 CREATE POLICY tenant_access ON app.orders AS PERMISSIVE FOR ALL TO PUBLIC USING (tenant_id > 0);
@@ -1249,6 +1259,13 @@ func createStripeDatabases(t *testing.T, ctx context.Context, admin *pgx.Conn, b
 	stamp := time.Now().UnixNano()
 	result := make(map[string]string, len(labels))
 	var names []string
+	t.Cleanup(func() {
+		for _, name := range names {
+			if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+quote(name)+" WITH (FORCE)"); err != nil {
+				t.Errorf("drop Stripe fixture database %s: %v", name, err)
+			}
+		}
+	})
 	for _, label := range labels {
 		name := fmt.Sprintf("onwardpg_stripe_%d_%s", stamp, label)
 		if _, err := admin.Exec(ctx, "CREATE DATABASE "+quote(name)); err != nil {
@@ -1260,11 +1277,6 @@ func createStripeDatabases(t *testing.T, ctx context.Context, admin *pgx.Conn, b
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() {
-		for _, name := range names {
-			_, _ = admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+quote(name)+" WITH (FORCE)")
-		}
-	})
 	return result
 }
 
@@ -1280,29 +1292,244 @@ func writeStripeDesiredDDL(t *testing.T, ddl string) (string, string) {
 
 func runStripePlan(t *testing.T, ctx context.Context, binary, fromURL, desiredDir string) stripePlan {
 	t.Helper()
-	command := exec.CommandContext(ctx, binary, "plan", "--from-dsn", fromURL, "--to-dir", desiredDir, "--output-format", "json", "--data-pack-new-tables=false")
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	output, err := command.Output()
+	output, stderr, err := runIsolatedStripePlan(ctx, binary, fromURL, desiredDir)
+	logStripeCleanupWarning(t, stderr, err)
 	if err != nil {
-		t.Fatalf("pinned Stripe plan failed: %v\n%s", err, stderr.String())
+		t.Fatalf("pinned Stripe plan failed: %v\n%s", err, stderr)
 	}
 	var plan stripePlan
 	if err := json.Unmarshal(output, &plan); err != nil {
-		t.Fatalf("decode pinned Stripe plan: %v\nstdout=%s\nstderr=%s", err, output, stderr.String())
+		t.Fatalf("decode pinned Stripe plan: %v\nstdout=%s\nstderr=%s", err, output, stderr)
 	}
 	return plan
 }
 
 func runStripePlanExpectFailure(t *testing.T, ctx context.Context, binary, fromURL, desiredDir string) string {
 	t.Helper()
-	command := exec.CommandContext(ctx, binary, "plan", "--from-dsn", fromURL, "--to-dir", desiredDir, "--output-format", "json", "--data-pack-new-tables=false")
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	if output, err := command.Output(); err == nil {
+	output, stderr, err := runIsolatedStripePlan(ctx, binary, fromURL, desiredDir)
+	logStripeCleanupWarning(t, stderr, err)
+	if err == nil {
 		t.Fatalf("pinned Stripe plan unexpectedly succeeded: %s", output)
 	}
-	return stderr.String()
+	var commandError *exec.ExitError
+	if errors.Is(err, errStripeTempCleanup) || !errors.As(err, &commandError) || !strings.Contains(stderr, "Error:") {
+		t.Fatalf("pinned Stripe plan did not fail as expected: %v\n%s", err, stderr)
+	}
+	return stderr
+}
+
+func logStripeCleanupWarning(t *testing.T, stderr string, planErr error) {
+	t.Helper()
+	if strings.Contains(stderr, "Failed to drop temporary database") {
+		// Stripe may report its own best-effort drop failure while exiting 0.
+		// Keep the diagnostic without logging a DSN or credential.
+		if errors.Is(planErr, errStripeTempCleanup) {
+			t.Log("pinned Stripe reported temporary database cleanup failure; scoped owner cleanup also failed")
+		} else {
+			t.Log("pinned Stripe reported temporary database cleanup failure; scoped owner cleanup completed")
+		}
+	}
+}
+
+// Each invocation gets its own non-superuser creator. Only databases owned by
+// that role's OID can be removed, including databases Stripe failed to drop.
+func runIsolatedStripePlan(ctx context.Context, binary, fromURL, desiredDir string) (output []byte, stderr string, retErr error) {
+	admin, err := pgx.Connect(ctx, fromURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("connect Stripe cleanup administrator: %w", err)
+	}
+	defer admin.Close(context.Background())
+
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return nil, "", fmt.Errorf("generate Stripe temp role: %w", err)
+	}
+	suffix := hex.EncodeToString(random)
+	roleName := "onwardpg_stripe_tmp_" + suffix
+	credential := make([]byte, 32)
+	if _, err := rand.Read(credential); err != nil {
+		return nil, "", fmt.Errorf("generate Stripe temp role credential: %w", err)
+	}
+	password := hex.EncodeToString(credential)
+	parsed, err := url.Parse(fromURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse Stripe source URL: %w", err)
+	}
+	parsed.Path, parsed.RawPath = "/postgres", ""
+	parsed.User = url.UserPassword(roleName, password)
+	// Do not inherit a query-string user or database that could override the URL.
+	query := parsed.Query()
+	query.Del("user")
+	query.Del("password")
+	query.Del("dbname")
+	parsed.RawQuery = query.Encode()
+	tempURL := parsed.String()
+
+	var roleOID uint32
+	roleCreationAttempted := false
+	// Register this before CREATE ROLE or OID lookup can fail. The closure also
+	// runs after command failure or context cancellation using a fresh context.
+	defer func() {
+		if !roleCreationAttempted {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cleanupAdmin, err := pgx.Connect(cleanupCtx, fromURL)
+		if err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("%w: reconnect for role %s: %v", errStripeTempCleanup, roleName, err))
+			return
+		}
+		defer cleanupAdmin.Close(context.Background())
+		if err := cleanupStripeTempRole(cleanupCtx, cleanupAdmin, roleName, roleOID); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("%w: %v", errStripeTempCleanup, err))
+		}
+	}()
+	roleCreationAttempted = true
+	if _, err := admin.Exec(ctx, "CREATE ROLE "+quote(roleName)+" LOGIN CREATEDB PASSWORD '"+password+"'"); err != nil {
+		return nil, "", fmt.Errorf("create Stripe temp role: %w", err)
+	}
+	if err := admin.QueryRow(ctx, "SELECT oid FROM pg_roles WHERE rolname=$1", roleName).Scan(&roleOID); err != nil {
+		return nil, "", fmt.Errorf("read Stripe temp role OID: %w", err)
+	}
+
+	command := exec.CommandContext(ctx, binary, "plan", "--from-dsn", fromURL, "--to-dir", desiredDir, "--temp-db-dsn", tempURL, "--output-format", "json", "--data-pack-new-tables=false")
+	var stderrBuffer bytes.Buffer
+	command.Stderr = &stderrBuffer
+	output, retErr = command.Output()
+	stderr = stderrBuffer.String()
+	return output, stderr, retErr
+}
+
+func cleanupStripeTempRole(ctx context.Context, admin *pgx.Conn, roleName string, roleOID uint32) error {
+	if roleOID == 0 {
+		if err := admin.QueryRow(ctx, "SELECT oid FROM pg_roles WHERE rolname=$1", roleName).Scan(&roleOID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return fmt.Errorf("read Stripe temp role OID for cleanup: %w", err)
+		}
+	}
+	rows, err := admin.Query(ctx, "SELECT datname FROM pg_database WHERE datdba=$1", roleOID)
+	if err != nil {
+		return fmt.Errorf("list Stripe temp databases: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan Stripe temp database: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("list Stripe temp databases: %w", err)
+	}
+	rows.Close()
+	for _, name := range names {
+		if _, err := admin.Exec(ctx, "DROP DATABASE "+quote(name)+" WITH (FORCE)"); err != nil {
+			return fmt.Errorf("drop Stripe temp database %s: %w", name, err)
+		}
+	}
+	if _, err := admin.Exec(ctx, "DROP ROLE "+quote(roleName)); err != nil {
+		return fmt.Errorf("drop Stripe temp role %s: %w", roleName, err)
+	}
+	return nil
+}
+
+func TestStripeTempCleanupKeepsUnrelatedDatabaseAndRole(t *testing.T) {
+	baseURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL differential tests")
+	}
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	targetRole, unrelatedRole := "onwardpg_cleanup_target_"+suffix, "onwardpg_cleanup_other_"+suffix
+	targetDB, unrelatedDB := "pgschemadiff_tmp_target_"+suffix, "pgschemadiff_tmp_other_"+suffix
+	t.Cleanup(func() {
+		for _, name := range []string{targetDB, unrelatedDB} {
+			if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+quote(name)+" WITH (FORCE)"); err != nil {
+				t.Errorf("clean up regression database %s: %v", name, err)
+			}
+		}
+		for _, name := range []string{targetRole, unrelatedRole} {
+			if _, err := admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(name)); err != nil {
+				t.Errorf("clean up regression role %s: %v", name, err)
+			}
+		}
+	})
+	for _, name := range []string{targetRole, unrelatedRole} {
+		if _, err := admin.Exec(ctx, "CREATE ROLE "+quote(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, pair := range [][2]string{{targetDB, targetRole}, {unrelatedDB, unrelatedRole}} {
+		if _, err := admin.Exec(ctx, "CREATE DATABASE "+quote(pair[0])+" OWNER "+quote(pair[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var roleOID uint32
+	if err := admin.QueryRow(ctx, "SELECT oid FROM pg_roles WHERE rolname=$1", targetRole).Scan(&roleOID); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupStripeTempRole(ctx, admin, targetRole, roleOID); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{targetRole, targetDB} {
+		var exists bool
+		if err := admin.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=$1 UNION ALL SELECT 1 FROM pg_database WHERE datname=$1)", name).Scan(&exists); err != nil || exists {
+			t.Fatalf("target resource %s remains: exists=%v err=%v", name, exists, err)
+		}
+	}
+	for _, name := range []string{unrelatedRole, unrelatedDB} {
+		var exists bool
+		if err := admin.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=$1 UNION ALL SELECT 1 FROM pg_database WHERE datname=$1)", name).Scan(&exists); err != nil || !exists {
+			t.Fatalf("unrelated resource %s was removed: exists=%v err=%v", name, exists, err)
+		}
+	}
+}
+
+func TestStripeTempCleanupReportsRoleDependencies(t *testing.T) {
+	baseURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL differential tests")
+	}
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	roleName, schemaName := "onwardpg_cleanup_blocked_"+suffix, "onwardpg_cleanup_schema_"+suffix
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)); err != nil {
+			t.Errorf("drop cleanup regression schema: %v", err)
+		}
+		if _, err := admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+quote(roleName)); err != nil {
+			t.Errorf("drop cleanup regression role: %v", err)
+		}
+	})
+	if _, err := admin.Exec(ctx, "CREATE ROLE "+quote(roleName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+quote(schemaName)+" AUTHORIZATION "+quote(roleName)); err != nil {
+		t.Fatal(err)
+	}
+	var roleOID uint32
+	if err := admin.QueryRow(ctx, "SELECT oid FROM pg_roles WHERE rolname=$1", roleName).Scan(&roleOID); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupStripeTempRole(ctx, admin, roleName, roleOID); err == nil || !strings.Contains(err.Error(), "drop Stripe temp role") {
+		t.Fatalf("cleanup must report an undroppable role: %v", err)
+	}
 }
 
 func assertStripeTimeoutsAndHazards(t *testing.T, plan stripePlan) {

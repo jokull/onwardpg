@@ -8,10 +8,10 @@ artifact_root=${ONWARDPG_ACCEPTANCE_ARTIFACT_DIR:-$(mktemp -d)}
 mkdir -p "$artifact_root"
 
 cd "$repository_root"
-native_pattern='^(TestReleaseContract|TestNativeContractReadiness|TestPlanLoop|TestRendererParity|TestHarness)'
-required_tests='TestReleaseContractNullableColumn,TestReleaseContractRequiredColumnWithReviewedCleanup,TestReleaseContractSameTypeRename,TestNativeContractReadinessRequiresEvidenceAndReconciliation,TestPlanLoopRestackMatrix,TestPlanLoopRestackRetainsSafeEditedPocket,TestPlanLoopDevelopmentAheadWorkIsNotAbsorbed,TestPlanLoopDevelopmentManualSQLHasAction,TestPlanLoopBranchSwitchRestoresParkedPlanIdentity,TestRendererParityRequiredColumnDecision'
+native_pattern='^(TestReleaseContract|TestReleaseOperational|TestNativeContractReadiness|TestPlanLoop|TestRendererParity|TestHarness)'
+required_tests='TestReleaseContractNullableColumn,TestReleaseContractRequiredColumnWithReviewedCleanup,TestReleaseContractSameTypeRename,TestReleaseOperationalRenameWorkload,TestReleaseOperationalTransactionalLockCancellation,TestNativeContractReadinessRequiresEvidenceAndReconciliation,TestPlanLoopRestackMatrix,TestPlanLoopRestackRetainsSafeEditedPocket,TestPlanLoopDevelopmentAheadWorkIsNotAbsorbed,TestPlanLoopDevelopmentManualSQLHasAction,TestPlanLoopBranchSwitchRestoresParkedPlanIdentity,TestRendererParityRequiredColumnDecision'
 listed_tests=$(go test ./acceptance -list "$native_pattern")
-if ! grep -Eq '^Test(ReleaseContract|NativeContractReadiness|PlanLoop|RendererParity|Harness)' <<<"$listed_tests"; then
+if ! grep -Eq '^Test(ReleaseContract|ReleaseOperational|NativeContractReadiness|PlanLoop|RendererParity|Harness)' <<<"$listed_tests"; then
   echo "native acceptance selection matched no tests" >&2
   exit 1
 fi

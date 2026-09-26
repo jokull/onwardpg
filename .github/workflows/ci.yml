@@ -2,12 +2,26 @@ name: CI
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
+  windows-exporter:
+    name: Windows exporter process safety
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Exercise native Windows job and process behavior
+        run: go test ./internal/workspace -run '^TestCompilerWindows' -count=1 -v
+
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 20

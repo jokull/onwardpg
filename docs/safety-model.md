@@ -1,8 +1,9 @@
 # Safety model
 
-onwardpg is a planner, not a deployment agent. It never executes a plan on a
-caller-supplied target. Clone verification is the only execution surface, and
-it creates and destroys its own randomly named disposable databases.
+The CLI never applies migration phase SQL to a caller-supplied target. Clone
+verification executes phases in randomly named disposable databases. Live
+contract gates and opt-in development postconditions run Boolean assertions
+through a separate read-only boundary.
 
 The planner's core safety rules are:
 
@@ -17,7 +18,8 @@ The planner's core safety rules are:
 - reject stale, impossible, contradictory, duplicate, and unused hints or
   internal answers;
 - hand product-specific casts, backfills, refreshes, and niche operations to an
-  explicit phase-local SQL TODO rather than accepting SQL inside decision JSON;
+  explicit phase-local SQL TODO or a typed, fingerprint-bound operator work
+  contract;
 - never report an incomplete plan as converged: `needs_decisions`,
   `needs_sql_edits`, and `unsupported` are blocking states;
 - require every mutable PR plan to have one explicit local PlanID; the
@@ -34,19 +36,12 @@ The planner's core safety rules are:
 
 Every column of every PostgreSQL 15–18 `pg_catalog` table is classified in the
 checked-in attribute ledger as modeled, blocked, derived, environmental,
-runtime, or secret. Live-version tests reject catalog shape drift. The current
-blockers include domains, composites, aggregates, standalone collations,
-range/multirange types, foreign tables, explicit ownership deviations,
-non-table and column ACL/default-privilege state, non-owner grant chains,
-replica identity, clustered or invalid indexes, relation and column physical
-options, explicit relation tablespaces, traditional inheritance, rules,
-text-search objects, event triggers, publications and subscriptions, extended
-statistics, FDWs/servers/user mappings, custom access methods/operators/casts/
-conversions/languages/transforms, security labels, and comments whose typed
-object does not yet retain them. PostgreSQL 18's canonical generated `NOT
-NULL` identities normalize to the existing column flag; custom/noncanonical
-or commented `NOT NULL`, unenforced and period constraints, and virtual
-generated columns are version-gated blockers.
+runtime, or secret. Live-version tests reject catalog shape drift. Supported
+families and their exceptions are recorded in the inventories linked below.
+For example, aggregates, foreign tables, traditional inheritance, event
+triggers, and logical replication configuration block planning. Domains,
+composites, ranges, and PostgreSQL 18 virtual generated columns have modeled
+paths; their support does not imply that every alteration is automatic.
 Subscription connection strings and security-label values are never included
 in diagnostics.
 Extension-owned members are represented atomically by the typed extension
@@ -85,9 +80,16 @@ does not set those values on a caller session.
 
 Product-specific SQL is developer/agent-owned and is never invented from
 catalog state. Choosing `manual_sql` writes an explicit `ONWARDPG TODO` into the
-relevant phase; the semantic hint itself cannot carry SQL. Every TODO must be
-replaced before verification. Optional `verify.sql` postconditions must each
-return one boolean `true` row during clone verification. Edited SQL and its
+relevant phase. Typed operator work can also carry reviewed statements and
+verification queries. Every TODO must be replaced before verification. Optional
+`verify.sql` postconditions and manual verification queries must each return
+exactly one non-null PostgreSQL Boolean value, `true`, in a read-only transaction
+or savepoint. Multiple statements and extra rows or columns are rejected even
+when the connection defaults to simple protocol. Queries fail if row-level
+security applies to the current role anywhere in the database, even when the
+assertion does not use that table. Parse/Describe rejects transaction commands
+before execution. The assertion transaction is always rolled back. Functions
+that change execution identity or cause external effects still require review. Edited SQL and its
 batch directives are receipted only after execution and convergence succeed.
 Only an assertion explicitly marked `-- onwardpg:dev-postcondition` is ever
 queried against a caller-owned development database, and it runs inside a

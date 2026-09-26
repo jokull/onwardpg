@@ -12,7 +12,10 @@ directly, without a shell, from the repository root. It runs the command twice,
 limits captured output, requires byte-identical DDL, and rejects direct changes
 to the checkout that it can observe. It is not an operating-system sandbox and
 cannot prevent writes outside the checkout or through external symlink targets;
-use a read-only export command.
+use a read-only export command. Both input paths accept at most 64 MiB. Command
+exports have a five-minute deadline per run and their output size is monitored
+while running. See [exporter resource limits](exporter-limits.md) for the exact
+limits and process-containment boundaries.
 
 ```toml
 version = 1

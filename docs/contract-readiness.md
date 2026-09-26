@@ -13,6 +13,19 @@ after expand. `onwardpg contract check` compares a caller database with that
 checkpoint and evaluates current readiness in one `REPEATABLE READ, READ ONLY`
 transaction. Neither command applies migration SQL to the caller database.
 
+## Complete row visibility
+
+Assertions and contract checks reject a database if row-level security applies
+to the checking role on any table. This includes tables outside the managed
+schema and tables unrelated to a particular query. `FORCE ROW LEVEL SECURITY`
+or a table owned by another role can therefore block a database-owner observer.
+Ordinary non-forced RLS owned by the observer remains supported.
+
+A query-local `row_security=off` setting is insufficient: a function can turn
+it back on internally. The database-wide preflight prevents that hidden-row
+case. Queries and functions still require review, particularly functions that
+change execution identity or have external effects.
+
 ## What the planner generates
 
 Consider replacing an old CHECK with a desired CHECK that accepts a different

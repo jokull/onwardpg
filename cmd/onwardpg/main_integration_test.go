@@ -2116,6 +2116,21 @@ func TestVerifyFailureModesAlwaysCleanDisposableDatabases(t *testing.T) {
 			wantCode:  "assertion_false",
 		},
 		{
+			name:      "assertion writes through CTE",
+			verifySQL: "-- onwardpg:assert no_mutation\nWITH changed AS (INSERT INTO app.items VALUES (1) RETURNING id) SELECT count(*) = 1 FROM changed;\n",
+			wantCode:  "assertion_query_failed",
+		},
+		{
+			name:      "assertion ignores later false row",
+			verifySQL: "-- onwardpg:assert all_rows_checked\nSELECT true UNION ALL SELECT false;\n",
+			wantCode:  "assertion_query_failed",
+		},
+		{
+			name:      "assertion escapes transaction",
+			verifySQL: "-- onwardpg:assert single_query\nSELECT true; COMMIT; INSERT INTO app.items VALUES (1);\n",
+			wantCode:  "assertion_query_failed",
+		},
+		{
 			name:       "cancellation",
 			phaseSQL:   "-- onwardpg:batch transactional\nSELECT pg_sleep(30);\n",
 			wantCode:   "transactional_batch_failed",

@@ -1,8 +1,9 @@
 # Developer-preview security review
 
-Reviewed 2026-07-15 against the developer-preview CLI boundary. No unresolved
-critical security finding was identified. This is a scoped engineering review,
-not a third-party audit.
+Updated 2026-09-26. The [ownership review](ownership-review.md) reproduced and
+fixed assertion execution, row-security visibility, and transaction-boundary
+failures missed by the previous review. This is a scoped engineering review,
+not a third-party audit or a production-safety certification.
 
 ## Trust boundaries
 
@@ -39,20 +40,40 @@ not a third-party audit.
   quoting and structured identifier arrays avoid delimiter ambiguity.
 - Source descriptions reject URLs and common libpq secret-bearing forms.
   Connection strings are used at runtime and are not written to bundles.
-- DDL export output, configuration files, and captured stderr are bounded;
-  JSON input rejects unknown and duplicate keys.
-- Transactional verification rolls back failed batches. Non-transactional
-  failures are reported as partial application inside a disposable database,
-  which is then destroyed.
+- Configuration files and exporter reads are bounded. Both schema input paths
+  accept at most 64 MiB; command output is monitored while the process runs,
+  and each export has a five-minute deadline. Stdout remains a regular file.
+  Checkout hashing streams input. The monitor is not a strict disk quota;
+  see [exporter limits](exporter-limits.md) for process and platform boundaries.
+- User-authored Boolean checks use one shared executor: a read-only transaction
+  or savepoint, pre-execution Parse/Describe, forced extended protocol, exactly
+  one non-null Boolean result, and unconditional rollback. Transaction commands
+  are rejected before they can end their surrounding transaction.
+- Assertions and readiness reject any database containing a table whose RLS
+  applies to the current role, including unmanaged tables and unrelated queries.
+  This prevents function-local `row_security=on` from concealing rows. Ordinary
+  non-forced RLS owned by the observer remains supported. `row_security=off` is
+  an additional guard; it does not bypass policies.
+- Transactional verification checks that the PostgreSQL transaction ID stays
+  unchanged. Explicit commits or rollbacks cannot silently satisfy a
+  transactional batch. Detection cannot undo an earlier explicit commit; the
+  verification database is disposable. Non-transactional batches must leave
+  the connection idle, and failures may have partially applied there.
 - Unknown catalog families block planning unless a validated narrow ignore
   selector matches them; ignored state is reported explicitly.
-- The dependency scan is clean with Go 1.26.5 and pgx 5.9.2; CI and the release
-  workflow rerun the pinned `govulncheck` command.
+- The 2026-09-26 dependency scan is clean with Go 1.26.8, pgx 5.9.2, and
+  `golang.org/x/text` 0.42.0. CI and release jobs rerun the pinned `govulncheck`
+  command; this result applies to these versions and that scan date.
 
 ## Residual risks and release gates
 
 - A malicious `schema_command` has the authority of the onwardpg process. Run
   only repository-controlled export commands, ideally in an isolated CI job.
+- Read-only SQL is not a sandbox for arbitrary database functions. Review gate
+  SQL and installed routines, and use a dedicated observer where supported.
+- Scratch cleanup uses an uncancelled context without a deadline. A stalled
+  administrator connection can delay cleanup indefinitely; a disconnected or
+  killed process can leave disposable databases and roles behind.
 - Clone verification cannot model table size, lock queues, concurrent traffic,
   role membership outside the clone, or application rollout correctness.
 - Superuser-only extensions and ownership transfer to external roles cannot be
