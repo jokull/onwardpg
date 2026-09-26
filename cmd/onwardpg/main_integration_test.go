@@ -553,7 +553,7 @@ dev_mode = "workspace"
 			break
 		}
 	}
-	if replayAction == nil || len(replayAction.Argv) < 6 || replayAction.Argv[2] != "--dev-hint" || replayAction.Argv[len(replayAction.Argv)-2] != "--output" || replayAction.Argv[len(replayAction.Argv)-1] != "sql" {
+	if replayAction == nil || len(replayAction.Argv) < 8 || replayAction.Argv[2] != "--target" || replayAction.Argv[3] != "primary" || replayAction.Argv[4] != "--dev-hint" || replayAction.Argv[len(replayAction.Argv)-2] != "--output" || replayAction.Argv[len(replayAction.Argv)-1] != "sql" {
 		t.Fatalf("development SQL replay action = %#v", replayAction)
 	}
 	statements := replayAction.SQL
@@ -733,7 +733,7 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if report.Durable.Outcome != "no_changes" || len(report.NextActions) != 1 || report.NextActions[0].Kind != "workspace_fast_forward" {
 		t.Fatalf("no-change workspace report = %#v", report)
 	}
-	wantArgv := []string{"onwardpg", "plan", "bootstrap", "--output", "sql"}
+	wantArgv := []string{"onwardpg", "plan", "bootstrap", "--target", "primary", "--output", "sql"}
 	if !reflect.DeepEqual(report.NextActions[0].Argv, wantArgv) {
 		t.Fatalf("workspace replay argv = %#v, want %#v", report.NextActions[0].Argv, wantArgv)
 	}
