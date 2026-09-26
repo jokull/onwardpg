@@ -8,13 +8,13 @@
 -- onwardpg:batch transactional
 -- Batch batch-contract-001: transactional.
 -- Review: safety=manual; hazards=contract_reconciliation,data_movement,post_drain_writers_required; requires_gates=writers:legacy.
--- onwardpg:edit begin stmt-sha256-1a5377b536479569445c7585eb95560c9e977f5d696557db5f28031f9789eec6
+-- onwardpg:edit begin stmt-sha256-9b26c5e7e779fe588376a246169e4c21c30449293242eea637249e7bc2e512a2
 -- PRODUCT-SPECIFIC SQL: Provide reviewed reconcile_contract_sql SQL for app.bookings.status
 -- Verify: SELECT NOT EXISTS (SELECT 1 FROM "app"."bookings" WHERE "status" IS NULL);
 -- ONWARDPG TODO: replace this comment with reviewed SQL for reconcile_contract_sql on app.bookings.status.
--- Planner analysis: Supply reviewed post-drain cleanup/backfill SQL and at least one read-only Boolean verification query for column:app:bookings:status.
+-- Planner analysis: Supply reviewed post-drain cleanup/backfill SQL for column:app:bookings:status. A generated read-only Boolean contract gate verifies the result; add product-specific assertions if needed.
 -- Expected effect: complete the named operation and converge to the desired catalog state.
--- onwardpg:edit end stmt-sha256-1a5377b536479569445c7585eb95560c9e977f5d696557db5f28031f9789eec6
+-- onwardpg:edit end stmt-sha256-9b26c5e7e779fe588376a246169e4c21c30449293242eea637249e7bc2e512a2
 
 -- onwardpg:batch transactional
 -- Batch batch-contract-002: transactional.

@@ -98,6 +98,10 @@ boundaries, strict unused-selector rejection, unavailable development databases,
 exact wildcard receipt narrowing, bundle integrity, and unchanged RLS safeguards.
 The full Go race suite and a final affected-package race run pass, as do vet,
 staticcheck, govulncheck, documentation validation, and the website type check.
+Release gates caught two older native tests expecting follow-up commands without
+the newly retained target, then a stored SQL receipt containing the old cleanup
+prompt. Their expectations and receipts were corrected. The full native
+PostgreSQL 18 CLI package passed; documentation workflows were rerun separately.
 
 ## Reproduce and inspect
 
