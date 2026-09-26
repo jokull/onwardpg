@@ -74,6 +74,7 @@ type Report struct {
 	DesiredFingerprint        string                     `json:"desired_fingerprint,omitempty"`
 	Plan                      *protocol.Result           `json:"generated_plan,omitempty"`
 	Decisions                 []protocol.Decision        `json:"decisions,omitempty"`
+	AppliedHints              []protocol.Hint            `json:"-"`
 	DeferredHints             []protocol.Hint            `json:"deferred_hints,omitempty"`
 	EditFiles                 []string                   `json:"edit_files,omitempty"`
 	EditRequirements          []EditRequirement          `json:"edit_requirements,omitempty"`
@@ -336,6 +337,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err := source.ValidateIgnoreSelectors(input.RequiredIgnores, current, desired); err != nil {
 		return report, err
 	}
+	observerIgnores, err := workspace.ObserverIgnoreSelectors(ctx, input.Target, current, desired)
+	if err != nil {
+		return report, err
+	}
 	activeIgnores, err := source.ActiveIgnoreSelectors(input.Ignores, current, desired)
 	if err != nil {
 		return report, err
@@ -346,6 +351,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, err
 	}
+	// These hints have survived rebinding to the current questions. Keep them
+	// available for cumulative follow-up commands even when an edited bundle
+	// must wait for more decisions before its receipts can be replaced.
+	report.AppliedHints = append([]protocol.Hint(nil), hints...)
 	if plan.Status == protocol.NeedsInput {
 		report.DeferredHints = suppliedHintsNotReceipted(input.Hints, hints)
 		report.Decisions, err = semantichint.Decisions(plan.Questions, current, desired)
@@ -436,7 +445,8 @@ func Run(ctx context.Context, input Input) (Report, error) {
 				SchemaQualifier:         input.PlannerOptions.SchemaQualifier,
 				IgnoreExtensionVersions: append([]string(nil), input.PlannerOptions.IgnoreExtensionVersions...),
 			},
-			IgnoreSelectors: append([]string(nil), input.Ignores...),
+			IgnoreSelectors:         append([]string(nil), input.Ignores...),
+			ObserverIgnoreSelectors: observerIgnores,
 		},
 		HistoryParentDigest: chain.HeadDigest,
 	}

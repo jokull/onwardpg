@@ -5,9 +5,9 @@ package driftcheck
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 
 	"github.com/jokull/onwardpg/internal/change"
+	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/pgschema"
 )
 
@@ -42,6 +42,13 @@ func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (R
 	if target == "" || historyHead == "" || expected == nil || actual == nil {
 		return Report{}, fmt.Errorf("target, history head, expected, and actual schemas are required")
 	}
+	// An explicitly ignored object may exist on only one side (for example a
+	// framework journal omitted from exported DDL). Compare both catalogs under
+	// the same observed policy while retaining that evidence in the report.
+	expected, actual, err := source.AlignIgnoreReceipts(expected, actual)
+	if err != nil {
+		return Report{}, err
+	}
 	expectedFingerprint, err := expected.Fingerprint()
 	if err != nil {
 		return Report{}, err
@@ -53,7 +60,7 @@ func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (R
 	report := Report{
 		Outcome: "drift_free", Target: target,
 		HistoryHead: historyHead, ExpectedFingerprint: expectedFingerprint, ActualFingerprint: actualFingerprint,
-		Ignored: mergeIgnored(expected.Ignored(), actual.Ignored()),
+		Ignored: expected.Ignored(),
 	}
 	for _, item := range change.Between(expected, actual) {
 		difference := Difference{ObjectID: item.ID.String()}
@@ -82,19 +89,4 @@ func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (R
 		report.Outcome = "drifted"
 	}
 	return report, nil
-}
-
-func mergeIgnored(groups ...[]string) []string {
-	seen := make(map[string]bool)
-	for _, group := range groups {
-		for _, value := range group {
-			seen[value] = true
-		}
-	}
-	result := make([]string, 0, len(seen))
-	for value := range seen {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
 }

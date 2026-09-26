@@ -234,6 +234,11 @@ For renames, type conversions, and destructive changes, follow the questions in
 `next_actions`. Answer with the reported `--hint` and edit only the named SQL
 sections. Exit code `2` means the plan needs input or SQL edits. A rename needs
 an explicit identity decision; a type conversion needs a rule for the data.
+Adding another compatible column can introduce a new rename candidate, so a
+previous rename decision may need confirming again. That keeps a changed set
+of possible identities from silently reusing an earlier answer. Use the complete
+suggested command (`argv`) for each answer: it can carry confirmed decisions
+that have not yet been saved while your edited SQL waits for the remaining choices.
 
 ### Use your framework's schema
 
@@ -247,9 +252,15 @@ schema_command = ["pnpm", "--silent", "schema:export"]
 `schema:export` is a script you provide. It must produce the same DDL for the
 same models, including everything needed to build the schema from empty.
 See the [schema input requirements](https://github.com/jokull/onwardpg/blob/main/docs/schema-inputs.md)
-and [example exporters for Drizzle, Prisma, and Django](https://github.com/jokull/onwardpg/tree/main/examples/frameworks).
+and [existing-project recipes for Drizzle, Prisma, and Django](https://github.com/jokull/onwardpg/tree/main/examples/frameworks).
 Choose one executor for production DDL; running both framework migrations and
 the onwardpg bundle would apply the same change twice.
+
+Adopt from an already-deployed schema: export the old models and run `init`
+before the feature edit. Keep existing framework migration history, but do not
+replay the onwardpg baseline against an existing database. Django's example
+exports migration state, so run `makemigrations` after model changes and use
+reviewed state-only migrations when onwardpg takes over their DDL.
 
 ### Connect a development database
 
@@ -265,6 +276,10 @@ its catalog and reports separate SQL to bring it up to date. In workspace mode,
 objects left by another branch are preserved. Migration history still comes
 from accepted bundles. The development and scratch databases must use the same
 PostgreSQL major.
+
+This comparison has its own `--dev-hint` decisions. A ready durable bundle can
+still return exit code `2` because local reconciliation needs an answer; inspect
+the `durable`, `development`, and `next_actions` sections separately.
 
 ### Work with a coding agent
 

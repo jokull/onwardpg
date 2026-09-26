@@ -16,6 +16,7 @@ async function collect(directory, predicate, output = []) {
 const documentationPaths = [
   path.join(repositoryRoot, 'README.md'),
   ...(await collect(path.join(repositoryRoot, 'docs'), (name) => name.endsWith('.md'))),
+  ...(await collect(path.join(repositoryRoot, 'examples'), (name) => name.endsWith('.md'))),
   ...(await collect(path.join(repositoryRoot, 'skills'), (name) => name.endsWith('.md'))),
   ...(await collect(path.join(repositoryRoot, 'website/src/content/docs'), (name) => /\.mdx?$/.test(name))),
 ];

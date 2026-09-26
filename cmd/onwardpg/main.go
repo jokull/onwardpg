@@ -421,7 +421,7 @@ func runContractAt(arguments []string, start string) int {
 	}
 	report, err := contractcheck.Run(context.Background(), contractcheck.Input{
 		Artifact: entry.Artifact, ExpectedHead: chain.HeadDigest, DatabaseURL: databaseURL, Environment: *environment,
-		Evidence: evidence, StatementTimeout: *statementTimeout, Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options,
 	})
 	if err != nil {
 		return writeError("contract_check_error", err)
@@ -731,10 +731,11 @@ func runDevAt(arguments []string, start string) int {
 				CurrentFingerprint string   `json:"current_fingerprint"`
 				DesiredFingerprint string   `json:"desired_fingerprint"`
 				Preserved          []string `json:"preserved,omitempty"`
+				Ignored            []string `json:"ignored,omitempty"`
 			}{
 				Status: devNoChangeStatus(result), Changed: false,
 				CurrentFingerprint: result.CurrentFingerprint, DesiredFingerprint: result.DesiredFingerprint,
-				Preserved: result.Preserved,
+				Preserved: result.Preserved, Ignored: result.Ignored,
 			})
 		} else {
 			_ = json.NewEncoder(os.Stdout).Encode(result)
@@ -1502,6 +1503,17 @@ func compactDurableOutcome(report draftflow.Report) workflowDurableOutcome {
 		Findings:        append([]draftflow.Finding(nil), report.Findings...),
 		WrittenReceipts: append([]string(nil), report.WrittenReceipts...),
 	}
+	if report.AnswerRebind != nil {
+		outstanding := make(map[string]bool, len(report.AnswerRebind.Unanswered))
+		for _, decision := range report.AnswerRebind.Unanswered {
+			outstanding[decision] = true
+		}
+		for _, invalidated := range report.AnswerRebind.Invalidated {
+			if outstanding[invalidated.Decision] {
+				result.Findings = append(result.Findings, answerInvalidationFinding(invalidated))
+			}
+		}
+	}
 	if report.Verification != nil {
 		result.Verification = &workflowVerificationSummary{
 			Outcome: report.Verification.Outcome, ThroughPhase: report.Verification.ThroughPhase,
@@ -1551,6 +1563,23 @@ func compactDurableOutcome(report draftflow.Report) workflowDurableOutcome {
 	return result
 }
 
+func answerInvalidationFinding(invalidated protocol.RebindFinding) draftflow.Finding {
+	message := fmt.Sprintf("previous decision %s was invalidated (%s)", invalidated.Decision, invalidated.Reason)
+	remediation := "review the current decisions before supplying a new hint"
+	switch invalidated.Reason {
+	case "question_scope_changed":
+		message = fmt.Sprintf("previous decision %s was invalidated because its question scope changed; the choices or participating schema objects may have changed", invalidated.Decision)
+		remediation = "review the current choices and answer this decision again"
+	case "answer_no_longer_valid":
+		message = fmt.Sprintf("previous decision %s is no longer a valid choice for its current question", invalidated.Decision)
+		remediation = "review the current choices and answer this decision again"
+	case "question_no_longer_present":
+		message = fmt.Sprintf("previous decision %s was discarded because its question is no longer present", invalidated.Decision)
+		remediation = "review the current plan; no replacement answer is needed for this decision"
+	}
+	return draftflow.Finding{Code: "answer_invalidated", Message: message, Remediation: remediation}
+}
+
 func compactDevelopmentOutcome(report devflow.Report) workflowDevelopmentOutcome {
 	result := workflowDevelopmentOutcome{
 		Status: report.Status, Verification: append([]devflow.PostconditionResult(nil), report.Postconditions...),
@@ -1570,13 +1599,24 @@ func compactDevelopmentOutcome(report devflow.Report) workflowDevelopmentOutcome
 	return result
 }
 
+func workflowPlanArgv(target, name string) []string {
+	argv := []string{"onwardpg", "plan"}
+	if name != "" {
+		argv = append(argv, name)
+	}
+	if target != "" {
+		argv = append(argv, "--target", target)
+	}
+	return argv
+}
+
 func workflowNextActions(durable draftflow.Report, development devflow.Report) []workflowNextAction {
 	var result []workflowNextAction
 	appendDecisions := func(scope, flag string, carried []protocol.Hint, decisions []protocol.Decision) {
 		for _, decision := range decisions {
 			action := workflowNextAction{Scope: scope, Kind: "semantic_hint"}
 			for _, choice := range decision.Choices {
-				argv := []string{"onwardpg", "plan"}
+				argv := workflowPlanArgv(durable.Target, "")
 				valid := true
 				for _, hint := range append(append([]protocol.Hint(nil), carried...), choice.Hint) {
 					encoded, err := json.Marshal(hint)
@@ -1599,7 +1639,7 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 			}
 		}
 	}
-	appendDecisions("durable", "--hint", nil, durable.Decisions)
+	appendDecisions("durable", "--hint", durable.AppliedHints, durable.Decisions)
 	if durable.EditReconciliation != nil && durable.EditReconciliation.Outcome == "conflict" {
 		for _, conflict := range durable.EditReconciliation.Conflicts {
 			action := workflowNextAction{
@@ -1617,13 +1657,22 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 		}
 	}
 	for _, hint := range durable.DeferredHints {
-		encoded, err := json.Marshal(hint)
-		if err != nil {
+		argv := workflowPlanArgv(durable.Target, "")
+		valid := true
+		for _, carried := range append(append([]protocol.Hint(nil), durable.AppliedHints...), hint) {
+			encoded, err := json.Marshal(carried)
+			if err != nil {
+				valid = false
+				break
+			}
+			argv = append(argv, "--hint", string(encoded))
+		}
+		if !valid {
 			continue
 		}
 		result = append(result, workflowNextAction{
 			Scope: "durable", Kind: "deferred_hint",
-			Choices: []workflowActionChoice{{Hint: hint, Argv: []string{"onwardpg", "plan", "--hint", string(encoded)}}},
+			Choices: []workflowActionChoice{{Hint: hint, Argv: argv}},
 		})
 	}
 	if durable.Outcome == string(protocol.NeedsSQLEdits) {
@@ -1652,7 +1701,7 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 	}
 	appendDecisions("development", "--dev-hint", development.AppliedHints, development.Decisions)
 	for _, hint := range development.DeferredHints {
-		argv := []string{"onwardpg", "plan"}
+		argv := workflowPlanArgv(durable.Target, "")
 		for _, carried := range append(append([]protocol.Hint(nil), development.AppliedHints...), hint) {
 			encoded, err := json.Marshal(carried)
 			if err != nil {
@@ -1708,15 +1757,16 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 		if durable.ParentChanged {
 			reason = "accepted_history_changed"
 		}
-		argv := []string{"onwardpg", "plan"}
+		name := ""
 		// A no-change plan has no durable bundle to keep active, and an
 		// absorbed generated bundle has just been removed. Naming the plan in
 		// those two cases makes this emitted replay command self-contained:
 		// it may rebuild the same empty H -> W comparison while rendering the
 		// still-useful D -> W reconciliation.
 		if (durable.Outcome == "no_changes" && durable.Path == "") || durable.RemovedBundle {
-			argv = append(argv, durable.BundleID)
+			name = durable.BundleID
 		}
+		argv := workflowPlanArgv(durable.Target, name)
 		for _, hint := range development.AppliedHints {
 			encoded, err := json.Marshal(hint)
 			if err != nil {
@@ -2012,6 +2062,10 @@ func runLowLevelPlan(command string, arguments []string) int {
 	}
 	if err := source.ValidateIgnoreSelectors(ignores, current, desired); err != nil {
 		return writeError("invalid_ignore", err)
+	}
+	current, desired, err = source.AlignIgnoreReceipts(current, desired)
+	if err != nil {
+		return writeError("source_error", err)
 	}
 	options := graphplan.Options{
 		ConcurrentIndexes:       *concurrentIndexes,

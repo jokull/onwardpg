@@ -99,7 +99,6 @@ type Input struct {
 	Evidence         []byte
 	Now              time.Time
 	StatementTimeout time.Duration
-	Ignores          []string
 	Options          graphplan.Options
 }
 
@@ -464,7 +463,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Findings = append(report.Findings, *finding)
 		return finalize(report), nil
 	}
-	actual, err := source.InspectGraphTransaction(ctx, tx, input.Ignores, false)
+	actual, err := source.InspectGraphTransaction(ctx, tx, manifest.Planner.ObserverIgnores(), false)
 	if err != nil {
 		return Report{}, fmt.Errorf("inspect production catalog read-only: %w", err)
 	}
@@ -487,6 +486,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			Remediation: "use an observer with complete row visibility for every RLS-enabled table; database ownership alone does not bypass FORCE RLS or policies on another role's tables",
 		})
 		return finalize(report), nil
+	}
+	actual, err = withoutObserverIgnoreReceipts(actual, input.Artifact.Manifest.Planner.ObserverIgnoreSelectors)
+	if err != nil {
+		return Report{}, err
 	}
 	report.ActualFingerprint, err = graphplan.Fingerprint(actual, input.Options)
 	if err != nil {

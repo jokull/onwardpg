@@ -36,3 +36,35 @@ func TestActiveIgnoreSelectorsStillRejectsMalformedPolicy(t *testing.T) {
 		t.Fatal("expected malformed ignore selector to fail")
 	}
 }
+
+func TestTableIgnoreRequiresObservedTableExclusion(t *testing.T) {
+	table := (pgschema.Table{Schema: "public", Name: "django_migrations"}).ObjectID()
+	for _, selector := range []string{"table:public.django_migrations", "table:*"} {
+		t.Run(selector, func(t *testing.T) {
+			tracker, err := newIgnoreTracker([]string{selector})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tracker.tableIgnored(table) {
+				t.Fatal("an unobserved selector cannot suppress missing table metadata")
+			}
+			snapshot := pgschema.New()
+			skipped, err := tracker.Skip("table:public.django_migrations", snapshot)
+			if err != nil || !skipped {
+				t.Fatalf("Skip = %v, %v", skipped, err)
+			}
+			if !tracker.tableIgnored(table) {
+				t.Fatal("observed table exclusion was not recorded")
+			}
+			if tracker.tableIgnored((pgschema.Table{Schema: "public", Name: "application_items"}).ObjectID()) {
+				t.Fatal("an unrelated table was treated as excluded")
+			}
+			if tracker.tableIgnored((pgschema.View{Schema: "public", Name: "django_migrations"}).ObjectID()) {
+				t.Fatal("table exclusion also excluded a view")
+			}
+			if got := snapshot.Ignored(); !reflect.DeepEqual(got, []string{"table:public.django_migrations"}) {
+				t.Fatalf("ignore receipt = %#v", got)
+			}
+		})
+	}
+}

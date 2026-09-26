@@ -4,7 +4,7 @@ set -euo pipefail
 output=$(mktemp)
 trap 'rm -f "$output"' EXIT
 
-pnpm exec prisma migrate diff \
+npx --no-install prisma migrate diff \
   --from-empty \
   --to-schema ./prisma/schema.prisma \
   --script >"$output"

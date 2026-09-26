@@ -251,9 +251,13 @@ func reconciliationQuestion(spec reconciliationSpec, currentFingerprint, desired
 }
 
 func reconciliationManualQuestion(spec reconciliationSpec, currentFingerprint, desiredFingerprint string) protocol.Question {
+	message := "Supply reviewed post-drain cleanup/backfill SQL and at least one read-only Boolean verification query for " + spec.TransitionID + "."
+	if spec.BooleanSQL != "" {
+		message = "Supply reviewed post-drain cleanup/backfill SQL for " + spec.TransitionID + ". A generated read-only Boolean contract gate verifies the result; add product-specific assertions if needed."
+	}
 	return protocol.Question{
 		ID: "reconcile_contract_sql:" + spec.TransitionID, Kind: "reconcile_contract_sql", Key: spec.ChangeID.String(),
-		Message: "Supply reviewed post-drain cleanup/backfill SQL and at least one read-only Boolean verification query for " + spec.TransitionID + ".",
+		Message: message,
 		Choices: []string{"provided"}, ScopeObjects: spec.ScopeObjects,
 		CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 	}

@@ -124,6 +124,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err := source.ValidateIgnoreSelectors(input.RequiredIgnores, empty, desired); err != nil {
 		return report, err
 	}
+	observerIgnores, err := workspace.ObserverIgnoreSelectors(ctx, input.Target, empty, desired)
+	if err != nil {
+		return report, err
+	}
 	activeIgnores, err := source.ActiveIgnoreSelectors(input.Ignores, empty, desired)
 	if err != nil {
 		return report, err
@@ -166,7 +170,8 @@ func Run(ctx context.Context, input Input) (Report, error) {
 				SchemaQualifier:         input.PlannerOptions.SchemaQualifier,
 				IgnoreExtensionVersions: append([]string(nil), input.PlannerOptions.IgnoreExtensionVersions...),
 			},
-			IgnoreSelectors: append([]string(nil), input.Ignores...),
+			IgnoreSelectors:         append([]string(nil), input.Ignores...),
+			ObserverIgnoreSelectors: observerIgnores,
 		},
 		HistoryParentDigest: bundle.HistoryRootDigest(),
 	}

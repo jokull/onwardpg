@@ -26,6 +26,11 @@ it back on internally. The database-wide preflight prevents that hidden-row
 case. Queries and functions still require review, particularly functions that
 change execution identity or have external effects.
 
+A dedicated observer needs schema `USAGE` and relation `SELECT` across the
+inspected database, including ignored framework journals. Catalog exclusions
+do not bypass access or RLS preflight. Grant that access directly or through a
+dedicated restricted role; inherited `pg_read_all_data` is rejected as elevated.
+
 ## What the planner generates
 
 Consider replacing an old CHECK with a desired CHECK that accepts a different
@@ -112,8 +117,18 @@ onwardpg contract check \
   --statement-timeout 30s
 ```
 
-The result is `ready`, `needs_evidence`, `blocked`, or `stale`. Catalog mismatch
-distinguishes an unapplied expand baseline, an already-contracted desired graph,
+The result is `ready`, `reconciliation_required`, `needs_evidence`, `blocked`,
+or `stale`. `reconciliation_required` means writer evidence passed but the named
+post-drain cleanup must run before enforcement. Have the deployment executor
+run that receipted reconciliation from `phases/contract.sql`, then repeat the
+check. Do not run the remaining contract batches until readiness passes.
+The named cleanup can appear after a cutover batch in the file. For example,
+if batch 002 is status cleanup and batch 001 removes the rename bridge, run 002,
+check for `ready`, then run 001 and 003. Preserve each batch's transaction mode
+and do not run the completed cleanup twice. This permission covers only the
+named reconciliation, not arbitrary batch reordering.
+
+Catalog mismatch distinguishes an unapplied expand baseline, an already-contracted desired graph,
 and unrelated/partial drift. Data gates run in the same read-only snapshot.
 
 Writer evidence is provider-neutral and bound to target, environment, PlanID,

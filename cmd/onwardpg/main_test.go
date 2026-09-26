@@ -13,9 +13,12 @@ import (
 	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/devflow"
 	"github.com/jokull/onwardpg/internal/draftflow"
+	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/semantichint"
 	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
+	"github.com/jokull/onwardpg/pgschema"
 )
 
 func findNextAction(actions []workflowNextAction, kind string) *workflowNextAction {
@@ -224,6 +227,100 @@ func TestWorkflowPlanDevelopmentChoiceArgvCarriesAppliedHints(t *testing.T) {
 	}
 }
 
+func TestWorkflowPlanDurableChoiceArgvCarriesOnlyCurrentAppliedHints(t *testing.T) {
+	obsolete := protocol.Hint{Kind: "rename", Object: "column", From: []string{"public", "customers", "display_name"}, To: []string{"public", "customers", "account_status"}}
+	reconfirmed := protocol.Hint{Kind: "rename", Object: "column", From: []string{"public", "customers", "display_name"}, To: []string{"public", "customers", "full_name"}}
+	reconcile := protocol.Hint{Kind: "reconcile", Object: "column", Name: []string{"public", "customers", "account_status"}, Strategy: "manual_sql"}
+	backfill := protocol.Hint{Kind: "rename_backfill", Name: []string{"public", "customers", "display_name"}, Strategy: "manual_sql"}
+	decision := func(hint protocol.Hint) protocol.Decision {
+		return protocol.Decision{Choices: []protocol.DecisionChoice{{Hint: hint}}}
+	}
+	checkArgv := func(argv []string, want ...protocol.Hint) {
+		t.Helper()
+		if len(argv) != 2+2*len(want) || !reflect.DeepEqual(argv[:2], []string{"onwardpg", "plan"}) {
+			t.Fatalf("argv = %#v", argv)
+		}
+		for index, hint := range want {
+			if argv[2+2*index] != "--hint" {
+				t.Fatalf("argv = %#v", argv)
+			}
+			var got protocol.Hint
+			if err := json.Unmarshal([]byte(argv[3+2*index]), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, hint) {
+				t.Fatalf("argv hint %d = %#v; want %#v", index, got, hint)
+			}
+		}
+	}
+
+	// Scope rebinding invalidates the old rename. Its replacement is a fresh
+	// choice and must not arrive prefilled in the suggested command.
+	first := newWorkflowPlanReport(draftflow.Report{
+		Outcome: string(protocol.NeedsInput), Decisions: []protocol.Decision{decision(reconfirmed)},
+	}, devflow.Report{Status: protocol.Status("not_available")})
+	checkArgv(first.NextActions[0].Choices[0].Argv, reconfirmed)
+
+	// The edited bundle cannot store the reconfirmed answer while later
+	// questions remain, so subsequent commands must carry it explicitly.
+	second := newWorkflowPlanReport(draftflow.Report{
+		Outcome: string(protocol.NeedsInput), AppliedHints: []protocol.Hint{reconfirmed},
+		Decisions: []protocol.Decision{decision(reconcile)}, DeferredHints: []protocol.Hint{backfill},
+	}, devflow.Report{Status: protocol.Status("not_available")})
+	if len(second.NextActions) != 2 {
+		t.Fatalf("next actions = %#v", second.NextActions)
+	}
+	checkArgv(second.NextActions[0].Choices[0].Argv, reconfirmed, reconcile)
+	checkArgv(second.NextActions[1].Choices[0].Argv, reconfirmed, backfill)
+
+	third := newWorkflowPlanReport(draftflow.Report{
+		Outcome: string(protocol.NeedsInput), AppliedHints: []protocol.Hint{reconfirmed, reconcile},
+		Decisions: []protocol.Decision{decision(backfill)},
+	}, devflow.Report{Status: protocol.Status("not_available")})
+	checkArgv(third.NextActions[0].Choices[0].Argv, reconfirmed, reconcile, backfill)
+	obsoleteJSON, err := json.Marshal(obsolete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []workflowNextAction{second.NextActions[0], second.NextActions[1], third.NextActions[0]} {
+		if strings.Contains(strings.Join(action.Choices[0].Argv, " "), string(obsoleteJSON)) {
+			t.Fatalf("obsolete rename was carried into argv: %#v", action.Choices[0].Argv)
+		}
+	}
+}
+
+func TestWorkflowPlanNextActionsRetainSelectedTarget(t *testing.T) {
+	hint := protocol.Hint{Kind: "drop", Object: "column", Name: []string{"app", "users", "legacy"}}
+	decision := protocol.Decision{Choices: []protocol.DecisionChoice{{Hint: hint}}}
+	report := newWorkflowPlanReport(draftflow.Report{
+		Outcome: string(protocol.NeedsInput), Target: "secondary", BundleID: "remove-legacy",
+		Decisions: []protocol.Decision{decision}, DeferredHints: []protocol.Hint{hint},
+	}, devflow.Report{
+		Status: protocol.NeedsInput, Decisions: []protocol.Decision{decision}, DeferredHints: []protocol.Hint{hint},
+	})
+	if len(report.NextActions) != 4 {
+		t.Fatalf("next actions = %#v", report.NextActions)
+	}
+	for _, action := range report.NextActions {
+		for _, choice := range action.Choices {
+			if !reflect.DeepEqual(choice.Argv[:4], []string{"onwardpg", "plan", "--target", "secondary"}) {
+				t.Fatalf("selected target missing from argv: %#v", choice.Argv)
+			}
+		}
+	}
+	fastForward := newWorkflowPlanReport(draftflow.Report{
+		Outcome: "no_changes", Target: "secondary", BundleID: "remove-legacy",
+	}, devflow.Report{
+		Status: protocol.Planned, Result: protocol.Result{Statements: []protocol.Statement{{SQL: "SELECT 1;"}}},
+	})
+	if len(fastForward.NextActions) != 1 || !reflect.DeepEqual(fastForward.NextActions[0].Argv[:5], []string{"onwardpg", "plan", "remove-legacy", "--target", "secondary"}) {
+		t.Fatalf("fast-forward target or name missing: %#v", fastForward.NextActions)
+	}
+	if got := workflowPlanArgv("", ""); !reflect.DeepEqual(got, []string{"onwardpg", "plan"}) {
+		t.Fatalf("optional target was inserted: %#v", got)
+	}
+}
+
 func TestWorkflowPlanDevelopmentSQLEditsExposeInspectionAction(t *testing.T) {
 	first := protocol.Hint{Kind: "reconcile", Object: "column", Name: []string{"app", "accounts", "status"}, Strategy: "manual_sql"}
 	second := protocol.Hint{Kind: "manual_sql", Object: "column", Name: []string{"app", "accounts", "status"}, Action: "reconcile_contract_sql"}
@@ -266,6 +363,92 @@ func TestWorkflowPlanOmitsPersistedGeneratedPlan(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "generated_plan") || strings.Contains(output.String(), "persisted artifact") {
 		t.Fatalf("ordinary JSON repeated the persisted generated plan: %s", output.String())
+	}
+}
+
+func TestWorkflowPlanExplainsInvalidatedRenameWhenCandidateSetChanges(t *testing.T) {
+	current, before, after := pgschema.New(), pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "customers"}
+	oldName := pgschema.Column{Table: table.ObjectID(), Name: "display_name", Position: 1, Type: "text", NotNull: true}
+	fullName := oldName
+	fullName.Name = "full_name"
+	status := pgschema.Column{Table: table.ObjectID(), Name: "account_status", Position: 2, Type: "text", NotNull: true}
+	for _, fixture := range []struct {
+		snapshot *pgschema.Snapshot
+		columns  []pgschema.Column
+	}{{current, []pgschema.Column{oldName}}, {before, []pgschema.Column{fullName}}, {after, []pgschema.Column{fullName, status}}} {
+		if err := fixture.snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		for _, column := range fixture.columns {
+			if err := fixture.snapshot.Add(column); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.snapshot.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	oldPlan, err := graphplan.Build(current, before, protocol.Answers{}, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPlan, err := graphplan.Build(current, after, protocol.Answers{}, graphplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldPlan.Questions) != 1 || len(newPlan.Questions) != 1 || oldPlan.Questions[0].Kind != "rename_column" || newPlan.Questions[0].Kind != "rename_column" || len(newPlan.Questions[0].Choices) != 3 {
+		t.Fatalf("rename questions before=%#v after=%#v", oldPlan.Questions, newPlan.Questions)
+	}
+	oldQuestion := oldPlan.Questions[0]
+	previous := protocol.Answers{CurrentFingerprint: oldPlan.CurrentFingerprint, DesiredFingerprint: oldPlan.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: oldQuestion.Kind, Key: oldQuestion.Key, Value: fullName.ObjectID().String(), QuestionFingerprint: oldQuestion.ScopeFingerprint}}}
+	rebound, err := protocol.RebindAnswers(previous, oldPlan.Questions, newPlan.Questions, newPlan.CurrentFingerprint, newPlan.DesiredFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rebound.Invalidated) != 1 || rebound.Invalidated[0].Reason != "question_scope_changed" || len(rebound.Carried) != 0 {
+		t.Fatalf("changed candidate set must invalidate the old answer: %#v", rebound)
+	}
+	decisions, err := semantichint.Decisions(newPlan.Questions, current, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := writeWorkflowPlanReport(&output, "json", draftflow.Report{Outcome: string(newPlan.Status), Target: "app", AnswerRebind: &rebound, Decisions: decisions}, devflow.Report{Status: protocol.Status("not_available")}); err != nil {
+		t.Fatal(err)
+	}
+	var report workflowPlanReport
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "needs_action" || len(report.Durable.Findings) != 1 || report.Durable.Findings[0].Code != "answer_invalidated" ||
+		!strings.Contains(report.Durable.Findings[0].Message, oldQuestion.Kind+":"+oldQuestion.Key) ||
+		!strings.Contains(report.Durable.Findings[0].Message, "question scope changed") {
+		t.Fatalf("invalidation missing from top-level workflow report: %s", output.String())
+	}
+	if len(report.NextActions) != 1 || report.NextActions[0].Kind != "semantic_hint" || len(report.NextActions[0].Choices) != 3 {
+		t.Fatalf("current rename choices were not preserved: %s", output.String())
+	}
+
+	// A hint can answer the invalidated rename while later reconciliation and
+	// backfill questions remain pending in the same plan invocation. The
+	// invalidation is then history, not an action the user still needs to take.
+	rebound.Answers.Answers = append(rebound.Answers.Answers, protocol.Answer{
+		Kind: oldQuestion.Kind, Key: oldQuestion.Key, Value: fullName.ObjectID().String(),
+		QuestionFingerprint: newPlan.Questions[0].ScopeFingerprint,
+	})
+	rebound.Unanswered = []string{"reconcile_contract:" + status.ObjectID().String(), "rename_backfill_strategy:" + oldName.ObjectID().String()}
+	output.Reset()
+	if err := writeWorkflowPlanReport(&output, "json", draftflow.Report{Outcome: string(protocol.NeedsInput), Target: "app", AnswerRebind: &rebound}, devflow.Report{Status: protocol.Status("not_available")}); err != nil {
+		t.Fatal(err)
+	}
+	report = workflowPlanReport{}
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Durable.Findings) != 0 {
+		t.Fatalf("already answered rename still requests another answer: %s", output.String())
 	}
 }
 

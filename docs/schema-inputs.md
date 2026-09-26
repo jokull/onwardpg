@@ -32,6 +32,18 @@ not enter the declarative history. It is not a DDL filter and it does not make
 schema selectors recursive. `config check` validates each selector against the
 exported DDL plus the read-only development catalog and reports what matched.
 
+Selectors use a dot between schema and object name, for example
+`table:public.django_migrations` or `table:drizzle.__drizzle_migrations`.
+They are different from the colon-separated object IDs shown in plans.
+Configure reviewed bookkeeping exclusions before planning so the bundle
+records the same boundary for later contract checks. If such a table exists
+only in the live database, configure `dev_database_env` when validating the
+selectors; an exporter-only catalog cannot confirm that it exists. The bundle
+stores exact observed live-only exclusions in `planner.observer_ignore_selectors`
+and keeps clone-schema exclusions in `planner.ignore_selectors`. Contract checks
+use that saved policy; editing current configuration cannot widen an existing
+bundle's boundary. Plan again to receipt a reviewed boundary change.
+
 The PostgreSQL major is inferred from the configured scratch server and bound
 to generated history. It is not a user-maintained configuration value.
 
@@ -41,7 +53,10 @@ PostgreSQL DDL. The [example exporters](../examples/frameworks/) cover Drizzle,
 Prisma, and Django. For Django, the exporter asks
 `MigrationLoader` for final `ProjectState` and materializes it with
 `SchemaEditor`; it therefore includes state-only operations without executing
-historical `RunPython` or `RunSQL` work.
+historical `RunPython` or `RunSQL` work. Run `makemigrations` after model edits:
+the Django example rejects changes absent from migration state. Follow the
+[existing-project adoption recipes](../examples/frameworks/README.md) for
+baseline timing, exporter setup, and framework migration bookkeeping.
 
 ## Why DDL is the boundary
 

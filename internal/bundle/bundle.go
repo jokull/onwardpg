@@ -54,10 +54,25 @@ type BuildIdentity struct {
 }
 
 type PlannerReceipt struct {
-	Version         string         `json:"version"`
-	Build           *BuildIdentity `json:"build,omitempty"`
-	Options         PlannerOptions `json:"options"`
-	IgnoreSelectors []string       `json:"ignore_selectors,omitempty"`
+	Version                 string         `json:"version"`
+	Build                   *BuildIdentity `json:"build,omitempty"`
+	Options                 PlannerOptions `json:"options"`
+	IgnoreSelectors         []string       `json:"ignore_selectors,omitempty"`
+	ObserverIgnoreSelectors []string       `json:"observer_ignore_selectors,omitempty"`
+}
+
+// ObserverIgnores returns only the catalog boundary bound into this receipt.
+// Older bundles without observer selectors preserve their original boundary.
+func (p PlannerReceipt) ObserverIgnores() []string {
+	selectors := append(append([]string(nil), p.IgnoreSelectors...), p.ObserverIgnoreSelectors...)
+	sort.Strings(selectors)
+	result := selectors[:0]
+	for _, selector := range selectors {
+		if len(result) == 0 || result[len(result)-1] != selector {
+			result = append(result, selector)
+		}
+	}
+	return result
 }
 
 // HistoryReceipt links a bundle to the exact protected history head it was
@@ -935,6 +950,15 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("planner ignore selectors must be non-empty, sorted, and unique")
 		}
 		previousIgnore = selector
+	}
+	previousObserverIgnore := ""
+	for _, selector := range m.Planner.ObserverIgnoreSelectors {
+		kind, value, found := strings.Cut(selector, ":")
+		if !found || kind == "" || value == "" || strings.TrimSpace(selector) != selector || strings.ContainsRune(selector, '\x00') ||
+			strings.Contains(value, "*") || (previousObserverIgnore != "" && selector <= previousObserverIgnore) {
+			return fmt.Errorf("planner observer ignore selectors must be exact kind:name selectors, sorted, and unique")
+		}
+		previousObserverIgnore = selector
 	}
 	if m.History != nil {
 		if !fingerprintPattern.MatchString(m.History.ParentDigest) || !fingerprintPattern.MatchString(m.History.EntryDigest) {

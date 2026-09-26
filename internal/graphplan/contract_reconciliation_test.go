@@ -88,6 +88,9 @@ func TestContractReconciliationManualReusesExactGeneratedBoolean(t *testing.T) {
 		t.Fatalf("manual reconciliation question=%#v", pending)
 	}
 	manual := pending.Questions[0]
+	if !strings.Contains(manual.Message, "generated read-only Boolean contract gate") || strings.Contains(manual.Message, "at least one read-only Boolean verification query") {
+		t.Fatalf("manual reconciliation prompt obscures generated verification: %q", manual.Message)
+	}
 	answers.Answers = append(answers.Answers, protocol.Answer{
 		Kind: manual.Kind, Key: manual.Key, Value: "provided", QuestionFingerprint: manual.ScopeFingerprint,
 		Manual: &protocol.ManualWork{Summary: "normalize legacy tier", ExecutionMode: "transactional", Statements: []string{"UPDATE public.delivery SET tier = 'open' WHERE tier = 'legacy';"}},
@@ -101,6 +104,15 @@ func TestContractReconciliationManualReusesExactGeneratedBoolean(t *testing.T) {
 	}
 	if strings.Contains(planned.Reconciliations[0].Work.VerificationSQL[0], "ONWARDPG TODO") {
 		t.Fatalf("exact catalog-derived gate remained an edit placeholder: %#v", planned.Reconciliations[0].Work)
+	}
+}
+
+func TestContractReconciliationManualPromptRequiresQueryWithoutGeneratedGate(t *testing.T) {
+	id := (pgschema.Constraint{Table: (pgschema.Table{Schema: "public", Name: "delivery"}).ObjectID(), Name: "delivery_exclusion"}).ObjectID()
+	spec := reconciliationSpec{ChangeID: id, TransitionID: id.String()}
+	question := reconciliationManualQuestion(spec, "current", "desired")
+	if !strings.Contains(question.Message, "at least one read-only Boolean verification query") || strings.Contains(question.Message, "generated read-only Boolean contract gate") {
+		t.Fatalf("manual-only reconciliation prompt lost required query: %q", question.Message)
 	}
 }
 

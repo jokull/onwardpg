@@ -3,7 +3,36 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
-## Unreleased
+## v0.1.0-preview.4 — 2026-09-26
+
+### Fixed
+
+- Table exclusions now cover their owned catalog metadata without suppressing
+  missing-table errors elsewhere. Application foreign keys that cross an ignored
+  table boundary require explicit review.
+- Bundles retain exact, observed development-only journal exclusions for live
+  contract readiness. The saved policy is integrity-bound and cannot be widened
+  by changing current configuration. Clone verification retains its own boundary.
+- Development planning, raw diff, and drift checks no longer report differences
+  caused only by a journal ignore receipt existing on one side of the comparison.
+  Successful development output retains the observed exclusion evidence.
+- Revoking temporary schema grants no longer leaves a false unsupported-ACL
+  finding when the resulting custom-schema ACL exactly matches PostgreSQL's
+  default. Actual privilege and ownership changes remain visible.
+- Suggested commands carry current confirmed hints through edited-bundle
+  revisions that are waiting for more decisions, without replacing existing SQL
+  or reusing invalidated answers. Follow-up commands retain the selected target.
+- Replanning explains invalidated answers while they remain unanswered, and
+  cleanup prompts distinguish generated data gates from required custom queries.
+- The Django exporter rejects model edits without migration state and supports
+  explicit `pg_dump` selection and scratch-admin URL reuse.
+
+### Documentation and adoption
+
+- Add existing-project recipes for Drizzle 1.0 RC, Django, and Prisma, including
+  framework migration handoff, empty-database bootstrap, and nullable overlap.
+- Add disposable populated adoption sandboxes and record fresh-agent feedback
+  with the limits of these small rehearsals.
 
 ## v0.1.0-preview.3 — 2026-09-26
 

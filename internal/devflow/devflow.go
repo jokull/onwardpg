@@ -99,6 +99,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err := source.ValidateIgnoreSelectors(input.RequiredIgnores, current, desired); err != nil {
 		return Report{}, err
 	}
+	current, desired, err = source.AlignIgnoreReceipts(current, desired)
+	if err != nil {
+		return Report{}, fmt.Errorf("align development ignore receipts: %w", err)
+	}
 	options := input.PlannerOptions
 	options.PreserveSurplus = input.Target.WorkspaceMode()
 	options.DirectColumnRenames = true

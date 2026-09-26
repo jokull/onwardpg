@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# drizzle-kit export does not currently emit CREATE SCHEMA for pgSchema().
-# List every named schema used by the model before the exported objects.
-printf 'CREATE SCHEMA "app";\n'
-pnpm exec drizzle-kit export --sql=true
+# For pgSchema() models, prepend CREATE SCHEMA statements here if your
+# drizzle-kit version omits them. Public-schema models need no preamble.
+# For example: printf 'CREATE SCHEMA "app";\n'
+exec npx --no-install drizzle-kit export --sql=true "$@"

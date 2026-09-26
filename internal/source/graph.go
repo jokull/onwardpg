@@ -1208,6 +1208,8 @@ ORDER BY n.nspname, c.relname, con.conname`)
 				if err := snapshot.AddDependency(object.ObjectID(), *object.Reference); err != nil {
 					return err
 				}
+			} else if tracker.tableIgnored(*object.Reference) {
+				return fmt.Errorf("foreign key %s references ignored table %s; review and explicitly ignore the dependent constraint before excluding its referenced table", object.ObjectID(), *object.Reference)
 			}
 		}
 		if object.Parent != nil {
@@ -1986,6 +1988,9 @@ ORDER BY n.nspname, c.relname, tg.tgname`)
 			return err
 		}
 		object.Table = relationObjectID(relationKind, schema, relation)
+		if tracker.tableIgnored(object.Table) {
+			continue
+		}
 		object.Routine = (pgschema.Routine{Schema: routineSchema, Name: routineName, Signature: routineSignature}).ObjectID()
 		selector := "trigger:" + schema + "." + relation + "." + object.Name
 		skip, err := tracker.Skip(selector, snapshot)
@@ -2090,6 +2095,9 @@ ORDER BY n.nspname, c.relname, p.polname`)
 			return err
 		}
 		object.Table = (pgschema.Table{Schema: schema, Name: table}).ObjectID()
+		if tracker.tableIgnored(object.Table) {
+			continue
+		}
 		selector := "policy:" + schema + "." + table + "." + object.Name
 		skip, err := tracker.Skip(selector, snapshot)
 		if err != nil {
@@ -2143,6 +2151,9 @@ ORDER BY n.nspname, c.relname`)
 			return err
 		}
 		object.Table = (pgschema.Table{Schema: schema, Name: table}).ObjectID()
+		if tracker.tableIgnored(object.Table) {
+			continue
+		}
 		selector := "row_level_security:" + schema + "." + table
 		skip, err := tracker.Skip(selector, snapshot)
 		if err != nil {
@@ -2264,6 +2275,9 @@ ORDER BY n.nspname, c.relname`)
 			return err
 		}
 		object := pgschema.ReplicaIdentity{Table: (pgschema.Table{Schema: schema, Name: table}).ObjectID()}
+		if tracker.tableIgnored(object.Table) {
+			continue
+		}
 		switch mode {
 		case "d":
 			object.Mode = pgschema.ReplicaIdentityDefault
@@ -2343,6 +2357,9 @@ ORDER BY n.nspname, c.relname, x.privilege_type,
 			return err
 		}
 		object.Table = relationObjectID(relationKind, schema, table)
+		if tracker.tableIgnored(object.Table) {
+			continue
+		}
 		selector := "table_privilege:" + schema + "." + table + "." + object.Privilege + "." + object.Grantee
 		skip, err := tracker.Skip(selector, snapshot)
 		if err != nil {
@@ -2655,6 +2672,14 @@ UNION ALL
 SELECT 'acl:schema:' || quote_ident(n.nspname)
 FROM pg_namespace n
 WHERE n.nspacl IS NOT NULL AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND (
+    n.nspname = 'public'
+    OR n.nspacl IS DISTINCT FROM acldefault('n', n.nspowner)
+    OR EXISTS (
+      SELECT 1 FROM pg_init_privs i
+      WHERE i.classoid = 'pg_namespace'::regclass AND i.objoid = n.oid AND i.objsubid = 0
+    )
+  )
   AND NOT (
     n.nspname = 'public'
     AND (SELECT count(*) FROM aclexplode(n.nspacl)) = 3
@@ -3137,10 +3162,11 @@ func parseOptions(options []string) []pgschema.Option {
 type ignoreTracker struct {
 	requested []string
 	used      map[string]bool
+	excluded  map[string]bool
 }
 
 func newIgnoreTracker(selectors []string) (*ignoreTracker, error) {
-	tracker := &ignoreTracker{requested: append([]string(nil), selectors...), used: make(map[string]bool)}
+	tracker := &ignoreTracker{requested: append([]string(nil), selectors...), used: make(map[string]bool), excluded: make(map[string]bool)}
 	for _, selector := range selectors {
 		kind, value, found := strings.Cut(selector, ":")
 		if !found || kind == "" || value == "" || strings.Contains(value, "*") && value != "*" {
@@ -3158,10 +3184,18 @@ func (t *ignoreTracker) Skip(actual string, snapshot *pgschema.Snapshot) (bool, 
 			if err := snapshot.AddIgnored(actual); err != nil {
 				return false, err
 			}
+			t.excluded[actual] = true
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// tableIgnored reports tables actually excluded by the table inspector. A
+// requested selector alone is insufficient: missing or unmodeled relations must
+// still produce the metadata inspector's normal error or unsupported blocker.
+func (t *ignoreTracker) tableIgnored(table pgschema.ID) bool {
+	return table.Kind == pgschema.KindTable && t.excluded["table:"+table.Schema+"."+table.Name]
 }
 
 func (t *ignoreTracker) Validate() error {
