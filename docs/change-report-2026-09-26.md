@@ -124,8 +124,26 @@ See [the cohort-by-cohort study](adoption-study.md) and
   with embedded versions, checksums, provenance attestations, and a generated
   Homebrew formula. Preview releases use reviewed changelog notes.
 - Preview.3 was published from `601cd78`; its Homebrew formula and documentation
-  site were updated. Preview.4 collects the adoption fixes above; publication
-  remains gated by the full release workflow.
+  site were updated. Preview.4 collects the adoption fixes above.
+
+### Published release
+
+- [v0.1.0-preview.4](https://github.com/jokull/onwardpg/releases/tag/v0.1.0-preview.4)
+  was published from `6d6ba2fdd36f9042295464bb90ae2a947534b935`.
+- The [full release gate](https://github.com/jokull/onwardpg/actions/runs/36277770980)
+  and corresponding main-branch CI passed, including PostgreSQL 15–18 integration,
+  differential, acceptance, README, and documentation-receipt workflows.
+- All six downloaded archive checksums and build metadata were verified. All
+  eight assets passed GitHub provenance verification. The downloaded macOS ARM
+  binary reports the expected version, commit, and clean build.
+- Homebrew tap commit `67d2d2e` updates the formula to the published checksums.
+- [The documentation site](https://onwardpg.solberg.is) was deployed as Cloudflare
+  version `81251663-53df-4849-878e-88454a5f4f82`; the live page was checked.
+- Release gates caught stale command expectations and a generated SQL receipt;
+  both were corrected and native workflows rerun before publication.
+- All owned study and final-check containers were removed. Local reports,
+  command evidence, available database dumps, and downloaded release assets
+  remain under `/tmp/onwardpg-adoption-20260926`.
 
 ## Remaining limits
 
