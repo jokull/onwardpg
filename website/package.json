@@ -15,14 +15,14 @@
     "check:agent-docs": "node scripts/check-agent-docs.mjs"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.6",
-    "@astrojs/mdx": "7.0.3",
+    "@astrojs/check": "^0.9.10",
+    "@astrojs/mdx": "8.0.2",
     "@tailwindcss/vite": "^4.3.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.111.0"
+    "wrangler": "^4.140.0"
   },
   "dependencies": {
-    "astro": "^7.1.1",
-    "blume": "1.1.2"
+    "astro": "^7.3.5",
+    "blume": "2.0.3"
   }
 }

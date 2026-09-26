@@ -1,9 +1,31 @@
 import { defineConfig } from "blume";
 
+const previousPages: Record<string, string> = {
+  "/start/comparison": "/#quick-start",
+  "/start/first-plan": "/#quick-start",
+  "/start/introduction": "/#quick-start",
+  "/start/installation": "/#quick-start",
+  "/agents/agent-assisted-planning": "/#work-with-a-coding-agent",
+  "/guides/sqlalchemy": "/#use-your-frameworks-schema",
+  "/guides/drizzle": "/#use-your-frameworks-schema",
+  "/guides/django": "/#use-your-frameworks-schema",
+  "/guides/prisma": "/#use-your-frameworks-schema",
+  "/concepts/expand-contract": "/#required-columns",
+  "/concepts/plan-command": "/#day-to-day-use",
+  "/concepts/verification": "/#review-and-verify",
+  "/concepts/contract-readiness": "/#deployment",
+  "/concepts/decisions": "/#required-columns",
+  "/delivery/production-runbook": "/#deployment",
+  "/delivery/github-actions": "/#deployment",
+  "/reference/cli": "/#reference",
+  "/reference/safety": "/#reference",
+  "/reference/generated-cli-help": "/#reference",
+};
+
 export default defineConfig({
   title: "onwardpg",
   description:
-    "Plan one evolving PostgreSQL migration around one compatibility-safe application deployment.",
+    "Plan and verify PostgreSQL schema migrations for rolling deployments.",
   logo: {
     href: "/",
     image: "/favicon.svg",
@@ -19,52 +41,12 @@ export default defineConfig({
     pages: "src/pages",
   },
   navigation: {
-    sidebar: [
-      {
-        label: "Start here",
-        items: [
-          "/start/introduction",
-          "/start/comparison",
-          "/start/installation",
-          "/start/first-plan",
-        ],
-      },
-      {
-        label: "Core concepts",
-        items: [
-          "/concepts/plan-command",
-          "/concepts/expand-contract",
-          "/concepts/contract-readiness",
-          "/concepts/decisions",
-          "/concepts/verification",
-        ],
-      },
-      {
-        label: "Framework guides",
-        items: [
-          "/guides/drizzle",
-          "/guides/django",
-          "/guides/prisma",
-          "/guides/sqlalchemy",
-        ],
-      },
-      {
-        label: "Coding agents",
-        items: ["/agents/agent-assisted-planning"],
-      },
-      {
-        label: "Delivery",
-        items: [
-          "/delivery/github-actions",
-          "/delivery/production-runbook",
-        ],
-      },
-      {
-        label: "Reference",
-        items: ["/reference/cli", "/reference/generated-cli-help", "/reference/safety"],
-      },
-    ],
+    sidebar: ["/"],
   },
+  redirects: Object.entries(previousPages).flatMap(([from, to]) => [
+    { from, to },
+    { from: `${from}.md`, to: "/index.md" },
+  ]),
   theme: {
     accent: {
       light: "#62715c",
@@ -85,6 +67,8 @@ export default defineConfig({
   seo: {
     og: {
       enabled: true,
+      // The renderer rejects the unquoted numeric family name in Source Serif 4.
+      fonts: ["Inter"],
       logo: "/favicon.svg",
       palette: {
         accent: "#c8b979",
@@ -94,18 +78,17 @@ export default defineConfig({
         border: "#536253",
       },
       titles: {
-        "/": "One evolving PostgreSQL migration",
+        "/": "PostgreSQL migrations for rolling deployments",
       },
     },
     robots: true,
     sitemap: true,
     structuredData: true,
   },
-  ai: {
+  agents: {
     llmsTxt: true,
   },
   deployment: {
-    output: "static",
     site: "https://onwardpg.solberg.is",
   },
 });

@@ -3,6 +3,7 @@ allowBuilds:
   sharp: true
   workerd: true
 minimumReleaseAgeExclude:
-  - blume@1.1.2
+  - blume@2.0.3
 overrides:
   path-to-regexp@6.1.0: 6.3.0
+  lodash-es@<4.17.24: 4.18.1

@@ -1,8 +1,9 @@
 # onwardpg documentation site
 
-The site is built with [Blume](https://useblume.dev/). Markdown and MDX remain
-repository-owned; Blume provides the docs shell, search, raw Markdown mirrors,
-agent-readable discovery, and generated 1200×630 Open Graph images.
+The site is one page, authored in `src/content/docs/index.md` and built with
+[Blume](https://useblume.dev/). Old documentation URLs redirect to sections of
+that page. Detailed engineering references live in the repository’s `docs/`.
+Blume provides search, a Markdown mirror, and the Open Graph image.
 
 ```sh
 pnpm install
@@ -15,7 +16,7 @@ pnpm check:agent-docs
 ```
 
 `generate:cli-docs` builds the current onwardpg binary and refreshes the tracked
-`reference/generated-cli-help.md` page. `dev` refreshes it automatically;
+`../docs/generated-cli-help.md` reference. `dev` refreshes it automatically;
 `check` and `build` fail if it is stale so published flags and defaults cannot
 drift from the executable.
 

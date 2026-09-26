@@ -34,8 +34,8 @@ to generated history. It is not a user-maintained configuration value.
 
 Drizzle, Django, Prisma, SQLAlchemy, handwritten SQL, or any future code-schema
 source is usable when the project has a reliable command that emits complete
-PostgreSQL DDL. The website publishes tested exporter recipes rather than
-embedding framework model parsers in the planner. For Django, the recipe asks
+PostgreSQL DDL. The [example exporters](../examples/frameworks/) cover Drizzle,
+Prisma, and Django. For Django, the exporter asks
 `MigrationLoader` for final `ProjectState` and materializes it with
 `SchemaEditor`; it therefore includes state-only operations without executing
 historical `RunPython` or `RunSQL` work.

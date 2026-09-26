@@ -25,7 +25,7 @@ Commands select the sole configured target automatically. In a multi-target
 repository, pass `--target NAME`; an omitted ambiguous target is an error that
 lists the available names.
 
-The website's [generated CLI help](https://onwardpg.solberg.is/reference/generated-cli-help)
+The [generated CLI help](generated-cli-help.md)
 is dumped from the current binary and is the exhaustive source for registered
 flags and defaults. This guide focuses on semantics and workflow.
 

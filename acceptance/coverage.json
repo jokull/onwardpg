@@ -11,50 +11,50 @@
   "claims": [
     {
       "id": "claim.additive-expand-only",
-      "source": "website/src/content/docs/concepts/plan-command.md",
-      "match": "There is no empty `contract.sql` for ceremony's sake.",
+      "source": "website/src/content/docs/index.md",
+      "match": "There is no contract phase for this change.",
       "summary": "A nullable additive column is emitted in expand without an empty contract phase."
     },
     {
       "id": "claim.required-column-staging",
-      "source": "website/src/content/docs/concepts/plan-command.md",
-      "match": "developer supplies the historical value; onwardpg keeps that edit ahead of its",
+      "source": "website/src/content/docs/index.md",
+      "match": "After this cleanup it checks that no nulls",
       "summary": "A required column is added nullable, reconciled explicitly, gated, and tightened after drain."
     },
     {
       "id": "claim.acceptance-envelope",
-      "source": "README.md",
-      "match": "Expand is an **acceptance-compatible envelope**",
+      "source": "docs/migration-workflow.md",
+      "match": "less than either endpoint schema when that is necessary for both writers to be",
       "summary": "Expand may temporarily loosen enforcement so legacy and new writes coexist."
     },
     {
       "id": "claim.rename-bridge",
-      "source": "README.md",
-      "match": "onwardpg creates a temporary second column",
+      "source": "docs/compatibility.md",
+      "match": "Eligible columns use a generated two-column, two-way bridge.",
       "summary": "A confirmed same-type rename can use a deterministic bidirectional bridge and final native rename."
     },
     {
       "id": "claim.dependent-view-handoff",
-      "source": "README.md",
-      "match": "planner adds three bounded edit",
+      "source": "docs/safety-model.md",
+      "match": "three ordered pockets for the overlap view, pre-cutover removal, and exact",
       "summary": "An unproved dependent-view rename stays inside three ordered, dependency-scoped edit pockets."
     },
     {
       "id": "claim.cross-type-handoff",
-      "source": "README.md",
-      "match": "closures. Exactly two edit pockets remain",
+      "source": "docs/safety-model.md",
+      "match": "two pockets, one per phase.",
       "summary": "A confirmed cross-name/type transition owns both endpoint columns and the entire dependent closure."
     },
     {
       "id": "claim.materialized-dependencies",
-      "source": "website/src/content/docs/concepts/plan-command.md",
-      "match": "dependency order for recreation, materialized-view population state, index",
+      "source": "docs/compatibility.md",
+      "match": "The owning transition includes the materialized view and indexes in its closure.",
       "summary": "Materialized dependencies and their indexes are ordered and freshness remains an explicit product boundary."
     },
     {
       "id": "claim.restack-one-plan",
-      "source": "website/src/content/docs/concepts/plan-command.md",
-      "match": "rebuilds the existing `PlanID` as **H(new) → W**.",
+      "source": "website/src/content/docs/index.md",
+      "match": "It updates the active migration",
       "summary": "Plain plan reruns keep one feature identity while accepted history changes underneath it."
     },
     {
@@ -65,26 +65,26 @@
     },
     {
       "id": "claim.contract-readiness",
-      "source": "README.md",
-      "match": "Contract is now an evidence boundary rather than a phase-name convention.",
+      "source": "docs/contract-readiness.md",
+      "match": "checkpoint and evaluates current readiness in one `REPEATABLE READ, READ ONLY`",
       "summary": "Contract cleanup is blocked on exact live catalog, data, and expiring writer evidence."
     },
     {
       "id": "claim.agent-remediation",
-      "source": "website/src/content/docs/agents/agent-assisted-planning.mdx",
-      "match": "JSON is the default and each document leads with a status or error code.",
+      "source": "website/src/content/docs/index.md",
+      "match": "questions in\n`next_actions`.",
       "summary": "Agent output exposes status, copyable decisions, edit paths, and scoped remediation."
     },
     {
       "id": "claim.final-convergence",
-      "source": "website/src/content/docs/concepts/verification.md",
-      "match": "the final semantic diff is empty",
+      "source": "website/src/content/docs/index.md",
+      "match": "checks that the final schema matches `schema.sql` with no remaining diff.",
       "summary": "Disposable verification requires exact execution and an empty final semantic residual."
     },
     {
       "id": "claim.split-plan-refusal",
-      "source": "README.md",
-      "match": "deployments, onwardpg says so instead of hiding one inside a phase name.",
+      "source": "docs/supported-features.md",
+      "match": "compatibility route does not fit one deployment.",
       "summary": "A transition that cannot fit one rolling deployment is split or refused rather than mislabeled safe."
     }
   ],

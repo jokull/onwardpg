@@ -66,7 +66,8 @@ for (const sourcePath of markdownDocs) {
   if (rawMarkdown !== source) throw new Error(`${slug}.md does not match its canonical source page`);
   if (!llms.includes(`${site}/${slug}.md`)) throw new Error(`llms.txt does not index ${slug}.md`);
 
-  const pageHtml = await readFile(path.join(distRoot, slug, 'index.html'), 'utf8');
+  const route = slug === 'index' ? '' : slug;
+  const pageHtml = await readFile(path.join(distRoot, route, 'index.html'), 'utf8');
   const ogUrl = `${site}/og/${slug}.png`;
   if (!pageHtml.includes('property="og:image"') || !pageHtml.includes(ogUrl)) {
     throw new Error(`${slug} does not advertise its generated Open Graph image`);
@@ -74,7 +75,7 @@ for (const sourcePath of markdownDocs) {
   if (!pageHtml.includes('1200') || !pageHtml.includes('630')) {
     throw new Error(`${slug} does not advertise Open Graph image dimensions`);
   }
-  if (!sitemap.includes(`${site}/${slug}`)) throw new Error(`sitemap does not index ${slug}`);
+  if (!sitemap.includes(`${site}/${route}`)) throw new Error(`sitemap does not index ${slug}`);
 
   const ogPath = path.join(distRoot, 'og', `${slug}.png`);
   const dimensions = pngDimensions(await readFile(ogPath));
@@ -84,18 +85,11 @@ for (const sourcePath of markdownDocs) {
   if ((await stat(ogPath)).size < 1_000) throw new Error(`${slug} Open Graph image is unexpectedly small`);
 }
 
-const homepage = await readFile(path.join(distRoot, 'index.html'), 'utf8');
-const homeOgUrl = `${site}/og/index.png`;
-if (!homepage.includes('property="og:image"') || !homepage.includes(homeOgUrl)) {
-  throw new Error('homepage does not advertise its generated Open Graph image');
-}
-const homeDimensions = pngDimensions(await readFile(path.join(distRoot, 'og/index.png')));
-if (homeDimensions.width !== 1200 || homeDimensions.height !== 630) {
-  throw new Error(`homepage Open Graph image is ${homeDimensions.width}x${homeDimensions.height}`);
-}
-
 const readability = JSON.parse(await readFile(path.join(distRoot, 'agent-readability.json'), 'utf8'));
-if (readability.generator !== 'blume@1.1.2') throw new Error('agent-readability.json has the wrong generator');
+const blumePackage = JSON.parse(await readFile(path.join(websiteRoot, 'node_modules/blume/package.json'), 'utf8'));
+if (readability.generator !== `blume@${blumePackage.version}`) {
+  throw new Error('agent-readability.json does not match the installed Blume version');
+}
 if (readability.artifacts?.markdown?.pattern !== `${site}/{route}.md`) {
   throw new Error('agent-readability.json does not advertise raw Markdown routes');
 }
@@ -113,5 +107,5 @@ for (const required of [
 }
 
 console.log(
-  `Blume docs verified: ${markdownDocs.length} pages, ${markdownDocs.length + 1} generated 1200x630 OG images, one canonical skill, and matching agent discovery`,
+  `Blume docs verified: ${markdownDocs.length} pages, ${markdownDocs.length} generated 1200x630 OG images, one canonical skill, and matching agent discovery`,
 );

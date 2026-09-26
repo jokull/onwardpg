@@ -21,3 +21,21 @@
 .prose h3 {
   letter-spacing: -0.025em;
 }
+
+/* A single document needs a contents list, without a separate page sidebar. */
+@media (min-width: 1024px) {
+  [data-blume-nav-drawer] {
+    display: none;
+  }
+
+  [data-blume-doc-grid] {
+    max-width: 76rem;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 1280px) {
+  [data-blume-doc-grid] {
+    grid-template-columns: minmax(0, 1fr) 16rem;
+  }
+}
