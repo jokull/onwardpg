@@ -400,6 +400,184 @@ func TestPostgres18NamedNotNullConstraintsBlockAndVirtualColumnsLoad(t *testing.
 	}
 }
 
+// notNullBlockers returns the not_null_constraint selectors of one schema.
+func notNullBlockers(snapshot *pgschema.Snapshot, schemaName string) []string {
+	var blockers []string
+	for _, selector := range snapshot.Unsupported() {
+		if strings.HasPrefix(selector, "not_null_constraint:"+schemaName+".") {
+			blockers = append(blockers, selector)
+		}
+	}
+	return blockers
+}
+
+func TestPostgres18GeneratedNotNullConstraintNamesAreNotBlockers(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockIntegrationDatabase(t, ctx, conn)
+	var version int
+	var encoding string
+	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer, current_setting('server_encoding')").Scan(&version, &encoding); err != nil {
+		t.Fatal(err)
+	}
+	if version < 180000 {
+		t.Skip("named NOT NULL constraints are a PostgreSQL 18 catalog family")
+	}
+	if encoding != "UTF8" {
+		t.Skipf("generated NOT NULL names are recomputed for a UTF8 server encoding, not %s", encoding)
+	}
+	stamp := time.Now().UTC().Format("20060102150405")
+	generated, equivalent := "onwardpg_nn_generated_"+stamp, "onwardpg_nn_equivalent_"+stamp
+	defer func() {
+		for _, name := range []string{generated, equivalent} {
+			_, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(name)+" CASCADE")
+		}
+	}()
+	exec := func(statement string) {
+		t.Helper()
+		if _, err := conn.Exec(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	exec("CREATE SCHEMA " + quote(generated))
+	// Every combination of short and over-long table and column names in ASCII,
+	// two-byte, and three-byte characters. Over-long names that share a prefix
+	// collide after truncation, so PostgreSQL appends not_null1, not_null2, ...
+	// in creation order.
+	parts := map[string][]string{
+		"ascii": {"a", strings.Repeat("s", 20), strings.Repeat("l", 40), strings.Repeat("x", 63)},
+		"2byte": {"é", strings.Repeat("é", 10), strings.Repeat("é", 20), strings.Repeat("é", 31)},
+		"3byte": {"日", strings.Repeat("日", 7), strings.Repeat("日", 14), strings.Repeat("日", 21)},
+	}
+	created := 0
+	for _, kind := range []string{"ascii", "2byte", "3byte"} {
+		var columns []string
+		for _, column := range parts[kind] {
+			columns = append(columns, quote(column)+" integer NOT NULL")
+		}
+		for _, table := range parts[kind] {
+			for copies := range 3 {
+				// Trailing nines keep the table name valid and distinct while it
+				// truncates to the same prefix, which forces the collision counter.
+				name := clipToCharacterBoundary(table, 63-copies) + strings.Repeat("9", copies)
+				exec("CREATE TABLE " + quote(generated) + "." + quote(name) + " (" + strings.Join(columns, ", ") + ", other integer)")
+				created += len(columns)
+			}
+		}
+	}
+	// SET NOT NULL and PRIMARY KEY use the same generated names.
+	exec("CREATE TABLE " + quote(generated) + ".late (id integer, " + strings.Repeat("c", 63) + " integer)")
+	exec("ALTER TABLE " + quote(generated) + ".late ALTER COLUMN id SET NOT NULL, ALTER COLUMN " + strings.Repeat("c", 63) + " SET NOT NULL")
+	exec("CREATE TABLE " + quote(generated) + "." + strings.Repeat("k", 63) + " (" + strings.Repeat("p", 63) + " integer PRIMARY KEY)")
+	exec("CREATE TABLE " + quote(generated) + "." + strings.Repeat("k", 62) + "1 (" + strings.Repeat("p", 63) + " integer PRIMARY KEY)")
+
+	rows, err := conn.Query(ctx, `SELECT c.relname::text, a.attname::text, con.conname::text
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1]
+WHERE con.contype = 'n' AND con.connamespace = to_regnamespace($1)`, quote(generated))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total, maxLength, counters int
+	for rows.Next() {
+		var relation, column, constraint string
+		if err := rows.Scan(&relation, &column, &constraint); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		total++
+		maxLength = max(maxLength, len(constraint))
+		if strings.HasSuffix(strings.TrimRight(constraint, "0123456789"), "_not_null") && !strings.HasSuffix(constraint, "_not_null") {
+			counters++
+		}
+		if !isGeneratedNotNullConstraintName(relation, column, constraint) {
+			t.Errorf("PostgreSQL generated %q for %q.%q, but it is not recognized as a generated name", constraint, relation, column)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if total < created || maxLength != 63 || counters == 0 {
+		t.Fatalf("test premise: %d constraints for %d tables, longest name %d bytes, %d with a collision counter", total, created, maxLength, counters)
+	}
+	snapshot, err := LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blockers := notNullBlockers(snapshot, generated); len(blockers) != 0 {
+		t.Fatalf("PostgreSQL-generated NOT NULL names are blockers: %#v", blockers)
+	}
+
+	// A custom name stays a blocker, and so does a default name that no longer
+	// matches its column or table after a rename: PostgreSQL does not rename the
+	// constraint, and the typed column cannot tell that from a custom name.
+	exec("CREATE TABLE " + quote(generated) + ".custom (id integer CONSTRAINT id_required NOT NULL)")
+	exec("CREATE TABLE " + quote(generated) + ".renamed_column (old_name integer NOT NULL)")
+	exec("ALTER TABLE " + quote(generated) + ".renamed_column RENAME COLUMN old_name TO new_name")
+	exec("CREATE TABLE " + quote(generated) + ".old_table (id integer NOT NULL)")
+	exec("ALTER TABLE " + quote(generated) + ".old_table RENAME TO new_table")
+	exec("CREATE TABLE " + quote(generated) + ".repaired (old_name integer NOT NULL)")
+	exec("ALTER TABLE " + quote(generated) + ".repaired RENAME COLUMN old_name TO new_name")
+	exec("ALTER TABLE " + quote(generated) + ".repaired RENAME CONSTRAINT repaired_old_name_not_null TO repaired_new_name_not_null")
+	snapshot, err = LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"not_null_constraint:" + generated + ".custom.id_required",
+		"not_null_constraint:" + generated + ".new_table.old_table_id_not_null",
+		"not_null_constraint:" + generated + ".renamed_column.renamed_column_old_name_not_null",
+	}
+	if got := notNullBlockers(snapshot, generated); !reflect.DeepEqual(got, want) {
+		t.Fatalf("NOT NULL blockers = %#v, want %#v", got, want)
+	}
+
+	// Two catalogs that differ only in which generated name a NOT NULL constraint
+	// received describe the same schema. In the second schema the default name is
+	// taken by another table's constraint when the table is created, so the
+	// constraint becomes t_c_not_null1 instead of t_c_not_null.
+	exec("CREATE SCHEMA " + quote(equivalent))
+	exec("CREATE TABLE " + quote(generated) + ".t (c integer NOT NULL)")
+	exec("CREATE TABLE " + quote(equivalent) + ".taken (x integer, CONSTRAINT t_c_not_null CHECK (x > 0))")
+	exec("CREATE TABLE " + quote(equivalent) + ".t (c integer NOT NULL)")
+	exec("DROP TABLE " + quote(equivalent) + ".taken")
+	snapshot, err = LoadGraph(ctx, Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := make([]pgschema.Column, 0, 2)
+	for _, schemaName := range []string{generated, equivalent} {
+		object, exists := snapshot.Object((pgschema.Column{Table: (pgschema.Table{Schema: schemaName, Name: "t"}).ObjectID(), Name: "c"}).ObjectID())
+		column, ok := object.(pgschema.Column)
+		if !exists || !ok {
+			t.Fatalf("column %s.t.c missing", schemaName)
+		}
+		columns = append(columns, column)
+	}
+	if columns[0].NotNullConstraintName != "t_c_not_null" || columns[1].NotNullConstraintName != "t_c_not_null1" {
+		t.Fatalf("test premise: constraint names %q and %q", columns[0].NotNullConstraintName, columns[1].NotNullConstraintName)
+	}
+	if blockers := notNullBlockers(snapshot, equivalent); len(blockers) != 0 {
+		t.Fatalf("collision-suffixed generated name is a blocker: %#v", blockers)
+	}
+	columns[0].Table, columns[1].Table = pgschema.ID{}, pgschema.ID{}
+	left, right := columns[0], columns[1]
+	left.NotNullConstraintName, right.NotNullConstraintName = "", ""
+	if !reflect.DeepEqual(left, right) {
+		t.Fatalf("columns differ beyond the generated NOT NULL name: %#v vs %#v", left, right)
+	}
+}
+
 func TestLoadGraphBlocksPendingConcurrentPartitionDetach(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {

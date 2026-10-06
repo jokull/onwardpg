@@ -2519,6 +2519,40 @@ func inspectCatalogSafetyBlockers(ctx context.Context, tx pgx.Tx, snapshot *pgsc
 			return err
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	return inspectNotNullConstraintNames(ctx, tx, snapshot, tracker, version)
+}
+
+// inspectNotNullConstraintNames blocks locally defined single-column NOT NULL
+// constraints whose name PostgreSQL would not have generated for the column
+// they sit on. The name cannot be judged in SQL: PostgreSQL shortens
+// over-long names, clips multibyte characters, and appends a collision counter
+// (see isGeneratedNotNullConstraintName).
+func inspectNotNullConstraintNames(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker, version int) error {
+	query := notNullConstraintNameCandidatesQuery(version)
+	if query == "" {
+		return nil
+	}
+	rows, err := tx.Query(ctx, query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var selector, relation, column, constraint string
+		if err := rows.Scan(&selector, &relation, &column, &constraint); err != nil {
+			return err
+		}
+		if isGeneratedNotNullConstraintName(relation, column, constraint) {
+			continue
+		}
+		if err := addBlocker(selector, snapshot, tracker); err != nil {
+			return err
+		}
+	}
 	return rows.Err()
 }
 
@@ -2545,14 +2579,34 @@ WHERE con.contype = 'n' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'informat
        OR NOT con.convalidated OR NOT con.conenforced OR con.connoinherit
 	   OR (con.conislocal AND con.coninhcount > 0)
        OR (con.conislocal AND con.coninhcount = 0 AND
-           (array_length(con.conkey, 1) <> 1 OR a.attname IS NULL
-            OR con.conname <> c.relname || '_' || a.attname || '_not_null')))
+           (array_length(con.conkey, 1) <> 1 OR a.attname IS NULL)))
 `)
 	}
 	if len(queries) == 0 {
 		return ""
 	}
 	return strings.Join(queries, "\nUNION ALL\n") + "\nORDER BY 1"
+}
+
+// notNullConstraintNameCandidatesQuery lists the locally defined, single-column
+// NOT NULL constraints whose name still has to be checked against the name
+// PostgreSQL generates. Rows that are blockers for another reason are also
+// selected by catalogVersionSafetyBlockersQuery; blockers are a set, so the
+// overlap is harmless.
+func notNullConstraintNameCandidatesQuery(version int) string {
+	if version < 180000 {
+		return ""
+	}
+	return `
+SELECT 'not_null_constraint:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '.' || quote_ident(con.conname),
+       c.relname::text, a.attname::text, con.conname::text
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1]
+WHERE con.contype = 'n' AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  AND con.conislocal AND con.coninhcount = 0 AND array_length(con.conkey, 1) = 1
+ORDER BY 1`
 }
 
 func notNullConstraintNameSelector(version int) string {

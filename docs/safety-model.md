@@ -50,7 +50,13 @@ member addresses alias to that Extension node for dependency ordering.
 Ordinary-view column defaults and comments on domain constraints, composite
 attributes, and view columns remain explicit blockers. Pending concurrent
 partition detaches and exceptional PostgreSQL 18 NOT NULL inheritance also
-fail closed rather than masquerading as ordinary topology. Customized options,
+fail closed rather than masquerading as ordinary topology. A PostgreSQL 18
+NOT NULL constraint with a name PostgreSQL itself generates for its table and
+column, including the 63-byte shortening and the `not_null1`, `not_null2`, ...
+collision suffix, is represented by the column alone and its name is never
+compared. A custom name, or a generated name left on a renamed table or column,
+blocks as `not_null_constraint:`; `ALTER TABLE ... RENAME CONSTRAINT` to the
+current default clears the latter. Customized options,
 comments, expressions, persistence, or names on implicit serial and identity
 backing sequences also block when their state is not retained by the typed
 column. The

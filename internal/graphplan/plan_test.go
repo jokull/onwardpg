@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jokull/onwardpg/internal/change"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/pgschema"
 )
@@ -3337,6 +3338,74 @@ func TestBuildDevelopmentColumnRenamePreservesPostgres18NotNullConstraintName(t 
 	if got, want := planned.Statements[1].SQL, `ALTER TABLE "app"."accounts" RENAME CONSTRAINT "accounts_quote_mode_not_null" TO "accounts_pricing_mode_not_null";`; got != want {
 		t.Fatalf("PostgreSQL 18 constraint rename = %q, want %q", got, want)
 	}
+}
+
+// PostgreSQL 18 names a NOT NULL constraint after creation order, so two
+// catalogs that describe one schema can carry different generated names. The
+// name is operational evidence only and must not leak into any comparison.
+func TestPostgres18GeneratedNotNullConstraintNameIsNotColumnIdentity(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "app", Name: "accounts"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "email", Type: "text", NotNull: true, NotNullConstraintName: "accounts_email_not_null"}
+	after := before
+	after.NotNullConstraintName = "accounts_email_not_null1"
+	for snapshot, column := range map[*pgschema.Snapshot]pgschema.Column{current: before, desired: after} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Add(column); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	currentFingerprint, err := current.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredFingerprint, err := desired.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentFingerprint != desiredFingerprint {
+		t.Fatal("a generated NOT NULL constraint name changed the snapshot fingerprint")
+	}
+	planned, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned || len(planned.Statements) != 0 {
+		t.Fatalf("generated NOT NULL name difference produced a plan: %#v", planned)
+	}
+
+	// A default change that PostgreSQL deems equivalent is filtered out even
+	// when the two columns carry different generated constraint names.
+	beforeDefault, afterDefault := "1 + 1", "2"
+	modified := change.Change{Kind: change.Modify, ID: before.ObjectID(), Before: before, After: after}
+	modified.Before = withDefault(before, &beforeDefault)
+	modified.After = withDefault(after, &afterDefault)
+	filtered, err := filterEquivalentDefaults([]change.Change{modified}, func(string, string) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("equivalent default change survived a NOT NULL name difference: %#v", filtered)
+	}
+
+	enumFrom := pgschema.Enum{Schema: "app", Name: "old_state"}
+	enumTo := pgschema.Enum{Schema: "app", Name: "new_state"}
+	stateBefore := pgschema.Column{Table: table.ObjectID(), Name: "state", Type: "app.old_state", NotNull: true, NotNullConstraintName: "accounts_state_not_null"}
+	stateAfter := stateBefore
+	stateAfter.Type, stateAfter.NotNullConstraintName = "app.new_state", "accounts_state_not_null1"
+	if !equivalentColumnForEnumRename(stateBefore, stateAfter, enumFrom, enumTo) {
+		t.Fatal("a generated NOT NULL name difference hid an enum rename")
+	}
+}
+
+func withDefault(column pgschema.Column, value *string) pgschema.Column {
+	column.Default = value
+	return column
 }
 
 func TestColumnRenameRejectsUnmodeledPostgres18NotNullConstraintIdentity(t *testing.T) {

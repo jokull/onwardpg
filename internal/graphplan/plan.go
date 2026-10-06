@@ -1447,6 +1447,9 @@ func filterEquivalentDefaults(changes []change.Change, equivalent func(current, 
 		}
 		withoutDefault := before
 		withoutDefault.Default = after.Default
+		// The PostgreSQL 18 NOT NULL constraint name is operational evidence,
+		// not part of the column's identity.
+		withoutDefault.NotNullConstraintName, after.NotNullConstraintName = "", ""
 		if !reflect.DeepEqual(withoutDefault, after) {
 			filtered = append(filtered, item)
 			continue
@@ -1703,6 +1706,7 @@ func containsEnumReference(column pgschema.Column, enum pgschema.Enum) bool {
 }
 
 func equivalentColumnForEnumRename(before, after pgschema.Column, from, to pgschema.Enum) bool {
+	before.NotNullConstraintName, after.NotNullConstraintName = "", ""
 	before.Type = normalizeEnumReference(before.Type, from, to)
 	if before.Default != nil {
 		value := normalizeEnumReference(*before.Default, from, to)
