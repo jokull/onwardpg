@@ -161,9 +161,12 @@ object. It does not apply to the replayed history or to DDL sources, to `init`,
 `diff` lists it as `live_ignored:SELECTOR` in `workspace_compatibility`.
 
 An ownership selector names the owning role, so a change of owner blocks again.
-A new `pg_parameter_acl` grant is a new selector. Ownership of anything other
-than an extension or a schema, event triggers, and every other unsupported
-family cannot be acknowledged this way.
+A `parameter_acl` selector names a parameter, not a grantee: a grant on a new
+parameter blocks, but once `parameter_acl:session_replication_role` is listed, a
+later grant of that parameter to another role is not visible to these commands.
+Review the grantees of every listed parameter in the cluster itself. Ownership of
+anything other than an extension or a schema, event triggers, and every other
+unsupported family cannot be acknowledged this way.
 
 ## history status
 
