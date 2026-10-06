@@ -143,8 +143,12 @@ file, or a report.
 
 ```sh
 onwardpg drift check --database-env PROD_READONLY_DATABASE_URL
-onwardpg diff --from-env PROD_READONLY_DATABASE_URL --to schema.sql --target NAME
+onwardpg diff --from-env PROD_READONLY_DATABASE_URL --to-env DESIRED_DATABASE_URL --target NAME
 ```
+
+`diff` reads each side from a database. `DESIRED_DATABASE_URL` names a
+disposable local database that holds the desired schema. A SQL file is also a
+valid side, as `file://PATH` together with `--dev-url`.
 
 `drift check` compares the live catalog with the replayed accepted history.
 Read `status`, the exit code, and every list in the result:
@@ -153,10 +157,12 @@ Read `status`, the exit code, and every list in the result:
   handle.
 - `drifted` (exit 4): `differences` names each object. Between a bundle's
   expand and its contract, the live catalog differs from the replayed history
-  on purpose; expect only what the pending contract removes.
-- `unsupported` (exit 3): `unsupported` lists live catalog state that the
-  planner does not model. `differences` is still reported. Do not treat this
-  result as a drift verdict.
+  on purpose. Expect only what the pending contract changes: the objects it
+  drops, and the final state it sets, such as `NOT NULL` or a validated
+  constraint.
+- `unsupported` (exit 3): `unsupported` lists catalog state that the planner
+  does not model, from the live database, the replayed history, or both.
+  `differences` is still reported. Do not treat this result as a drift verdict.
 
 A managed provider owns some live state: an extension or a schema that its
 admin role owns, and parameter grants to its roles. That state is listed in the
@@ -164,11 +170,15 @@ target's `live_ignore` in `.onwardpg.toml`, as exact selectors copied from an
 `unsupported` report (`ownership:extension:NAME=ROLE`,
 `ownership:schema:NAME=ROLE`, `parameter_acl:NAME`). It applies only to
 `drift check`, `contract check`, and `diff --target`; it never changes `plan`,
-`verify`, or `init`. Report `observer.live_ignored` and
-`observer.live_ignore_unmatched` from the result. An unmatched entry
-acknowledges nothing: it is a typo or a name that needs quotes. Add or change a
-`live_ignore` entry only with the user's approval, because a parameter entry
-also hides a later grant of that parameter to another role.
+`verify`, or `init`. It filters the live side only, so it cannot clear a
+selector that comes from the replayed history; fix that one in the declared
+schema. Report what was ignored: `drift check` and `contract check` give
+`observer.live_ignored` and `observer.live_ignore_unmatched`; `diff --target`
+gives `live_ignored:SELECTOR` and `live_ignore_unmatched:SELECTOR` entries in
+`workspace_compatibility`, and gives neither when it stops for a decision. An
+unmatched entry acknowledges nothing: it is a typo or a name that needs quotes.
+Add or change a `live_ignore` entry only with the user's approval, because a
+parameter entry also hides a later grant of that parameter to another role.
 
 Provider objects that the planner does model, such as an extra extension, still
 show as differences. Pass `--ignore SELECTOR` for those, and report the list.
@@ -182,8 +192,12 @@ A constraint or index that differs from the desired schema only in its name is
 offered as a rename decision. A foreign key whose referenced primary-key or
 unique constraint is renamed in the same plan is offered with it; answer the
 key and the foreign key together. Confirm a rename only when the definitions
-are the same object. A confirmed rename emits `RENAME CONSTRAINT`, which is a
-metadata change; a declined one becomes a drop and a new constraint, with a
-new validation.
+are the same object.
+
+- Constraint: a confirmed rename emits `ALTER TABLE ... RENAME CONSTRAINT`, a
+  metadata change. A declined one becomes a drop and a new constraint, with a
+  new validation.
+- Standalone index: a confirmed rename emits `ALTER INDEX ... RENAME TO`, a
+  metadata change. A declined one builds the index again.
 
 Do not describe the migration as safe merely because clone verification passed.
