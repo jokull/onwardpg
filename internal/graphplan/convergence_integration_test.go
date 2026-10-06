@@ -7577,6 +7577,94 @@ func TestConstraintRenamesConvergeOnPostgreSQL(t *testing.T) {
 	}
 }
 
+// TestReferencedKeyRenamesCarryForeignKeyRenamesOnPostgreSQL proves that a
+// foreign key referencing a primary key whose name (and backing index name)
+// also changes is offered as a rename, and that the whole plan is
+// RENAME CONSTRAINT only: the foreign key and key constraints keep their
+// catalog OIDs and nothing is dropped, re-added, or re-validated.
+func TestReferencedKeyRenamesCarryForeignKeyRenamesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_key_rename_" + time.Now().UTC().Format("20060102150405")
+	baseDDL := "CREATE SCHEMA " + quote(schemaName) + ";"
+	ddl := func(primary, unique, orderFK, lineFK string) string {
+		return "CREATE TABLE " + quote(schemaName) + ".accounts (id bigint NOT NULL, email text NOT NULL, CONSTRAINT " + quote(primary) + " PRIMARY KEY (id), CONSTRAINT " + quote(unique) + " UNIQUE (email));" +
+			"CREATE TABLE " + quote(schemaName) + ".orders (id bigint NOT NULL, account_id bigint NOT NULL, account_email text);" +
+			"CREATE TABLE " + quote(schemaName) + ".lines (id bigint NOT NULL, account_id bigint NOT NULL);" +
+			"ALTER TABLE " + quote(schemaName) + ".orders ADD CONSTRAINT " + quote(orderFK) + " FOREIGN KEY (account_id) REFERENCES " + quote(schemaName) + ".accounts(id) ON DELETE CASCADE;" +
+			"ALTER TABLE " + quote(schemaName) + ".orders ADD CONSTRAINT orders_account_email_fk FOREIGN KEY (account_email) REFERENCES " + quote(schemaName) + ".accounts(email);" +
+			"ALTER TABLE " + quote(schemaName) + ".lines ADD CONSTRAINT " + quote(lineFK) + " FOREIGN KEY (account_id) REFERENCES " + quote(schemaName) + ".accounts(id);"
+	}
+	if _, err := conn.Exec(ctx, baseDDL+ddl("accounts_pk", "accounts_email_unique", "orders_account_id_fk", "lines_account_id_fk")); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	desiredDDL := baseDDL + ddl("accounts_pkey", "accounts_email_key", "orders_account_id_fkey", "lines_account_id_fkey")
+	desiredDDL = strings.Replace(desiredDDL, "orders_account_email_fk", "orders_account_email_fkey", 1)
+	if err := os.WriteFile(path, []byte(desiredDDL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const renamePairs = 5
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != renamePairs {
+		t.Fatalf("expected one rename question per name-only constraint pair (primary key, unique key, and three foreign keys): %#v", pending)
+	}
+	var answers []protocol.Answer
+	for _, question := range pending.Questions {
+		if question.Kind != "rename_constraint" {
+			t.Fatalf("unexpected question %#v", question)
+		}
+		answers = append(answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: question.Choices[0]})
+	}
+	plan, err := buildIntegration(current, desired, protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: answers}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned || len(plan.Statements) != renamePairs {
+		t.Fatalf("expected %d statements: status %s statements %d questions %v", renamePairs, plan.Status, len(plan.Statements), func() (ids []string) { for _, q := range plan.Questions { ids = append(ids, q.ID) }; return }())
+	}
+	for _, statement := range plan.Statements {
+		if !strings.HasPrefix(statement.SQL, "ALTER TABLE ") || !strings.Contains(statement.SQL, " RENAME CONSTRAINT ") {
+			t.Fatalf("the plan must contain only RENAME CONSTRAINT statements, got %q", statement.SQL)
+		}
+	}
+	oids := func() string {
+		var result string
+		if err := conn.QueryRow(ctx, `SELECT string_agg(con.oid::text || ':' || con.conindid::text || ':' || con.convalidated::text, ',' ORDER BY con.oid)
+FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname = $1`, schemaName).Scan(&result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	before := oids()
+	applyPlan(t, ctx, conn, plan)
+	if after := oids(); after != before {
+		t.Fatalf("renames must keep every constraint, its backing index, and its validation state:\nbefore %s\nafter  %s", before, after)
+	}
+	assertGraphConverges(t, ctx, url, desired)
+}
+
 func TestDomainLifecycleConvergesOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
