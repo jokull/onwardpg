@@ -128,6 +128,92 @@ install as `scratch_admin_installed`, and reports advisory `notes` (an entry the
 restricted role could create itself, or a history head whose receipt differs
 from the configuration).
 
+A target may also list `live_ignore` selectors for provider-owned state that
+exists only in live clusters. See [live_ignore](#live_ignore).
+
+## live_ignore
+
+A managed PostgreSQL provider owns some state in its own clusters: extensions
+that its administrative role installed, its own schema, and `pg_parameter_acl`
+grants to its roles. That state cannot be in the exported DDL or in a
+development catalog, so it cannot be a target `ignore` selector, and it blocks
+every command that reads the live catalog as `unsupported`. A target can
+acknowledge exactly that state in `.onwardpg.toml`:
+
+~~~toml
+[targets.primary]
+live_ignore = [
+  "ownership:extension:earthdistance=pscale_admin",
+  "ownership:schema:pscale_extensions=pscale_admin",
+  "parameter_acl:session_replication_role",
+]
+~~~
+
+Only three selector forms are accepted: `ownership:extension:NAME=ROLE`,
+`ownership:schema:NAME=ROLE`, and `parameter_acl:NAME`, each exact, with no
+wildcard. The list is validated for form only. A selector that matches nothing
+in a given cluster is not an error, because one configuration serves clusters
+that differ in what their provider installs.
+
+`live_ignore` is read only by commands that inspect a live catalog: `drift
+check`, `contract check`, and `diff` when it is given `--target`. It removes
+the named blocker markers from the live snapshot and nothing else. It never
+removes a typed object or adds an ignore receipt, so every difference in the
+modeled graph stays visible; for example, the
+extension itself is still compared when the project DDL creates it, and a
+provider schema that is not in the project DDL still appears as an unexpected
+object. It does not apply to the replayed history or to DDL sources, to `init`,
+`plan` (including the legacy `plan --from --to` spelling, which does not accept
+`--target`), `draft`, `verify`, or to `dev plan`. Acknowledged state is not hidden:
+`drift check` and `contract check` list it in `observer.live_ignored`, and
+`diff` lists it as `live_ignored:SELECTOR` in `workspace_compatibility` of a
+planned or unsupported result; the decision envelope, which carries no
+compatibility list, omits it.
+
+A configured selector that matched nothing in this catalog is reported next to
+them: `observer.live_ignore_unmatched` for `drift check` and `contract check`,
+and `live_ignore_unmatched:SELECTOR` in `workspace_compatibility` for `diff`
+(only when a PostgreSQL URL source was inspected; a selector must match on
+neither side to be listed). It is information only. It never changes the status,
+the exit code, or a fingerprint, because one configuration legitimately serves
+several environments, so a selector for state only production has is unmatched
+everywhere else.
+
+Fingerprints follow one rule. The acknowledged selectors are removed before
+the comparison fingerprint is computed, because unsupported markers are part of
+a snapshot's fingerprint and a catalog whose only difference from the expected
+graph is acknowledged provider state must compare equal: `drift check` then
+reports `drift_free` with `expected_fingerprint` equal to `actual_fingerprint`,
+and `contract check` matches the receipted checkpoint. The reported
+`actual_fingerprint` (and `diff`'s `current_fingerprint`) therefore depends on
+the `live_ignore` list. The removed selectors are listed, and
+`observer.observed_fingerprint` reports the fingerprint of the live catalog
+before removal, so a reader can tell that two runs saw the same catalog. It is
+present in `drift check` and `contract check` results only when something was
+removed. `diff` has no such field.
+
+A selector must be written the way the report prints it, with every identifier
+as PostgreSQL's `quote_ident` writes it: unquoted lower-case letters, digits,
+and underscores that do not start with a digit, otherwise double-quoted with
+embedded quotes doubled, for example `parameter_acl:"extwlist.extensions"` and
+`ownership:schema:"Provider Schema"=pscale_admin`. Both the name and the role are
+required, the single `=` outside quotes separates them, and nothing may follow.
+Because an unmatched selector is not an error, a selector that cannot be a
+generated one is rejected rather than silently matching nothing. The grammar
+does not know PostgreSQL's keyword list, which differs by major version, so an
+unquoted keyword such as `parameter_acl:user` is accepted although PostgreSQL
+prints `parameter_acl:"user"`. Copy the selector from the report; if one still
+matches nothing, a typo or a name that needs quotes shows up in
+`live_ignore_unmatched`.
+
+An ownership selector names the owning role, so a change of owner blocks again.
+A `parameter_acl` selector names a parameter, not a grantee: a grant on a new
+parameter blocks, but once `parameter_acl:session_replication_role` is listed, a
+later grant of that parameter to another role is not visible to these commands.
+Review the grantees of every listed parameter in the cluster itself. Ownership of
+anything other than an extension or a schema, event triggers, and every other
+unsupported family cannot be acknowledged this way.
+
 ## history status
 
 ~~~sh
@@ -302,6 +388,7 @@ split boolean queries in verify.sql.
 ~~~sh
 onwardpg drift check \
   (--database "$PRODUCTION_DATABASE_URL" | --database-env ENV) \
+  [--target NAME] [--config .onwardpg.toml] \
   [--ignore SELECTOR]
 ~~~
 
@@ -312,6 +399,17 @@ Pass exactly one of `--database` and `--database-env`.
 Replays the complete receipted history head in disposable PostgreSQL, inspects the
 explicitly supplied live catalog read-only, and reports typed missing,
 unexpected, and changed objects. Exit zero means drift_free; drift exits 4.
+
+When the live catalog holds state the planner cannot model, such as an object
+owned by a role other than the one inspecting, a `pg_parameter_acl` grant, or
+an event trigger, the status is `unsupported`, the exit code is 3, and the
+selectors are listed in `unsupported`. `diff --from URL` refuses the same
+catalog with the same selectors. The `differences` are still computed and
+listed, so one run shows everything; the `unsupported` list also includes any
+such state in the replayed history. A result without `unsupported` entries
+means there is no modeled drift and nothing the planner would refuse. State
+that the target's [live_ignore](#live_ignore) list acknowledges is not listed in
+`unsupported`; it appears in `observer.live_ignored`.
 
 The audit never generates repair SQL, changes history, or participates in
 ordinary draft generation.
@@ -343,7 +441,12 @@ evidence bound to the exact plan and environment.
 The report includes the selected target, environment, bundle and PlanID
 identity, generation, entry digest,
 expected and observed fingerprints, check time, gate results, findings, and a
-report digest. Its status is `ready`, `needs_evidence`, `blocked`, or `stale`.
+report digest. Its status is `ready`, `reconciliation_required`,
+`needs_evidence`, `blocked`, `stale`, or `unsupported`. `unsupported` (exit 3)
+means the production catalog holds state the planner cannot model; the report
+lists the selectors in `unsupported` and the finding `unsupported_catalog_state`,
+and runs no data gate. Catalog drift is still classified on the modeled graph,
+so unsupported state is no longer reported as `catalog_drift`.
 `--statement-timeout` limits each read-only catalog or data-gate query and
 defaults to 30 seconds. `ready` does not execute or schedule contract. See
 [contract readiness](contract-readiness.md) for the evidence format.
@@ -361,13 +464,16 @@ DDL.
 
 | Flag | Meaning |
 | --- | --- |
-| --from SOURCE | Required current schema |
-| --to SOURCE | Required desired schema |
+| --from SOURCE | Required current schema, unless `--from-env` is given |
+| --to SOURCE | Required desired schema, unless `--to-env` is given |
+| --from-env ENV, --to-env ENV | Read that side's PostgreSQL URL from an environment variable, so a live URL stays out of process arguments; mutually exclusive with `--from` or `--to` for the same side |
 | --dev-url URL | Administrative URL required for DDL sources |
 | --scratch-admin-extension NAME=SCHEMA | Untrusted extension the scratch administrator may install for DDL sources; repeatable |
 | --hint JSON | Semantic decision; repeatable |
 | --hints-file FILE | Array of semantic decisions |
 | --output text\|json | JSON by default; text renders decisions or SQL |
+| --target NAME | `diff` only: apply this target's [live_ignore](#live_ignore) list to PostgreSQL URL sources; the rest of the target is not read |
+| --config FILE | `diff` only: repository configuration read for `--target`; requires `--target` |
 
 The remaining planner and ignore flags match dev plan. `diff` never writes a
 bundle. `plan --from --to` is retained as a compatibility spelling. Use the

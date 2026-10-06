@@ -8,3 +8,4 @@ overrides:
   path-to-regexp@6.1.0: 6.3.0
   lodash-es@<4.17.24: 4.18.1
   undici@>=7.0.0 <7.29.1: 7.30.0
+  sharp@<0.35.5: 0.35.5

@@ -133,6 +133,6 @@ onwardpg contract check \
   --evidence deploy-readiness.json
 ```
 
-Report `ready`, `needs_evidence`, `blocked`, or `stale`; never apply phase SQL.
+Report `ready`, `needs_evidence`, `blocked`, `stale`, or `unsupported`; never apply phase SQL.
 
 Do not describe the migration as safe merely because clone verification passed.

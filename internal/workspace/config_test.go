@@ -118,6 +118,24 @@ bundle_root = "onward-bundles"
 schema_command = ["tool", "--database", "postgres://secret@localhost/db"]
 dev_database_env = "DEV_DATABASE_URL"
 `,
+		"live-ignore-wildcard": `version = 1
+bundle_root = "onward-bundles"
+[targets.db]
+schema_file = "schema.sql"
+live_ignore = ["parameter_acl:*"]
+`,
+		"live-ignore-malformed-ownership": `version = 1
+bundle_root = "onward-bundles"
+[targets.db]
+schema_file = "schema.sql"
+live_ignore = ["ownership:schema:=provider"]
+`,
+		"live-ignore-outside-provider-state": `version = 1
+bundle_root = "onward-bundles"
+[targets.db]
+schema_file = "schema.sql"
+live_ignore = ["table:public.orders"]
+`,
 		"invalid-ignore": `version = 1
 bundle_root = "onward-bundles"
 [targets.db]
@@ -192,6 +210,30 @@ func TestConfigRejectsUnsafePaths(t *testing.T) {
 	config.BundleRoot = ".."
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "remain within") {
 		t.Fatalf("expected parent bundle root rejection, got %v", err)
+	}
+}
+
+func TestLoadReadsLiveIgnoreWithoutRequiringItToMatchAnyCatalog(t *testing.T) {
+	name := filepath.Join(t.TempDir(), ".onwardpg.toml")
+	data := `version = 1
+bundle_root = "onward-bundles"
+[targets.db]
+schema_file = "schema.sql"
+live_ignore = [
+  "ownership:extension:earthdistance=pscale_admin",
+  "ownership:schema:pscale_extensions=pscale_admin",
+  "parameter_acl:session_replication_role",
+]
+`
+	if err := os.WriteFile(name, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := Load(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.Targets["db"].LiveIgnore; len(got) != 3 || got[2] != "parameter_acl:session_replication_role" {
+		t.Fatalf("live_ignore = %#v", got)
 	}
 }
 

@@ -152,7 +152,14 @@ constraint whose definition and backing index are otherwise identical,
 onwardpg asks a fingerprint-bound `rename_constraint` question and then uses
 `ALTER TABLE ... RENAME CONSTRAINT`. PostgreSQL's backing-index rename is
 modeled as the same identity-preserving operation, and preserved constraint or
-index comments are explicitly reconciled. Check, unique, exclusion,
+index comments are explicitly reconciled. A foreign key that differs only by
+name and by the name of the index behind the referenced primary-key or unique
+constraint is also offered, in the same round, as long as that referenced
+constraint is itself a rename candidate that was not declined; PostgreSQL stores
+the referenced index by OID, so the foreign key's rename stays metadata-only and
+no constraint is dropped, re-added, or re-validated. A foreign key that
+references a unique index without a constraint is not covered: when that index
+is renamed, the foreign key is still planned as drop and re-add. Check, unique, exclusion,
 `NULLS NOT DISTINCT`, and foreign-key variants converge on PostgreSQL 15–18.
 Partition-propagated constraint renames and ambiguous candidates remain
 outside this proof rather than being inferred.
@@ -279,7 +286,10 @@ role quoting, and carry authorization hazards. Default declarative
 materialization deliberately cannot assume membership in an external owner
 role, so that input fails before planning until a separately isolated
 privileged-cluster path exists. A narrow `table_owner:` ignore can suppress
-that one attribute while preserving the table. RLS state, policies, and
+that one attribute while preserving the table. Extension and schema ownership
+by a provider role and `pg_parameter_acl` grants stay blockers; a target's
+`live_ignore` list acknowledges exact selectors for live observation only
+(see [live_ignore](cli.md#live_ignore)). RLS state, policies, and
 ordinary/partitioned-table grants are typed verticals: policy column/routine
 dependencies are catalog edges; policy and authorization contractions require
 explicit semantic decisions; and role identifiers are quoted with `PUBLIC`
