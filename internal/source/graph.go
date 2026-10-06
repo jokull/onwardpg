@@ -34,16 +34,16 @@ func PostgresMajor(ctx context.Context, databaseURL string) (int, error) {
 	return version / 10000, nil
 }
 
-func materializeDDLGraph(ctx context.Context, path, devURL string, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
+func materializeDDLGraph(ctx context.Context, path, devURL string, ignores []string, validateIgnores bool, options ...scratchdb.Option) (*pgschema.Snapshot, error) {
 	ddl, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return materializeDDLBytesGraph(ctx, ddl, filepath.Base(path), devURL, ignores, validateIgnores)
+	return materializeDDLBytesGraph(ctx, ddl, filepath.Base(path), devURL, ignores, validateIgnores, options...)
 }
 
-func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devURL string, ignores []string, validateIgnores bool) (snapshot *pgschema.Snapshot, resultErr error) {
-	database, err := scratchdb.Create(ctx, devURL, "onwardpg_ddl")
+func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devURL string, ignores []string, validateIgnores bool, options ...scratchdb.Option) (snapshot *pgschema.Snapshot, resultErr error) {
+	database, err := scratchdb.Create(ctx, devURL, "onwardpg_ddl", options...)
 	if err != nil {
 		return nil, err
 	}
@@ -56,17 +56,36 @@ func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devUR
 	if err != nil {
 		return nil, err
 	}
-	if _, err = target.Exec(ctx, string(ddl)); err != nil {
+	// The script runs as one simple-protocol message, so a refused statement
+	// rolls all of it back and the whole script is safe to run again after the
+	// scratch administrator installs an allowlisted extension.
+	err = database.Retrying(ctx, func() error {
+		_, execErr := target.Exec(ctx, string(ddl))
+		return execErr
+	})
+	if err != nil {
 		target.Close(ctx)
 		return nil, fmt.Errorf("execute declarative DDL from %s: %w", provenance, err)
 	}
 	if err := target.Close(ctx); err != nil {
 		return nil, fmt.Errorf("close temp database connection: %w", err)
 	}
-	return inspectGraphConfig(ctx, database.Config, ignores, validateIgnores)
+	return InspectScratchGraph(ctx, database, ignores, validateIgnores)
+}
+
+// InspectScratchGraph reads the typed graph of a disposable database. Extensions
+// that the scratch administrator installed for an allowlisted project keep the
+// administrator as owner; that exact ownership is not reported as a blocker,
+// because the graph models an extension by name, version, and schema.
+func InspectScratchGraph(ctx context.Context, database *scratchdb.Database, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
+	return inspectGraphConfigWith(ctx, database.Config, ignores, validateIgnores, database.OwnershipExemptions())
 }
 
 func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
+	return inspectGraphConfigWith(ctx, config, ignores, validateIgnores, nil)
+}
+
+func inspectGraphConfigWith(ctx context.Context, config *pgx.ConnConfig, ignores []string, validateIgnores bool, exempt []string) (*pgschema.Snapshot, error) {
 	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, err
@@ -77,7 +96,7 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 		return nil, fmt.Errorf("begin graph catalog snapshot: %w", err)
 	}
 	defer tx.Rollback(context.Background())
-	snapshot, err := InspectGraphTransaction(ctx, tx, ignores, validateIgnores)
+	snapshot, err := inspectGraphTransactionWith(ctx, tx, ignores, validateIgnores, exempt)
 	if err != nil {
 		return nil, err
 	}
@@ -91,12 +110,25 @@ func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []s
 // transaction. Contract readiness uses this to keep the catalog checkpoint
 // and all Boolean gates in one repeatable-read, read-only snapshot.
 func InspectGraphTransaction(ctx context.Context, tx pgx.Tx, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
+	return inspectGraphTransactionWith(ctx, tx, ignores, validateIgnores, nil)
+}
+
+// inspectGraphTransactionWith additionally accepts exact ownership blocker
+// selectors that are expected and must not be reported. Only the disposable
+// scratch path passes any; every live database is inspected without them.
+func inspectGraphTransactionWith(ctx context.Context, tx pgx.Tx, ignores []string, validateIgnores bool, exempt []string) (*pgschema.Snapshot, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("catalog transaction is required")
 	}
 	tracker, err := newIgnoreTracker(ignores)
 	if err != nil {
 		return nil, err
+	}
+	if len(exempt) > 0 {
+		tracker.expected = make(map[string]bool, len(exempt))
+		for _, selector := range exempt {
+			tracker.expected[selector] = true
+		}
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL search_path = pg_catalog"); err != nil {
 		return nil, fmt.Errorf("set graph catalog snapshot search_path: %w", err)
@@ -2666,6 +2698,9 @@ ORDER BY 1`}
 }
 
 func addBlocker(selector string, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
+	if tracker.expected[selector] {
+		return nil
+	}
 	skip, err := tracker.Skip(selector, snapshot)
 	if err != nil {
 		return err
@@ -3217,6 +3252,10 @@ type ignoreTracker struct {
 	requested []string
 	used      map[string]bool
 	excluded  map[string]bool
+	// expected holds blocker selectors that are not findings: administrator-owned
+	// extensions in a disposable database. Unlike an ignore, they are not
+	// receipted and cannot match anything but the exact selector.
+	expected map[string]bool
 }
 
 func newIgnoreTracker(selectors []string) (*ignoreTracker, error) {

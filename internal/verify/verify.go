@@ -67,6 +67,9 @@ type Input struct {
 	ThroughPhase string
 	Ignores      []string
 	Options      graphplan.Options
+	// AdminExtensions is the reviewed allowlist of untrusted extensions that the
+	// scratch administrator may install when the restricted role is refused.
+	AdminExtensions []scratchdb.AdminExtension
 }
 
 func Run(ctx context.Context, input Input) (Report, error) {
@@ -112,7 +115,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	observed, batches, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, input.ThroughPhase, input.Ignores)
+	observed, batches, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, input.ThroughPhase, input.Ignores, input.AdminExtensions)
 	report.ExecutedBatches = batches
 	if err != nil {
 		return Report{}, err
@@ -132,7 +135,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			assertionIDs = append(assertionIDs, assertion.ID)
 		}
 	}
-	desired, _, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, "contract", input.Ignores)
+	desired, _, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, "contract", input.Ignores, input.AdminExtensions)
 	if err != nil {
 		return Report{}, err
 	}
@@ -220,8 +223,8 @@ func selectedBatchCount(artifact bundle.Artifact, throughPhase string) (int, err
 	return count, nil
 }
 
-func executeDisposable(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignores []string) (snapshot *pgschema.Snapshot, batches int, failure *Failure, resultErr error) {
-	database, err := scratchdb.Create(ctx, adminURL, "onwardpg_verify")
+func executeDisposable(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignores []string, adminExtensions []scratchdb.AdminExtension) (snapshot *pgschema.Snapshot, batches int, failure *Failure, resultErr error) {
+	database, err := scratchdb.Create(ctx, adminURL, "onwardpg_verify", scratchdb.WithAdminExtensions(adminExtensions))
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -267,7 +270,7 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 				}
 				for index, batch := range parsed {
 					batches++
-					if err := executeRawBatch(ctx, connection, batch); err != nil {
+					if err := database.Retrying(ctx, func() error { return executeRawBatch(ctx, connection, batch) }); err != nil {
 						connection.Close(context.Background())
 						return nil, batches, batchFailure(entry.Directory, fmt.Sprintf("edited-%s-%03d", phase, index+1), phase, batch.Transactional, err), nil
 					}
@@ -287,7 +290,7 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 					continue
 				}
 				batches++
-				if err := executeBatch(ctx, connection, batch); err != nil {
+				if err := executeBatchRetrying(ctx, connection, batch, database.Retrying); err != nil {
 					connection.Close(context.Background())
 					return nil, batches, batchFailure(entry.Directory, batch.ID, phase, batch.Transactional, err), nil
 				}
@@ -315,7 +318,7 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 	if err := connection.Close(ctx); err != nil {
 		return nil, batches, nil, fmt.Errorf("close disposable execution connection: %w", err)
 	}
-	snapshot, err = source.LoadDatabaseGraphForComparison(ctx, database.Config, ignores)
+	snapshot, err = source.InspectScratchGraph(ctx, database, ignores, false)
 	if err != nil {
 		return nil, batches, nil, fmt.Errorf("inspect disposable result: %w", err)
 	}
@@ -399,14 +402,28 @@ func ExecutePhaseBatch(ctx context.Context, connection *pgx.Conn, batch bundle.S
 }
 
 func executeBatch(ctx context.Context, connection *pgx.Conn, batch protocol.Batch) error {
+	return executeBatchRetrying(ctx, connection, batch, func(_ context.Context, unit func() error) error { return unit() })
+}
+
+// executeBatchRetrying runs each atomic unit of a batch through retry: one
+// statement of a non-transactional batch, or a whole transactional batch that
+// rolled back. Verification supplies the scratch database's extension retry;
+// no caller-owned connection is ever given one.
+func executeBatchRetrying(ctx context.Context, connection *pgx.Conn, batch protocol.Batch, retry func(context.Context, func() error) error) error {
 	if !batch.Transactional {
 		for _, statement := range batch.Statements {
-			if err := executeRawBatch(ctx, connection, bundle.SQLBatch{SQL: statement.SQL}); err != nil {
+			if err := retry(ctx, func() error {
+				return executeRawBatch(ctx, connection, bundle.SQLBatch{SQL: statement.SQL})
+			}); err != nil {
 				return err
 			}
 		}
 		return executeVerification(ctx, connection, batch)
 	}
+	return retry(ctx, func() error { return executeTransactionalBatch(ctx, connection, batch) })
+}
+
+func executeTransactionalBatch(ctx context.Context, connection *pgx.Conn, batch protocol.Batch) error {
 	if connection.PgConn().TxStatus() != 'I' {
 		return fmt.Errorf("batch requires an idle connection")
 	}

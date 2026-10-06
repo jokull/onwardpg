@@ -17,6 +17,7 @@ import (
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/internal/semantichint"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/targetlock"
@@ -322,7 +323,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("render base history: %w", err)
 	}
-	current, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, input.AdminURL, input.Ignores)
+	current, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, input.AdminURL, input.Ignores, input.Target.ScratchOptions()...)
 	if err != nil {
 		return report, fmt.Errorf("replay base history: %w", err)
 	}
@@ -330,7 +331,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("compile desired schema: %w", err)
 	}
-	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
+	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores, input.Target.ScratchOptions()...)
 	if err != nil {
 		return report, fmt.Errorf("materialize desired schema: %w", err)
 	}
@@ -447,6 +448,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			},
 			IgnoreSelectors:         append([]string(nil), input.Ignores...),
 			ObserverIgnoreSelectors: observerIgnores,
+			ScratchAdminExtensions:  scratchdb.NormalizeAdminExtensions(input.Target.ScratchAdminExtensions),
 		},
 		HistoryParentDigest: chain.HeadDigest,
 	}
@@ -543,6 +545,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		expandVerification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: protocol.PhaseExpand, Ignores: input.Ignores, Options: input.PlannerOptions,
+			AdminExtensions: input.Target.ScratchAdminExtensions,
 		})
 		if err != nil {
 			return report, fmt.Errorf("verify generated expand checkpoint: %w", err)
@@ -565,6 +568,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		verification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: "contract", Ignores: input.Ignores, Options: input.PlannerOptions,
+			AdminExtensions: input.Target.ScratchAdminExtensions,
 		})
 		if err != nil {
 			return report, fmt.Errorf("verify generated draft: %w", err)
@@ -790,7 +794,7 @@ func ensureInputsUnchanged(ctx context.Context, input Input, lock *targetlock.Lo
 	if err != nil {
 		return fmt.Errorf("recompile desired schema before lifecycle write: %w", err)
 	}
-	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
+	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores, input.Target.ScratchOptions()...)
 	if err != nil {
 		return fmt.Errorf("rematerialize desired schema before lifecycle write: %w", err)
 	}

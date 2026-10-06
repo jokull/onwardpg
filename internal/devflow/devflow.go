@@ -92,7 +92,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			Unsupported: []string{"development_observer_" + observerFinding.Code + ":" + observerFinding.Message},
 		}}, nil
 	}
-	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
+	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores, input.Target.ScratchOptions()...)
 	if err != nil {
 		return Report{}, fmt.Errorf("materialize desired schema: %w", err)
 	}

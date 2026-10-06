@@ -15,6 +15,7 @@ import (
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/targetlock"
 	"github.com/jokull/onwardpg/internal/verify"
@@ -113,11 +114,11 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("compile declarative schema: %w", err)
 	}
-	empty, err := source.LoadDDLGraphForComparison(ctx, nil, "empty-postgresql", input.AdminURL, input.Ignores)
+	empty, err := source.LoadDDLGraphForComparison(ctx, nil, "empty-postgresql", input.AdminURL, input.Ignores, input.Target.ScratchOptions()...)
 	if err != nil {
 		return report, fmt.Errorf("inspect empty PostgreSQL baseline: %w", err)
 	}
-	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
+	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores, input.Target.ScratchOptions()...)
 	if err != nil {
 		return report, fmt.Errorf("inspect declarative schema: %w", err)
 	}
@@ -172,6 +173,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			},
 			IgnoreSelectors:         append([]string(nil), input.Ignores...),
 			ObserverIgnoreSelectors: observerIgnores,
+			ScratchAdminExtensions:  scratchdb.NormalizeAdminExtensions(input.Target.ScratchAdminExtensions),
 		},
 		HistoryParentDigest: bundle.HistoryRootDigest(),
 	}
@@ -232,6 +234,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	verification, err := verify.Run(ctx, verify.Input{
 		AdminURL: input.AdminURL, Chain: stagedChain, BundleID: input.BundleID,
 		ThroughPhase: "contract", Ignores: input.Ignores, Options: input.PlannerOptions,
+		AdminExtensions: input.Target.ScratchAdminExtensions,
 	})
 	if err != nil {
 		return report, fmt.Errorf("verify baseline bundle: %w", err)
@@ -283,7 +286,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("recompile desired schema after baseline verification: %w", err)
 	}
-	desiredAfter, err := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, input.AdminURL, input.Ignores)
+	desiredAfter, err := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, input.AdminURL, input.Ignores, input.Target.ScratchOptions()...)
 	if err != nil {
 		return report, fmt.Errorf("rematerialize desired schema after baseline verification: %w", err)
 	}

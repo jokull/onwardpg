@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/scratchdb"
 )
 
 var rootHistoryDigest = digestFrames([]byte("onwardpg.history"), []byte("root"))
@@ -59,6 +60,10 @@ type PlannerReceipt struct {
 	Options                 PlannerOptions `json:"options"`
 	IgnoreSelectors         []string       `json:"ignore_selectors,omitempty"`
 	ObserverIgnoreSelectors []string       `json:"observer_ignore_selectors,omitempty"`
+	// ScratchAdminExtensions records the reviewed allowlist under which
+	// disposable databases were materialized for this bundle. It is configuration
+	// policy, not planner input: it never enters a source fingerprint.
+	ScratchAdminExtensions []scratchdb.AdminExtension `json:"scratch_admin_extensions,omitempty"`
 }
 
 // ObserverIgnores returns only the catalog boundary bound into this receipt.
@@ -950,6 +955,14 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("planner ignore selectors must be non-empty, sorted, and unique")
 		}
 		previousIgnore = selector
+	}
+	if err := scratchdb.ValidateAdminExtensions(m.Planner.ScratchAdminExtensions); err != nil {
+		return fmt.Errorf("planner scratch administrator extensions: %w", err)
+	}
+	for index := 1; index < len(m.Planner.ScratchAdminExtensions); index++ {
+		if m.Planner.ScratchAdminExtensions[index-1].Name >= m.Planner.ScratchAdminExtensions[index].Name {
+			return fmt.Errorf("planner scratch administrator extensions must be sorted by name")
+		}
 	}
 	previousObserverIgnore := ""
 	for _, selector := range m.Planner.ObserverIgnoreSelectors {

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -32,6 +33,10 @@ type Target struct {
 	ScratchDatabaseEnv string   `toml:"scratch_database_env" json:"scratch_database_env,omitempty"`
 	DevMode            string   `toml:"dev_mode" json:"dev_mode,omitempty"`
 	Ignore             []string `toml:"ignore" json:"ignore,omitempty"`
+	// ScratchAdminExtensions names untrusted extensions that the scratch
+	// administrator, not the restricted owner role, may install in disposable
+	// databases when project DDL asks for them. See docs/security-review.md.
+	ScratchAdminExtensions []scratchdb.AdminExtension `toml:"scratch_admin_extensions" json:"scratch_admin_extensions,omitempty"`
 }
 
 func Load(name string) (Config, error) {
@@ -124,6 +129,9 @@ func (t Target) Validate() error {
 	if t.DevMode != "" && t.DevMode != "workspace" && t.DevMode != "strict" {
 		return fmt.Errorf("dev_mode must be workspace or strict")
 	}
+	if err := scratchdb.ValidateAdminExtensions(t.ScratchAdminExtensions); err != nil {
+		return fmt.Errorf("scratch_admin_extensions: %w", err)
+	}
 	for _, selector := range t.Ignore {
 		kind, name, found := strings.Cut(selector, ":")
 		if !found || kind == "" || name == "" || strings.Contains(name, "*") && name != "*" || strings.TrimSpace(selector) != selector {
@@ -137,6 +145,12 @@ func (t Target) Validate() error {
 // may retain objects from other branches, so absence from exported DDL is not
 // enough authority to drop them.
 func (t Target) WorkspaceMode() bool { return t.DevMode == "" || t.DevMode == "workspace" }
+
+// ScratchOptions carries the target's reviewed extension allowlist into every
+// disposable database created for it. The empty allowlist grants nothing.
+func (t Target) ScratchOptions() []scratchdb.Option {
+	return []scratchdb.Option{scratchdb.WithAdminExtensions(t.ScratchAdminExtensions)}
+}
 
 // ScratchEnv returns the environment variable containing the disposable
 // PostgreSQL administrative URL. Falling back to dev_database_env preserves

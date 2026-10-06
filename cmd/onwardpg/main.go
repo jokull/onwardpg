@@ -28,6 +28,7 @@ import (
 	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/historyinit"
 	"github.com/jokull/onwardpg/internal/protocol"
+	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/internal/semantichint"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/targetlock"
@@ -507,7 +508,7 @@ func runDriftAt(arguments []string, start string) int {
 	}
 	ctx := context.Background()
 	selectors := targetIgnoreSelectors(target, ignores)
-	expected, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, scratchURL, selectors)
+	expected, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, scratchURL, selectors, target.ScratchOptions()...)
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
@@ -1006,6 +1007,15 @@ func runBundleAt(arguments []string, start string) int {
 			fmt.Sprintf("local active plan %s does not match bundle plan id %s", selectedAnchor.PlanID, manifest.PlanID),
 			"select the intended bundle explicitly or remove the stale local active-plan anchor")
 	}
+	// Disposable materialization uses the allowlist this bundle receipted. A
+	// configuration that now differs would widen or narrow the trust under which
+	// the receipted evidence was produced, so it blocks instead of being applied.
+	if !sameScratchAdminExtensions(manifest.Planner.ScratchAdminExtensions, target.ScratchAdminExtensions) {
+		return writeVerifyFinding(*targetName, *bundleID, prefix.HeadDigest, *through, "blocked", "scratch_admin_extensions_changed",
+			fmt.Sprintf("bundle %s receipted scratch_admin_extensions %s but %s now configures %s",
+				*bundleID, formatScratchAdminExtensions(manifest.Planner.ScratchAdminExtensions), *configName, formatScratchAdminExtensions(target.ScratchAdminExtensions)),
+			"restore the receipted list in the configuration, or draft a new bundle (or re-run init for an unpublished baseline) so the receipt records the reviewed allowlist")
+	}
 	options := graphplan.Options{
 		ConcurrentIndexes:       manifest.Planner.Options.ConcurrentIndexes,
 		IfNotExists:             manifest.Planner.Options.IfNotExists,
@@ -1019,7 +1029,7 @@ func runBundleAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("compile current desired schema: %w", err))
 	}
-	working, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, manifest.Planner.IgnoreSelectors)
+	working, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, manifest.Planner.IgnoreSelectors, scratchdb.WithAdminExtensions(manifest.Planner.ScratchAdminExtensions))
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("materialize current desired schema: %w", err))
 	}
@@ -1051,6 +1061,7 @@ func runBundleAt(arguments []string, start string) int {
 		expandReport, expandErr := verify.Run(ctx, verify.Input{
 			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: protocol.PhaseExpand,
 			Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+			AdminExtensions: manifest.Planner.ScratchAdminExtensions,
 		})
 		if expandErr != nil {
 			return writeError("verification_error", expandErr)
@@ -1074,12 +1085,14 @@ func runBundleAt(arguments []string, start string) int {
 			report, err = verify.Run(ctx, verify.Input{
 				AdminURL: adminURL, Chain: verificationChain, BundleID: *bundleID, ThroughPhase: *through,
 				Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+				AdminExtensions: manifest.Planner.ScratchAdminExtensions,
 			})
 		}
 	} else {
 		report, err = verify.Run(ctx, verify.Input{
 			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: *through,
 			Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+			AdminExtensions: manifest.Planner.ScratchAdminExtensions,
 		})
 	}
 	if err != nil {
@@ -1100,7 +1113,7 @@ func runBundleAt(arguments []string, start string) int {
 		if compileErr != nil {
 			return writeError("source_error", fmt.Errorf("recompile desired schema after verification: %w", compileErr))
 		}
-		workingAfter, loadErr := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, adminURL, manifest.Planner.IgnoreSelectors)
+		workingAfter, loadErr := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, adminURL, manifest.Planner.IgnoreSelectors, scratchdb.WithAdminExtensions(manifest.Planner.ScratchAdminExtensions))
 		if loadErr != nil {
 			return writeError("source_error", fmt.Errorf("rematerialize desired schema after verification: %w", loadErr))
 		}
@@ -2043,6 +2056,8 @@ func runLowLevelPlan(command string, arguments []string) int {
 	flags.Var(&ignores, "ignore", "selector to exclude")
 	var ignoreExtensionVersions stringsFlag
 	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
+	var scratchAdminExtensions stringsFlag
+	flags.Var(&scratchAdminExtensions, "scratch-admin-extension", "NAME=SCHEMA untrusted extension the scratch administrator may install in --dev-url databases; repeat for multiple extensions")
 	if help, err := parseFlagSet(flags, arguments); help {
 		return 0
 	} else if err != nil {
@@ -2061,13 +2076,18 @@ func runLowLevelPlan(command string, arguments []string) int {
 	if err != nil {
 		return writeError("invalid_hints", err)
 	}
+	extensions, err := parseScratchAdminExtensions(scratchAdminExtensions)
+	if err != nil {
+		return writeError("invalid_invocation", err)
+	}
+	scratchOptions := []scratchdb.Option{scratchdb.WithAdminExtensions(extensions)}
 	ctx := context.Background()
 	fromSpec, toSpec := source.Parse(*from), source.Parse(*to)
-	current, err := source.LoadGraphForComparison(ctx, fromSpec, *devURL, ignores)
+	current, err := source.LoadGraphForComparison(ctx, fromSpec, *devURL, ignores, scratchOptions...)
 	if err != nil {
 		return writeError("source_error", err)
 	}
-	desired, err := source.LoadGraphForComparison(ctx, toSpec, *devURL, ignores)
+	desired, err := source.LoadGraphForComparison(ctx, toSpec, *devURL, ignores, scratchOptions...)
 	if err != nil {
 		return writeError("source_error", err)
 	}
@@ -2184,6 +2204,12 @@ func runConfig(arguments []string) int {
 		ScratchPostgresMajor int      `json:"scratch_postgres_major"`
 		HistoryPostgresMajor int      `json:"history_postgres_major,omitempty"`
 		Ignored              []string `json:"ignored,omitempty"`
+		// ScratchAdminExtensions echoes the reviewed allowlist. Installed lists the
+		// extensions the scratch administrator actually had to create to
+		// materialize the DDL on this server; Notes are advisory.
+		ScratchAdminExtensions []scratchdb.AdminExtension `json:"scratch_admin_extensions,omitempty"`
+		ScratchAdminInstalled  []string                   `json:"scratch_admin_installed,omitempty"`
+		Notes                  []string                   `json:"notes,omitempty"`
 	}
 	checked := make([]checkedTarget, 0, len(targets))
 	ctx := context.Background()
@@ -2207,7 +2233,13 @@ func runConfig(arguments []string) int {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
 		}
 		selectors := sortedUniqueStrings(target.Ignore)
-		graph, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, selectors)
+		notes, err := scratchdb.CheckAdminExtensions(ctx, adminURL, target.ScratchAdminExtensions)
+		if err != nil {
+			return writeError("invalid_config", fmt.Errorf("target %s: %w", targetName, err))
+		}
+		var administratorInstalled []string
+		scratchOptions := append(target.ScratchOptions(), scratchdb.WithInstallObserver(func(installed []string) { administratorInstalled = installed }))
+		graph, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, selectors, scratchOptions...)
 		if err != nil {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
 		}
@@ -2263,10 +2295,20 @@ func runConfig(arguments []string) int {
 		if historyMajor != 0 && devMajor != 0 && historyMajor != devMajor {
 			return writeError("incompatible_postgres_major", fmt.Errorf("target %s history requires PostgreSQL %d; development is %d", targetName, historyMajor, devMajor))
 		}
+		if len(chain.Entries) > 0 {
+			head := chain.Entries[len(chain.Entries)-1].Artifact.Manifest
+			if !sameScratchAdminExtensions(head.Planner.ScratchAdminExtensions, target.ScratchAdminExtensions) {
+				notes = append(notes, fmt.Sprintf("history head %s receipted scratch_admin_extensions %s but the configuration lists %s; onwardpg verify reports scratch_admin_extensions_changed until a bundle receipts the configured list",
+					head.BundleID, formatScratchAdminExtensions(head.Planner.ScratchAdminExtensions), formatScratchAdminExtensions(target.ScratchAdminExtensions)))
+			}
+		}
 		checked = append(checked, checkedTarget{
 			Name: targetName, Provenance: compiled.Provenance, Fingerprint: fingerprint,
 			DevPostgresMajor: devMajor, ScratchPostgresMajor: scratchMajor, HistoryPostgresMajor: historyMajor,
-			Ignored: ignored,
+			Ignored:                ignored,
+			ScratchAdminExtensions: scratchdb.NormalizeAdminExtensions(target.ScratchAdminExtensions),
+			ScratchAdminInstalled:  administratorInstalled,
+			Notes:                  notes,
 		})
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(struct {
@@ -2559,6 +2601,36 @@ func resolveConfiguredTarget(config workspace.Config, selected *string) (workspa
 		*selected = names[0]
 	}
 	return config.Target(*selected)
+}
+
+func parseScratchAdminExtensions(values []string) ([]scratchdb.AdminExtension, error) {
+	extensions := make([]scratchdb.AdminExtension, 0, len(values))
+	for _, value := range values {
+		name, schema, found := strings.Cut(value, "=")
+		if !found {
+			return nil, fmt.Errorf("--scratch-admin-extension %q must be NAME=SCHEMA", value)
+		}
+		extensions = append(extensions, scratchdb.AdminExtension{Name: name, Schema: schema})
+	}
+	if err := scratchdb.ValidateAdminExtensions(extensions); err != nil {
+		return nil, fmt.Errorf("--scratch-admin-extension: %w", err)
+	}
+	return extensions, nil
+}
+
+func sameScratchAdminExtensions(receipted, configured []scratchdb.AdminExtension) bool {
+	return reflect.DeepEqual(scratchdb.NormalizeAdminExtensions(receipted), scratchdb.NormalizeAdminExtensions(configured))
+}
+
+func formatScratchAdminExtensions(extensions []scratchdb.AdminExtension) string {
+	if len(extensions) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(extensions))
+	for _, extension := range scratchdb.NormalizeAdminExtensions(extensions) {
+		parts = append(parts, extension.Name+" in "+extension.Schema)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func targetIgnoreSelectors(target workspace.Target, command []string) []string {

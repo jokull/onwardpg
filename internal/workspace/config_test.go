@@ -194,3 +194,47 @@ func TestConfigRejectsUnsafePaths(t *testing.T) {
 		t.Fatalf("expected parent bundle root rejection, got %v", err)
 	}
 }
+
+func TestLoadScratchAdminExtensions(t *testing.T) {
+	load := func(t *testing.T, extra string) (Config, error) {
+		t.Helper()
+		name := filepath.Join(t.TempDir(), ".onwardpg.toml")
+		data := "version = 1\nbundle_root = \"onward-bundles\"\n[targets.db]\nschema_file = \"schema.sql\"\nscratch_database_env = \"SCRATCH_DATABASE_URL\"\n" + extra
+		if err := os.WriteFile(name, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(name)
+	}
+	config, err := load(t, `scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions" }, { name = "uuid-ossp", schema = "public" }]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extensions := config.Targets["db"].ScratchAdminExtensions
+	if len(extensions) != 2 || extensions[0].Name != "earthdistance" || extensions[0].Schema != "extensions" || extensions[1].Name != "uuid-ossp" {
+		t.Fatalf("scratch_admin_extensions = %#v", extensions)
+	}
+	if got := len(config.Targets["db"].ScratchOptions()); got != 1 {
+		t.Fatalf("scratch options = %d", got)
+	}
+	for label, extra := range map[string]string{
+		"unknown-field":    `scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions", version = "1.2" }]`,
+		"missing-schema":   `scratch_admin_extensions = [{ name = "earthdistance" }]`,
+		"missing-name":     `scratch_admin_extensions = [{ schema = "extensions" }]`,
+		"uppercase":        `scratch_admin_extensions = [{ name = "EarthDistance", schema = "extensions" }]`,
+		"injection":        `scratch_admin_extensions = [{ name = "cube\"; DROP", schema = "extensions" }]`,
+		"duplicate":        `scratch_admin_extensions = [{ name = "cube", schema = "a" }, { name = "cube", schema = "b" }]`,
+		"plpgsql":          `scratch_admin_extensions = [{ name = "plpgsql", schema = "public" }]`,
+		"reserved-schema":  `scratch_admin_extensions = [{ name = "cube", schema = "pg_catalog" }]`,
+		"strings-not-keys": `scratch_admin_extensions = ["earthdistance"]`,
+	} {
+		t.Run(label, func(t *testing.T) {
+			if _, err := load(t, extra); err == nil {
+				t.Fatal("expected invalid scratch_admin_extensions to fail")
+			}
+		})
+	}
+	empty, err := load(t, "")
+	if err != nil || len(empty.Targets["db"].ScratchAdminExtensions) != 0 {
+		t.Fatalf("an omitted allowlist must be empty and valid: %v %#v", err, empty)
+	}
+}

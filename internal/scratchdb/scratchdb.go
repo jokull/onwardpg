@@ -22,6 +22,13 @@ type Database struct {
 	Name        string
 	Role        string
 	Config      *pgx.ConnConfig
+
+	// extensions is the reviewed allowlist the administrator may install on
+	// demand; installed and exemptions record what it actually installed.
+	extensions map[string]AdminExtension
+	installed  []string
+	exemptions []string
+	onInstall  func([]string)
 }
 
 // Each DROP has its own deadline, leaving room for checkpoint and filesystem
@@ -40,9 +47,16 @@ type databaseEnvironment struct {
 	CollationVersion string
 }
 
-func Create(ctx context.Context, adminURL, prefix string) (_ *Database, resultErr error) {
+func Create(ctx context.Context, adminURL, prefix string, options ...Option) (_ *Database, resultErr error) {
 	if adminURL == "" {
 		return nil, fmt.Errorf("scratch administrative URL is required")
+	}
+	var resolved settings
+	for _, option := range options {
+		option(&resolved)
+	}
+	if err := ValidateAdminExtensions(resolved.extensions); err != nil {
+		return nil, fmt.Errorf("scratch administrator extensions: %w", err)
 	}
 	admin, err := pgx.Connect(ctx, adminURL)
 	if err != nil {
@@ -69,6 +83,13 @@ func Create(ctx context.Context, adminURL, prefix string) (_ *Database, resultEr
 		return nil, err
 	}
 	resources := &Database{admin: admin, adminConfig: admin.Config().Copy(), Name: name, Role: role}
+	resources.onInstall = resolved.onInstall
+	if len(resolved.extensions) > 0 {
+		resources.extensions = make(map[string]AdminExtension, len(resolved.extensions))
+		for _, extension := range resolved.extensions {
+			resources.extensions[extension.Name] = extension
+		}
+	}
 	// Even a failed CREATE can have committed before its response was lost.
 	// Both generated names are unique and cleanup is safe to repeat.
 	defer func() {

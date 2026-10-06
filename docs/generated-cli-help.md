@@ -185,6 +185,8 @@ Usage: onwardpg diff --from SOURCE --to SOURCE [options]
         output format: text or json (default "json")
   -schema-qualifier value
         scope to one schema and render names using this qualifier (empty means unqualified)
+  -scratch-admin-extension value
+        NAME=SCHEMA untrusted extension the scratch administrator may install in --dev-url databases; repeat for multiple extensions
   -to string
         desired PostgreSQL URL or CREATE-statement SQL file
 ```

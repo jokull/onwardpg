@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/pgschema"
 )
 
@@ -28,14 +29,14 @@ func Parse(value string) Spec {
 
 // LoadGraph loads either a live PostgreSQL database or a declarative DDL file
 // into the sole internal schema representation: a typed graph snapshot.
-func LoadGraph(ctx context.Context, spec Spec, devURL string, ignores []string) (*pgschema.Snapshot, error) {
-	return loadGraph(ctx, spec, devURL, ignores, true)
+func LoadGraph(ctx context.Context, spec Spec, devURL string, ignores []string, options ...scratchdb.Option) (*pgschema.Snapshot, error) {
+	return loadGraph(ctx, spec, devURL, ignores, true, options...)
 }
 
 // LoadGraphForComparison defers ignore-selector validation until both source
 // snapshots have been read. Call ValidateIgnoreSelectors on their union.
-func LoadGraphForComparison(ctx context.Context, spec Spec, devURL string, ignores []string) (*pgschema.Snapshot, error) {
-	return loadGraph(ctx, spec, devURL, ignores, false)
+func LoadGraphForComparison(ctx context.Context, spec Spec, devURL string, ignores []string, options ...scratchdb.Option) (*pgschema.Snapshot, error) {
+	return loadGraph(ctx, spec, devURL, ignores, false, options...)
 }
 
 // LoadDatabaseGraphForComparison inspects an already parsed connection
@@ -52,17 +53,17 @@ func LoadDatabaseGraphForComparison(ctx context.Context, config *pgx.ConnConfig,
 // LoadDDLGraphForComparison materializes exported CREATE statements
 // directly, avoiding an unreceipted intermediate file while retaining the
 // same PostgreSQL catalog authority as a file:// source.
-func LoadDDLGraphForComparison(ctx context.Context, ddl []byte, provenance, devURL string, ignores []string) (*pgschema.Snapshot, error) {
+func LoadDDLGraphForComparison(ctx context.Context, ddl []byte, provenance, devURL string, ignores []string, options ...scratchdb.Option) (*pgschema.Snapshot, error) {
 	if devURL == "" {
 		return nil, fmt.Errorf("exported DDL requires a dev database URL")
 	}
 	if strings.TrimSpace(provenance) == "" || strings.Contains(provenance, "://") {
 		return nil, fmt.Errorf("exported DDL provenance must be non-secret")
 	}
-	return materializeDDLBytesGraph(ctx, ddl, provenance, devURL, ignores, false)
+	return materializeDDLBytesGraph(ctx, ddl, provenance, devURL, ignores, false, options...)
 }
 
-func loadGraph(ctx context.Context, spec Spec, devURL string, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
+func loadGraph(ctx context.Context, spec Spec, devURL string, ignores []string, validateIgnores bool, options ...scratchdb.Option) (*pgschema.Snapshot, error) {
 	switch spec.Kind {
 	case "database":
 		config, err := pgx.ParseConfig(spec.Value)
@@ -74,7 +75,7 @@ func loadGraph(ctx context.Context, spec Spec, devURL string, ignores []string, 
 		if devURL == "" {
 			return nil, fmt.Errorf("a file:// source requires --dev-url")
 		}
-		return materializeDDLGraph(ctx, spec.Value, devURL, ignores, validateIgnores)
+		return materializeDDLGraph(ctx, spec.Value, devURL, ignores, validateIgnores, options...)
 	default:
 		return nil, fmt.Errorf("unknown source kind %q", spec.Kind)
 	}
