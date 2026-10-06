@@ -36,7 +36,7 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   `--ignore` flag per selector. `drift check`, `contract check`, and `diff`
   (with the new `--target NAME [--config FILE]`) remove exactly the named
   blocker markers from the live snapshot and list them as
-  `observer.live_ignored` (`workspace_compatibility` for `diff`). Selectors are
+  `observer.live_ignored` (`workspace_compatibility` for a `diff` plan). Selectors are
   exact, validated for syntax and kind only, and need not match in every
   cluster. They never remove a typed object, add an ignore receipt, or change a
   fingerprint, and planning, verification, replayed history, and DDL sources

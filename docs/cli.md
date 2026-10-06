@@ -158,7 +158,9 @@ provider schema that is not in the project DDL still appears as an unexpected
 object. It does not apply to the replayed history or to DDL sources, to `init`,
 `plan`, `draft`, `verify`, or to `dev plan`. Acknowledged state is not hidden:
 `drift check` and `contract check` list it in `observer.live_ignored`, and
-`diff` lists it as `live_ignored:SELECTOR` in `workspace_compatibility`.
+`diff` lists it as `live_ignored:SELECTOR` in `workspace_compatibility` of a
+planned or unsupported result; the decision envelope, which carries no
+compatibility list, omits it.
 
 An ownership selector names the owning role, so a change of owner blocks again.
 A `parameter_acl` selector names a parameter, not a grantee: a grant on a new
