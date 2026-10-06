@@ -508,7 +508,14 @@ func runDriftAt(arguments []string, start string) int {
 	}
 	ctx := context.Background()
 	selectors := targetIgnoreSelectors(target, ignores)
-	expected, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, scratchURL, selectors, target.ScratchOptions()...)
+	// The replay is a claim about accepted history, so it uses the allowlist that
+	// history head receipted; verify applies the same rule.
+	receipted := chain.Entries[len(chain.Entries)-1].Artifact.Manifest.Planner.ScratchAdminExtensions
+	if !sameScratchAdminExtensions(receipted, target.ScratchAdminExtensions) {
+		return writeError("scratch_admin_extensions_changed", fmt.Errorf("history head receipted scratch_admin_extensions %s but the configuration lists %s; restore the receipted list or draft a new bundle that receipts the reviewed allowlist",
+			formatScratchAdminExtensions(receipted), formatScratchAdminExtensions(target.ScratchAdminExtensions)))
+	}
+	expected, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, scratchURL, selectors, scratchdb.WithAdminExtensions(receipted))
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}

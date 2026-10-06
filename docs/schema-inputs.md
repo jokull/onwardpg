@@ -89,7 +89,7 @@ The DDL stays the only source of schema state:
   bundle needs ownership and is not supported there.
 - The list is receipted in `planner.scratch_admin_extensions` and bound by the
   bundle's history entry digest. It is never part of a source fingerprint.
-  `verify` materializes with the receipted list and blocks with
+  `verify` and `drift check` materialize with the receipted list and block with
   `scratch_admin_extensions_changed` if the configuration now differs, like the
   boundary rule for ignores: editing configuration cannot silently widen the
   trust of an existing bundle. Plan again to receipt a reviewed change.

@@ -175,6 +175,13 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 			if result.code == 0 || !strings.Contains(result.stdout, `"code":"scratch_admin_extensions_changed"`) {
 				t.Fatalf("%s: %d %s", label, result.code, result.stdout)
 			}
+			// drift check replays history too, and fails before touching the live URL.
+			drift := captureStdout(t, func() int {
+				return runDriftAt([]string{"check", "--database", "postgres://127.0.0.1:1/unreachable"}, repository)
+			})
+			if drift.code == 0 || !strings.Contains(drift.stdout, "scratch_admin_extensions_changed") {
+				t.Fatalf("%s: drift check: %d %s", label, drift.code, drift.stdout)
+			}
 		}
 		writeTestFile(t, repository, ".onwardpg.toml", config(setting))
 	})
