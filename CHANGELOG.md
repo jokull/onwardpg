@@ -3,6 +3,28 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## Unreleased
+
+### Fixed
+
+- `drift check` no longer hides live catalog state that makes `init`, `plan`, and
+  `diff` stop as unsupported. The state (for example
+  `ownership:extension:earthdistance=pscale_admin` or
+  `parameter_acl:session_replication_role`) was in the inspected snapshot, but
+  the report dropped it and showed only `drifted`. The report now has an
+  `unsupported` list; when it is not empty the status is `unsupported` and the
+  exit code is 3, and the `differences` are still listed. A result without
+  `unsupported` entries now means there is no modeled drift and nothing the
+  planner would refuse. The list includes unsupported state in the replayed
+  history as well as in the live catalog.
+- `contract check` reported unsupported production state as `catalog_drift`
+  (status `blocked`, exit 4), because that state is part of the observed
+  fingerprint. It now reports status `unsupported` (exit 3), the selectors in
+  `unsupported`, and the finding `unsupported_catalog_state`, and runs no data
+  gate. Catalog drift is classified on the modeled graph alone, so a catalog
+  that also differs from the receipted checkpoint still gets its
+  `catalog_drift`, `expand_not_applied`, or `contract_already_applied` finding.
+
 ## v0.1.0-preview.5 — 2026-10-06
 
 ### Fixed

@@ -118,7 +118,9 @@ onwardpg contract check \
 ```
 
 The result is `ready`, `reconciliation_required`, `needs_evidence`, `blocked`,
-or `stale`. `reconciliation_required` means writer evidence passed but the named
+`stale`, or `unsupported`. `unsupported` means the observed catalog holds state
+the planner cannot model (the same selectors `diff` and `drift check` report);
+it is listed in `unsupported` and no gate runs. `reconciliation_required` means writer evidence passed but the named
 post-drain cleanup must run before enforcement. Have the deployment executor
 run that receipted reconciliation from `phases/contract.sql`, then repeat the
 check. Do not run the remaining contract batches until readiness passes.

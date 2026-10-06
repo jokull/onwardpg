@@ -427,11 +427,13 @@ func runContractAt(arguments []string, start string) int {
 		return writeError("contract_check_error", err)
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
-	if report.Status == "ready" {
+	switch report.Status {
+	case "ready":
 		return 0
-	}
-	if report.Status == "needs_evidence" || report.Status == "reconciliation_required" {
+	case "needs_evidence", "reconciliation_required":
 		return 2
+	case "unsupported":
+		return 3
 	}
 	return 4
 }
@@ -534,8 +536,11 @@ func runDriftAt(arguments []string, start string) int {
 		ProjectedAccess: append([]string(nil), observer.ProjectedAccess...),
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
-	if report.Outcome == "drift_free" {
+	switch report.Outcome {
+	case "drift_free":
 		return 0
+	case "unsupported":
+		return 3
 	}
 	return 4
 }

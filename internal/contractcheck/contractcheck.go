@@ -83,6 +83,7 @@ type Report struct {
 	BundleEntryDigest   string                    `json:"bundle_entry_digest"`
 	ExpectedFingerprint string                    `json:"expected_expand_fingerprint"`
 	ActualFingerprint   string                    `json:"actual_fingerprint,omitempty"`
+	Unsupported         []string                  `json:"unsupported,omitempty"`
 	CheckedAt           string                    `json:"checked_at"`
 	Observer            ObserverProjection        `json:"observer"`
 	GateResults         []GateResult              `json:"gates,omitempty"`
@@ -495,15 +496,38 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	if report.ActualFingerprint != checkpoint.ExpandFingerprint {
+	// Unsupported state is part of the observed fingerprint, but a receipted
+	// checkpoint never contains any. Classify catalog drift on the modeled
+	// graph alone so that unsupported state cannot masquerade as drift, and
+	// report that state by name.
+	comparable := report.ActualFingerprint
+	if unsupported := actual.Unsupported(); len(unsupported) > 0 {
+		report.Status, report.Unsupported = "unsupported", unsupported
+		report.Findings = append(report.Findings, Finding{
+			Code:        "unsupported_catalog_state",
+			Message:     "production holds catalog state the planner cannot model: " + strings.Join(unsupported, ", "),
+			Remediation: "resolve the state or exclude it with a validated ignore selector; diff and drift check refuse the same catalog",
+		})
+		modeled, err := actual.Project(nil, func(string) bool { return false })
+		if err != nil {
+			return Report{}, err
+		}
+		if comparable, err = graphplan.Fingerprint(modeled, input.Options); err != nil {
+			return Report{}, err
+		}
+	}
+	if comparable != checkpoint.ExpandFingerprint {
 		code, message := "catalog_drift", "production does not match the receipted post-expand catalog"
-		switch report.ActualFingerprint {
+		switch comparable {
 		case checkpoint.BaselineFingerprint:
 			code, message = "expand_not_applied", "production still matches the pre-expand baseline"
 		case checkpoint.DesiredFingerprint:
 			code, message = "contract_already_applied", "production already matches the desired post-contract catalog"
 		}
 		report.Findings = append(report.Findings, Finding{Code: code, Message: message, Remediation: "inspect deployment state and catalog drift before running contract"})
+		return finalize(report), nil
+	}
+	if report.Status == "unsupported" {
 		return finalize(report), nil
 	}
 

@@ -306,6 +306,15 @@ Replays the complete receipted history head in disposable PostgreSQL, inspects t
 explicitly supplied live catalog read-only, and reports typed missing,
 unexpected, and changed objects. Exit zero means drift_free; drift exits 4.
 
+When the live catalog holds state the planner cannot model, such as an object
+owned by a role other than the one inspecting, a `pg_parameter_acl` grant, or
+an event trigger, the status is `unsupported`, the exit code is 3, and the
+selectors are listed in `unsupported`. `diff --from URL` refuses the same
+catalog with the same selectors. The `differences` are still computed and
+listed, so one run shows everything; the `unsupported` list also includes any
+such state in the replayed history. A result without `unsupported` entries
+means there is no modeled drift and nothing the planner would refuse.
+
 The audit never generates repair SQL, changes history, or participates in
 ordinary draft generation.
 
@@ -336,7 +345,12 @@ evidence bound to the exact plan and environment.
 The report includes the selected target, environment, bundle and PlanID
 identity, generation, entry digest,
 expected and observed fingerprints, check time, gate results, findings, and a
-report digest. Its status is `ready`, `needs_evidence`, `blocked`, or `stale`.
+report digest. Its status is `ready`, `reconciliation_required`,
+`needs_evidence`, `blocked`, `stale`, or `unsupported`. `unsupported` (exit 3)
+means the production catalog holds state the planner cannot model; the report
+lists the selectors in `unsupported` and the finding `unsupported_catalog_state`,
+and runs no data gate. Catalog drift is still classified on the modeled graph,
+so unsupported state is no longer reported as `catalog_drift`.
 `--statement-timeout` limits each read-only catalog or data-gate query and
 defaults to 30 seconds. `ready` does not execute or schedule contract. See
 [contract readiness](contract-readiness.md) for the evidence format.
