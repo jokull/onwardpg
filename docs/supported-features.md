@@ -153,11 +153,13 @@ onwardpg asks a fingerprint-bound `rename_constraint` question and then uses
 `ALTER TABLE ... RENAME CONSTRAINT`. PostgreSQL's backing-index rename is
 modeled as the same identity-preserving operation, and preserved constraint or
 index comments are explicitly reconciled. A foreign key that differs only by
-name and by the name of the referenced primary-key or unique index is also
-offered, in the same round, as long as that referenced key is itself a rename
-candidate that was not declined; PostgreSQL stores the referenced index by OID,
-so the foreign key's rename stays metadata-only and no constraint is dropped,
-re-added, or re-validated. Check, unique, exclusion,
+name and by the name of the index behind the referenced primary-key or unique
+constraint is also offered, in the same round, as long as that referenced
+constraint is itself a rename candidate that was not declined; PostgreSQL stores
+the referenced index by OID, so the foreign key's rename stays metadata-only and
+no constraint is dropped, re-added, or re-validated. A foreign key that
+references a unique index without a constraint is not covered: when that index
+is renamed, the foreign key is still planned as drop and re-add. Check, unique, exclusion,
 `NULLS NOT DISTINCT`, and foreign-key variants converge on PostgreSQL 15–18.
 Partition-propagated constraint renames and ambiguous candidates remain
 outside this proof rather than being inferred.

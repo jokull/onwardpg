@@ -8,8 +8,8 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 ### Fixed
 
 - A foreign key whose only differences from the desired schema are its own
-  name and the name of the referenced primary-key or unique index is now
-  offered as a `rename_constraint` decision, in the same round as the key's own
+  name and the name of the index behind the referenced primary-key or unique
+  constraint is now offered as a `rename_constraint` decision, in the same round as the key's own
   rename. Before, such a foreign key was never a rename candidate, because the
   index name that PostgreSQL records for the referenced key (`UsingIndex`) was
   compared literally: after an ORM or `pg_dump` round trip left old key names
@@ -18,7 +18,8 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   table. The foreign key is a candidate only while its referenced key is itself
   a rename candidate that has not been declined; every other catalog field is
   still compared. A confirmed pair emits only `ALTER TABLE ... RENAME
-  CONSTRAINT`, which PostgreSQL carries out as a metadata change.
+  CONSTRAINT`, which PostgreSQL carries out as a metadata change. A foreign
+  key that references a unique index without a constraint is not covered.
 
 ## v0.1.0-preview.5 — 2026-10-06
 
