@@ -121,6 +121,13 @@ catalog read-only. Every selector must match the exported DDL or development
 catalog, and the JSON receipt lists the exact excluded objects. This lets a
 target acknowledge provider-owned state that may be absent from replay history.
 
+When a target lists `scratch_admin_extensions`, `config check` verifies that the
+scratch server provides each extension, returns the list as
+`scratch_admin_extensions`, names the extensions the administrator had to
+install as `scratch_admin_installed`, and reports advisory `notes` (an entry the
+restricted role could create itself, or a history head whose receipt differs
+from the configuration).
+
 ## history status
 
 ~~~sh
@@ -174,7 +181,7 @@ Planner options include:
 | --hint JSON | Semantic decision; repeatable |
 | --hints-file FILE | Array of semantic decisions |
 | --concurrent-indexes | Build eligible standalone indexes concurrently |
-| --if-not-exists | Use supported IF NOT EXISTS forms |
+| --if-not-exists | Use supported IF NOT EXISTS forms, including schema and extension creation |
 | --if-exists | Use supported IF EXISTS forms |
 | --cascade-drops | Permit supported CASCADE rendering after destructive approval |
 | --schema-qualifier VALUE | Scope and render through one schema qualifier |
@@ -357,6 +364,7 @@ DDL.
 | --from SOURCE | Required current schema |
 | --to SOURCE | Required desired schema |
 | --dev-url URL | Administrative URL required for DDL sources |
+| --scratch-admin-extension NAME=SCHEMA | Untrusted extension the scratch administrator may install for DDL sources; repeatable |
 | --hint JSON | Semantic decision; repeatable |
 | --hints-file FILE | Array of semantic decisions |
 | --output text\|json | JSON by default; text renders decisions or SQL |

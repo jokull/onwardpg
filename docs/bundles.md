@@ -233,13 +233,20 @@ schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
 ignore = ["extension:pg_stat_statements"]
+scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions" }]
 ~~~
 
 schema_command may replace schema_file. Configuration rejects unknown fields,
 escaping paths, literal URLs, ambiguous schema sources, bundle/schema path
 overlap, unsafe environment-variable names, and malformed ignore selectors.
 Configured ignores are target policy; only selectors active in a durable H → W
-comparison are copied into that bundle's receipts.
+comparison are copied into that bundle's receipts. `scratch_admin_extensions`
+names untrusted extensions that the scratch administrator may install in
+disposable databases (see [schema inputs](schema-inputs.md)); the whole
+configured list is copied to `planner.scratch_admin_extensions`, whether or not
+a given server needed it, so the same project receipts the same bytes on every
+machine. `verify` replays with the receipted list and reports
+`scratch_admin_extensions_changed` when the configuration differs.
 
 dev_database_env supplies the read-only dev catalog. scratch_database_env
 supplies disposable-database authority. Omitting the latter falls back to the

@@ -7,3 +7,6 @@ dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
 # Exact, reviewed provider-owned objects may be excluded from this target.
 # ignore = ["extension:pg_stat_statements", "schema:auth"]
+# Untrusted contrib extensions (earthdistance, dblink, ...) that the scratch
+# administrator, not the restricted login, may install in disposable databases.
+# scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions" }]

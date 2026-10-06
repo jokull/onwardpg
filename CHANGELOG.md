@@ -3,6 +3,36 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## Unreleased
+
+### Added
+
+- Targets can list `scratch_admin_extensions` in `.onwardpg.toml`, for example
+  `[{ name = "earthdistance", schema = "extensions" }]`. When project DDL asks
+  for an extension that PostgreSQL does not trust (so the restricted scratch
+  login is refused with `permission denied to create extension`), the scratch
+  administrator installs the listed extension and its dependencies into the
+  named schema inside that disposable database, and the unchanged DDL is run
+  again. Nothing is inferred from SQL text, an extension that nothing asks for
+  is never installed, and no live-database path creates extensions. Without the
+  entry the same error now carries a hint naming the setting.
+  Administrator-owned extensions are not reported as `ownership:extension`
+  blockers in disposable databases, so fingerprints equal those built where the
+  owner created a trusted extension. `init`, `plan`, `draft`, `verify`,
+  `dev plan`, `drift check`, and `config check` honor the list;
+  `diff`/`plan --from --to` take `--scratch-admin-extension NAME=SCHEMA`.
+  The list is receipted in `planner.scratch_admin_extensions`; `verify` replays
+  with the receipted list and blocks with `scratch_admin_extensions_changed`
+  when the configuration differs. `config check` reports
+  `scratch_admin_extensions`, `scratch_admin_installed`, and `notes`; an entry
+  the server lacks is an error and an entry for a trusted extension is a note.
+
+### Changed
+
+- `--if-not-exists` now also renders `CREATE EXTENSION IF NOT EXISTS`, which
+  generated bundles need when the scratch administrator installs an extension
+  before they run.
+
 ## v0.1.0-preview.5 — 2026-10-06
 
 ### Fixed

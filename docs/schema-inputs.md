@@ -44,6 +44,62 @@ and keeps clone-schema exclusions in `planner.ignore_selectors`. Contract checks
 use that saved policy; editing current configuration cannot widen an existing
 bundle's boundary. Plan again to receipt a reviewed boundary change.
 
+### Untrusted extensions in disposable databases
+
+PostgreSQL lets a role without superuser rights create only *trusted*
+extensions. onwardpg runs project DDL as exactly such a role, so an untrusted
+contrib extension (`earthdistance`, `dblink`, `pg_prewarm`, ...) fails with
+`permission denied to create extension`. A target can name the extensions that
+the scratch administrator may install instead:
+
+```toml
+[targets.primary-postgres]
+schema_command = ["pnpm", "--filter", "db", "schema:export"]
+scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
+scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions" }]
+```
+
+Each entry is a reviewed grant with exactly two required fields: the extension
+`name` and the `schema` the project installs it into (use `"public"` when the
+DDL names no schema). Unknown fields, bad names, and duplicates are rejected.
+The DDL stays the only source of schema state:
+
+- Nothing is inferred from the DDL text. The administrator acts only after the
+  restricted role's own `CREATE EXTENSION` was refused for a listed name, so an
+  entry for an extension the DDL never creates changes nothing, and an entry for
+  a trusted extension is never used.
+- The administrator creates the extension with `CREATE EXTENSION ... WITH SCHEMA
+  <schema> CASCADE`, after creating that schema for the restricted role if it is
+  missing, then the unchanged statement list runs again. Dependencies installed
+  by `CASCADE` (`earthdistance` requires `cube`) land in the same schema, and a
+  dependency that itself needs superuser rights must be listed too, so the grant
+  never reaches an extension the project did not name. List a trusted dependency
+  only when the project places it in a different schema.
+- The rerun requires idempotent creation: `CREATE SCHEMA IF NOT EXISTS` and
+  `CREATE EXTENSION IF NOT EXISTS` in the DDL, and `--if-not-exists` when onwardpg
+  generates the statements (it now also covers extension creation). A bare
+  statement fails with a hint naming this requirement. History replay and
+  `baseline_replay` bundles reuse the DDL's own idempotent statements.
+- Administrator-created extensions stay owned by the administrator, because
+  PostgreSQL cannot hand an extension to another role. The catalog reader of a
+  disposable database does not report that exact ownership as
+  `ownership:extension:NAME=ROLE`; the graph models an extension by name,
+  version, and schema, so the fingerprint equals the one built where the owner
+  created a trusted extension. Dropping or altering such an extension in a later
+  bundle needs ownership and is not supported there.
+- The list is receipted in `planner.scratch_admin_extensions` and bound by the
+  bundle's history entry digest. It is never part of a source fingerprint.
+  `verify` materializes with the receipted list and blocks with
+  `scratch_admin_extensions_changed` if the configuration now differs, like the
+  boundary rule for ignores: editing configuration cannot silently widen the
+  trust of an existing bundle. Plan again to receipt a reviewed change.
+
+`config check` rejects an entry the scratch server does not provide, and reports
+an entry the restricted role could create anyway as a note rather than an
+error, so one configuration stays valid on servers that trust different
+extensions. It also lists `scratch_admin_installed`: what the administrator had
+to install to materialize the DDL on that server.
+
 The PostgreSQL major is inferred from the configured scratch server and bound
 to generated history. It is not a user-maintained configuration value.
 

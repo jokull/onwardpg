@@ -18,6 +18,24 @@ not a third-party audit or a production-safety certification.
   default template. Creation explicitly copies the connected control
   database's encoding, locale provider, locale, collation, and ctype, and
   rejects a collation-version mismatch.
+- A target may list `scratch_admin_extensions`. For each listed name the
+  scratch administrator, not the restricted login, runs that extension's
+  install script (and those of its declared dependencies) as a superuser inside
+  the disposable database, after the restricted login's own `CREATE EXTENSION`
+  was refused. This widens trust in the script and the library code that the
+  extension loads on the scratch server: an extension such as `dblink` or
+  `file_fdw` gives later project DDL and migration SQL in that database whatever
+  the extension exposes, for example outbound connections or server-file
+  access. Keep the list to extensions that the scratch cluster's operators
+  already trust, and keep that cluster dedicated. Nothing is inferred from SQL
+  text; an entry that nothing asks for has no effect; the login itself stays
+  non-superuser; the database and login are still dropped afterwards. The list
+  is receipted in each bundle and a differing configuration blocks `verify`.
+  Caller-owned development and production databases are inspected read-only and
+  no live-database code path creates an extension. The administrator keeps
+  ownership of the extension it installs (PostgreSQL cannot transfer it), so
+  those extensions are exempted, by exact name and administrator role, from the
+  ownership blocker in the disposable database's catalog reader only.
 - `schema_command` is trusted project code, invoked directly without a shell.
   It is checked for deterministic output and observable checkout mutations,
   but it is not an operating-system sandbox.
@@ -76,10 +94,12 @@ not a third-party audit or a production-safety certification.
   killed process can leave disposable databases and roles behind.
 - Clone verification cannot model table size, lock queues, concurrent traffic,
   role membership outside the clone, or application rollout correctness.
-- Superuser-only extensions and ownership transfer to external roles cannot be
-  materialized by the default restricted owner. Supporting those declarative
-  inputs requires an isolated privileged-cluster execution boundary, not a
-  quiet privilege escalation inside the shared scratch cluster.
+- Superuser-only extensions are materialized only through the explicit,
+  receipted `scratch_admin_extensions` allowlist described above; an unlisted
+  one still fails with a hint. Ownership transfer to external roles cannot be
+  materialized by the default restricted owner. Supporting that requires an
+  isolated privileged-cluster execution boundary, not a quiet privilege
+  escalation inside the shared scratch cluster.
 - Release archives have SHA-256 checksums and GitHub build-provenance
   attestations. Homebrew verifies the selected archive checksum; consumers who
   require provenance verification must additionally use `gh attestation

@@ -168,6 +168,14 @@ Transactional batches are intended to be atomic execution boundaries. The real
 PostgreSQL integration suite includes a failure case that proves an earlier
 statement is rolled back when a later statement in the same batch fails.
 
+A target's `scratch_admin_extensions` list is a reviewed widening of the
+disposable-database boundary, not of any caller-owned database. The scratch
+administrator installs a listed extension only after the restricted role was
+refused it, only inside the disposable database, and the list is receipted in
+the bundle so `verify` reports a differing configuration instead of applying
+it. No live-database path creates extensions. See the
+[security review](security-review.md) for exactly what trust this adds.
+
 An ignore selector is acceptance of a blind spot, not a declaration that the
 ignored object is equivalent. A command-line `--ignore` must match at least one
 of the two compared snapshots and the exact excluded objects are returned in
