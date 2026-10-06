@@ -1,0 +1,30 @@
+name: Website dependency audit
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/website-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install website dependencies
+        run: |
+          corepack enable
+          pnpm --dir website install --frozen-lockfile
+      - name: Audit website dependencies
+        run: pnpm --dir website audit --audit-level high

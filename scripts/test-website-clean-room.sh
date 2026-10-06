@@ -16,7 +16,6 @@ rsync -a \
 
 corepack enable
 pnpm --dir "$fixture/repository/website" install --frozen-lockfile
-pnpm --dir "$fixture/repository/website" audit --audit-level high
 pnpm --dir "$fixture/repository/website" check
 pnpm --dir "$fixture/repository/website" validate
 pnpm --dir "$fixture/repository/website" build

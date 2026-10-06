@@ -3,7 +3,7 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
-## Unreleased
+## v0.1.0-preview.6 — 2026-10-06
 
 ### Fixed
 
@@ -75,6 +75,12 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   environment variable, like `drift check --database-env`, so a live URL stays
   out of process arguments. Each is mutually exclusive with `--from` or `--to`
   for the same side.
+
+### Changed
+
+- The dependency audit of the documentation website runs in a scheduled
+  workflow, not in pull request CI or in the release workflow. The website is
+  not part of the binary.
 
 ## v0.1.0-preview.5 — 2026-10-06
 

@@ -9,3 +9,5 @@
 /.wrangler/
 /PLAN.md
 /REVIEW.md
+__pycache__/
+*.pyc
