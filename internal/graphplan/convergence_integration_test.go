@@ -7642,7 +7642,12 @@ func TestReferencedKeyRenamesCarryForeignKeyRenamesOnPostgreSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	if plan.Status != protocol.Planned || len(plan.Statements) != renamePairs {
-		t.Fatalf("expected %d statements: status %s statements %d questions %v", renamePairs, plan.Status, len(plan.Statements), func() (ids []string) { for _, q := range plan.Questions { ids = append(ids, q.ID) }; return }())
+		t.Fatalf("expected %d statements: status %s statements %d questions %v", renamePairs, plan.Status, len(plan.Statements), func() (ids []string) {
+			for _, q := range plan.Questions {
+				ids = append(ids, q.ID)
+			}
+			return
+		}())
 	}
 	for _, statement := range plan.Statements {
 		if !strings.HasPrefix(statement.SQL, "ALTER TABLE ") || !strings.Contains(statement.SQL, " RENAME CONSTRAINT ") {
