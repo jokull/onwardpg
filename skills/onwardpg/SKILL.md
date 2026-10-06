@@ -135,4 +135,55 @@ onwardpg contract check \
 
 Report `ready`, `needs_evidence`, `blocked`, `stale`, or `unsupported`; never apply phase SQL.
 
+## Check a live database
+
+Use these commands only with a restricted read-only URL that the user provides
+in an environment variable. Never put a database URL in command arguments, a
+file, or a report.
+
+```sh
+onwardpg drift check --database-env PROD_READONLY_DATABASE_URL
+onwardpg diff --from-env PROD_READONLY_DATABASE_URL --to schema.sql --target NAME
+```
+
+`drift check` compares the live catalog with the replayed accepted history.
+Read `status`, the exit code, and every list in the result:
+
+- `drift_free` (exit 0): no modeled difference and nothing the planner cannot
+  handle.
+- `drifted` (exit 4): `differences` names each object. Between a bundle's
+  expand and its contract, the live catalog differs from the replayed history
+  on purpose; expect only what the pending contract removes.
+- `unsupported` (exit 3): `unsupported` lists live catalog state that the
+  planner does not model. `differences` is still reported. Do not treat this
+  result as a drift verdict.
+
+A managed provider owns some live state: an extension or a schema that its
+admin role owns, and parameter grants to its roles. That state is listed in the
+target's `live_ignore` in `.onwardpg.toml`, as exact selectors copied from an
+`unsupported` report (`ownership:extension:NAME=ROLE`,
+`ownership:schema:NAME=ROLE`, `parameter_acl:NAME`). It applies only to
+`drift check`, `contract check`, and `diff --target`; it never changes `plan`,
+`verify`, or `init`. Report `observer.live_ignored` and
+`observer.live_ignore_unmatched` from the result. An unmatched entry
+acknowledges nothing: it is a typo or a name that needs quotes. Add or change a
+`live_ignore` entry only with the user's approval, because a parameter entry
+also hides a later grant of that parameter to another role.
+
+Provider objects that the planner does model, such as an extra extension, still
+show as differences. Pass `--ignore SELECTOR` for those, and report the list.
+
+A result never authorizes a repair. Resolve drift through a reviewed bundle or
+a deliberate change to the declared schema.
+
+## Renames
+
+A constraint or index that differs from the desired schema only in its name is
+offered as a rename decision. A foreign key whose referenced primary-key or
+unique constraint is renamed in the same plan is offered with it; answer the
+key and the foreign key together. Confirm a rename only when the definitions
+are the same object. A confirmed rename emits `RENAME CONSTRAINT`, which is a
+metadata change; a declined one becomes a drop and a new constraint, with a
+new validation.
+
 Do not describe the migration as safe merely because clone verification passed.
