@@ -255,11 +255,16 @@ func TestLoadScratchAdminExtensions(t *testing.T) {
 	if len(extensions) != 2 || extensions[0].Name != "earthdistance" || extensions[0].Schema != "extensions" || extensions[1].Name != "uuid-ossp" {
 		t.Fatalf("scratch_admin_extensions = %#v", extensions)
 	}
+	pinned, err := load(t, `scratch_admin_extensions = [{ name = "pg_prewarm", schema = "tools", version = "1.1" }]`)
+	if err != nil || pinned.Targets["db"].ScratchAdminExtensions[0].Version != "1.1" {
+		t.Fatalf("a pinned version must load: %v %#v", err, pinned)
+	}
 	if got := len(config.Targets["db"].ScratchOptions()); got != 1 {
 		t.Fatalf("scratch options = %d", got)
 	}
 	for label, extra := range map[string]string{
-		"unknown-field":    `scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions", version = "1.2" }]`,
+		"unknown-field":    `scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions", owner = "root" }]`,
+		"bad-version":      `scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions", version = "1 2" }]`,
 		"missing-schema":   `scratch_admin_extensions = [{ name = "earthdistance" }]`,
 		"missing-name":     `scratch_admin_extensions = [{ schema = "extensions" }]`,
 		"uppercase":        `scratch_admin_extensions = [{ name = "EarthDistance", schema = "extensions" }]`,
