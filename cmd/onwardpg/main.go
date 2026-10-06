@@ -512,14 +512,8 @@ func runDriftAt(arguments []string, start string) int {
 	}
 	ctx := context.Background()
 	selectors := targetIgnoreSelectors(target, ignores)
-	// The replay is a claim about accepted history, so it uses the allowlist that
-	// history head receipted; verify applies the same rule.
-	receipted := chain.Entries[len(chain.Entries)-1].Artifact.Manifest.Planner.ScratchAdminExtensions
-	if !sameScratchAdminExtensions(receipted, target.ScratchAdminExtensions) {
-		return writeError("scratch_admin_extensions_changed", fmt.Errorf("history head receipted scratch_admin_extensions %s but the configuration lists %s; restore the receipted list or draft a new bundle that receipts the reviewed allowlist",
-			formatScratchAdminExtensions(receipted), formatScratchAdminExtensions(target.ScratchAdminExtensions)))
-	}
-	expected, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, scratchURL, selectors, scratchdb.WithAdminExtensions(receipted))
+	// Each accepted bundle replays under the allowlist it receipted.
+	expected, err := source.LoadReplayGraphForComparison(ctx, replay.Segments, replay.Provenance, scratchURL, selectors)
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
@@ -1024,10 +1018,12 @@ func runBundleAt(arguments []string, start string) int {
 			fmt.Sprintf("local active plan %s does not match bundle plan id %s", selectedAnchor.PlanID, manifest.PlanID),
 			"select the intended bundle explicitly or remove the stale local active-plan anchor")
 	}
-	// Disposable materialization uses the allowlist this bundle receipted. A
-	// configuration that now differs would widen or narrow the trust under which
-	// the receipted evidence was produced, so it blocks instead of being applied.
-	if !sameScratchAdminExtensions(manifest.Planner.ScratchAdminExtensions, target.ScratchAdminExtensions) {
+	// Read-only checking claims that the receipted evidence still holds under the
+	// configuration at hand, so a list that differs from this bundle's own receipt
+	// is an error there. Drafting a new bundle legitimately runs under a changed
+	// list, and every accepted bundle replays under its own receipt, so nothing
+	// else compares the two.
+	if *check && !sameScratchAdminExtensions(manifest.Planner.ScratchAdminExtensions, target.ScratchAdminExtensions) {
 		return writeVerifyFinding(*targetName, *bundleID, prefix.HeadDigest, *through, "blocked", "scratch_admin_extensions_changed",
 			fmt.Sprintf("bundle %s receipted scratch_admin_extensions %s but %s now configures %s",
 				*bundleID, formatScratchAdminExtensions(manifest.Planner.ScratchAdminExtensions), *configName, formatScratchAdminExtensions(target.ScratchAdminExtensions)),
@@ -1046,7 +1042,7 @@ func runBundleAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("compile current desired schema: %w", err))
 	}
-	working, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, manifest.Planner.IgnoreSelectors, scratchdb.WithAdminExtensions(manifest.Planner.ScratchAdminExtensions))
+	working, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, manifest.Planner.IgnoreSelectors, target.ScratchOptions()...)
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("materialize current desired schema: %w", err))
 	}
@@ -1078,7 +1074,6 @@ func runBundleAt(arguments []string, start string) int {
 		expandReport, expandErr := verify.Run(ctx, verify.Input{
 			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: protocol.PhaseExpand,
 			Ignores: manifest.Planner.IgnoreSelectors, Options: options,
-			AdminExtensions: manifest.Planner.ScratchAdminExtensions,
 		})
 		if expandErr != nil {
 			return writeError("verification_error", expandErr)
@@ -1102,14 +1097,12 @@ func runBundleAt(arguments []string, start string) int {
 			report, err = verify.Run(ctx, verify.Input{
 				AdminURL: adminURL, Chain: verificationChain, BundleID: *bundleID, ThroughPhase: *through,
 				Ignores: manifest.Planner.IgnoreSelectors, Options: options,
-				AdminExtensions: manifest.Planner.ScratchAdminExtensions,
 			})
 		}
 	} else {
 		report, err = verify.Run(ctx, verify.Input{
 			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: *through,
 			Ignores: manifest.Planner.IgnoreSelectors, Options: options,
-			AdminExtensions: manifest.Planner.ScratchAdminExtensions,
 		})
 	}
 	if err != nil {
@@ -1130,7 +1123,7 @@ func runBundleAt(arguments []string, start string) int {
 		if compileErr != nil {
 			return writeError("source_error", fmt.Errorf("recompile desired schema after verification: %w", compileErr))
 		}
-		workingAfter, loadErr := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, adminURL, manifest.Planner.IgnoreSelectors, scratchdb.WithAdminExtensions(manifest.Planner.ScratchAdminExtensions))
+		workingAfter, loadErr := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, adminURL, manifest.Planner.IgnoreSelectors, target.ScratchOptions()...)
 		if loadErr != nil {
 			return writeError("source_error", fmt.Errorf("rematerialize desired schema after verification: %w", loadErr))
 		}
@@ -2076,7 +2069,7 @@ func runLowLevelPlan(command string, arguments []string) int {
 	var ignoreExtensionVersions stringsFlag
 	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
 	var scratchAdminExtensions stringsFlag
-	flags.Var(&scratchAdminExtensions, "scratch-admin-extension", "NAME=SCHEMA untrusted extension the scratch administrator may install in --dev-url databases; repeat for multiple extensions")
+	flags.Var(&scratchAdminExtensions, "scratch-admin-extension", "NAME=SCHEMA[@VERSION] untrusted extension the scratch administrator may install in --dev-url databases; repeat for multiple extensions")
 	// live_ignore belongs to live observation. The legacy `plan --from --to`
 	// spelling shares this function but must keep refusing unsupported catalog
 	// state, so only diff accepts --target and --config.
@@ -2383,7 +2376,7 @@ func runConfig(arguments []string) int {
 		if len(chain.Entries) > 0 {
 			head := chain.Entries[len(chain.Entries)-1].Artifact.Manifest
 			if !sameScratchAdminExtensions(head.Planner.ScratchAdminExtensions, target.ScratchAdminExtensions) {
-				notes = append(notes, fmt.Sprintf("history head %s receipted scratch_admin_extensions %s but the configuration lists %s; onwardpg verify reports scratch_admin_extensions_changed until a bundle receipts the configured list",
+				notes = append(notes, fmt.Sprintf("history head %s receipted scratch_admin_extensions %s but the configuration lists %s; history replays under each bundle's own receipt, a new bundle receipts the configured list, and onwardpg verify --check reports scratch_admin_extensions_changed for a bundle whose receipt differs",
 					head.BundleID, formatScratchAdminExtensions(head.Planner.ScratchAdminExtensions), formatScratchAdminExtensions(target.ScratchAdminExtensions)))
 			}
 		}
@@ -2693,9 +2686,10 @@ func parseScratchAdminExtensions(values []string) ([]scratchdb.AdminExtension, e
 	for _, value := range values {
 		name, schema, found := strings.Cut(value, "=")
 		if !found {
-			return nil, fmt.Errorf("--scratch-admin-extension %q must be NAME=SCHEMA", value)
+			return nil, fmt.Errorf("--scratch-admin-extension %q must be NAME=SCHEMA or NAME=SCHEMA@VERSION", value)
 		}
-		extensions = append(extensions, scratchdb.AdminExtension{Name: name, Schema: schema})
+		schema, version, _ := strings.Cut(schema, "@")
+		extensions = append(extensions, scratchdb.AdminExtension{Name: name, Schema: schema, Version: version})
 	}
 	if err := scratchdb.ValidateAdminExtensions(extensions); err != nil {
 		return nil, fmt.Errorf("--scratch-admin-extension: %w", err)
@@ -2713,7 +2707,11 @@ func formatScratchAdminExtensions(extensions []scratchdb.AdminExtension) string 
 	}
 	parts := make([]string, 0, len(extensions))
 	for _, extension := range scratchdb.NormalizeAdminExtensions(extensions) {
-		parts = append(parts, extension.Name+" in "+extension.Schema)
+		part := extension.Name + " in " + extension.Schema
+		if extension.Version != "" {
+			part += " at " + extension.Version
+		}
+		parts = append(parts, part)
 	}
 	return strings.Join(parts, ", ")
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/pgschema"
 )
@@ -70,22 +71,52 @@ func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devUR
 	if err := target.Close(ctx); err != nil {
 		return nil, fmt.Errorf("close temp database connection: %w", err)
 	}
-	return InspectScratchGraph(ctx, database, ignores, validateIgnores)
+	return inspectGraphConfig(ctx, database.Config, ignores, validateIgnores)
 }
 
-// InspectScratchGraph reads the typed graph of a disposable database. Extensions
-// that the scratch administrator installed for an allowlisted project keep the
-// administrator as owner; that exact ownership is not reported as a blocker,
-// because the graph models an extension by name, version, and schema.
-func InspectScratchGraph(ctx context.Context, database *scratchdb.Database, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
-	return inspectGraphConfigWith(ctx, database.Config, ignores, validateIgnores, database.OwnershipExemptions())
+// LoadReplayGraphForComparison replays accepted history in one disposable
+// database, running each bundle's SQL under the allowlist that bundle
+// receipted rather than the current configuration. A bundle receipted without
+// the field replays with an empty allowlist. Each segment is its own script, so
+// a refused extension reruns only that bundle.
+func LoadReplayGraphForComparison(ctx context.Context, segments []history.ReplaySegment, provenance, devURL string, ignores []string) (snapshot *pgschema.Snapshot, resultErr error) {
+	if devURL == "" {
+		return nil, fmt.Errorf("history replay requires a scratch database URL")
+	}
+	database, err := scratchdb.Create(ctx, devURL, "onwardpg_ddl")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := database.Close(); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	target, err := database.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, segment := range segments {
+		if err := database.UseAdminExtensions(segment.ScratchAdminExtensions); err != nil {
+			target.Close(ctx)
+			return nil, fmt.Errorf("history bundle %s: %w", segment.Bundle, err)
+		}
+		err := database.Retrying(ctx, func() error {
+			_, execErr := target.Exec(ctx, string(segment.DDL))
+			return execErr
+		})
+		if err != nil {
+			target.Close(ctx)
+			return nil, fmt.Errorf("replay history bundle %s from %s: %w", segment.Bundle, provenance, err)
+		}
+	}
+	if err := target.Close(ctx); err != nil {
+		return nil, fmt.Errorf("close temp database connection: %w", err)
+	}
+	return inspectGraphConfig(ctx, database.Config, ignores, false)
 }
 
 func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
-	return inspectGraphConfigWith(ctx, config, ignores, validateIgnores, nil)
-}
-
-func inspectGraphConfigWith(ctx context.Context, config *pgx.ConnConfig, ignores []string, validateIgnores bool, exempt []string) (*pgschema.Snapshot, error) {
 	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, err
@@ -96,7 +127,7 @@ func inspectGraphConfigWith(ctx context.Context, config *pgx.ConnConfig, ignores
 		return nil, fmt.Errorf("begin graph catalog snapshot: %w", err)
 	}
 	defer tx.Rollback(context.Background())
-	snapshot, err := inspectGraphTransactionWith(ctx, tx, ignores, validateIgnores, exempt)
+	snapshot, err := InspectGraphTransaction(ctx, tx, ignores, validateIgnores)
 	if err != nil {
 		return nil, err
 	}
@@ -110,25 +141,12 @@ func inspectGraphConfigWith(ctx context.Context, config *pgx.ConnConfig, ignores
 // transaction. Contract readiness uses this to keep the catalog checkpoint
 // and all Boolean gates in one repeatable-read, read-only snapshot.
 func InspectGraphTransaction(ctx context.Context, tx pgx.Tx, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
-	return inspectGraphTransactionWith(ctx, tx, ignores, validateIgnores, nil)
-}
-
-// inspectGraphTransactionWith additionally accepts exact ownership blocker
-// selectors that are expected and must not be reported. Only the disposable
-// scratch path passes any; every live database is inspected without them.
-func inspectGraphTransactionWith(ctx context.Context, tx pgx.Tx, ignores []string, validateIgnores bool, exempt []string) (*pgschema.Snapshot, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("catalog transaction is required")
 	}
 	tracker, err := newIgnoreTracker(ignores)
 	if err != nil {
 		return nil, err
-	}
-	if len(exempt) > 0 {
-		tracker.expected = make(map[string]bool, len(exempt))
-		for _, selector := range exempt {
-			tracker.expected[selector] = true
-		}
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL search_path = pg_catalog"); err != nil {
 		return nil, fmt.Errorf("set graph catalog snapshot search_path: %w", err)
@@ -2698,9 +2716,6 @@ ORDER BY 1`}
 }
 
 func addBlocker(selector string, snapshot *pgschema.Snapshot, tracker *ignoreTracker) error {
-	if tracker.expected[selector] {
-		return nil
-	}
 	skip, err := tracker.Skip(selector, snapshot)
 	if err != nil {
 		return err
@@ -3252,10 +3267,6 @@ type ignoreTracker struct {
 	requested []string
 	used      map[string]bool
 	excluded  map[string]bool
-	// expected holds blocker selectors that are not findings: administrator-owned
-	// extensions in a disposable database. Unlike an ignore, they are not
-	// receipted and cannot match anything but the exact selector.
-	expected map[string]bool
 }
 
 func newIgnoreTracker(selectors []string) (*ignoreTracker, error) {

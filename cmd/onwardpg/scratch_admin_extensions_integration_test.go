@@ -175,13 +175,24 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 			if result.code == 0 || !strings.Contains(result.stdout, `"code":"scratch_admin_extensions_changed"`) {
 				t.Fatalf("%s: %d %s", label, result.code, result.stdout)
 			}
-			// drift check replays history too, and fails before touching the live URL.
-			drift := captureStdout(t, func() int {
-				return runDriftAt([]string{"check", "--database", "postgres://127.0.0.1:1/unreachable"}, repository)
-			})
-			if drift.code == 0 || !strings.Contains(drift.stdout, "scratch_admin_extensions_changed") {
-				t.Fatalf("%s: drift check: %d %s", label, drift.code, drift.stdout)
-			}
+		}
+		// Only a read-only check of one bundle compares the two. Drift check replays
+		// each accepted bundle under its own receipt, so the changed configuration
+		// does not matter to it.
+		live, cleanup := createTestDatabase(t, adminURL)
+		defer cleanup()
+		connection, err := pgx.Connect(ctx, live)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close(ctx)
+		if _, err := connection.Exec(ctx, earthDistanceSchema); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, repository, ".onwardpg.toml", config(""))
+		drift := captureStdout(t, func() int { return runDriftAt([]string{"check", "--database", live}, repository) })
+		if drift.code != 0 || !strings.Contains(drift.stdout, `"status":"drift_free"`) {
+			t.Fatalf("drift check under a changed configuration: %d %s", drift.code, drift.stdout)
 		}
 		writeTestFile(t, repository, ".onwardpg.toml", config(setting))
 	})
@@ -240,4 +251,154 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 			t.Fatalf("diff with a malformed flag: %d %s", bad.code, bad.stdout)
 		}
 	})
+}
+
+// Accepted bundles replay under the allowlist each one receipted. Changing the
+// configuration later must not break the replay of an old bundle.
+func TestHistoryReplaysEachBundleUnderItsOwnAllowlistOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close(ctx)
+	for _, name := range []string{"pg_prewarm", "pgstattuple"} {
+		var untrusted bool
+		if err := admin.QueryRow(ctx, `
+SELECT v.superuser AND NOT v.trusted
+FROM pg_available_extensions a JOIN pg_available_extension_versions v ON v.name = a.name AND v.version = a.default_version
+WHERE a.name = $1`, name).Scan(&untrusted); err != nil || !untrusted {
+			t.Skipf("%s is not an untrusted extension on this server (%v)", name, err)
+		}
+	}
+	const table = `CREATE TABLE public.place (id bigint PRIMARY KEY, lat double precision NOT NULL, lon double precision NOT NULL);
+`
+	const first = `CREATE SCHEMA IF NOT EXISTS "tools";
+CREATE EXTENSION IF NOT EXISTS "pg_prewarm" WITH SCHEMA "tools";
+`
+	const second = `CREATE EXTENSION IF NOT EXISTS "pgstattuple" WITH SCHEMA "tools";
+`
+	const firstEntry = `{ name = "pg_prewarm", schema = "tools" }`
+	const secondEntry = `{ name = "pgstattuple", schema = "tools" }`
+	repository := t.TempDir()
+	config := func(entries ...string) string {
+		list := ""
+		if len(entries) > 0 {
+			list = "scratch_admin_extensions = [" + strings.Join(entries, ", ") + "]\n"
+		}
+		return `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+` + list
+	}
+	run := func(name string, call func() int) captured {
+		t.Helper()
+		result := captureStdout(t, call)
+		if result.code != 0 {
+			t.Fatalf("%s: %d %s", name, result.code, result.stdout)
+		}
+		return result
+	}
+
+	writeTestFile(t, repository, ".onwardpg.toml", config(firstEntry))
+	writeTestFile(t, repository, "schema.sql", first+table)
+	run("init", func() int { return runInitAt(nil, repository) })
+
+	t.Run("a later bundle adds a second allowlisted extension", func(t *testing.T) {
+		writeTestFile(t, repository, ".onwardpg.toml", config(firstEntry, secondEntry))
+		writeTestFile(t, repository, "schema.sql", first+second+table)
+		run("plan", func() int { return runWorkflowPlanAt([]string{"add-second", "--if-not-exists"}, repository) })
+		run("verify --check", func() int { return runVerifyAt([]string{"--bundle", "add-second", "--check"}, repository) })
+		artifact, err := bundle.Read(filepath.Join(repository, "onward-bundles/primary/add-second"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := artifact.Manifest.Planner.ScratchAdminExtensions; len(got) != 2 {
+			t.Fatalf("second bundle receipt = %#v", got)
+		}
+		baseline, err := bundle.Read(filepath.Join(repository, "onward-bundles/primary/baseline"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := baseline.Manifest.Planner.ScratchAdminExtensions; len(got) != 1 || got[0].Name != "pg_prewarm" {
+			t.Fatalf("the accepted baseline's own receipt changed: %#v", got)
+		}
+	})
+
+	t.Run("removing the extensions from DDL and configuration still plans and verifies the drop", func(t *testing.T) {
+		// Neither the DDL nor the configuration mentions either extension now, yet
+		// the accepted bundles that created them must replay under their receipts.
+		// The previous plan counts as merged: forget the local active-plan anchor.
+		if err := os.RemoveAll(filepath.Join(repository, ".onwardpg")); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, repository, ".onwardpg.toml", config())
+		writeTestFile(t, repository, "schema.sql", `CREATE SCHEMA IF NOT EXISTS "tools";`+"\n"+table)
+		run("plan drop", func() int {
+			return runWorkflowPlanAt([]string{"drop-extensions",
+				"--hint", `{"kind":"drop","object":"extension","name":["tools","pg_prewarm"]}`,
+				"--hint", `{"kind":"drop","object":"extension","name":["tools","pgstattuple"]}`}, repository)
+		})
+		run("verify --check", func() int { return runVerifyAt([]string{"--bundle", "drop-extensions", "--check"}, repository) })
+		artifact, err := bundle.Read(filepath.Join(repository, "onward-bundles/primary/drop-extensions"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := artifact.Manifest.Planner.ScratchAdminExtensions; len(got) != 0 {
+			t.Fatalf("the drop bundle must receipt the configuration it ran under (none), got %#v", got)
+		}
+		phase := string(artifact.Files[artifact.Manifest.Phases["expand"].Path]) + string(artifact.Files[artifact.Manifest.Phases["contract"].Path])
+		if !strings.Contains(phase, `DROP EXTENSION "pg_prewarm"`) || !strings.Contains(phase, `DROP EXTENSION "pgstattuple"`) {
+			t.Fatalf("the drop bundle does not drop the extensions:\n%s", phase)
+		}
+		// Drift check also replays the whole history without the configuration.
+		live, cleanup := createTestDatabase(t, adminURL)
+		defer cleanup()
+		connection, err := pgx.Connect(ctx, live)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close(ctx)
+		if _, err := connection.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS "tools";`+"\n"+table); err != nil {
+			t.Fatal(err)
+		}
+		drift := captureStdout(t, func() int { return runDriftAt([]string{"check", "--database", live}, repository) })
+		if drift.code != 0 || !strings.Contains(drift.stdout, `"status":"drift_free"`) {
+			t.Fatalf("drift check: %d %s", drift.code, drift.stdout)
+		}
+	})
+}
+
+// The version in the allowlist entry, not a VERSION clause in project DDL,
+// decides what the administrator installs.
+func TestScratchAdminExtensionVersionFlagOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	repository := t.TempDir()
+	writeTestFile(t, repository, "empty.sql", "")
+	writeTestFile(t, repository, "schema.sql", "CREATE SCHEMA IF NOT EXISTS tools;\nCREATE EXTENSION IF NOT EXISTS pg_prewarm WITH SCHEMA tools VERSION '1.1';\n")
+	diff := func(flag string) captured {
+		return captureStdout(t, func() int {
+			return runLowLevelPlan("diff", []string{"--from", "file://" + filepath.Join(repository, "empty.sql"), "--to", "file://" + filepath.Join(repository, "schema.sql"), "--dev-url", adminURL, "--scratch-admin-extension", flag, "--output", "text"})
+		})
+	}
+	pinned := diff("pg_prewarm=tools@1.1")
+	if pinned.code != 0 || !strings.Contains(pinned.stdout, `VERSION '1.1'`) {
+		t.Fatalf("pinned: %d %s", pinned.code, pinned.stdout)
+	}
+	unpinned := diff("pg_prewarm=tools")
+	if unpinned.code != 0 || strings.Contains(unpinned.stdout, `VERSION '1.1'`) || !strings.Contains(unpinned.stdout, `VERSION '1.2'`) {
+		t.Fatalf("without a version the default is installed, whatever the DDL says: %d %s", unpinned.code, unpinned.stdout)
+	}
+	if bad := diff("pg_prewarm=tools@1 1"); bad.code == 0 {
+		t.Fatalf("a malformed version was accepted: %s", bad.stdout)
+	}
 }

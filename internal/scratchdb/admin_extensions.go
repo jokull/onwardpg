@@ -20,12 +20,22 @@ import (
 // here is an explicit, reviewed grant: its install script runs as the scratch
 // administrator, in a database that is dropped afterwards, and only when the
 // restricted role's own CREATE EXTENSION was refused for that exact name.
+//
+// Version is optional. When set, the administrator installs exactly that
+// version; when empty it installs the server's default version. For a listed
+// extension the installed version comes from this entry, never from a VERSION
+// clause in project DDL: the tool does not parse SQL, and the project's own
+// CREATE EXTENSION IF NOT EXISTS is a no-op once the extension exists.
 type AdminExtension struct {
-	Name   string `toml:"name" json:"name"`
-	Schema string `toml:"schema" json:"schema"`
+	Name    string `toml:"name" json:"name"`
+	Schema  string `toml:"schema" json:"schema"`
+	Version string `toml:"version" json:"version,omitempty"`
 }
 
-var extensionNamePattern = regexp.MustCompile(`^[a-z0-9_][a-z0-9_-]{0,62}$`)
+var (
+	extensionNamePattern    = regexp.MustCompile(`^[a-z0-9_][a-z0-9_-]{0,62}$`)
+	extensionVersionPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._+-]{0,62}$`)
+)
 
 // ValidateAdminExtensions rejects entries that cannot name an extension and a
 // schema, and duplicate names. It never consults a server.
@@ -40,6 +50,9 @@ func ValidateAdminExtensions(extensions []AdminExtension) error {
 		}
 		if err := validateSchemaName(extension.Schema); err != nil {
 			return fmt.Errorf("entry %d (%s): %w", index+1, extension.Name, err)
+		}
+		if extension.Version != "" && !extensionVersionPattern.MatchString(extension.Version) {
+			return fmt.Errorf("entry %d (%s): version %q must be letters, digits, '.', '_', '+' or '-' (at most 63 bytes)", index+1, extension.Name, extension.Version)
 		}
 		if seen[extension.Name] {
 			return fmt.Errorf("entry %d: extension %q is listed more than once", index+1, extension.Name)
@@ -102,30 +115,35 @@ func WithAdminExtensions(extensions []AdminExtension) Option {
 // restricted scratch role create an untrusted extension. Any other error is
 // returned unchanged. The original error stays in the chain.
 func ExplainDenied(err error) error {
-	pgErr, name := deniedExtension(err)
-	if pgErr == nil || !strings.Contains(strings.ToLower(pgErr.Message), "create extension") {
+	name, ok := deniedExtension(err)
+	if !ok {
 		return err
 	}
 	return fmt.Errorf("%w; hint: the scratch role is restricted and may create only trusted extensions; if the project needs %q in disposable databases, name it under scratch_admin_extensions in .onwardpg.toml (for example scratch_admin_extensions = [{ name = %q, schema = \"public\" }]) so the scratch administrator installs it", err, name, name)
 }
 
-// deniedExtension returns the PostgreSQL error and the first quoted name in
-// its message when err is an insufficient-privilege failure (SQLSTATE 42501).
-// The SQLSTATE and the quoted name are stable; the message text is localized.
-func deniedExtension(err error) (*pgconn.PgError, string) {
+// deniedExtension reports the extension that PostgreSQL's own CREATE EXTENSION
+// path refused to a non-superuser. Message wording is localized and project SQL
+// can raise any SQLSTATE with any text (RAISE ... USING ERRCODE = '42501'), so
+// the evidence is the non-localized source location the server attaches: file
+// extension.c, routine execute_extension_script, for SQLSTATE 42501. A
+// user-raised error comes from pl_exec.c and cannot match. These values were
+// observed with a real refusal on PostgreSQL 15, 16, 17 and 18; the quoted
+// extension name is the first identifier of the message PostgreSQL built.
+func deniedExtension(err error) (string, bool) {
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		return nil, ""
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" || pgErr.File != "extension.c" || pgErr.Routine != "execute_extension_script" {
+		return "", false
 	}
 	start := strings.IndexByte(pgErr.Message, '"')
 	if start < 0 {
-		return nil, ""
+		return "", false
 	}
 	end := strings.IndexByte(pgErr.Message[start+1:], '"')
 	if end < 0 {
-		return nil, ""
+		return "", false
 	}
-	return pgErr, pgErr.Message[start+1 : start+1+end]
+	return pgErr.Message[start+1 : start+1+end], true
 }
 
 // Recover handles one refused CREATE EXTENSION. When err is PostgreSQL denying
@@ -137,7 +155,10 @@ func (d *Database) Recover(ctx context.Context, err error) (bool, error) {
 	if d == nil || len(d.extensions) == 0 {
 		return false, nil
 	}
-	_, name := deniedExtension(err)
+	name, refused := deniedExtension(err)
+	if !refused {
+		return false, nil
+	}
 	extension, listed := d.extensions[name]
 	if !listed {
 		return false, nil
@@ -166,7 +187,7 @@ func (d *Database) Retrying(ctx context.Context, unit func() error) error {
 			installedAny = true
 			continue
 		}
-		if _, name := deniedExtension(err); d != nil && d.extensions[name].Name != "" {
+		if name, refused := deniedExtension(err); refused && d != nil && d.extensions[name].Name != "" {
 			// Listed, yet still refused: the hint would send the reader back to
 			// a setting that is already in place.
 			return err
@@ -195,23 +216,9 @@ func (d *Database) explainRetry(err error) error {
 	return err
 }
 
-// OwnershipExemptions lists the exact catalog-ownership selectors,
-// ownership:extension:NAME=ADMIN, for extensions the scratch administrator
-// created in this database. PostgreSQL has no ALTER EXTENSION ... OWNER TO and
-// REASSIGN OWNED cannot move objects owned by the bootstrap superuser, so these
-// extensions stay administrator-owned. The typed graph models an extension by
-// name, version, and schema only; a graph reader that knows these selectors
-// does not report them as foreign ownership, which keeps the fingerprint equal
-// to one built where the owner created a trusted extension.
-func (d *Database) OwnershipExemptions() []string {
-	if d == nil {
-		return nil
-	}
-	return append([]string(nil), d.exemptions...)
-}
-
 // InstalledByAdministrator lists the extensions, including dependencies, that
-// the scratch administrator created in this database, sorted by name.
+// the scratch administrator created in this database, sorted by name. They are
+// owned by the restricted role, exactly as if it had created them.
 func (d *Database) InstalledByAdministrator() []string {
 	if d == nil {
 		return nil
@@ -235,42 +242,113 @@ func (d *Database) install(ctx context.Context, extension AdminExtension) (bool,
 		return false, err
 	}
 	defer transaction.Rollback(context.Background())
-	installed, err := d.installClosure(ctx, transaction, extension, map[string]bool{})
+	before, err := extensionNames(ctx, transaction)
 	if err != nil {
 		return false, err
 	}
-	if !installed {
+	if before[extension.Name] {
 		return false, nil
 	}
-	rows, err := transaction.Query(ctx, `
-SELECT e.extname, 'ownership:extension:' || quote_ident(e.extname) || '=' || quote_ident(r.rolname)
-FROM pg_extension e JOIN pg_roles r ON r.oid = e.extowner
-WHERE r.rolname = current_user AND e.extname <> 'plpgsql'
-ORDER BY e.extname`)
+	// PostgreSQL has no ALTER EXTENSION ... OWNER TO and REASSIGN OWNED refuses
+	// the bootstrap superuser, so a transient NOLOGIN superuser installs the
+	// extension and REASSIGN OWNED then hands the extension and its member
+	// objects to the restricted role. Afterwards the database looks as if the
+	// restricted role had created the extension itself: nothing foreign-owned
+	// reaches the catalog reader, and the project's own later DROP EXTENSION or
+	// ALTER EXTENSION works. The helper is created, used, and dropped inside this
+	// one transaction; no login or membership ever reaches the restricted role.
+	helper := d.Role + "_ext"
+	steps := []string{
+		"CREATE ROLE " + quoteIdentifier(helper) + " NOLOGIN SUPERUSER",
+		"SET LOCAL ROLE " + quoteIdentifier(helper),
+	}
+	for _, step := range steps {
+		if _, err := transaction.Exec(ctx, step); err != nil {
+			return false, fmt.Errorf("prepare extension installation (the scratch administrator must be a superuser): %w", err)
+		}
+	}
+	if _, err := d.installClosure(ctx, transaction, extension, map[string]bool{}); err != nil {
+		return false, err
+	}
+	if _, err := transaction.Exec(ctx, "RESET ROLE"); err != nil {
+		return false, err
+	}
+	// Only a superuser may own a foreign-data wrapper (dblink, postgres_fdw,
+	// file_fdw) or an event trigger, so REASSIGN OWNED would refuse them. Hand
+	// those to the administrator first. That matches what a trusted extension
+	// leaves behind: its members belong to a superuser.
+	superuserOnly, err := transaction.Query(ctx, `
+SELECT format('ALTER FOREIGN DATA WRAPPER %I OWNER TO %I', f.fdwname, current_user)
+FROM pg_foreign_data_wrapper f JOIN pg_roles r ON r.oid = f.fdwowner WHERE r.rolname = $1
+UNION ALL
+SELECT format('ALTER EVENT TRIGGER %I OWNER TO %I', e.evtname, current_user)
+FROM pg_event_trigger e JOIN pg_roles r ON r.oid = e.evtowner WHERE r.rolname = $1`, helper)
 	if err != nil {
 		return false, err
 	}
-	var names, exemptions []string
-	for rows.Next() {
-		var name, exemption string
-		if err := rows.Scan(&name, &exemption); err != nil {
-			rows.Close()
+	var handOver []string
+	for superuserOnly.Next() {
+		var statement string
+		if err := superuserOnly.Scan(&statement); err != nil {
+			superuserOnly.Close()
 			return false, err
 		}
-		names, exemptions = append(names, name), append(exemptions, exemption)
+		handOver = append(handOver, statement)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	superuserOnly.Close()
+	if err := superuserOnly.Err(); err != nil {
+		return false, err
+	}
+	for _, statement := range handOver {
+		if _, err := transaction.Exec(ctx, statement); err != nil {
+			return false, fmt.Errorf("keep a superuser-only member of extension %q with the administrator: %w", extension.Name, err)
+		}
+	}
+	for _, step := range []string{
+		"REASSIGN OWNED BY " + quoteIdentifier(helper) + " TO " + quoteIdentifier(d.Role),
+		"DROP OWNED BY " + quoteIdentifier(helper),
+		"DROP ROLE " + quoteIdentifier(helper),
+	} {
+		if _, err := transaction.Exec(ctx, step); err != nil {
+			return false, fmt.Errorf("hand extension %q to the restricted role: %w", extension.Name, err)
+		}
+	}
+	after, err := extensionNames(ctx, transaction)
+	if err != nil {
 		return false, err
 	}
 	if err := transaction.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit installation of extension %q: %w", extension.Name, err)
 	}
-	d.installed, d.exemptions = names, exemptions
+	var created []string
+	for name := range after {
+		if !before[name] {
+			created = append(created, name)
+		}
+	}
+	d.installed = append(d.installed, created...)
+	sort.Strings(d.installed)
 	if d.onInstall != nil {
-		d.onInstall(append([]string(nil), names...))
+		d.onInstall(append([]string(nil), d.installed...))
 	}
 	return true, nil
+}
+
+func extensionNames(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
+	rows, err := tx.Query(ctx, "SELECT extname FROM pg_extension")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names[name] = true
+	}
+	return names, rows.Err()
 }
 
 // installClosure installs extension after any allowlisted dependency that is
@@ -295,10 +373,10 @@ func (d *Database) installClosure(ctx context.Context, tx pgx.Tx, extension Admi
 	err := tx.QueryRow(ctx, `
 SELECT COALESCE(v.requires::text[], '{}')
 FROM pg_available_extensions a
-JOIN pg_available_extension_versions v ON v.name = a.name AND v.version = a.default_version
-WHERE a.name = $1`, extension.Name).Scan(&requires)
+JOIN pg_available_extension_versions v ON v.name = a.name AND v.version = COALESCE(NULLIF($2, ''), a.default_version)
+WHERE a.name = $1`, extension.Name, extension.Version).Scan(&requires)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, fmt.Errorf("scratch_admin_extensions names extension %q, which this PostgreSQL server does not provide", extension.Name)
+		return false, errUnavailable(extension)
 	}
 	if err != nil {
 		return false, err
@@ -336,7 +414,11 @@ WHERE a.name = $1`, dependency).Scan(&needsAdministrator)
 	if _, err := tx.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+quoteIdentifier(extension.Schema)+" AUTHORIZATION "+quoteIdentifier(d.Role)); err != nil {
 		return false, fmt.Errorf("create schema %q for extension %q: %w", extension.Schema, extension.Name, err)
 	}
-	if _, err := tx.Exec(ctx, "CREATE EXTENSION "+quoteIdentifier(extension.Name)+" WITH SCHEMA "+quoteIdentifier(extension.Schema)+" CASCADE"); err != nil {
+	create := "CREATE EXTENSION " + quoteIdentifier(extension.Name) + " WITH SCHEMA " + quoteIdentifier(extension.Schema)
+	if extension.Version != "" {
+		create += " VERSION " + quoteLiteral(extension.Version)
+	}
+	if _, err := tx.Exec(ctx, create+" CASCADE"); err != nil {
 		return false, fmt.Errorf("scratch administrator could not install extension %q into schema %q (it needs a superuser administrator): %w", extension.Name, extension.Schema, err)
 	}
 	return true, nil
@@ -364,10 +446,10 @@ func CheckAdminExtensions(ctx context.Context, adminURL string, extensions []Adm
 		err := connection.QueryRow(ctx, `
 SELECT v.superuser AND NOT v.trusted
 FROM pg_available_extensions a
-JOIN pg_available_extension_versions v ON v.name = a.name AND v.version = a.default_version
-WHERE a.name = $1`, extension.Name).Scan(&needsAdministrator)
+JOIN pg_available_extension_versions v ON v.name = a.name AND v.version = COALESCE(NULLIF($2, ''), a.default_version)
+WHERE a.name = $1`, extension.Name, extension.Version).Scan(&needsAdministrator)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("scratch_admin_extensions names extension %q, which this PostgreSQL server does not provide", extension.Name)
+			return nil, errUnavailable(extension)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("probe extension %q: %w", extension.Name, err)
@@ -377,4 +459,28 @@ WHERE a.name = $1`, extension.Name).Scan(&needsAdministrator)
 		}
 	}
 	return notes, nil
+}
+
+func errUnavailable(extension AdminExtension) error {
+	if extension.Version != "" {
+		return fmt.Errorf("scratch_admin_extensions names extension %q version %q, which this PostgreSQL server does not provide", extension.Name, extension.Version)
+	}
+	return fmt.Errorf("scratch_admin_extensions names extension %q, which this PostgreSQL server does not provide", extension.Name)
+}
+
+// UseAdminExtensions replaces the allowlist for statements run from now on.
+// Replaying accepted history applies each bundle's own receipted list this
+// way; what the administrator already installed stays installed.
+func (d *Database) UseAdminExtensions(extensions []AdminExtension) error {
+	if err := ValidateAdminExtensions(extensions); err != nil {
+		return fmt.Errorf("scratch administrator extensions: %w", err)
+	}
+	d.extensions = nil
+	if len(extensions) > 0 {
+		d.extensions = make(map[string]AdminExtension, len(extensions))
+		for _, extension := range extensions {
+			d.extensions[extension.Name] = extension
+		}
+	}
+	return nil
 }

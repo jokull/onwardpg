@@ -188,11 +188,13 @@ statement is rolled back when a later statement in the same batch fails.
 
 A target's `scratch_admin_extensions` list is a reviewed widening of the
 disposable-database boundary, not of any caller-owned database. The scratch
-administrator installs a listed extension only after the restricted role was
-refused it, only inside the disposable database, and the list is receipted in
-the bundle so `verify` reports a differing configuration instead of applying
-it. No live-database path creates extensions. See the
-[security review](security-review.md) for exactly what trust this adds.
+administrator installs a listed extension only after PostgreSQL's own
+`CREATE EXTENSION` refused the restricted role, only inside the disposable
+database, and the list is receipted in the bundle. Accepted bundles replay under
+their own receipts; `verify --check` reports a configuration that differs from a
+bundle's receipt instead of applying it. No live-database path creates
+extensions. See the [security review](security-review.md) for exactly what trust
+this adds.
 
 An ignore selector is acceptance of a blind spot, not a declaration that the
 ignored object is equivalent. A command-line `--ignore` must match at least one

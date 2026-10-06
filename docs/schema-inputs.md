@@ -56,49 +56,82 @@ the scratch administrator may install instead:
 [targets.primary-postgres]
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
 scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
-scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions" }]
+scratch_admin_extensions = [
+  { name = "earthdistance", schema = "extensions" },
+  { name = "pg_prewarm", schema = "tools", version = "1.1" },
+]
 ```
 
-Each entry is a reviewed grant with exactly two required fields: the extension
-`name` and the `schema` the project installs it into (use `"public"` when the
-DDL names no schema). Unknown fields, bad names, and duplicates are rejected.
+Each entry is a reviewed grant. `name` and `schema` (the schema the project
+installs the extension into; `"public"` when the DDL names none) are required.
+`version` is optional. Unknown fields, bad names or versions, and duplicates are
+rejected.
+
+**The version comes from the entry, not from the DDL.** The administrator
+installs exactly `version` when it is set and the server's default version when
+it is not. A `VERSION` clause in project DDL is not honored for a listed
+extension: onwardpg does not parse SQL, and the project's own
+`CREATE EXTENSION IF NOT EXISTS` is a no-op once the extension exists (on
+PostgreSQL 15 through 18 it only raises a notice; without `IF NOT EXISTS` it is
+an error). The installed version is what the graph records, so a mismatch shows
+up as a fingerprint difference against a server where the owner created the
+extension with that clause, but onwardpg cannot detect it from the DDL itself.
+State the same version in the entry. `config check` fails when the server does
+not offer the version.
+
 The DDL stays the only source of schema state:
 
-- Nothing is inferred from the DDL text. The administrator acts only after the
-  restricted role's own `CREATE EXTENSION` was refused for a listed name, so an
-  entry for an extension the DDL never creates changes nothing, and an entry for
-  a trusted extension is never used.
+- Nothing is inferred from the DDL text. The administrator acts only after
+  PostgreSQL's own `CREATE EXTENSION` path refused the restricted role for a
+  listed name, so an entry for an extension the DDL never creates changes
+  nothing, and an entry for a trusted extension is never used. The refusal is
+  recognized by the server's non-localized error fields (SQLSTATE `42501`,
+  source file `extension.c`, routine `execute_extension_script`), never by
+  message text, so an error raised by project SQL cannot trigger an install.
 - The administrator creates the extension with `CREATE EXTENSION ... WITH SCHEMA
-  <schema> CASCADE`, after creating that schema for the restricted role if it is
-  missing, then the unchanged statement list runs again. Dependencies installed
-  by `CASCADE` (`earthdistance` requires `cube`) land in the same schema, and a
-  dependency that itself needs superuser rights must be listed too, so the grant
-  never reaches an extension the project did not name. List a trusted dependency
-  only when the project places it in a different schema.
+  <schema> [VERSION v] CASCADE`, after creating that schema for the restricted
+  role if it is missing, then the unchanged statement list runs again.
+  Dependencies installed by `CASCADE` (`earthdistance` requires `cube`) land in
+  the same schema, and a dependency that itself needs superuser rights must be
+  listed too, so the grant never reaches an extension the project did not name.
+  List a trusted dependency only when the project places it in a different
+  schema.
 - The rerun requires idempotent creation: `CREATE SCHEMA IF NOT EXISTS` and
-  `CREATE EXTENSION IF NOT EXISTS` in the DDL, and `--if-not-exists` when onwardpg
-  generates the statements (it now also covers extension creation). A bare
-  statement fails with a hint naming this requirement. History replay and
-  `baseline_replay` bundles reuse the DDL's own idempotent statements.
-- Administrator-created extensions stay owned by the administrator, because
-  PostgreSQL cannot hand an extension to another role. The catalog reader of a
-  disposable database does not report that exact ownership as
-  `ownership:extension:NAME=ROLE`; the graph models an extension by name,
-  version, and schema, so the fingerprint equals the one built where the owner
-  created a trusted extension. Dropping or altering such an extension in a later
-  bundle needs ownership and is not supported there.
-- The list is receipted in `planner.scratch_admin_extensions` and bound by the
-  bundle's history entry digest. It is never part of a source fingerprint.
-  `verify` and `drift check` materialize with the receipted list and block with
-  `scratch_admin_extensions_changed` if the configuration now differs, like the
-  boundary rule for ignores: editing configuration cannot silently widen the
-  trust of an existing bundle. Plan again to receipt a reviewed change.
+  `CREATE EXTENSION IF NOT EXISTS` in the DDL, and `--if-not-exists` when
+  onwardpg generates the statements (it also covers extension creation). A bare
+  statement fails with a hint naming this requirement. A baseline replays the
+  DDL as written.
+- The extension ends up owned by the restricted role, as if it had created the
+  extension itself. A transient `NOLOGIN SUPERUSER` role installs it inside one
+  transaction, `REASSIGN OWNED` hands the extension and its members to the
+  restricted role, and the role is dropped before the transaction commits.
+  Foreign-data wrappers and event triggers can only be owned by a superuser and
+  stay with the administrator, as members of a trusted extension stay with the
+  bootstrap superuser. Reads of the disposable catalog therefore need no
+  exception, and a later bundle can `DROP` or `ALTER` the extension.
 
-`config check` rejects an entry the scratch server does not provide, and reports
-an entry the restricted role could create anyway as a note rather than an
-error, so one configuration stays valid on servers that trust different
-extensions. It also lists `scratch_admin_installed`: what the administrator had
-to install to materialize the DDL on that server.
+**Receipts and replay.** The list is receipted in
+`planner.scratch_admin_extensions`, bound by the bundle's history entry digest,
+and never part of a source fingerprint. The whole configured list is receipted
+whether or not a server needed it, so the same project writes the same bytes on
+every machine. Each accepted bundle replays under the list *it* receipted, in
+`plan`, `draft`, `verify`, `drift check`, and `init`: a bundle receipted without
+the field (every bundle written before this setting) replays with an empty list.
+Only the mutable work, the desired DDL and the bundle being planned, runs under
+the current configuration. Removing an extension from the DDL and the
+configuration therefore does not stop the older bundle that created it from
+replaying, and changing the list is the normal state while a new bundle is
+drafted. One place still compares: `verify --check` blocks with
+`scratch_admin_extensions_changed` when the bundle it checks receipted a list
+that differs from the configuration it is checked under, because a read-only
+check claims that the receipted evidence still holds under the configuration at
+hand. Plan again to receipt a reviewed change.
+
+`config check` rejects an entry (or version) the scratch server does not
+provide, and reports an entry the restricted role could create anyway as a note
+rather than an error, so one configuration stays valid on servers that trust
+different extensions. It also lists `scratch_admin_installed`: what the
+administrator had to install to materialize the DDL on that server.
 
 The PostgreSQL major is inferred from the configured scratch server and bound
 to generated history. It is not a user-maintained configuration value.

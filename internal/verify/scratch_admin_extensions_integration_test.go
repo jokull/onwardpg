@@ -71,7 +71,7 @@ CREATE INDEX ON public.place USING gist (extensions.ll_to_earth(lat, lon));`})
 			if got := strings.Join(database.InstalledByAdministrator(), ","); got == "" {
 				t.Skip("earthdistance is trusted on this server: the restricted role created it itself")
 			}
-			graph, err := source.InspectScratchGraph(ctx, database, nil, false)
+			graph, err := source.LoadDatabaseGraphForComparison(ctx, database.Config, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

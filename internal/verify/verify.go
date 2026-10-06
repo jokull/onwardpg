@@ -67,9 +67,6 @@ type Input struct {
 	ThroughPhase string
 	Ignores      []string
 	Options      graphplan.Options
-	// AdminExtensions is the reviewed allowlist of untrusted extensions that the
-	// scratch administrator may install when the restricted role is refused.
-	AdminExtensions []scratchdb.AdminExtension
 }
 
 func Run(ctx context.Context, input Input) (Report, error) {
@@ -115,7 +112,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	observed, batches, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, input.ThroughPhase, input.Ignores, input.AdminExtensions)
+	observed, batches, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, input.ThroughPhase, input.Ignores)
 	report.ExecutedBatches = batches
 	if err != nil {
 		return Report{}, err
@@ -135,7 +132,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			assertionIDs = append(assertionIDs, assertion.ID)
 		}
 	}
-	desired, _, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, "contract", input.Ignores, input.AdminExtensions)
+	desired, _, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, "contract", input.Ignores)
 	if err != nil {
 		return Report{}, err
 	}
@@ -223,8 +220,8 @@ func selectedBatchCount(artifact bundle.Artifact, throughPhase string) (int, err
 	return count, nil
 }
 
-func executeDisposable(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignores []string, adminExtensions []scratchdb.AdminExtension) (snapshot *pgschema.Snapshot, batches int, failure *Failure, resultErr error) {
-	database, err := scratchdb.Create(ctx, adminURL, "onwardpg_verify", scratchdb.WithAdminExtensions(adminExtensions))
+func executeDisposable(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignores []string) (snapshot *pgschema.Snapshot, batches int, failure *Failure, resultErr error) {
+	database, err := scratchdb.Create(ctx, adminURL, "onwardpg_verify")
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -243,6 +240,12 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 		return nil, 0, nil, err
 	}
 	for _, entry := range chain.Entries {
+		// Every bundle replays under the allowlist it receipted, never under the
+		// current configuration; a bundle receipted without one gets none.
+		if err := database.UseAdminExtensions(entry.Artifact.Manifest.Planner.ScratchAdminExtensions); err != nil {
+			connection.Close(context.Background())
+			return nil, batches, nil, fmt.Errorf("bundle %s: %w", entry.Directory, err)
+		}
 		data := entry.Artifact.Files["plan.json"]
 		var plan protocol.Result
 		if err := json.Unmarshal(data, &plan); err != nil {
@@ -318,7 +321,7 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 	if err := connection.Close(ctx); err != nil {
 		return nil, batches, nil, fmt.Errorf("close disposable execution connection: %w", err)
 	}
-	snapshot, err = source.InspectScratchGraph(ctx, database, ignores, false)
+	snapshot, err = source.LoadDatabaseGraphForComparison(ctx, database.Config, ignores)
 	if err != nil {
 		return nil, batches, nil, fmt.Errorf("inspect disposable result: %w", err)
 	}

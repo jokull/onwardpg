@@ -24,10 +24,9 @@ type Database struct {
 	Config      *pgx.ConnConfig
 
 	// extensions is the reviewed allowlist the administrator may install on
-	// demand; installed and exemptions record what it actually installed.
+	// demand; installed records what it actually installed.
 	extensions map[string]AdminExtension
 	installed  []string
-	exemptions []string
 	onInstall  func([]string)
 }
 
@@ -84,11 +83,8 @@ func Create(ctx context.Context, adminURL, prefix string, options ...Option) (_ 
 	}
 	resources := &Database{admin: admin, adminConfig: admin.Config().Copy(), Name: name, Role: role}
 	resources.onInstall = resolved.onInstall
-	if len(resolved.extensions) > 0 {
-		resources.extensions = make(map[string]AdminExtension, len(resolved.extensions))
-		for _, extension := range resolved.extensions {
-			resources.extensions[extension.Name] = extension
-		}
+	if err := resources.UseAdminExtensions(resolved.extensions); err != nil {
+		return nil, err
 	}
 	// Even a failed CREATE can have committed before its response was lost.
 	// Both generated names are unique and cleanup is safe to repeat.

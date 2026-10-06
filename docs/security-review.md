@@ -21,21 +21,29 @@ not a third-party audit or a production-safety certification.
 - A target may list `scratch_admin_extensions`. For each listed name the
   scratch administrator, not the restricted login, runs that extension's
   install script (and those of its declared dependencies) as a superuser inside
-  the disposable database, after the restricted login's own `CREATE EXTENSION`
-  was refused. This widens trust in the script and the library code that the
-  extension loads on the scratch server: an extension such as `dblink` or
-  `file_fdw` gives later project DDL and migration SQL in that database whatever
-  the extension exposes, for example outbound connections or server-file
-  access. Keep the list to extensions that the scratch cluster's operators
-  already trust, and keep that cluster dedicated. Nothing is inferred from SQL
+  the disposable database, after PostgreSQL's own `CREATE EXTENSION` refused the
+  restricted login. To keep the extension owned by the restricted login the
+  administrator creates a transient `NOLOGIN SUPERUSER` role, installs through
+  it, runs `REASSIGN OWNED`, and drops the role, all in one transaction; that
+  role is never granted to, or loginable by, the restricted login, and it is a
+  cluster-global role only for the length of that transaction. This widens
+  trust in the script and the library code that the extension loads on the
+  scratch server: an extension such as `dblink` or `file_fdw` gives later
+  project DDL and migration SQL in that database whatever the extension exposes,
+  for example outbound connections or server-file access. Keep the list to
+  extensions that the scratch cluster's operators already trust, and keep that
+  cluster dedicated. The trigger is PostgreSQL's own refusal, recognized by its
+  non-localized source location (SQLSTATE `42501`, `extension.c`,
+  `execute_extension_script`), so project SQL cannot raise a lookalike error to
+  make the administrator run an install script. Nothing is inferred from SQL
   text; an entry that nothing asks for has no effect; the login itself stays
   non-superuser; the database and login are still dropped afterwards. The list
-  is receipted in each bundle and a differing configuration blocks `verify`.
-  Caller-owned development and production databases are inspected read-only and
-  no live-database code path creates an extension. The administrator keeps
-  ownership of the extension it installs (PostgreSQL cannot transfer it), so
-  those extensions are exempted, by exact name and administrator role, from the
-  ownership blocker in the disposable database's catalog reader only.
+  is receipted in each bundle, each accepted bundle replays under its own
+  receipt, and `verify --check` blocks when a bundle's receipt differs from the
+  configuration. Caller-owned development and production databases are
+  inspected read-only and no live-database code path creates an extension.
+  `live_ignore` is unrelated: it acknowledges provider-owned state in live
+  clusters and never applies to a disposable database.
 - `schema_command` is trusted project code, invoked directly without a shell.
   It is checked for deterministic output and observable checkout mutations,
   but it is not an operating-system sandbox.

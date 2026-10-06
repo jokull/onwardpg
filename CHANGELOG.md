@@ -77,24 +77,32 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   for the same side.
 
 - Targets can list `scratch_admin_extensions` in `.onwardpg.toml`, for example
-  `[{ name = "earthdistance", schema = "extensions" }]`. When project DDL asks
-  for an extension that PostgreSQL does not trust (so the restricted scratch
-  login is refused with `permission denied to create extension`), the scratch
-  administrator installs the listed extension and its dependencies into the
-  named schema inside that disposable database, and the unchanged DDL is run
-  again. Nothing is inferred from SQL text, an extension that nothing asks for
-  is never installed, and no live-database path creates extensions. Without the
-  entry the same error now carries a hint naming the setting.
-  Administrator-owned extensions are not reported as `ownership:extension`
-  blockers in disposable databases, so fingerprints equal those built where the
-  owner created a trusted extension. `init`, `plan`, `draft`, `verify`,
-  `dev plan`, `drift check`, and `config check` honor the list;
-  `diff`/`plan --from --to` take `--scratch-admin-extension NAME=SCHEMA`.
-  The list is receipted in `planner.scratch_admin_extensions`; `verify` replays
-  with the receipted list and blocks with `scratch_admin_extensions_changed`
-  when the configuration differs. `config check` reports
-  `scratch_admin_extensions`, `scratch_admin_installed`, and `notes`; an entry
-  the server lacks is an error and an entry for a trusted extension is a note.
+  `[{ name = "earthdistance", schema = "extensions" }]`, with an optional
+  `version`. When project DDL asks for an extension that PostgreSQL does not
+  trust, the restricted scratch login is refused with
+  `permission denied to create extension`. The scratch administrator then
+  installs the listed extension and its dependencies into the named schema
+  inside that disposable database (the entry's version, or the server default
+  when none is given; a `VERSION` clause in the DDL is not honored for a listed
+  extension), and the unchanged DDL is run again. The refusal is recognized by
+  PostgreSQL's non-localized error fields (SQLSTATE 42501, `extension.c`,
+  `execute_extension_script`), not by message text, so project SQL cannot
+  trigger an install. Nothing is inferred from SQL text, an extension that
+  nothing asks for is never installed, and no live-database path creates
+  extensions. Without the entry the same error carries a hint naming the
+  setting. A transient superuser role installs the extension and `REASSIGN
+  OWNED` hands it to the restricted login, so the catalog and fingerprints equal
+  those built where the owner created a trusted extension, and a later bundle
+  can drop it. The list is receipted in `planner.scratch_admin_extensions`.
+  Each accepted bundle replays under the list it receipted (a bundle without
+  the field replays with none) in `init`, `plan`, `draft`, `verify`, and
+  `drift check`; only the desired DDL and the bundle being planned use the
+  current configuration. `verify --check` blocks with
+  `scratch_admin_extensions_changed` when the checked bundle's receipt differs
+  from the configuration. `config check` reports `scratch_admin_extensions`,
+  `scratch_admin_installed`, and `notes`; an entry or version the server lacks is
+  an error and an entry for a trusted extension is a note. `diff` and
+  `plan --from --to` take `--scratch-admin-extension NAME=SCHEMA[@VERSION]`.
 
 ### Changed
 

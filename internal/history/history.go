@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jokull/onwardpg/internal/bundle"
+	"github.com/jokull/onwardpg/internal/scratchdb"
 )
 
 var phaseOrder = []string{"expand", "contract"}
@@ -32,6 +33,16 @@ type Replay struct {
 	Files      []string
 	Digest     string
 	Provenance string
+	// Segments is the same SQL split per accepted bundle, each with the
+	// scratch administrator allowlist that bundle receipted. A bundle receipted
+	// without the field replays with an empty allowlist.
+	Segments []ReplaySegment
+}
+
+type ReplaySegment struct {
+	Bundle                 string
+	DDL                    []byte
+	ScratchAdminExtensions []scratchdb.AdminExtension
 }
 
 type StatusEntry struct {
@@ -356,7 +367,9 @@ func load(root, bundleRoot, target, excludedBundleID string, editedCandidate boo
 func (c Chain) Replay() (Replay, error) {
 	var ddl strings.Builder
 	var files []string
+	var segments []ReplaySegment
 	for _, entry := range c.Entries {
+		var segment strings.Builder
 		for _, phase := range phaseOrder {
 			artifact, exists := entry.Artifact.Manifest.Phases[phase]
 			if !exists {
@@ -368,15 +381,21 @@ func (c Chain) Replay() (Replay, error) {
 			}
 			name := filepath.ToSlash(filepath.Join(entry.Directory, artifact.Path))
 			files = append(files, name)
-			ddl.WriteString("\n-- onwardpg history: " + name + "\n")
-			ddl.Write(body)
-			if len(body) == 0 || body[len(body)-1] != '\n' {
-				ddl.WriteByte('\n')
+			for _, out := range []*strings.Builder{&ddl, &segment} {
+				out.WriteString("\n-- onwardpg history: " + name + "\n")
+				out.Write(body)
+				if len(body) == 0 || body[len(body)-1] != '\n' {
+					out.WriteByte('\n')
+				}
 			}
 		}
+		segments = append(segments, ReplaySegment{
+			Bundle: entry.Directory, DDL: []byte(segment.String()),
+			ScratchAdminExtensions: entry.Artifact.Manifest.Planner.ScratchAdminExtensions,
+		})
 	}
 	return Replay{
-		DDL: []byte(ddl.String()), Files: files, Digest: c.HeadDigest,
+		DDL: []byte(ddl.String()), Files: files, Digest: c.HeadDigest, Segments: segments,
 		Provenance: "onwardpg-history:" + c.Target + ":" + c.HeadDigest,
 	}, nil
 }

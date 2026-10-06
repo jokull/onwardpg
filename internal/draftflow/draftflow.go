@@ -323,7 +323,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("render base history: %w", err)
 	}
-	current, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, input.AdminURL, input.Ignores, input.Target.ScratchOptions()...)
+	current, err := source.LoadReplayGraphForComparison(ctx, replay.Segments, replay.Provenance, input.AdminURL, input.Ignores)
 	if err != nil {
 		return report, fmt.Errorf("replay base history: %w", err)
 	}
@@ -545,7 +545,6 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		expandVerification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: protocol.PhaseExpand, Ignores: input.Ignores, Options: input.PlannerOptions,
-			AdminExtensions: input.Target.ScratchAdminExtensions,
 		})
 		if err != nil {
 			return report, fmt.Errorf("verify generated expand checkpoint: %w", err)
@@ -568,7 +567,6 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		verification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: "contract", Ignores: input.Ignores, Options: input.PlannerOptions,
-			AdminExtensions: input.Target.ScratchAdminExtensions,
 		})
 		if err != nil {
 			return report, fmt.Errorf("verify generated draft: %w", err)

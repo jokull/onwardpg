@@ -234,7 +234,6 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	verification, err := verify.Run(ctx, verify.Input{
 		AdminURL: input.AdminURL, Chain: stagedChain, BundleID: input.BundleID,
 		ThroughPhase: "contract", Ignores: input.Ignores, Options: input.PlannerOptions,
-		AdminExtensions: input.Target.ScratchAdminExtensions,
 	})
 	if err != nil {
 		return report, fmt.Errorf("verify baseline bundle: %w", err)

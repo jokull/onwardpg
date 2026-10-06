@@ -126,7 +126,7 @@ scratch server provides each extension, returns the list as
 `scratch_admin_extensions`, names the extensions the administrator had to
 install as `scratch_admin_installed`, and reports advisory `notes` (an entry the
 restricted role could create itself, or a history head whose receipt differs
-from the configuration).
+from the configuration, which is normal while a new bundle is drafted).
 
 A target may also list `live_ignore` selectors for provider-owned state that
 exists only in live clusters. See [live_ignore](#live_ignore).
@@ -468,7 +468,7 @@ DDL.
 | --to SOURCE | Required desired schema, unless `--to-env` is given |
 | --from-env ENV, --to-env ENV | Read that side's PostgreSQL URL from an environment variable, so a live URL stays out of process arguments; mutually exclusive with `--from` or `--to` for the same side |
 | --dev-url URL | Administrative URL required for DDL sources |
-| --scratch-admin-extension NAME=SCHEMA | Untrusted extension the scratch administrator may install for DDL sources; repeatable |
+| --scratch-admin-extension NAME=SCHEMA[@VERSION] | Untrusted extension (and optional exact version) the scratch administrator may install for DDL sources; repeatable |
 | --hint JSON | Semantic decision; repeatable |
 | --hints-file FILE | Array of semantic decisions |
 | --output text\|json | JSON by default; text renders decisions or SQL |

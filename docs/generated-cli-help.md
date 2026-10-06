@@ -190,7 +190,7 @@ Usage: onwardpg diff --from SOURCE --to SOURCE [options]
   -schema-qualifier value
         scope to one schema and render names using this qualifier (empty means unqualified)
   -scratch-admin-extension value
-        NAME=SCHEMA untrusted extension the scratch administrator may install in --dev-url databases; repeat for multiple extensions
+        NAME=SCHEMA[@VERSION] untrusted extension the scratch administrator may install in --dev-url databases; repeat for multiple extensions
   -target string
         configured target whose live_ignore list applies to PostgreSQL URL sources
   -to string

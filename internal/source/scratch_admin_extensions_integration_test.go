@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jokull/onwardpg/internal/history"
 	"github.com/jokull/onwardpg/internal/scratchdb"
 )
 
@@ -185,11 +186,11 @@ func TestAllowlistedSchemaMustBeCreatedIdempotently(t *testing.T) {
 	}
 }
 
-func TestAdministratorOwnershipExemptionIsExact(t *testing.T) {
+func TestAdministratorInstalledExtensionsAreOwnedByTheRestrictedRole(t *testing.T) {
 	url := scratchTestURL(t)
 	requireUntrustedExtension(t, url, "earthdistance")
 	ctx := context.Background()
-	database, err := scratchdb.Create(ctx, url, "onwardpg_exempt_test", scratchdb.WithAdminExtensions([]scratchdb.AdminExtension{{Name: "earthdistance", Schema: "extensions"}}))
+	database, err := scratchdb.Create(ctx, url, "onwardpg_owned_test", scratchdb.WithAdminExtensions([]scratchdb.AdminExtension{{Name: "earthdistance", Schema: "extensions"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,21 +210,86 @@ func TestAdministratorOwnershipExemptionIsExact(t *testing.T) {
 	if installed := strings.Join(database.InstalledByAdministrator(), ","); installed != "cube,earthdistance" {
 		t.Fatalf("administrator installed %q, want the extension and its dependency", installed)
 	}
-	// The same database inspected without the exemption reports the ownership,
-	// so the exemption is what keeps these extensions out of the graph.
-	plain, err := inspectGraphConfig(ctx, database.Config, nil, false)
+	var foreign int
+	if err := owner.QueryRow(ctx, `SELECT count(*) FROM pg_extension e JOIN pg_roles r ON r.oid = e.extowner WHERE r.rolname <> current_user AND e.extname <> 'plpgsql'`).Scan(&foreign); err != nil || foreign != 0 {
+		t.Fatalf("extensions owned by someone other than the restricted role: %d %v", foreign, err)
+	}
+	// No transient superuser outlives the installation.
+	admin, err := pgx.Connect(ctx, url)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(plain.Unsupported(), ","); !strings.Contains(got, "ownership:extension:cube=") || !strings.Contains(got, "ownership:extension:earthdistance=") {
-		t.Fatalf("without the exemption the administrator ownership must be reported, got %q", got)
+	defer admin.Close(ctx)
+	var helpers int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname LIKE $1`, database.Role+"\\_ext").Scan(&helpers); err != nil || helpers != 0 {
+		t.Fatalf("transient installer role left behind: %d %v", helpers, err)
 	}
-	exempt, err := InspectScratchGraph(ctx, database, nil, false)
+	// Reads need no exemption: the catalog looks as if the owner created them.
+	graph, err := inspectGraphConfig(ctx, database.Config, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := exempt.Unsupported(); len(got) != 0 {
-		t.Fatalf("exempted graph still has blockers %v", got)
+	if blockers := graph.Unsupported(); len(blockers) != 0 {
+		t.Fatalf("blockers %v", blockers)
+	}
+	// And a later bundle can drop them.
+	if _, err := owner.Exec(ctx, `DROP EXTENSION earthdistance; DROP EXTENSION cube;`); err != nil {
+		t.Fatalf("the restricted role cannot drop an extension the administrator installed: %v", err)
+	}
+}
+
+func TestAllowlistEntryVersionDecidesTheInstalledVersion(t *testing.T) {
+	url := scratchTestURL(t)
+	requireUntrustedExtension(t, url, "pg_prewarm")
+	ctx := context.Background()
+	const ddl = `CREATE SCHEMA IF NOT EXISTS tools; CREATE EXTENSION IF NOT EXISTS pg_prewarm WITH SCHEMA tools VERSION '1.1';`
+	reference := ownerCreatedFingerprint(t, url, ddl)
+	pinned, err := LoadDDLGraphForComparison(ctx, []byte(ddl), "test-ddl", url, nil, scratchdb.WithAdminExtensions([]scratchdb.AdminExtension{{Name: "pg_prewarm", Schema: "tools", Version: "1.1"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := pinned.Fingerprint(); got != reference {
+		t.Fatalf("an entry pinned to the DDL's version must equal the owner-created catalog: %s vs %s", got, reference)
+	}
+	// Without a version the default is installed and the DDL's VERSION clause is
+	// not honored; the graph shows it, onwardpg does not parse the clause.
+	unpinned, err := LoadDDLGraphForComparison(ctx, []byte(ddl), "test-ddl", url, nil, scratchdb.WithAdminExtensions([]scratchdb.AdminExtension{{Name: "pg_prewarm", Schema: "tools"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := unpinned.Fingerprint(); got == reference {
+		t.Fatal("the default version was installed, so the fingerprint must differ from the VERSION '1.1' catalog")
+	}
+}
+
+func TestReplayUsesEachBundlesOwnAllowlist(t *testing.T) {
+	url := scratchTestURL(t)
+	requireUntrustedExtension(t, url, "pg_prewarm")
+	ctx := context.Background()
+	entry := []scratchdb.AdminExtension{{Name: "pg_prewarm", Schema: "tools"}}
+	create := history.ReplaySegment{Bundle: "baseline", DDL: []byte(`CREATE SCHEMA IF NOT EXISTS tools; CREATE EXTENSION IF NOT EXISTS pg_prewarm WITH SCHEMA tools;`), ScratchAdminExtensions: entry}
+	later := history.ReplaySegment{Bundle: "add-table", DDL: []byte(`CREATE TABLE public.t (id bigint);`)}
+	plain := history.ReplaySegment{Bundle: "legacy", DDL: []byte(`CREATE TABLE public.legacy (id bigint);`)}
+
+	// An old bundle with an entry, followed by a bundle receipted without one.
+	if _, err := LoadReplayGraphForComparison(ctx, []history.ReplaySegment{create, later}, "history", url, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A bundle receipted without the field replays as an empty list...
+	if _, err := LoadReplayGraphForComparison(ctx, []history.ReplaySegment{plain, later}, "history", url, nil); err != nil {
+		t.Fatal(err)
+	}
+	// ...which cannot create an untrusted extension.
+	withoutEntry := create
+	withoutEntry.ScratchAdminExtensions = nil
+	_, err := LoadReplayGraphForComparison(ctx, []history.ReplaySegment{plain, withoutEntry}, "history", url, nil)
+	if err == nil || !strings.Contains(err.Error(), "scratch_admin_extensions") || !strings.Contains(err.Error(), "history bundle baseline") {
+		t.Fatalf("a bundle without a receipted list must not get one: %v", err)
+	}
+	// A later bundle adds a second allowlisted extension: each segment's own list.
+	second := history.ReplaySegment{Bundle: "second", DDL: []byte(`CREATE EXTENSION IF NOT EXISTS pgstattuple WITH SCHEMA tools;`), ScratchAdminExtensions: []scratchdb.AdminExtension{{Name: "pg_prewarm", Schema: "tools"}, {Name: "pgstattuple", Schema: "tools"}}}
+	if _, err := LoadReplayGraphForComparison(ctx, []history.ReplaySegment{create, second}, "history", url, nil); err != nil {
+		t.Fatalf("second bundle: %v", err)
 	}
 }
 
