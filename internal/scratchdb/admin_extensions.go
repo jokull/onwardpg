@@ -428,9 +428,12 @@ WHERE a.name = $1`, dependency).Scan(&needsAdministrator)
 // name the server does not provide is an error: the setting cannot work there.
 // An entry for an extension the restricted role may already create (trusted, or
 // not superuser-only) is returned as a note, not an error: one repository
-// configuration must stay valid on servers that differ in what they trust, and
-// the entry has no effect where the extension is trusted because the
-// administrator only acts after the restricted role is refused.
+// configuration must stay valid on servers that differ in what they trust.
+// Such an entry is "not needed" only when no listed extension that needs the
+// administrator depends on it, directly or through other listed entries: the
+// administrator installs a listed dependency first, with that entry's schema and
+// version, so removing the entry could move the dependency or change its
+// version. In that case the note says what the entry fixes instead.
 func CheckAdminExtensions(ctx context.Context, adminURL string, extensions []AdminExtension) ([]string, error) {
 	if len(extensions) == 0 {
 		return nil, nil
@@ -440,23 +443,62 @@ func CheckAdminExtensions(ctx context.Context, adminURL string, extensions []Adm
 		return nil, fmt.Errorf("connect scratch administrator: %w", err)
 	}
 	defer func() { _ = closeAdmin(connection) }()
-	var notes []string
-	for _, extension := range NormalizeAdminExtensions(extensions) {
-		var needsAdministrator bool
+	entries := NormalizeAdminExtensions(extensions)
+	listed := make(map[string]AdminExtension, len(entries))
+	for _, entry := range entries {
+		listed[entry.Name] = entry
+	}
+	needsAdministrator := make(map[string]bool, len(entries))
+	requires := make(map[string][]string, len(entries))
+	for _, entry := range entries {
+		var needs bool
+		var deps []string
 		err := connection.QueryRow(ctx, `
-SELECT v.superuser AND NOT v.trusted
+SELECT v.superuser AND NOT v.trusted, COALESCE(v.requires::text[], '{}')
 FROM pg_available_extensions a
 JOIN pg_available_extension_versions v ON v.name = a.name AND v.version = COALESCE(NULLIF($2, ''), a.default_version)
-WHERE a.name = $1`, extension.Name, extension.Version).Scan(&needsAdministrator)
+WHERE a.name = $1`, entry.Name, entry.Version).Scan(&needs, &deps)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errUnavailable(extension)
+			return nil, errUnavailable(entry)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("probe extension %q: %w", extension.Name, err)
+			return nil, fmt.Errorf("probe extension %q: %w", entry.Name, err)
 		}
-		if !needsAdministrator {
-			notes = append(notes, fmt.Sprintf("scratch_admin_extensions entry %q is not needed on this scratch server: the restricted role can create it, so the entry has no effect here", extension.Name))
+		needsAdministrator[entry.Name], requires[entry.Name] = needs, deps
+	}
+	// parents[name] is the first listed extension needing the administrator that
+	// installs name as one of its listed dependencies.
+	parents := map[string]string{}
+	for _, entry := range entries {
+		if !needsAdministrator[entry.Name] {
+			continue
 		}
+		var walk func(string)
+		seen := map[string]bool{entry.Name: true}
+		walk = func(name string) {
+			for _, dependency := range requires[name] {
+				if _, ok := listed[dependency]; !ok || seen[dependency] {
+					continue
+				}
+				seen[dependency] = true
+				if _, taken := parents[dependency]; !taken {
+					parents[dependency] = entry.Name
+				}
+				walk(dependency)
+			}
+		}
+		walk(entry.Name)
+	}
+	var notes []string
+	for _, entry := range entries {
+		if needsAdministrator[entry.Name] {
+			continue
+		}
+		if parent, ok := parents[entry.Name]; ok {
+			notes = append(notes, fmt.Sprintf("scratch_admin_extensions entry %q fixes the schema and version of a dependency of %q: the restricted role could create it, but the administrator installs it first with this entry's schema and version when %q is installed, so removing the entry can move it or change its version", entry.Name, parent, parent))
+			continue
+		}
+		notes = append(notes, fmt.Sprintf("scratch_admin_extensions entry %q is not needed on this scratch server: the restricted role can create it, so the entry has no effect here", entry.Name))
 	}
 	return notes, nil
 }

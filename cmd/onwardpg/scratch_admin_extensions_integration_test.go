@@ -96,13 +96,13 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 			t.Fatalf("config check accepted a missing extension: %d %s", result.code, result.stdout)
 		}
 	})
-	t.Run("config check notes a trusted extension instead of failing", func(t *testing.T) {
+	t.Run("config check notes a trusted entry that fixes a dependency instead of failing", func(t *testing.T) {
 		writeTestFile(t, repository, ".onwardpg.toml", config(`scratch_admin_extensions = [{ name = "earthdistance", schema = "extensions" }, { name = "cube", schema = "extensions" }]`))
 		defer writeTestFile(t, repository, ".onwardpg.toml", config(setting))
 		result := captureStdout(t, func() int {
 			return runConfig([]string{"check", "--config", filepath.Join(repository, ".onwardpg.toml")})
 		})
-		if result.code != 0 || !strings.Contains(result.stdout, `"notes":["scratch_admin_extensions entry \"cube\" is not needed`) {
+		if result.code != 0 || !strings.Contains(result.stdout, `"notes":["scratch_admin_extensions entry \"cube\" fixes the schema and version of a dependency of \"earthdistance\"`) {
 			t.Fatalf("config check: %d %s", result.code, result.stdout)
 		}
 	})

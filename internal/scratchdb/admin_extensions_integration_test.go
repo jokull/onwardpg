@@ -144,3 +144,37 @@ func TestCheckAdminExtensionsRequiresTheVersionToExist(t *testing.T) {
 		t.Fatalf("a version the server lacks must be an error, got %v", err)
 	}
 }
+
+func TestCheckAdminExtensionNotesAreDependencyAware(t *testing.T) {
+	url := testAdminURL(t)
+	requireUntrusted(t, url, "earthdistance", "")
+	ctx := context.Background()
+	check := func(entries ...AdminExtension) []string {
+		t.Helper()
+		notes, err := CheckAdminExtensions(ctx, url, entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return notes
+	}
+	// cube is trusted but earthdistance requires it: the entry decides where
+	// the administrator installs it, so it is not "unnecessary".
+	notes := check(AdminExtension{Name: "earthdistance", Schema: "extensions"}, AdminExtension{Name: "cube", Schema: "geo", Version: "1.5"})
+	if len(notes) != 1 || !strings.Contains(notes[0], `entry "cube" fixes the schema and version of a dependency of "earthdistance"`) || strings.Contains(notes[0], "not needed") {
+		t.Fatalf("dependency note = %q", notes)
+	}
+	// A trusted extension listed alone, or next to an untrusted one that does not
+	// depend on it, has no effect.
+	for _, entries := range [][]AdminExtension{
+		{{Name: "cube", Schema: "extensions"}},
+		{{Name: "pg_trgm", Schema: "extensions"}, {Name: "earthdistance", Schema: "extensions"}},
+	} {
+		notes := check(entries...)
+		if len(notes) != 1 || !strings.Contains(notes[0], "is not needed on this scratch server") {
+			t.Fatalf("entries %v: notes = %q", entries, notes)
+		}
+	}
+	if notes := check(AdminExtension{Name: "earthdistance", Schema: "extensions"}); len(notes) != 0 {
+		t.Fatalf("an entry the restricted role cannot create needs no note: %q", notes)
+	}
+}

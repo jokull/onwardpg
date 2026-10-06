@@ -84,7 +84,8 @@ The DDL stays the only source of schema state:
 - Nothing is inferred from the DDL text. The administrator acts only after
   PostgreSQL's own `CREATE EXTENSION` path refused the restricted role for a
   listed name, so an entry for an extension the DDL never creates changes
-  nothing, and an entry for a trusted extension is never used. The refusal is
+  nothing, and an entry for a trusted extension is never used to install it
+  (it can still place a dependency, below). The refusal is
   recognized by the server's non-localized error fields (SQLSTATE `42501`,
   source file `extension.c`, routine `execute_extension_script`), never by
   message text, so an error raised by project SQL cannot trigger an install.
@@ -130,7 +131,10 @@ hand. Plan again to receipt a reviewed change.
 `config check` rejects an entry (or version) the scratch server does not
 provide, and reports an entry the restricted role could create anyway as a note
 rather than an error, so one configuration stays valid on servers that trust
-different extensions. It also lists `scratch_admin_installed`: what the
+different extensions. The note says "not needed" only when no listed extension
+that needs the administrator depends on the entry; otherwise it says the entry
+fixes the schema and version of a dependency of that extension, because
+removing it can move the dependency or change its version. It also lists `scratch_admin_installed`: what the
 administrator had to install to materialize the DDL on that server.
 
 The PostgreSQL major is inferred from the configured scratch server and bound

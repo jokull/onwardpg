@@ -125,7 +125,9 @@ When a target lists `scratch_admin_extensions`, `config check` verifies that the
 scratch server provides each extension, returns the list as
 `scratch_admin_extensions`, names the extensions the administrator had to
 install as `scratch_admin_installed`, and reports advisory `notes` (an entry the
-restricted role could create itself, or a history head whose receipt differs
+restricted role could create itself, which is "not needed" unless a listed
+extension depends on it and the entry fixes that dependency's schema and
+version, or a history head whose receipt differs
 from the configuration, which is normal while a new bundle is drafted).
 
 A target may also list `live_ignore` selectors for provider-owned state that
