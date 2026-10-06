@@ -20,6 +20,12 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   dormant, but an unused `--ignore` flag on `diff` or `drift check` is still
   an error.
 
+### Added
+
+- `drift check --database-env ENV` reads the live URL from an environment
+  variable, like `contract check --database-env`. `--database` still works; the
+  two flags are mutually exclusive.
+
 ## v0.1.0-preview.4 — 2026-09-26
 
 ### Fixed

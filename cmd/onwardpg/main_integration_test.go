@@ -151,6 +151,13 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if clean.Outcome != "drift_free" || len(clean.Differences) != 0 || clean.Observer == nil {
 		t.Fatalf("clean drift report = %#v", clean)
 	}
+	t.Setenv("ONWARDPG_TEST_DRIFT_LIVE_URL", liveURL)
+	fromEnvironment := captureStdout(t, func() int {
+		return runDriftAt([]string{"check", "--target", "primary", "--database-env", "ONWARDPG_TEST_DRIFT_LIVE_URL"}, repository)
+	})
+	if fromEnvironment.code != 0 || fromEnvironment.stdout != cleanOutput.stdout {
+		t.Fatalf("--database-env drift exit = %d, stdout = %s, want the --database report %s", fromEnvironment.code, fromEnvironment.stdout, cleanOutput.stdout)
+	}
 }
 
 func TestOrdinaryAdditiveDraftIsStableAndConvergesOnPostgreSQL(t *testing.T) {
