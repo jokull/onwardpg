@@ -15,8 +15,10 @@ import (
 // graph projects only the proven inspection overlay: the database owner's
 // ambient identity and owner-granted, non-grantable SELECT access belonging to
 // the dedicated observer roles. Application authorization remains in the
-// graph and therefore remains visible to drift comparison.
-func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores []string, statementTimeout time.Duration) (*pgschema.Snapshot, ObserverProjection, *Finding, error) {
+// graph and therefore remains visible to drift comparison. liveIgnore removes
+// only the unsupported-state selectors a project acknowledged for its live
+// clusters (see source.ProjectLiveIgnored) and reports those it removed.
+func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores, liveIgnore []string, statementTimeout time.Duration) (*pgschema.Snapshot, ObserverProjection, *Finding, error) {
 	if databaseURL == "" {
 		return nil, ObserverProjection{}, nil, fmt.Errorf("observer database URL is required")
 	}
@@ -58,5 +60,18 @@ func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores []s
 		return nil, report, nil, err
 	}
 	report.ProjectedAccess = projected
-	return snapshot, report, finding, nil
+	if finding != nil {
+		return snapshot, report, finding, nil
+	}
+	observed := snapshot
+	snapshot, report.LiveIgnored, report.LiveIgnoreUnmatched, err = source.ProjectLiveIgnored(observed, liveIgnore)
+	if err != nil {
+		return nil, report, nil, err
+	}
+	if len(report.LiveIgnored) > 0 {
+		if report.ObservedFingerprint, err = observed.Fingerprint(); err != nil {
+			return nil, report, nil, err
+		}
+	}
+	return snapshot, report, nil, nil
 }

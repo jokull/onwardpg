@@ -33,6 +33,7 @@ import (
 	"github.com/jokull/onwardpg/internal/targetlock"
 	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
+	"github.com/jokull/onwardpg/pgschema"
 )
 
 // buildVersion must remain a plain string initializer so release builds can
@@ -391,7 +392,8 @@ func runContractAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	if _, err := resolveConfiguredTarget(config, targetName); err != nil {
+	target, err := resolveConfiguredTarget(config, targetName)
+	if err != nil {
 		return writeError("invalid_config", err)
 	}
 	chain, err := history.Load(filepath.Dir(configPath), config.BundleRoot, *targetName)
@@ -421,17 +423,19 @@ func runContractAt(arguments []string, start string) int {
 	}
 	report, err := contractcheck.Run(context.Background(), contractcheck.Input{
 		Artifact: entry.Artifact, ExpectedHead: chain.HeadDigest, DatabaseURL: databaseURL, Environment: *environment,
-		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options,
+		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options, LiveIgnore: target.LiveIgnore,
 	})
 	if err != nil {
 		return writeError("contract_check_error", err)
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
-	if report.Status == "ready" {
+	switch report.Status {
+	case "ready":
 		return 0
-	}
-	if report.Status == "needs_evidence" || report.Status == "reconciliation_required" {
+	case "needs_evidence", "reconciliation_required":
 		return 2
+	case "unsupported":
+		return 3
 	}
 	return 4
 }
@@ -511,7 +515,7 @@ func runDriftAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
-	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, 30*time.Second)
+	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, target.LiveIgnore, 30*time.Second)
 	if err != nil {
 		return writeError("drift_observer_error", fmt.Errorf("inspect live catalog through the read-only observer boundary: %w", err))
 	}
@@ -531,11 +535,17 @@ func runDriftAt(arguments []string, start string) int {
 	}
 	report.Observer = &driftcheck.Observer{
 		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode,
-		ProjectedAccess: append([]string(nil), observer.ProjectedAccess...),
+		ProjectedAccess:     append([]string(nil), observer.ProjectedAccess...),
+		LiveIgnored:         append([]string(nil), observer.LiveIgnored...),
+		LiveIgnoreUnmatched: append([]string(nil), observer.LiveIgnoreUnmatched...),
+		ObservedFingerprint: observer.ObservedFingerprint,
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
-	if report.Outcome == "drift_free" {
+	switch report.Outcome {
+	case "drift_free":
 		return 0
+	case "unsupported":
+		return 3
 	}
 	return 4
 }
@@ -2028,6 +2038,8 @@ func runLowLevelPlan(command string, arguments []string) int {
 	}
 	from := flags.String("from", "", "current PostgreSQL URL or CREATE-statement SQL file")
 	to := flags.String("to", "", "desired PostgreSQL URL or CREATE-statement SQL file")
+	fromEnv := flags.String("from-env", "", "environment variable containing the current PostgreSQL URL, instead of --from")
+	toEnv := flags.String("to-env", "", "environment variable containing the desired PostgreSQL URL, instead of --to")
 	devURL := flags.String("dev-url", "", "PostgreSQL admin URL for disposable materialization databases")
 	var inlineHints stringsFlag
 	flags.Var(&inlineHints, "hint", "semantic JSON hint; repeat for multiple decisions")
@@ -2043,6 +2055,15 @@ func runLowLevelPlan(command string, arguments []string) int {
 	flags.Var(&ignores, "ignore", "selector to exclude")
 	var ignoreExtensionVersions stringsFlag
 	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
+	// live_ignore belongs to live observation. The legacy `plan --from --to`
+	// spelling shares this function but must keep refusing unsupported catalog
+	// state, so only diff accepts --target and --config.
+	var targetName, configName string
+	configName = ".onwardpg.toml"
+	if command == "diff" {
+		flags.StringVar(&targetName, "target", "", "configured target whose live_ignore list applies to PostgreSQL URL sources")
+		flags.StringVar(&configName, "config", ".onwardpg.toml", "repository configuration read for --target")
+	}
 	if help, err := parseFlagSet(flags, arguments); help {
 		return 0
 	} else if err != nil {
@@ -2051,8 +2072,22 @@ func runLowLevelPlan(command string, arguments []string) int {
 	if code := rejectPositionals(flags, command); code != 0 {
 		return code
 	}
+	for _, side := range []struct {
+		flag, envFlag string
+		value, env    *string
+	}{{"--from", "--from-env", from, fromEnv}, {"--to", "--to-env", to, toEnv}} {
+		if *side.value != "" && *side.env != "" {
+			return writeError("invalid_invocation", fmt.Errorf("%s accepts either %s or %s, not both", command, side.flag, side.envFlag))
+		}
+		if *side.env != "" {
+			// A URL read from the environment stays out of process arguments.
+			if *side.value = os.Getenv(*side.env); *side.value == "" {
+				return writeError("source_error", fmt.Errorf("environment variable %s is required", *side.env))
+			}
+		}
+	}
 	if *from == "" || *to == "" {
-		return writeError("invalid_invocation", fmt.Errorf("%s requires --from and --to", command))
+		return writeError("invalid_invocation", fmt.Errorf("%s requires --from (or --from-env) and --to (or --to-env)", command))
 	}
 	if *output != "json" && *output != "text" {
 		return writeError("invalid_invocation", fmt.Errorf("%s --output must be text or json", command))
@@ -2061,13 +2096,47 @@ func runLowLevelPlan(command string, arguments []string) int {
 	if err != nil {
 		return writeError("invalid_hints", err)
 	}
+	configSet := false
+	flags.Visit(func(f *flag.Flag) { configSet = configSet || f.Name == "config" })
+	if configSet && targetName == "" {
+		return writeError("invalid_invocation", fmt.Errorf("%s --config requires --target", command))
+	}
+	var liveIgnore []string
+	if command == "diff" && targetName != "" {
+		configPath, err := filepath.Abs(configName)
+		if err != nil {
+			return writeError("invalid_config", err)
+		}
+		config, err := workspace.Load(configPath)
+		if err != nil {
+			return writeError("invalid_config", err)
+		}
+		target, err := config.Target(targetName)
+		if err != nil {
+			return writeError("invalid_config", err)
+		}
+		liveIgnore = target.LiveIgnore
+	}
 	ctx := context.Background()
 	fromSpec, toSpec := source.Parse(*from), source.Parse(*to)
-	current, err := source.LoadGraphForComparison(ctx, fromSpec, *devURL, ignores)
+	var liveIgnored []string
+	liveSources := 0
+	// Only a PostgreSQL URL is a live catalog; a DDL file never is.
+	load := func(spec source.Spec) (*pgschema.Snapshot, error) {
+		snapshot, err := source.LoadGraphForComparison(ctx, spec, *devURL, ignores)
+		if err != nil || spec.Kind != "database" || len(liveIgnore) == 0 {
+			return snapshot, err
+		}
+		liveSources++
+		snapshot, removed, _, err := source.ProjectLiveIgnored(snapshot, liveIgnore)
+		liveIgnored = append(liveIgnored, removed...)
+		return snapshot, err
+	}
+	current, err := load(fromSpec)
 	if err != nil {
 		return writeError("source_error", err)
 	}
-	desired, err := source.LoadGraphForComparison(ctx, toSpec, *devURL, ignores)
+	desired, err := load(toSpec)
 	if err != nil {
 		return writeError("source_error", err)
 	}
@@ -2099,6 +2168,15 @@ func runLowLevelPlan(command string, arguments []string) int {
 		result, err = graphplan.Build(current, desired, protocol.Answers{}, options)
 		if err != nil {
 			return writeError("planning_error", err)
+		}
+	}
+	for _, selector := range sortedUniqueStrings(liveIgnored) {
+		result.Compatibility = append(result.Compatibility, "live_ignored:"+selector)
+	}
+	if liveSources > 0 {
+		// Unmatched on every live source: information only, never an error.
+		for _, selector := range source.UnmatchedLiveIgnore(liveIgnore, liveIgnored) {
+			result.Compatibility = append(result.Compatibility, "live_ignore_unmatched:"+selector)
 		}
 	}
 	if result.Status == protocol.NeedsInput {

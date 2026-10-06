@@ -1060,3 +1060,25 @@ func contains(value, part string) bool {
 	}
 	return false
 }
+
+func TestDiffReadsSourceURLsFromEnvironmentVariables(t *testing.T) {
+	t.Setenv("ONWARDPG_TEST_FROM_URL", "")
+	cases := []struct {
+		name      string
+		arguments []string
+		want      string
+	}{
+		{"both spellings for one side", []string{"--from", "postgres://a/b", "--from-env", "ONWARDPG_TEST_FROM_URL", "--to", "postgres://c/d"}, "accepts either --from or --from-env, not both"},
+		{"both spellings for the other side", []string{"--from", "postgres://a/b", "--to", "postgres://c/d", "--to-env", "ONWARDPG_TEST_FROM_URL"}, "accepts either --to or --to-env, not both"},
+		{"unset variable", []string{"--from-env", "ONWARDPG_TEST_FROM_URL", "--to", "postgres://c/d"}, "environment variable ONWARDPG_TEST_FROM_URL is required"},
+		{"missing side", []string{"--from", "postgres://a/b"}, "requires --from (or --from-env) and --to (or --to-env)"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			result := captureStdout(t, func() int { return runLowLevelPlan("diff", test.arguments) })
+			if result.code == 0 || !strings.Contains(result.stdout, test.want) {
+				t.Fatalf("exit = %d, stdout = %s", result.code, result.stdout)
+			}
+		})
+	}
+}

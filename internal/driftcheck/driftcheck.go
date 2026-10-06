@@ -5,6 +5,7 @@ package driftcheck
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/jokull/onwardpg/internal/change"
 	"github.com/jokull/onwardpg/internal/source"
@@ -25,8 +26,12 @@ type Report struct {
 	ExpectedFingerprint string       `json:"expected_fingerprint"`
 	ActualFingerprint   string       `json:"actual_fingerprint"`
 	Differences         []Difference `json:"differences,omitempty"`
-	Ignored             []string     `json:"ignored,omitempty"`
-	Observer            *Observer    `json:"observer,omitempty"`
+	// Unsupported lists catalog state, on either side, that the planner cannot
+	// model. It is the same set `diff` reports; a result without entries means
+	// the catalog holds nothing the planner would refuse.
+	Unsupported []string  `json:"unsupported,omitempty"`
+	Ignored     []string  `json:"ignored,omitempty"`
+	Observer    *Observer `json:"observer,omitempty"`
 }
 
 // Observer describes environmental catalog state proven to belong only to a
@@ -36,6 +41,19 @@ type Observer struct {
 	DatabaseOwner   string   `json:"database_owner"`
 	Mode            string   `json:"mode"`
 	ProjectedAccess []string `json:"projected_access,omitempty"`
+	// LiveIgnored lists unsupported state observed in the live catalog that
+	// the target's live_ignore list acknowledged: environmental state of the
+	// cluster, shown but not a blocker.
+	LiveIgnored []string `json:"live_ignored,omitempty"`
+	// LiveIgnoreUnmatched lists configured live_ignore selectors that matched
+	// nothing in this catalog. It is information only and never changes the
+	// status or exit code.
+	LiveIgnoreUnmatched []string `json:"live_ignore_unmatched,omitempty"`
+	// ObservedFingerprint is the fingerprint of the live catalog before
+	// LiveIgnored selectors were removed. The report's actual_fingerprint is
+	// the one after removal, which is what is compared. Present only when
+	// LiveIgnored is not empty.
+	ObservedFingerprint string `json:"observed_fingerprint,omitempty"`
 }
 
 func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (Report, error) {
@@ -60,7 +78,7 @@ func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (R
 	report := Report{
 		Outcome: "drift_free", Target: target,
 		HistoryHead: historyHead, ExpectedFingerprint: expectedFingerprint, ActualFingerprint: actualFingerprint,
-		Ignored: expected.Ignored(),
+		Ignored: expected.Ignored(), Unsupported: unionSorted(expected.Unsupported(), actual.Unsupported()),
 	}
 	for _, item := range change.Between(expected, actual) {
 		difference := Difference{ObjectID: item.ID.String()}
@@ -85,8 +103,29 @@ func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (R
 		}
 		report.Differences = append(report.Differences, difference)
 	}
-	if len(report.Differences) > 0 || expectedFingerprint != actualFingerprint {
+	// Unsupported state outranks drift so that drift check and diff agree on
+	// whether a catalog is supported, while the differences stay in the same
+	// report: one run shows everything.
+	switch {
+	case len(report.Unsupported) > 0:
+		report.Outcome = "unsupported"
+	case len(report.Differences) > 0 || expectedFingerprint != actualFingerprint:
 		report.Outcome = "drifted"
 	}
 	return report, nil
+}
+
+func unionSorted(first, second []string) []string {
+	seen := make(map[string]bool, len(first)+len(second))
+	var result []string
+	for _, values := range [][]string{first, second} {
+		for _, value := range values {
+			if !seen[value] {
+				seen[value] = true
+				result = append(result, value)
+			}
+		}
+	}
+	sort.Strings(result)
+	return result
 }

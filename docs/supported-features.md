@@ -286,7 +286,10 @@ role quoting, and carry authorization hazards. Default declarative
 materialization deliberately cannot assume membership in an external owner
 role, so that input fails before planning until a separately isolated
 privileged-cluster path exists. A narrow `table_owner:` ignore can suppress
-that one attribute while preserving the table. RLS state, policies, and
+that one attribute while preserving the table. Extension and schema ownership
+by a provider role and `pg_parameter_acl` grants stay blockers; a target's
+`live_ignore` list acknowledges exact selectors for live observation only
+(see [live_ignore](cli.md#live_ignore)). RLS state, policies, and
 ordinary/partitioned-table grants are typed verticals: policy column/routine
 dependencies are catalog edges; policy and authorization contractions require
 explicit semantic decisions; and role identifiers are quoted with `PUBLIC`

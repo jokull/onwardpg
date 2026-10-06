@@ -324,7 +324,7 @@ onwardpg contract check \
 
 `ready` permits proceeding. `reconciliation_required` identifies cleanup your
 release runner must complete before checking again. `needs_evidence`, `blocked`,
-and `stale` need resolution. The [contract reference](https://github.com/jokull/onwardpg/blob/main/docs/contract-readiness.md)
+`stale`, and `unsupported` need resolution. The [contract reference](https://github.com/jokull/onwardpg/blob/main/docs/contract-readiness.md)
 defines the evidence file, observer permissions, and cleanup order. Contract SQL
 repeats the data assertions at enforcement time.
 

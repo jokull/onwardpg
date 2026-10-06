@@ -148,7 +148,9 @@ onwardpg drift check --database "$PROD_DATABASE_URL"
 onwardpg drift check --database-env PROD_DATABASE_URL
 ```
 
-It compares observed P with replayed accepted history H and reports drift. A finding is evidence to
+It compares observed P with replayed accepted history H and reports drift. A catalog
+holding state the planner cannot model reports `unsupported` (exit 3) with the selectors,
+the same ones `diff` reports, together with the differences. A finding is evidence to
 investigate, not permission for onwardpg to make production changes. Resolve it
 through a reviewed forward bundle or a deliberate declared-schema correction.
 

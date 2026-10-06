@@ -7,6 +7,24 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ### Fixed
 
+- `drift check` no longer hides live catalog state that makes `init`, `plan`, and
+  `diff` stop as unsupported. The state (for example
+  `ownership:extension:earthdistance=pscale_admin` or
+  `parameter_acl:session_replication_role`) was in the inspected snapshot, but
+  the report dropped it and showed only `drifted`. The report now has an
+  `unsupported` list; when it is not empty the status is `unsupported` and the
+  exit code is 3, and the `differences` are still listed. A result without
+  `unsupported` entries now means there is no modeled drift and nothing the
+  planner would refuse. The list includes unsupported state in the replayed
+  history as well as in the live catalog.
+- `contract check` reported unsupported production state as `catalog_drift`
+  (status `blocked`, exit 4), because that state is part of the observed
+  fingerprint. It now reports status `unsupported` (exit 3), the selectors in
+  `unsupported`, and the finding `unsupported_catalog_state`, and runs no data
+  gate. Catalog drift is classified on the modeled graph alone, so a catalog
+  that also differs from the receipted checkpoint still gets its
+  `catalog_drift`, `expand_not_applied`, or `contract_already_applied` finding.
+
 - A foreign key whose only differences from the desired schema are its own
   name and the name of the index behind the referenced primary-key or unique
   constraint is now offered as a `rename_constraint` decision, in the same round as the key's own
@@ -20,6 +38,43 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   still compared. A confirmed pair emits only `ALTER TABLE ... RENAME
   CONSTRAINT`, which PostgreSQL carries out as a metadata change. A foreign
   key that references a unique index without a constraint is not covered.
+
+### Added
+
+- A target can list `live_ignore` selectors in `.onwardpg.toml` for state a
+  managed PostgreSQL provider owns in live clusters: an extension or a schema
+  owned by another role (`ownership:extension:NAME=ROLE`,
+  `ownership:schema:NAME=ROLE`) and a `pg_parameter_acl` grant
+  (`parameter_acl:NAME`). Those selectors can exist only in production, so they
+  could not be target `ignore` entries and every live command needed one
+  `--ignore` flag per selector. `drift check`, `contract check`, and `diff`
+  (with the new `--target NAME [--config FILE]`) remove exactly the named
+  blocker markers from the live snapshot and list them as
+  `observer.live_ignored` (`workspace_compatibility` for a `diff` plan). Selectors are
+  exact, written as the report prints them with `quote_ident`-style
+  identifiers, validated for form and kind, and need not match in every
+  cluster. They never remove a typed object or add an ignore receipt.
+  They are removed before the comparison fingerprint is computed, so a catalog
+  that differs from the expected graph only by acknowledged state compares
+  equal (`drift check` is `drift_free`; `contract check` matches its
+  checkpoint) and the reported fingerprint depends on the list;
+  `observer.observed_fingerprint` reports the fingerprint before removal, in
+  `drift check` and `contract check` results when something was removed.
+  A configured selector that matched nothing is listed as
+  `observer.live_ignore_unmatched` (`live_ignore_unmatched:SELECTOR` in a `diff`
+  plan's `workspace_compatibility`); that is information only and never changes
+  a status, exit code, or fingerprint, so a typo, or a keyword that PostgreSQL
+  quotes, does not pass unnoticed. `--target` and `--config` belong to `diff`
+  only: the legacy `plan --from --to` spelling does not accept them and never
+  applies the list.
+  Planning, verification, replayed history, and DDL sources ignore the list. The attribute ledger keeps these catalogs classified as blocked:
+  a parameter ACL or a foreign-owned schema can be a real privilege difference
+  between environments, so nothing is acknowledged without an exact entry, and a
+  changed owner or a new grant blocks again.
+- `diff --from-env ENV` and `--to-env ENV` read a side's PostgreSQL URL from an
+  environment variable, like `drift check --database-env`, so a live URL stays
+  out of process arguments. Each is mutually exclusive with `--from` or `--to`
+  for the same side.
 
 ## v0.1.0-preview.5 — 2026-10-06
 

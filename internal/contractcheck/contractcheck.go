@@ -63,6 +63,19 @@ type ObserverProjection struct {
 	DatabaseOwner   string   `json:"database_owner"`
 	Mode            string   `json:"mode"`
 	ProjectedAccess []string `json:"projected_access,omitempty"`
+	// LiveIgnored lists the unsupported-state selectors, observed in this
+	// catalog, that the target's live_ignore list acknowledged. They are
+	// environmental state the reader still sees, but not a blocker.
+	LiveIgnored []string `json:"live_ignored,omitempty"`
+	// LiveIgnoreUnmatched lists configured live_ignore selectors that matched
+	// nothing in this catalog. It is information only: the same configuration
+	// serves several environments, and a typo shows up here.
+	LiveIgnoreUnmatched []string `json:"live_ignore_unmatched,omitempty"`
+	// ObservedFingerprint is the fingerprint of the catalog before LiveIgnored
+	// selectors were removed, so a reader can tell that two runs saw the same
+	// catalog. The reported actual fingerprint is the one after removal, which
+	// is what is compared. Present only when LiveIgnored is not empty.
+	ObservedFingerprint string `json:"observed_fingerprint,omitempty"`
 }
 
 type ReconciliationReadiness struct {
@@ -83,6 +96,7 @@ type Report struct {
 	BundleEntryDigest   string                    `json:"bundle_entry_digest"`
 	ExpectedFingerprint string                    `json:"expected_expand_fingerprint"`
 	ActualFingerprint   string                    `json:"actual_fingerprint,omitempty"`
+	Unsupported         []string                  `json:"unsupported,omitempty"`
 	CheckedAt           string                    `json:"checked_at"`
 	Observer            ObserverProjection        `json:"observer"`
 	GateResults         []GateResult              `json:"gates,omitempty"`
@@ -100,6 +114,10 @@ type Input struct {
 	Now              time.Time
 	StatementTimeout time.Duration
 	Options          graphplan.Options
+	// LiveIgnore holds the target's live_ignore selectors. It can only
+	// acknowledge unsupported state; it cannot hide an object from the
+	// receipted checkpoint comparison.
+	LiveIgnore []string
 }
 
 type observerContext struct {
@@ -476,6 +494,11 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Findings = append(report.Findings, *finding)
 		return finalize(report), nil
 	}
+	unprojected := actual
+	actual, report.Observer.LiveIgnored, report.Observer.LiveIgnoreUnmatched, err = source.ProjectLiveIgnored(actual, input.LiveIgnore)
+	if err != nil {
+		return Report{}, err
+	}
 	if err := sqlcheck.RequireUnfilteredRows(ctx, tx); err != nil {
 		if !errors.Is(err, sqlcheck.ErrRowSecurity) {
 			return Report{}, err
@@ -495,15 +518,47 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	if report.ActualFingerprint != checkpoint.ExpandFingerprint {
+	if len(report.Observer.LiveIgnored) > 0 {
+		raw, err := withoutObserverIgnoreReceipts(unprojected, input.Artifact.Manifest.Planner.ObserverIgnoreSelectors)
+		if err != nil {
+			return Report{}, err
+		}
+		if report.Observer.ObservedFingerprint, err = graphplan.Fingerprint(raw, input.Options); err != nil {
+			return Report{}, err
+		}
+	}
+	// Unsupported state is part of the observed fingerprint, but a receipted
+	// checkpoint never contains any. Classify catalog drift on the modeled
+	// graph alone so that unsupported state cannot masquerade as drift, and
+	// report that state by name.
+	comparable := report.ActualFingerprint
+	if unsupported := actual.Unsupported(); len(unsupported) > 0 {
+		report.Status, report.Unsupported = "unsupported", unsupported
+		report.Findings = append(report.Findings, Finding{
+			Code:        "unsupported_catalog_state",
+			Message:     "production holds catalog state the planner cannot model: " + strings.Join(unsupported, ", "),
+			Remediation: "resolve the state; provider-owned extension, schema, and parameter ACL state can be acknowledged in the target's live_ignore list; diff and drift check refuse the same catalog",
+		})
+		modeled, err := actual.Project(nil, func(string) bool { return false })
+		if err != nil {
+			return Report{}, err
+		}
+		if comparable, err = graphplan.Fingerprint(modeled, input.Options); err != nil {
+			return Report{}, err
+		}
+	}
+	if comparable != checkpoint.ExpandFingerprint {
 		code, message := "catalog_drift", "production does not match the receipted post-expand catalog"
-		switch report.ActualFingerprint {
+		switch comparable {
 		case checkpoint.BaselineFingerprint:
 			code, message = "expand_not_applied", "production still matches the pre-expand baseline"
 		case checkpoint.DesiredFingerprint:
 			code, message = "contract_already_applied", "production already matches the desired post-contract catalog"
 		}
 		report.Findings = append(report.Findings, Finding{Code: code, Message: message, Remediation: "inspect deployment state and catalog drift before running contract"})
+		return finalize(report), nil
+	}
+	if report.Status == "unsupported" {
 		return finalize(report), nil
 	}
 

@@ -392,4 +392,6 @@ database, which is force-dropped on success, failure, or cancellation.
 `drift check` emits target, history head,
 expected and actual fingerprints, exact ignored objects, and deterministic
 differences classified as `missing_in_actual`, `unexpected_in_actual`, or
-`changed_in_actual`. Drift exits `4`; a matching live catalog exits `0`.
+`changed_in_actual`. Drift exits `4`; a matching live catalog exits `0`. Catalog
+state the planner cannot model is listed in `unsupported` with status
+`unsupported` and exit `3`, alongside the differences.
