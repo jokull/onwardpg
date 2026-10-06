@@ -69,8 +69,6 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   out of process arguments. Each is mutually exclusive with `--from` or `--to`
   for the same side.
 
-||||||| 4b28fc5
-
 ## v0.1.0-preview.5 — 2026-10-06
 
 ### Fixed
