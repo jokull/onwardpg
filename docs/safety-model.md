@@ -50,7 +50,11 @@ extension or a schema by a role other than the inspecting role, and
 ledger keeps them classified as blocked. A target's `live_ignore` list can
 acknowledge an exact selector for commands that read a live catalog
 (`drift check`, `contract check`, and `diff --target`). The list removes only
-that blocker marker, never a typed object, and it is not applied to replayed
+that blocker marker, never a typed object, before the comparison fingerprint is
+computed, so a catalog that differs from the expected graph only by acknowledged
+state compares equal; the removed selectors are listed and
+`observer.observed_fingerprint` reports the catalog's fingerprint before
+removal. It is not applied to replayed
 history, DDL sources, planning, or verification. It is not a default: a new
 parameter grant or a changed owner is a different selector and blocks again, and
 the acknowledged state is reported as `observer.live_ignored`. A parameter ACL

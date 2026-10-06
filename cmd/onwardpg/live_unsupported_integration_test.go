@@ -239,6 +239,19 @@ live_ignore = [`+strings.Join(quoted, ", ")+`]
 		if report.Observer == nil || !reflect.DeepEqual(report.Observer.LiveIgnored, []string{extension, schema}) {
 			t.Fatalf("observer = %#v", report.Observer)
 		}
+		// Replayed history and the live catalog compare equal once the
+		// acknowledged markers are removed; the raw catalog is reported apart.
+		if report.ExpectedFingerprint != report.ActualFingerprint || report.Observer.ObservedFingerprint == "" || report.Observer.ObservedFingerprint == report.ActualFingerprint {
+			t.Fatalf("fingerprints: expected %s, actual %s, observed %s", report.ExpectedFingerprint, report.ActualFingerprint, report.Observer.ObservedFingerprint)
+		}
+		observed := report.Observer.ObservedFingerprint
+		writeConfig()
+		defer writeConfig(extension, schema)
+		code, report = drift()
+		if code != 3 || report.Outcome != "unsupported" || len(report.Differences) != 0 || !reflect.DeepEqual(sortedUnsupported(report.Unsupported), []string{extension, schema}) ||
+			report.ActualFingerprint != observed || report.Observer.ObservedFingerprint != "" {
+			t.Fatalf("without live_ignore: exit = %d, report = %#v", code, report)
+		}
 	})
 
 	t.Run("diff agrees only when it is given the target", func(t *testing.T) {

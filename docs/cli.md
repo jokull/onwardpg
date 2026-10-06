@@ -144,15 +144,15 @@ live_ignore = [
 
 Only three selector forms are accepted: `ownership:extension:NAME=ROLE`,
 `ownership:schema:NAME=ROLE`, and `parameter_acl:NAME`, each exact, with no
-wildcard. The list is validated for syntax only. A selector that matches nothing
+wildcard. The list is validated for form only. A selector that matches nothing
 in a given cluster is not an error, because one configuration serves clusters
 that differ in what their provider installs.
 
 `live_ignore` is read only by commands that inspect a live catalog: `drift
 check`, `contract check`, and `diff` when it is given `--target`. It removes
 the named blocker markers from the live snapshot and nothing else. It never
-removes a typed object, adds an ignore receipt, or changes a fingerprint, so
-every difference in the modeled graph stays visible; for example, the
+removes a typed object or adds an ignore receipt, so every difference in the
+modeled graph stays visible; for example, the
 extension itself is still compared when the project DDL creates it, and a
 provider schema that is not in the project DDL still appears as an unexpected
 object. It does not apply to the replayed history or to DDL sources, to `init`,
@@ -161,6 +161,28 @@ object. It does not apply to the replayed history or to DDL sources, to `init`,
 `diff` lists it as `live_ignored:SELECTOR` in `workspace_compatibility` of a
 planned or unsupported result; the decision envelope, which carries no
 compatibility list, omits it.
+
+Fingerprints follow one rule. The acknowledged selectors are removed before
+the comparison fingerprint is computed, because unsupported markers are part of
+a snapshot's fingerprint and a catalog whose only difference from the expected
+graph is acknowledged provider state must compare equal: `drift check` then
+reports `drift_free` with `expected_fingerprint` equal to `actual_fingerprint`,
+and `contract check` matches the receipted checkpoint. The reported
+`actual_fingerprint` (and `diff`'s `current_fingerprint`) therefore depends on
+the `live_ignore` list. The removed selectors are listed, and
+`observer.observed_fingerprint` reports the fingerprint of the live catalog
+before removal, so a reader can tell that two runs saw the same catalog. It is
+present in `drift check` and `contract check` results only when something was
+removed. `diff` has no such field.
+
+A selector must be written the way the report prints it, with every identifier
+as PostgreSQL's `quote_ident` writes it: unquoted lower-case letters, digits,
+and underscores that do not start with a digit, otherwise double-quoted with
+embedded quotes doubled, for example `parameter_acl:"extwlist.extensions"` and
+`ownership:schema:"Provider Schema"=pscale_admin`. Both the name and the role are
+required, the single `=` outside quotes separates them, and nothing may follow.
+Because an unmatched selector is not an error, a selector that cannot be a
+generated one is rejected rather than silently matching nothing.
 
 An ownership selector names the owning role, so a change of owner blocks again.
 A `parameter_acl` selector names a parameter, not a grantee: a grant on a new

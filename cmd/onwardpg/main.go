@@ -535,8 +535,9 @@ func runDriftAt(arguments []string, start string) int {
 	}
 	report.Observer = &driftcheck.Observer{
 		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode,
-		ProjectedAccess: append([]string(nil), observer.ProjectedAccess...),
-		LiveIgnored:     append([]string(nil), observer.LiveIgnored...),
+		ProjectedAccess:     append([]string(nil), observer.ProjectedAccess...),
+		LiveIgnored:         append([]string(nil), observer.LiveIgnored...),
+		ObservedFingerprint: observer.ObservedFingerprint,
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
 	switch report.Outcome {

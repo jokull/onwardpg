@@ -45,6 +45,11 @@ type Observer struct {
 	// the target's live_ignore list acknowledged: environmental state of the
 	// cluster, shown but not a blocker.
 	LiveIgnored []string `json:"live_ignored,omitempty"`
+	// ObservedFingerprint is the fingerprint of the live catalog before
+	// LiveIgnored selectors were removed. The report's actual_fingerprint is
+	// the one after removal, which is what is compared. Present only when
+	// LiveIgnored is not empty.
+	ObservedFingerprint string `json:"observed_fingerprint,omitempty"`
 }
 
 func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (Report, error) {

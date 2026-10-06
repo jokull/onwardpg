@@ -67,6 +67,11 @@ type ObserverProjection struct {
 	// catalog, that the target's live_ignore list acknowledged. They are
 	// environmental state the reader still sees, but not a blocker.
 	LiveIgnored []string `json:"live_ignored,omitempty"`
+	// ObservedFingerprint is the fingerprint of the catalog before LiveIgnored
+	// selectors were removed, so a reader can tell that two runs saw the same
+	// catalog. The reported actual fingerprint is the one after removal, which
+	// is what is compared. Present only when LiveIgnored is not empty.
+	ObservedFingerprint string `json:"observed_fingerprint,omitempty"`
 }
 
 type ReconciliationReadiness struct {
@@ -485,6 +490,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Findings = append(report.Findings, *finding)
 		return finalize(report), nil
 	}
+	unprojected := actual
 	actual, report.Observer.LiveIgnored, err = source.ProjectLiveIgnored(actual, input.LiveIgnore)
 	if err != nil {
 		return Report{}, err
@@ -507,6 +513,15 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	report.ActualFingerprint, err = graphplan.Fingerprint(actual, input.Options)
 	if err != nil {
 		return Report{}, err
+	}
+	if len(report.Observer.LiveIgnored) > 0 {
+		raw, err := withoutObserverIgnoreReceipts(unprojected, input.Artifact.Manifest.Planner.ObserverIgnoreSelectors)
+		if err != nil {
+			return Report{}, err
+		}
+		if report.Observer.ObservedFingerprint, err = graphplan.Fingerprint(raw, input.Options); err != nil {
+			return Report{}, err
+		}
 	}
 	// Unsupported state is part of the observed fingerprint, but a receipted
 	// checkpoint never contains any. Classify catalog drift on the modeled

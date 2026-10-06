@@ -37,10 +37,16 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   (with the new `--target NAME [--config FILE]`) remove exactly the named
   blocker markers from the live snapshot and list them as
   `observer.live_ignored` (`workspace_compatibility` for a `diff` plan). Selectors are
-  exact, validated for syntax and kind only, and need not match in every
-  cluster. They never remove a typed object, add an ignore receipt, or change a
-  fingerprint, and planning, verification, replayed history, and DDL sources
-  ignore them. The attribute ledger keeps these catalogs classified as blocked:
+  exact, written as the report prints them with `quote_ident`-style
+  identifiers, validated for form and kind, and need not match in every
+  cluster. They never remove a typed object or add an ignore receipt.
+  They are removed before the comparison fingerprint is computed, so a catalog
+  that differs from the expected graph only by acknowledged state compares
+  equal (`drift check` is `drift_free`; `contract check` matches its
+  checkpoint) and the reported fingerprint depends on the list;
+  `observer.observed_fingerprint` reports the fingerprint before removal, in
+  `drift check` and `contract check` results when something was removed.
+  Planning, verification, replayed history, and DDL sources ignore the list. The attribute ledger keeps these catalogs classified as blocked:
   a parameter ACL or a foreign-owned schema can be a real privilege difference
   between environments, so nothing is acknowledged without an exact entry, and a
   changed owner or a new grant blocks again.

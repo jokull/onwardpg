@@ -63,9 +63,15 @@ func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores, li
 	if finding != nil {
 		return snapshot, report, finding, nil
 	}
-	snapshot, report.LiveIgnored, err = source.ProjectLiveIgnored(snapshot, liveIgnore)
+	observed := snapshot
+	snapshot, report.LiveIgnored, err = source.ProjectLiveIgnored(observed, liveIgnore)
 	if err != nil {
 		return nil, report, nil, err
+	}
+	if len(report.LiveIgnored) > 0 {
+		if report.ObservedFingerprint, err = observed.Fingerprint(); err != nil {
+			return nil, report, nil, err
+		}
 	}
 	return snapshot, report, nil, nil
 }

@@ -8,37 +8,90 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
-func TestValidateLiveIgnoreSelectorsAcceptsOnlyExactProviderState(t *testing.T) {
-	for _, selector := range []string{
+func TestValidateLiveIgnoreSelectorsGrammar(t *testing.T) {
+	valid := []string{
 		"ownership:extension:earthdistance=pscale_admin",
+		"ownership:extension:pg_stat_statements=pscale_admin",
+		"ownership:schema:pscale_extensions=pscale_admin",
 		`ownership:schema:"Provider Schema"=pscale_admin`,
+		`ownership:schema:"a=b"="role=1"`,
+		`ownership:schema:"say ""hi"""="Admin ""One"""`,
+		`ownership:extension:"uuid-ossp"=pscale_admin`,
 		"parameter_acl:session_replication_role",
 		`parameter_acl:"extwlist.extensions"`,
-	} {
+		`parameter_acl:"a""b"`,
+	}
+	for _, selector := range valid {
 		if err := ValidateLiveIgnoreSelectors([]string{selector}); err != nil {
 			t.Errorf("%s rejected: %v", selector, err)
 		}
 	}
-	for _, selector := range []string{
+	invalid := []string{
 		"",
 		"ownership:extension:",
 		"ownership:extension:earthdistance",
 		"ownership:schema:pscale_extensions",
+		"ownership:schema:=provider",
+		"ownership:schema:provider_ext=",
+		"ownership:extension:name=role=extra",
+		"ownership:extension:name==role",
+		"ownership:extension:name=role ",
+		"ownership:extension:name=role,other",
+		"ownership:extension:name =role",
+		`ownership:schema:""=role`,
+		`ownership:schema:name=""`,
+		`ownership:schema:"name=role`,
+		`ownership:schema:"name"role`,
+		`ownership:schema:"name"x=role`,
+		`ownership:schema:"na"me"=role`,
+		`ownership:schema:name="role`,
+		`ownership:schema:name="ro"le"`,
+		"ownership:schema:Provider=role",
+		"ownership:schema:name=Role",
+		"ownership:schema:1name=role",
+		"ownership:schema:na$me=role",
 		"ownership:*",
 		"ownership:extension:*",
 		"ownership:relation:public.sessions=provider",
 		"ownership:routine:public.f()=provider",
 		"parameter_acl:*",
 		"parameter_acl:",
+		`parameter_acl:""`,
+		`parameter_acl:"unterminated`,
+		`parameter_acl:"a"b`,
+		"parameter_acl:a.b",
+		"parameter_acl:session_replication_role=on",
+		"parameter_acl:session_replication_role ",
 		" parameter_acl:session_replication_role",
 		"extension:earthdistance",
 		"table:public.orders",
 		"acl:schema:public",
 		"event_trigger:audit",
-	} {
+	}
+	for _, selector := range invalid {
 		err := ValidateLiveIgnoreSelectors([]string{selector})
 		if err == nil || !strings.Contains(err.Error(), "live_ignore") {
 			t.Errorf("%q accepted or mislabelled: %v", selector, err)
+		}
+	}
+}
+
+// Selectors the catalog queries emit are built with quote_ident; these are the
+// forms PostgreSQL produces for identifiers that need quoting.
+func TestValidateLiveIgnoreSelectorsAcceptsWhatTheGeneratorEmits(t *testing.T) {
+	for _, identifier := range []string{
+		"plain", "_leading_underscore", "with_digits_2", `"Mixed"`, `"has space"`, `"with.dot"`, `"with-dash"`,
+		`"uuid-ossp"`, `"dollar$"`, `"equals=sign"`, `"quote""inside"`, `"1leading_digit"`, `"user"`, `"ünïcode"`,
+	} {
+		for _, selector := range []string{
+			"ownership:extension:" + identifier + "=" + identifier,
+			"ownership:schema:" + identifier + "=plain",
+			"ownership:schema:plain=" + identifier,
+			"parameter_acl:" + identifier,
+		} {
+			if err := ValidateLiveIgnoreSelectors([]string{selector}); err != nil {
+				t.Errorf("%s rejected: %v", selector, err)
+			}
 		}
 	}
 }

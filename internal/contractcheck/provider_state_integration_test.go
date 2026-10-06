@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jokull/onwardpg/internal/bundle"
+	"github.com/jokull/onwardpg/internal/driftcheck"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/internal/source"
@@ -28,6 +29,13 @@ type providerFixture struct {
 
 func newProviderFixture(t *testing.T) *providerFixture {
 	t.Helper()
+	return newProviderFixtureWithRole(t, "_provider")
+}
+
+// newProviderFixtureWithRole names the provider role after the scratch role
+// plus suffix, so a test can give it a name that needs quoting.
+func newProviderFixtureWithRole(t *testing.T, suffix string) *providerFixture {
+	t.Helper()
 	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if adminURL == "" {
 		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
@@ -37,7 +45,7 @@ func newProviderFixture(t *testing.T) *providerFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &providerFixture{t: t, Role: scratch.Role + "_provider", URL: restrictedScratchURL(scratch.Config)}
+	fixture := &providerFixture{t: t, Role: scratch.Role + suffix, URL: restrictedScratchURL(scratch.Config)}
 	if fixture.cluster, err = pgx.Connect(ctx, adminURL); err != nil {
 		_ = scratch.Close()
 		t.Fatal(err)
@@ -324,9 +332,10 @@ func TestContractCheckAppliesLiveIgnoreToUnsupportedStateOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != "unsupported" || len(report.Unsupported) != 3 {
+	if report.Status != "unsupported" || len(report.Unsupported) != 3 || report.Observer.ObservedFingerprint != "" {
 		t.Fatalf("without live_ignore: %#v", report)
 	}
+	observed := report.ActualFingerprint
 
 	input.LiveIgnore = acknowledged
 	report, err = Run(ctx, input)
@@ -335,6 +344,15 @@ func TestContractCheckAppliesLiveIgnoreToUnsupportedStateOnly(t *testing.T) {
 	}
 	if report.Status != "ready" || len(report.Unsupported) != 0 || strings.Join(report.Observer.LiveIgnored, ",") != strings.Join(acknowledged, ",") {
 		t.Fatalf("with live_ignore: %#v", report)
+	}
+	// The comparison fingerprint is taken after the markers are removed, so the
+	// catalog matches the receipted checkpoint; the raw one is reported apart.
+	if report.ActualFingerprint != report.ExpectedFingerprint || report.Observer.ObservedFingerprint == "" || report.Observer.ObservedFingerprint == report.ActualFingerprint {
+		t.Fatalf("fingerprints: expected %s, actual %s, observed %s", report.ExpectedFingerprint, report.ActualFingerprint, report.Observer.ObservedFingerprint)
+	}
+
+	if report.Observer.ObservedFingerprint != observed {
+		t.Fatalf("observed fingerprint %s is not the unprojected catalog %s", report.Observer.ObservedFingerprint, observed)
 	}
 
 	// live_ignore cannot hide a modeled difference from the receipted checkpoint.
@@ -345,5 +363,112 @@ func TestContractCheckAppliesLiveIgnoreToUnsupportedStateOnly(t *testing.T) {
 	}
 	if report.Status != "blocked" || len(report.Findings) != 1 || report.Findings[0].Code != "catalog_drift" {
 		t.Fatalf("modeled drift under live_ignore: %#v", report)
+	}
+}
+
+// Replayed history and the live catalog are identical except for state the
+// provider owns: the project DDL creates the extension and the schema, and in
+// the live cluster a provider role owns both and holds a parameter grant.
+func TestDriftCheckIsInSyncWhenOnlyAcknowledgedProviderStateDiffers(t *testing.T) {
+	fixture := newProviderFixture(t)
+	ctx := context.Background()
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	fixture.ownExtension("citext")
+	fixture.ownSchema("provider_ext")
+	// The project's own role, the database owner, creates the application table.
+	owner, err := pgx.Connect(ctx, fixture.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close(ctx)
+	if _, err := owner.Exec(ctx, "CREATE TABLE public.users (id bigint, email citext)"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.grantParameter("session_replication_role")
+	acknowledged := []string{
+		"ownership:extension:citext=" + fixture.Role,
+		"ownership:schema:provider_ext=" + fixture.Role,
+		"parameter_acl:session_replication_role",
+	}
+
+	expected, err := source.LoadDDLGraphForComparison(ctx, []byte("CREATE EXTENSION citext; CREATE SCHEMA provider_ext; CREATE TABLE public.users (id bigint, email citext);"), "provider-state-test", adminURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replay happens in a scratch cluster of its own in practice; here it shares
+	// this cluster, so drop the cluster-wide parameter marker it also observes.
+	expected, err = expected.Project(nil, func(selector string) bool { return !strings.HasPrefix(selector, "parameter_acl:") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	compare := func(liveIgnore []string) (driftcheck.Report, ObserverProjection) {
+		t.Helper()
+		actual, projection, finding, err := InspectObserverCatalog(ctx, fixture.URL, nil, liveIgnore, 5*time.Second)
+		if err != nil || finding != nil {
+			t.Fatalf("finding = %#v, err = %v", finding, err)
+		}
+		report, err := driftcheck.Compare("primary", "head", expected, actual)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return report, projection
+	}
+
+	report, projection := compare(nil)
+	if report.Outcome != "unsupported" || strings.Join(report.Unsupported, ",") != strings.Join(acknowledged, ",") || len(report.Differences) != 0 || projection.ObservedFingerprint != "" {
+		t.Fatalf("without live_ignore: %#v", report)
+	}
+	rawFingerprint := report.ActualFingerprint
+
+	report, projection = compare(acknowledged)
+	if report.Outcome != "drift_free" || len(report.Differences) != 0 || len(report.Unsupported) != 0 {
+		t.Fatalf("with live_ignore: %#v", report)
+	}
+	if report.ExpectedFingerprint != report.ActualFingerprint {
+		t.Fatalf("fingerprints differ: expected %s, actual %s", report.ExpectedFingerprint, report.ActualFingerprint)
+	}
+	if strings.Join(projection.LiveIgnored, ",") != strings.Join(acknowledged, ",") {
+		t.Fatalf("live ignored = %#v", projection.LiveIgnored)
+	}
+	if projection.ObservedFingerprint != rawFingerprint || rawFingerprint == report.ActualFingerprint {
+		t.Fatalf("observed fingerprint = %s, raw = %s, compared = %s", projection.ObservedFingerprint, rawFingerprint, report.ActualFingerprint)
+	}
+}
+
+// Every selector the catalog queries really emit must pass live_ignore
+// validation and be acknowledged by itself, including identifiers that
+// quote_ident has to quote.
+func TestLiveIgnoreAcceptsEveryProviderSelectorTheInspectorEmits(t *testing.T) {
+	fixture := newProviderFixtureWithRole(t, `_Provider "Admin"=1`)
+	ctx := context.Background()
+	fixture.ownExtension(`"uuid-ossp"`)
+	fixture.exec(`CREATE SCHEMA "Provider ""Schema""=x" AUTHORIZATION ` + pgx.Identifier{fixture.Role}.Sanitize())
+	fixture.grantParameter("my.custom_param")
+	fixture.grantParameter("session_replication_role")
+
+	snapshot, _, finding, err := InspectObserverCatalog(ctx, fixture.URL, nil, nil, 5*time.Second)
+	if err != nil || finding != nil {
+		t.Fatalf("finding = %#v, err = %v", finding, err)
+	}
+	var emitted []string
+	for _, selector := range snapshot.Unsupported() {
+		if strings.HasPrefix(selector, "ownership:") || strings.HasPrefix(selector, "parameter_acl:") {
+			emitted = append(emitted, selector)
+		}
+	}
+	if len(emitted) != 4 {
+		t.Fatalf("emitted selectors = %#v", emitted)
+	}
+	for _, selector := range emitted {
+		if err := source.ValidateLiveIgnoreSelectors([]string{selector}); err != nil {
+			t.Errorf("generated selector rejected: %v", err)
+		}
+	}
+	projected, projection, _, err := InspectObserverCatalog(ctx, fixture.URL, nil, emitted, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projected.Unsupported()) != 0 || len(projection.LiveIgnored) != 4 {
+		t.Fatalf("unsupported = %#v, live ignored = %#v", projected.Unsupported(), projection.LiveIgnored)
 	}
 }

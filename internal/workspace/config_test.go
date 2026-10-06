@@ -124,6 +124,12 @@ bundle_root = "onward-bundles"
 schema_file = "schema.sql"
 live_ignore = ["parameter_acl:*"]
 `,
+		"live-ignore-malformed-ownership": `version = 1
+bundle_root = "onward-bundles"
+[targets.db]
+schema_file = "schema.sql"
+live_ignore = ["ownership:schema:=provider"]
+`,
 		"live-ignore-outside-provider-state": `version = 1
 bundle_root = "onward-bundles"
 [targets.db]
