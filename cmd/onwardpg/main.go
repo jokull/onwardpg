@@ -438,15 +438,16 @@ func runContractAt(arguments []string, start string) int {
 
 func runDriftAt(arguments []string, start string) int {
 	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg drift check --database URL [--target NAME]")
+		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg drift check (--database URL | --database-env ENV) [--target NAME]")
 		return 0
 	}
 	if len(arguments) == 0 || arguments[0] != "check" {
-		return writeError("invalid_invocation", errors.New("usage: onwardpg drift check --database URL [--target NAME]"))
+		return writeError("invalid_invocation", errors.New("usage: onwardpg drift check (--database URL | --database-env ENV) [--target NAME]"))
 	}
 	flags := flag.NewFlagSet("drift check", flag.ContinueOnError)
 	targetName := flags.String("target", "", "configured database target name")
-	databaseURL := flags.String("database", "", "live PostgreSQL URL inspected read-only")
+	databaseFlag := flags.String("database", "", "live PostgreSQL URL inspected read-only")
+	databaseEnv := flags.String("database-env", "", "environment variable containing the live PostgreSQL URL inspected read-only")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
@@ -458,8 +459,18 @@ func runDriftAt(arguments []string, start string) int {
 	if code := rejectPositionals(flags, "drift check"); code != 0 {
 		return code
 	}
-	if *databaseURL == "" {
-		return writeError("invalid_invocation", errors.New("drift check requires --database"))
+	if *databaseFlag != "" && *databaseEnv != "" {
+		return writeError("invalid_invocation", errors.New("drift check accepts either --database or --database-env, not both"))
+	}
+	databaseURL := *databaseFlag
+	if *databaseEnv != "" {
+		databaseURL = os.Getenv(*databaseEnv)
+		if databaseURL == "" {
+			return writeError("source_error", fmt.Errorf("environment variable %s is required", *databaseEnv))
+		}
+	}
+	if databaseURL == "" {
+		return writeError("invalid_invocation", errors.New("drift check requires --database or --database-env"))
 	}
 	configPath := *configName
 	if !filepath.IsAbs(configPath) {
@@ -500,7 +511,7 @@ func runDriftAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
-	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, *databaseURL, selectors, 30*time.Second)
+	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, 30*time.Second)
 	if err != nil {
 		return writeError("drift_observer_error", fmt.Errorf("inspect live catalog through the read-only observer boundary: %w", err))
 	}

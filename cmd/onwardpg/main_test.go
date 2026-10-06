@@ -810,6 +810,35 @@ func TestDevPlanRejectsUnknownOutputBeforeReadingConfiguration(t *testing.T) {
 	}
 }
 
+func TestDriftCheckDatabaseSourceValidation(t *testing.T) {
+	const secret = "postgres://user:secret@127.0.0.1:1/db"
+	t.Setenv("ONWARDPG_TEST_DRIFT_URL", secret)
+	t.Setenv("ONWARDPG_TEST_DRIFT_EMPTY", "")
+	tests := []struct {
+		name      string
+		arguments []string
+		want      string
+	}{
+		{"neither", []string{"check"}, `"code":"invalid_invocation"`},
+		{"both", []string{"check", "--database", secret, "--database-env", "ONWARDPG_TEST_DRIFT_URL"}, "either --database or --database-env, not both"},
+		{"unset variable", []string{"check", "--database-env", "ONWARDPG_TEST_DRIFT_UNSET"}, "environment variable ONWARDPG_TEST_DRIFT_UNSET is required"},
+		{"empty variable", []string{"check", "--database-env", "ONWARDPG_TEST_DRIFT_EMPTY"}, "environment variable ONWARDPG_TEST_DRIFT_EMPTY is required"},
+		// A usable variable passes validation and reaches configuration loading.
+		{"variable accepted", []string{"check", "--database-env", "ONWARDPG_TEST_DRIFT_URL"}, `"code":"invalid_config"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := captureStdout(t, func() int { return runDriftAt(test.arguments, t.TempDir()) })
+			if output.code != 1 || !strings.Contains(output.stdout, test.want) {
+				t.Fatalf("exit = %d, stdout = %s, want %q", output.code, output.stdout, test.want)
+			}
+			if strings.Contains(output.stdout, "secret") {
+				t.Fatalf("diagnostic leaked the database URL: %s", output.stdout)
+			}
+		})
+	}
+}
+
 func TestDiagnosticContract(t *testing.T) {
 	diagnostic := protocol.ErrorDiagnostic("invalid_invocation", errors.New("bad flags"))
 	data, err := json.Marshal(diagnostic)

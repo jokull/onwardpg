@@ -12,6 +12,7 @@ onwardpg status
 onwardpg verify
 onwardpg contract check --environment production --database-env PROD_READONLY_DATABASE_URL
 onwardpg drift check --database URL
+onwardpg drift check --database-env PROD_READONLY_DATABASE_URL
 onwardpg diff --from SOURCE --to SOURCE
 ~~~
 
@@ -293,9 +294,13 @@ split boolean queries in verify.sql.
 
 ~~~sh
 onwardpg drift check \
-  --database "$PRODUCTION_DATABASE_URL" \
+  (--database "$PRODUCTION_DATABASE_URL" | --database-env ENV) \
   [--ignore SELECTOR]
 ~~~
+
+`--database-env` names an environment variable that holds the live URL, so the
+credential stays out of process arguments, like `contract check --database-env`.
+Pass exactly one of `--database` and `--database-env`.
 
 Replays the complete receipted history head in disposable PostgreSQL, inspects the
 explicitly supplied live catalog read-only, and reports typed missing,

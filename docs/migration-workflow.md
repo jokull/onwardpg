@@ -144,6 +144,8 @@ Run this when it is operationally useful, not as a requirement of every PR:
 
 ```sh
 onwardpg drift check --database "$PROD_DATABASE_URL"
+# or keep the credential out of process arguments:
+onwardpg drift check --database-env PROD_DATABASE_URL
 ```
 
 It compares observed P with replayed accepted history H and reports drift. A finding is evidence to

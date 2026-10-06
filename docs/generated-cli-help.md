@@ -149,6 +149,8 @@ Usage of drift check:
         repository configuration path (default ".onwardpg.toml")
   -database string
         live PostgreSQL URL inspected read-only
+  -database-env string
+        environment variable containing the live PostgreSQL URL inspected read-only
   -ignore value
         validated catalog selector to exclude
   -target string
