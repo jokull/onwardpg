@@ -4651,7 +4651,14 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 		if object.Name == "" || object.Schema == "" || object.Version == "" {
 			return nil, nil, []string{"extension_create:" + object.ObjectID().String()}, nil
 		}
-		sql := "CREATE EXTENSION " + quote(object.Name) + " WITH SCHEMA " + quote(object.Schema) + " VERSION " + literal(object.Version) + ";"
+		prefix := "CREATE EXTENSION "
+		if options.IfNotExists {
+			// Idempotent creation is what lets a scratch administrator install an
+			// untrusted extension (scratch_admin_extensions) before the restricted
+			// role replays this statement.
+			prefix += "IF NOT EXISTS "
+		}
+		sql := prefix + quote(object.Name) + " WITH SCHEMA " + quote(object.Schema) + " VERSION " + literal(object.Version) + ";"
 		statements := []protocol.Statement{statement(sql, "expand", "review", true, "extension_install")}
 		if object.Comment != nil {
 			statements = append(statements, statement("COMMENT ON EXTENSION "+quote(object.Name)+" IS "+literal(*object.Comment)+";", "expand", "safe", true))

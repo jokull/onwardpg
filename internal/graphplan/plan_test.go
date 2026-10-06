@@ -877,6 +877,20 @@ func TestBuildRendersExtensionCreate(t *testing.T) {
 	}
 }
 
+func TestBuildRendersIdempotentExtensionCreateWithIfNotExists(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	if err := desired.Add(pgschema.Extension{Schema: "public", Name: "pgcrypto", Version: "1.3"}); err != nil {
+		t.Fatal(err)
+	}
+	planned, err := Build(current, desired, protocol.Answers{}, Options{IfNotExists: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned || len(planned.Statements) != 1 || planned.Statements[0].SQL != `CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA "public" VERSION '1.3';` {
+		t.Fatalf("idempotent extension create was not rendered: %#v", planned)
+	}
+}
+
 func TestBuildRendersExtensionVersionUpdate(t *testing.T) {
 	current, desired := pgschema.New(), pgschema.New()
 	before := pgschema.Extension{Schema: "public", Name: "pgcrypto", Version: "1.2"}
