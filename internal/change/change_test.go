@@ -123,3 +123,22 @@ func TestBetweenIgnoresPhysicalColumnPosition(t *testing.T) {
 		t.Fatalf("physical position must not create a semantic diff: %#v", changes)
 	}
 }
+
+func TestBetweenIgnoresPostgres18NotNullConstraintName(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	table := pgschema.Table{Schema: "public", Name: "orders"}
+	before := pgschema.Column{Table: table.ObjectID(), Name: "email", Type: "text", NotNull: true, NotNullConstraintName: "orders_email_not_null"}
+	after := before
+	after.NotNullConstraintName = "orders_email_not_null1"
+	for snapshot, column := range map[*pgschema.Snapshot]pgschema.Column{current: before, desired: after} {
+		if err := snapshot.Add(table); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Add(column); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if changes := Between(current, desired); len(changes) != 0 {
+		t.Fatalf("a generated NOT NULL constraint name must not create a semantic diff: %#v", changes)
+	}
+}

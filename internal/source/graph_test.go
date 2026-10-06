@@ -53,6 +53,19 @@ func TestCatalogVersionPredicates(t *testing.T) {
 	if got := catalogVersionSafetyBlockersQuery(180000); !strings.Contains(got, "parameter_acl:") || !strings.Contains(got, "not_null_constraint:") {
 		t.Fatalf("PostgreSQL 18 version blocker query = %q", got)
 	}
+	// The generated-name decision is made in Go, so the SQL must not judge it.
+	if got := catalogVersionSafetyBlockersQuery(180000); strings.Contains(got, "_not_null'") {
+		t.Fatalf("PostgreSQL 18 version blocker query compares NOT NULL names: %q", got)
+	}
+	for _, version := range []int{140000, 150000, 170000} {
+		if got := notNullConstraintNameCandidatesQuery(version); got != "" {
+			t.Fatalf("PostgreSQL %d NOT NULL name candidate query = %q, want empty", version/10000, got)
+		}
+	}
+	if got := notNullConstraintNameCandidatesQuery(180000); !strings.Contains(got, "con.contype = 'n'") ||
+		!strings.Contains(got, "con.conislocal AND con.coninhcount = 0") || !strings.Contains(got, "array_length(con.conkey, 1) = 1") {
+		t.Fatalf("PostgreSQL 18 NOT NULL name candidate query = %q", got)
+	}
 }
 
 func TestCatalogSafetyQueryNamesSecurityLabelsWithoutValues(t *testing.T) {

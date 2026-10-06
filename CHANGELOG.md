@@ -3,6 +3,23 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## Unreleased
+
+### Fixed
+
+- On PostgreSQL 18, a NOT NULL constraint no longer blocks as
+  `not_null_constraint:` when its name is the one PostgreSQL itself generated
+  for its table and column. The check now reproduces PostgreSQL's
+  `makeObjectName` shortening to 63 bytes (including multibyte clipping) and the
+  `not_null1`, `not_null2`, ... collision suffix, instead of comparing against
+  `<table>_<column>_not_null`. Custom names, and default names left on a renamed
+  table or column, still block. Catalogs that differ only in which generated name
+  a constraint received now compare equal in `plan`, `diff`, `dev plan`, and
+  `drift check`. `not_null_constraint:` ignore selectors that existed only for
+  generated names can be removed; left in a target's `ignore` list they are
+  dormant, but an unused `--ignore` flag on `diff` or `drift check` is still
+  an error.
+
 ## v0.1.0-preview.4 — 2026-09-26
 
 ### Fixed
