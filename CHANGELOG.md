@@ -25,6 +25,20 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   that also differs from the receipted checkpoint still gets its
   `catalog_drift`, `expand_not_applied`, or `contract_already_applied` finding.
 
+- A foreign key whose only differences from the desired schema are its own
+  name and the name of the index behind the referenced primary-key or unique
+  constraint is now offered as a `rename_constraint` decision, in the same round as the key's own
+  rename. Before, such a foreign key was never a rename candidate, because the
+  index name that PostgreSQL records for the referenced key (`UsingIndex`) was
+  compared literally: after an ORM or `pg_dump` round trip left old key names
+  (`..._pk`, `idx_..._sqlite_autoindex_...`), every foreign key referencing one
+  was planned as drop plus re-add, with a full re-validation on a production
+  table. The foreign key is a candidate only while its referenced key is itself
+  a rename candidate that has not been declined; every other catalog field is
+  still compared. A confirmed pair emits only `ALTER TABLE ... RENAME
+  CONSTRAINT`, which PostgreSQL carries out as a metadata change. A foreign
+  key that references a unique index without a constraint is not covered.
+
 ### Added
 
 - A target can list `live_ignore` selectors in `.onwardpg.toml` for state a
@@ -54,6 +68,8 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   environment variable, like `drift check --database-env`, so a live URL stays
   out of process arguments. Each is mutually exclusive with `--from` or `--to`
   for the same side.
+
+||||||| 4b28fc5
 
 ## v0.1.0-preview.5 — 2026-10-06
 

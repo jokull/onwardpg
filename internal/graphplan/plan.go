@@ -1465,6 +1465,26 @@ func filterEquivalentDefaults(changes []change.Change, equivalent func(current, 
 	return filtered, nil
 }
 
+// constraintRenameOutcome records what happened to one rename candidate so
+// that a foreign key whose referenced key is renamed in the same plan can be
+// gated on the answer for that key.
+type constraintRenameOutcome int
+
+const (
+	constraintRenameUnresolved constraintRenameOutcome = iota + 1
+	constraintRenameConfirmed
+	constraintRenameDeclined
+)
+
+// resolveConstraintRenames asks a fingerprint-bound question for every
+// ordinary-table constraint that differs from a desired constraint only by
+// name. It runs in two passes. The first pass handles every constraint whose
+// identity is fully described by its own catalog state. The second pass
+// handles foreign keys whose referenced primary-key or unique index also
+// changes name: the foreign key stores that index by OID, so its rename is
+// still metadata-only, but it is only a candidate while the referenced key is
+// itself a rename candidate that the user has not declined. A foreign key is
+// therefore never renamed unless its referenced key is renamed with it.
 func resolveConstraintRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]change.Change, []renameConstraint, []protocol.Question, error) {
 	var drops, creates []change.Change
 	for _, item := range changes {
@@ -1480,6 +1500,47 @@ func resolveConstraintRenames(changes []change.Change, current, desired *pgschem
 	consumed := make(map[pgschema.ID]bool)
 	var renames []renameConstraint
 	var questions []protocol.Question
+	candidateOf := make(map[pgschema.ID]pgschema.ID)
+	outcomes := make(map[pgschema.ID]constraintRenameOutcome)
+
+	ask := func(drop, candidate change.Change) error {
+		before, after := drop.Before.(pgschema.Constraint), candidate.After.(pgschema.Constraint)
+		candidateOf[drop.ID] = candidate.ID
+		question := protocol.Question{
+			ID: "rename_constraint:" + drop.ID.String(), Kind: "rename_constraint", Key: drop.ID.String(),
+			Message:            "Was " + drop.ID.String() + " renamed to " + candidate.ID.String() + "?",
+			Choices:            []string{candidate.ID.String(), "create"},
+			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		}
+		answer, found, err := resolver.Resolve(question)
+		if err != nil {
+			return err
+		}
+		if !found {
+			outcomes[drop.ID] = constraintRenameUnresolved
+			questions = append(questions, question)
+			return nil
+		}
+		if answer != candidate.ID.String() {
+			outcomes[drop.ID] = constraintRenameDeclined
+			return nil
+		}
+		fromIndexes, toIndexes, ok := constraintRenameIndexes(current, desired, before, after)
+		if !ok {
+			outcomes[drop.ID] = constraintRenameDeclined
+			return nil
+		}
+		outcomes[drop.ID] = constraintRenameConfirmed
+		consumed[drop.ID], consumed[candidate.ID] = true, true
+		for i := range fromIndexes {
+			consumed[fromIndexes[i].ObjectID()] = true
+			consumed[toIndexes[i].ObjectID()] = true
+		}
+		renames = append(renames, renameConstraint{from: before, to: after, fromIndexes: fromIndexes, toIndexes: toIndexes})
+		return nil
+	}
+
+	var dependent []change.Change
 	for _, drop := range drops {
 		before := drop.Before.(pgschema.Constraint)
 		if before.Parent != nil || constraintTableIsPartitioned(current, before.Table) {
@@ -1494,38 +1555,45 @@ func resolveConstraintRenames(changes []change.Change, current, desired *pgschem
 				}
 			}
 		}
+		if len(candidates) == 0 && before.Type == pgschema.ConstraintForeign {
+			dependent = append(dependent, drop)
+			continue
+		}
 		if len(candidates) != 1 {
 			continue
 		}
-		candidate := candidates[0]
-		after := candidate.After.(pgschema.Constraint)
-		question := protocol.Question{
-			ID: "rename_constraint:" + drop.ID.String(), Kind: "rename_constraint", Key: drop.ID.String(),
-			Message:            "Was " + drop.ID.String() + " renamed to " + candidate.ID.String() + "?",
-			Choices:            []string{candidate.ID.String(), "create"},
-			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
-		}
-		answer, found, err := resolver.Resolve(question)
-		if err != nil {
+		if err := ask(drop, candidates[0]); err != nil {
 			return nil, nil, nil, err
 		}
-		if !found {
-			questions = append(questions, question)
-			continue
+	}
+
+	if len(dependent) > 0 {
+		currentKeys, desiredKeys := renameKeyConstraints(current), renameKeyConstraints(desired)
+		candidatesByDrop := make(map[pgschema.ID][]change.Change, len(dependent))
+		dropsByCreate := make(map[pgschema.ID]int)
+		for _, drop := range dependent {
+			before := drop.Before.(pgschema.Constraint)
+			for _, create := range creates {
+				after := create.After.(pgschema.Constraint)
+				if consumed[create.ID] || after.Parent != nil || constraintTableIsPartitioned(desired, after.Table) {
+					continue
+				}
+				if !equivalentForeignKeyForRename(before, after, currentKeys, desiredKeys, candidateOf, outcomes) {
+					continue
+				}
+				candidatesByDrop[drop.ID] = append(candidatesByDrop[drop.ID], create)
+				dropsByCreate[create.ID]++
+			}
 		}
-		if answer != candidate.ID.String() {
-			continue
+		for _, drop := range dependent {
+			candidates := candidatesByDrop[drop.ID]
+			if len(candidates) != 1 || dropsByCreate[candidates[0].ID] != 1 {
+				continue
+			}
+			if err := ask(drop, candidates[0]); err != nil {
+				return nil, nil, nil, err
+			}
 		}
-		fromIndexes, toIndexes, ok := constraintRenameIndexes(current, desired, before, after)
-		if !ok {
-			continue
-		}
-		consumed[drop.ID], consumed[candidate.ID] = true, true
-		for i := range fromIndexes {
-			consumed[fromIndexes[i].ObjectID()] = true
-			consumed[toIndexes[i].ObjectID()] = true
-		}
-		renames = append(renames, renameConstraint{from: before, to: after, fromIndexes: fromIndexes, toIndexes: toIndexes})
 	}
 	if len(consumed) == 0 {
 		return changes, renames, questions, nil
@@ -1549,6 +1617,68 @@ func equivalentConstraintForRename(before, after pgschema.Constraint) bool {
 	before.Name, after.Name = "", ""
 	before.Comment, after.Comment = nil, nil
 	return reflect.DeepEqual(before, after)
+}
+
+// renameKeyRef addresses the primary-key or unique constraint that owns an
+// index of the given name on a table.
+type renameKeyRef struct {
+	table pgschema.ID
+	index string
+}
+
+// renameKeyConstraints indexes the ordinary primary-key and unique constraints
+// whose backing index carries the constraint name, which is the only shape for
+// which RENAME CONSTRAINT also produces the desired index name. An index owned
+// by more than one constraint is omitted rather than guessed.
+func renameKeyConstraints(snapshot *pgschema.Snapshot) map[renameKeyRef]pgschema.Constraint {
+	keys := make(map[renameKeyRef]pgschema.Constraint)
+	ambiguous := make(map[renameKeyRef]bool)
+	for _, object := range snapshot.Objects() {
+		constraint, ok := object.(pgschema.Constraint)
+		if !ok || constraint.Parent != nil || constraint.UsingIndex == "" || constraint.UsingIndex != constraint.Name ||
+			constraint.Type != pgschema.ConstraintPrimary && constraint.Type != pgschema.ConstraintUnique {
+			continue
+		}
+		ref := renameKeyRef{table: constraint.Table, index: constraint.UsingIndex}
+		if _, exists := keys[ref]; exists {
+			ambiguous[ref] = true
+		}
+		keys[ref] = constraint
+	}
+	for ref := range ambiguous {
+		delete(keys, ref)
+	}
+	return keys
+}
+
+// equivalentForeignKeyForRename reports whether two foreign keys differ only
+// by constraint name and by the name of the referenced key's index, where that
+// index is owned by a primary-key or unique constraint that is itself a rename
+// candidate in the same plan and has not been declined. Every other catalog
+// field, including the referenced table, columns, actions and equality
+// operators, must still be identical.
+func equivalentForeignKeyForRename(before, after pgschema.Constraint, currentKeys, desiredKeys map[renameKeyRef]pgschema.Constraint, candidateOf map[pgschema.ID]pgschema.ID, outcomes map[pgschema.ID]constraintRenameOutcome) bool {
+	if before.Type != pgschema.ConstraintForeign || after.Type != pgschema.ConstraintForeign ||
+		before.Reference == nil || after.Reference == nil ||
+		before.UsingIndex == "" || after.UsingIndex == "" || before.UsingIndex == after.UsingIndex {
+		return false
+	}
+	beforeKey, ok := currentKeys[renameKeyRef{table: *before.Reference, index: before.UsingIndex}]
+	if !ok {
+		return false
+	}
+	afterKey, ok := desiredKeys[renameKeyRef{table: *after.Reference, index: after.UsingIndex}]
+	if !ok {
+		return false
+	}
+	if candidateOf[beforeKey.ObjectID()] != afterKey.ObjectID() {
+		return false
+	}
+	if outcome := outcomes[beforeKey.ObjectID()]; outcome != constraintRenameConfirmed && outcome != constraintRenameUnresolved {
+		return false
+	}
+	before.UsingIndex, after.UsingIndex = "", ""
+	return equivalentConstraintForRename(before, after)
 }
 
 func constraintTableIsPartitioned(snapshot *pgschema.Snapshot, id pgschema.ID) bool {
