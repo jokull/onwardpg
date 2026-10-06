@@ -323,3 +323,34 @@ live_ignore = [`+strings.Join(quoted, ", ")+`]
 		}
 	})
 }
+
+func TestDiffReadsLiveURLFromEnvironmentOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	liveURL, cleanup := createTestDatabase(t, adminURL)
+	defer cleanup()
+	connection, err := pgx.Connect(context.Background(), liveURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close(context.Background())
+	if _, err := connection.Exec(context.Background(), "CREATE TABLE public.users (id bigint)"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ONWARDPG_DIFF_LIVE_URL", liveURL)
+	schema := t.TempDir() + "/schema.sql"
+	if err := os.WriteFile(schema, []byte("CREATE TABLE public.users (id bigint);\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	byValue := captureStdout(t, func() int {
+		return runLowLevelPlan("diff", []string{"--from", liveURL, "--to", "file://" + schema, "--dev-url", adminURL})
+	})
+	byEnvironment := captureStdout(t, func() int {
+		return runLowLevelPlan("diff", []string{"--from-env", "ONWARDPG_DIFF_LIVE_URL", "--to", "file://" + schema, "--dev-url", adminURL})
+	})
+	if byEnvironment.code != 0 || byEnvironment.code != byValue.code || byEnvironment.stdout != byValue.stdout {
+		t.Fatalf("--from-env: %d %s\n--from: %d %s", byEnvironment.code, byEnvironment.stdout, byValue.code, byValue.stdout)
+	}
+}

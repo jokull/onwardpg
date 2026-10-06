@@ -415,8 +415,9 @@ DDL.
 
 | Flag | Meaning |
 | --- | --- |
-| --from SOURCE | Required current schema |
-| --to SOURCE | Required desired schema |
+| --from SOURCE | Required current schema, unless `--from-env` is given |
+| --to SOURCE | Required desired schema, unless `--to-env` is given |
+| --from-env ENV, --to-env ENV | Read that side's PostgreSQL URL from an environment variable, so a live URL stays out of process arguments; mutually exclusive with `--from` or `--to` for the same side |
 | --dev-url URL | Administrative URL required for DDL sources |
 | --hint JSON | Semantic decision; repeatable |
 | --hints-file FILE | Array of semantic decisions |

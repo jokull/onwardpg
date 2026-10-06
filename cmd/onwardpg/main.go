@@ -2036,6 +2036,8 @@ func runLowLevelPlan(command string, arguments []string) int {
 	}
 	from := flags.String("from", "", "current PostgreSQL URL or CREATE-statement SQL file")
 	to := flags.String("to", "", "desired PostgreSQL URL or CREATE-statement SQL file")
+	fromEnv := flags.String("from-env", "", "environment variable containing the current PostgreSQL URL, instead of --from")
+	toEnv := flags.String("to-env", "", "environment variable containing the desired PostgreSQL URL, instead of --to")
 	devURL := flags.String("dev-url", "", "PostgreSQL admin URL for disposable materialization databases")
 	var inlineHints stringsFlag
 	flags.Var(&inlineHints, "hint", "semantic JSON hint; repeat for multiple decisions")
@@ -2061,8 +2063,22 @@ func runLowLevelPlan(command string, arguments []string) int {
 	if code := rejectPositionals(flags, command); code != 0 {
 		return code
 	}
+	for _, side := range []struct {
+		flag, envFlag string
+		value, env    *string
+	}{{"--from", "--from-env", from, fromEnv}, {"--to", "--to-env", to, toEnv}} {
+		if *side.value != "" && *side.env != "" {
+			return writeError("invalid_invocation", fmt.Errorf("%s accepts either %s or %s, not both", command, side.flag, side.envFlag))
+		}
+		if *side.env != "" {
+			// A URL read from the environment stays out of process arguments.
+			if *side.value = os.Getenv(*side.env); *side.value == "" {
+				return writeError("source_error", fmt.Errorf("environment variable %s is required", *side.env))
+			}
+		}
+	}
 	if *from == "" || *to == "" {
-		return writeError("invalid_invocation", fmt.Errorf("%s requires --from and --to", command))
+		return writeError("invalid_invocation", fmt.Errorf("%s requires --from (or --from-env) and --to (or --to-env)", command))
 	}
 	if *output != "json" && *output != "text" {
 		return writeError("invalid_invocation", fmt.Errorf("%s --output must be text or json", command))

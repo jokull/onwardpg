@@ -171,6 +171,8 @@ Usage: onwardpg diff --from SOURCE --to SOURCE [options]
         PostgreSQL admin URL for disposable materialization databases
   -from string
         current PostgreSQL URL or CREATE-statement SQL file
+  -from-env string
+        environment variable containing the current PostgreSQL URL, instead of --from
   -hint value
         semantic JSON hint; repeat for multiple decisions
   -hints-file string
@@ -191,6 +193,8 @@ Usage: onwardpg diff --from SOURCE --to SOURCE [options]
         configured target whose live_ignore list applies to PostgreSQL URL sources
   -to string
         desired PostgreSQL URL or CREATE-statement SQL file
+  -to-env string
+        environment variable containing the desired PostgreSQL URL, instead of --to
 ```
 
 ## `onwardpg history status`

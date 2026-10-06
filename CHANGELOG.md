@@ -44,6 +44,10 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   a parameter ACL or a foreign-owned schema can be a real privilege difference
   between environments, so nothing is acknowledged without an exact entry, and a
   changed owner or a new grant blocks again.
+- `diff --from-env ENV` and `--to-env ENV` read a side's PostgreSQL URL from an
+  environment variable, like `drift check --database-env`, so a live URL stays
+  out of process arguments. Each is mutually exclusive with `--from` or `--to`
+  for the same side.
 
 ## v0.1.0-preview.5 — 2026-10-06
 
