@@ -121,11 +121,13 @@ func TestProjectLiveIgnoredRemovesOnlyAcknowledgedMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projected, removed, err := ProjectLiveIgnored(snapshot, []string{
+	projected, removed, unmatched, err := ProjectLiveIgnored(snapshot, []string{
 		"parameter_acl:session_replication_role",
 		"ownership:schema:pscale_extensions=pscale_admin",
 		"ownership:extension:hypopg=pscale_admin",
 		"ownership:extension:earthdistance=pscale_admin", // owner differs in this cluster
+		"parameter_acl:not_present_here",
+		"parameter_acl:user", // an unquoted keyword never matches what the generator prints
 		"parameter_acl:not_present_here",
 	})
 	if err != nil {
@@ -138,6 +140,10 @@ func TestProjectLiveIgnoredRemovesOnlyAcknowledgedMarkers(t *testing.T) {
 	}
 	if !reflect.DeepEqual(removed, wantRemoved) {
 		t.Fatalf("removed = %#v, want %#v", removed, wantRemoved)
+	}
+	wantUnmatched := []string{"ownership:extension:earthdistance=pscale_admin", "parameter_acl:not_present_here", "parameter_acl:user"}
+	if !reflect.DeepEqual(unmatched, wantUnmatched) {
+		t.Fatalf("unmatched = %#v, want %#v", unmatched, wantUnmatched)
 	}
 	wantUnsupported := []string{"ownership:extension:earthdistance=someone_else", "ownership:relation:public.sessions=pscale_admin"}
 	if !reflect.DeepEqual(projected.Unsupported(), wantUnsupported) {
@@ -157,11 +163,11 @@ func TestProjectLiveIgnoredWithoutSelectorsKeepsTheSnapshot(t *testing.T) {
 	if err := snapshot.AddUnsupported("parameter_acl:session_replication_role"); err != nil {
 		t.Fatal(err)
 	}
-	projected, removed, err := ProjectLiveIgnored(snapshot, nil)
-	if err != nil || projected != snapshot || removed != nil {
+	projected, removed, unmatched, err := ProjectLiveIgnored(snapshot, nil)
+	if err != nil || projected != snapshot || removed != nil || unmatched != nil {
 		t.Fatalf("projected=%p removed=%#v err=%v", projected, removed, err)
 	}
-	if _, _, err := ProjectLiveIgnored(snapshot, []string{"table:public.orders"}); err == nil {
+	if _, _, _, err := ProjectLiveIgnored(snapshot, []string{"table:public.orders"}); err == nil {
 		t.Fatal("unsupported kind accepted")
 	}
 }

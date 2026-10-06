@@ -60,6 +60,13 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   checkpoint) and the reported fingerprint depends on the list;
   `observer.observed_fingerprint` reports the fingerprint before removal, in
   `drift check` and `contract check` results when something was removed.
+  A configured selector that matched nothing is listed as
+  `observer.live_ignore_unmatched` (`live_ignore_unmatched:SELECTOR` in a `diff`
+  plan's `workspace_compatibility`); that is information only and never changes
+  a status, exit code, or fingerprint, so a typo, or a keyword that PostgreSQL
+  quotes, does not pass unnoticed. `--target` and `--config` belong to `diff`
+  only: the legacy `plan --from --to` spelling does not accept them and never
+  applies the list.
   Planning, verification, replayed history, and DDL sources ignore the list. The attribute ledger keeps these catalogs classified as blocked:
   a parameter ACL or a foreign-owned schema can be a real privilege difference
   between environments, so nothing is acknowledged without an exact entry, and a

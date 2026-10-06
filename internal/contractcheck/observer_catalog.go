@@ -64,7 +64,7 @@ func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores, li
 		return snapshot, report, finding, nil
 	}
 	observed := snapshot
-	snapshot, report.LiveIgnored, err = source.ProjectLiveIgnored(observed, liveIgnore)
+	snapshot, report.LiveIgnored, report.LiveIgnoreUnmatched, err = source.ProjectLiveIgnored(observed, liveIgnore)
 	if err != nil {
 		return nil, report, nil, err
 	}

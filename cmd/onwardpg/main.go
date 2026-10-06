@@ -537,6 +537,7 @@ func runDriftAt(arguments []string, start string) int {
 		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode,
 		ProjectedAccess:     append([]string(nil), observer.ProjectedAccess...),
 		LiveIgnored:         append([]string(nil), observer.LiveIgnored...),
+		LiveIgnoreUnmatched: append([]string(nil), observer.LiveIgnoreUnmatched...),
 		ObservedFingerprint: observer.ObservedFingerprint,
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
@@ -2054,8 +2055,15 @@ func runLowLevelPlan(command string, arguments []string) int {
 	flags.Var(&ignores, "ignore", "selector to exclude")
 	var ignoreExtensionVersions stringsFlag
 	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
-	targetName := flags.String("target", "", "configured target whose live_ignore list applies to PostgreSQL URL sources")
-	configName := flags.String("config", ".onwardpg.toml", "repository configuration read for --target")
+	// live_ignore belongs to live observation. The legacy `plan --from --to`
+	// spelling shares this function but must keep refusing unsupported catalog
+	// state, so only diff accepts --target and --config.
+	var targetName, configName string
+	configName = ".onwardpg.toml"
+	if command == "diff" {
+		flags.StringVar(&targetName, "target", "", "configured target whose live_ignore list applies to PostgreSQL URL sources")
+		flags.StringVar(&configName, "config", ".onwardpg.toml", "repository configuration read for --target")
+	}
 	if help, err := parseFlagSet(flags, arguments); help {
 		return 0
 	} else if err != nil {
@@ -2090,12 +2098,12 @@ func runLowLevelPlan(command string, arguments []string) int {
 	}
 	configSet := false
 	flags.Visit(func(f *flag.Flag) { configSet = configSet || f.Name == "config" })
-	if configSet && *targetName == "" {
+	if configSet && targetName == "" {
 		return writeError("invalid_invocation", fmt.Errorf("%s --config requires --target", command))
 	}
 	var liveIgnore []string
-	if *targetName != "" {
-		configPath, err := filepath.Abs(*configName)
+	if command == "diff" && targetName != "" {
+		configPath, err := filepath.Abs(configName)
 		if err != nil {
 			return writeError("invalid_config", err)
 		}
@@ -2103,7 +2111,7 @@ func runLowLevelPlan(command string, arguments []string) int {
 		if err != nil {
 			return writeError("invalid_config", err)
 		}
-		target, err := config.Target(*targetName)
+		target, err := config.Target(targetName)
 		if err != nil {
 			return writeError("invalid_config", err)
 		}
@@ -2112,13 +2120,15 @@ func runLowLevelPlan(command string, arguments []string) int {
 	ctx := context.Background()
 	fromSpec, toSpec := source.Parse(*from), source.Parse(*to)
 	var liveIgnored []string
+	liveSources := 0
 	// Only a PostgreSQL URL is a live catalog; a DDL file never is.
 	load := func(spec source.Spec) (*pgschema.Snapshot, error) {
 		snapshot, err := source.LoadGraphForComparison(ctx, spec, *devURL, ignores)
-		if err != nil || spec.Kind != "database" {
+		if err != nil || spec.Kind != "database" || len(liveIgnore) == 0 {
 			return snapshot, err
 		}
-		snapshot, removed, err := source.ProjectLiveIgnored(snapshot, liveIgnore)
+		liveSources++
+		snapshot, removed, _, err := source.ProjectLiveIgnored(snapshot, liveIgnore)
 		liveIgnored = append(liveIgnored, removed...)
 		return snapshot, err
 	}
@@ -2162,6 +2172,12 @@ func runLowLevelPlan(command string, arguments []string) int {
 	}
 	for _, selector := range sortedUniqueStrings(liveIgnored) {
 		result.Compatibility = append(result.Compatibility, "live_ignored:"+selector)
+	}
+	if liveSources > 0 {
+		// Unmatched on every live source: information only, never an error.
+		for _, selector := range source.UnmatchedLiveIgnore(liveIgnore, liveIgnored) {
+			result.Compatibility = append(result.Compatibility, "live_ignore_unmatched:"+selector)
+		}
 	}
 	if result.Status == protocol.NeedsInput {
 		decisions, decisionErr := semantichint.Decisions(result.Questions, current, desired)

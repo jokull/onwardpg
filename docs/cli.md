@@ -156,11 +156,21 @@ modeled graph stays visible; for example, the
 extension itself is still compared when the project DDL creates it, and a
 provider schema that is not in the project DDL still appears as an unexpected
 object. It does not apply to the replayed history or to DDL sources, to `init`,
-`plan`, `draft`, `verify`, or to `dev plan`. Acknowledged state is not hidden:
+`plan` (including the legacy `plan --from --to` spelling, which does not accept
+`--target`), `draft`, `verify`, or to `dev plan`. Acknowledged state is not hidden:
 `drift check` and `contract check` list it in `observer.live_ignored`, and
 `diff` lists it as `live_ignored:SELECTOR` in `workspace_compatibility` of a
 planned or unsupported result; the decision envelope, which carries no
 compatibility list, omits it.
+
+A configured selector that matched nothing in this catalog is reported next to
+them: `observer.live_ignore_unmatched` for `drift check` and `contract check`,
+and `live_ignore_unmatched:SELECTOR` in `workspace_compatibility` for `diff`
+(only when a PostgreSQL URL source was inspected; a selector must match on
+neither side to be listed). It is information only. It never changes the status,
+the exit code, or a fingerprint, because one configuration legitimately serves
+several environments, so a selector for state only production has is unmatched
+everywhere else.
 
 Fingerprints follow one rule. The acknowledged selectors are removed before
 the comparison fingerprint is computed, because unsupported markers are part of
@@ -182,7 +192,12 @@ embedded quotes doubled, for example `parameter_acl:"extwlist.extensions"` and
 `ownership:schema:"Provider Schema"=pscale_admin`. Both the name and the role are
 required, the single `=` outside quotes separates them, and nothing may follow.
 Because an unmatched selector is not an error, a selector that cannot be a
-generated one is rejected rather than silently matching nothing.
+generated one is rejected rather than silently matching nothing. The grammar
+does not know PostgreSQL's keyword list, which differs by major version, so an
+unquoted keyword such as `parameter_acl:user` is accepted although PostgreSQL
+prints `parameter_acl:"user"`. Copy the selector from the report; if one still
+matches nothing, a typo or a name that needs quotes shows up in
+`live_ignore_unmatched`.
 
 An ownership selector names the owning role, so a change of owner blocks again.
 A `parameter_acl` selector names a parameter, not a grantee: a grant on a new
@@ -449,8 +464,8 @@ DDL.
 | --hint JSON | Semantic decision; repeatable |
 | --hints-file FILE | Array of semantic decisions |
 | --output text\|json | JSON by default; text renders decisions or SQL |
-| --target NAME | Apply this target's [live_ignore](#live_ignore) list to PostgreSQL URL sources; the rest of the target is not read |
-| --config FILE | Repository configuration read for `--target`; requires `--target` |
+| --target NAME | `diff` only: apply this target's [live_ignore](#live_ignore) list to PostgreSQL URL sources; the rest of the target is not read |
+| --config FILE | `diff` only: repository configuration read for `--target`; requires `--target` |
 
 The remaining planner and ignore flags match dev plan. `diff` never writes a
 bundle. `plan --from --to` is retained as a compatibility spelling. Use the

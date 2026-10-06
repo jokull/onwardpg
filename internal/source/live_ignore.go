@@ -130,20 +130,20 @@ func firstRune(text string) string {
 // differs from the expected graph only by acknowledged state compares equal,
 // and report the input's fingerprint separately. Selectors absent from the
 // snapshot are ignored without error because one project configuration serves
-// clusters that differ in what their provider installs.
-func ProjectLiveIgnored(snapshot *pgschema.Snapshot, selectors []string) (*pgschema.Snapshot, []string, error) {
+// clusters that differ in what their provider installs; they are returned as
+// unmatched so that they stay visible.
+func ProjectLiveIgnored(snapshot *pgschema.Snapshot, selectors []string) (projected *pgschema.Snapshot, removed, unmatched []string, err error) {
 	if len(selectors) == 0 {
-		return snapshot, nil, nil
+		return snapshot, nil, nil, nil
 	}
 	if err := ValidateLiveIgnoreSelectors(selectors); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	acknowledged := make(map[string]bool, len(selectors))
 	for _, selector := range selectors {
 		acknowledged[selector] = true
 	}
-	var removed []string
-	projected, err := snapshot.Project(nil, func(selector string) bool {
+	projected, err = snapshot.Project(nil, func(selector string) bool {
 		if acknowledged[selector] {
 			removed = append(removed, selector)
 			return false
@@ -151,8 +151,29 @@ func ProjectLiveIgnored(snapshot *pgschema.Snapshot, selectors []string) (*pgsch
 		return true
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	sort.Strings(removed)
-	return projected, removed, nil
+	return projected, removed, UnmatchedLiveIgnore(selectors, removed), nil
+}
+
+// UnmatchedLiveIgnore returns the configured selectors, sorted and without
+// duplicates, that are not in matched. An entry that acknowledged nothing is
+// information, not an error: one configuration serves clusters that differ in
+// what their provider installs. It is also how a typo, or a keyword that
+// quote_ident would have quoted, becomes visible.
+func UnmatchedLiveIgnore(selectors, matched []string) []string {
+	seen := make(map[string]bool, len(selectors)+len(matched))
+	for _, selector := range matched {
+		seen[selector] = true
+	}
+	var unmatched []string
+	for _, selector := range selectors {
+		if !seen[selector] {
+			seen[selector] = true
+			unmatched = append(unmatched, selector)
+		}
+	}
+	sort.Strings(unmatched)
+	return unmatched
 }

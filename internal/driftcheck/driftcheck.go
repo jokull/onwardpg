@@ -45,6 +45,10 @@ type Observer struct {
 	// the target's live_ignore list acknowledged: environmental state of the
 	// cluster, shown but not a blocker.
 	LiveIgnored []string `json:"live_ignored,omitempty"`
+	// LiveIgnoreUnmatched lists configured live_ignore selectors that matched
+	// nothing in this catalog. It is information only and never changes the
+	// status or exit code.
+	LiveIgnoreUnmatched []string `json:"live_ignore_unmatched,omitempty"`
 	// ObservedFingerprint is the fingerprint of the live catalog before
 	// LiveIgnored selectors were removed. The report's actual_fingerprint is
 	// the one after removal, which is what is compared. Present only when

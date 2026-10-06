@@ -355,6 +355,20 @@ func TestContractCheckAppliesLiveIgnoreToUnsupportedStateOnly(t *testing.T) {
 		t.Fatalf("observed fingerprint %s is not the unprojected catalog %s", report.Observer.ObservedFingerprint, observed)
 	}
 
+	// An entry that matches nothing is reported, and changes neither the status
+	// nor the fingerprints.
+	withUnmatched := input
+	withUnmatched.LiveIgnore = append(append([]string(nil), acknowledged...), "parameter_acl:user")
+	again, err := Run(ctx, withUnmatched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Status != report.Status || again.ActualFingerprint != report.ActualFingerprint ||
+		strings.Join(again.Observer.LiveIgnored, ",") != strings.Join(acknowledged, ",") ||
+		strings.Join(again.Observer.LiveIgnoreUnmatched, ",") != "parameter_acl:user" || len(report.Observer.LiveIgnoreUnmatched) != 0 {
+		t.Fatalf("with an unmatched entry: %#v", again)
+	}
+
 	// live_ignore cannot hide a modeled difference from the receipted checkpoint.
 	fixture.exec("CREATE TABLE public.manual_table (id bigint)")
 	report, err = Run(ctx, input)

@@ -275,6 +275,43 @@ live_ignore = [`+strings.Join(quoted, ", ")+`]
 		}
 	})
 
+	t.Run("a configured selector that matches nothing is reported and changes nothing", func(t *testing.T) {
+		const unmatched = "parameter_acl:user" // PostgreSQL prints "user", quoted
+		writeConfig(extension, schema, unmatched)
+		defer writeConfig(extension, schema)
+		code, report := drift()
+		if code != 0 || report.Outcome != "drift_free" || report.Observer == nil ||
+			!reflect.DeepEqual(report.Observer.LiveIgnored, []string{extension, schema}) ||
+			!reflect.DeepEqual(report.Observer.LiveIgnoreUnmatched, []string{unmatched}) {
+			t.Fatalf("exit = %d, report = %#v", code, report)
+		}
+		accepted := diff("--target", "primary", "--config", repository+"/.onwardpg.toml")
+		var result protocol.Result
+		if err := json.Unmarshal([]byte(accepted.stdout), &result); err != nil {
+			t.Fatal(err)
+		}
+		if accepted.code != 0 || result.Status != protocol.Planned || !reflect.DeepEqual(result.Compatibility,
+			[]string{"live_ignored:" + extension, "live_ignored:" + schema, "live_ignore_unmatched:" + unmatched}) {
+			t.Fatalf("diff: %d %s", accepted.code, accepted.stdout)
+		}
+	})
+
+	t.Run("the legacy plan spelling never consults live_ignore", func(t *testing.T) {
+		arguments := []string{"--from", liveURL, "--to", "file://" + repository + "/schema.sql", "--dev-url", adminURL}
+		// Without a target the provider state stops the plan, as before.
+		refused := captureStdout(t, func() int { return runPlan(arguments) })
+		if refused.code != 3 || !strings.Contains(refused.stdout, `"status":"unsupported"`) || !strings.Contains(refused.stdout, extension) {
+			t.Fatalf("plan: %d %s", refused.code, refused.stdout)
+		}
+		// plan never accepted --target, and must not start applying the list.
+		withTarget := captureStdout(t, func() int {
+			return runPlan(append(append([]string(nil), arguments...), "--target", "primary", "--config", repository+"/.onwardpg.toml"))
+		})
+		if withTarget.code == 0 || strings.Contains(withTarget.stdout, `"status":"planned"`) || !strings.Contains(withTarget.stdout, "target") {
+			t.Fatalf("plan --target: %d %s", withTarget.code, withTarget.stdout)
+		}
+	})
+
 	t.Run("a genuine blocker is still reported", func(t *testing.T) {
 		if _, err := connection.Exec(context.Background(), "CREATE SEQUENCE public.manual_seq; ALTER SEQUENCE public.manual_seq OWNER TO "+pgx.Identifier{role}.Sanitize()); err != nil {
 			t.Fatal(err)
