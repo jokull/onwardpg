@@ -82,7 +82,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("compile desired schema: %w", err)
 	}
-	current, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, input.DevURL, input.Ignores, 30*time.Second)
+	current, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, input.DevURL, input.Ignores, nil, 30*time.Second)
 	if err != nil {
 		return Report{}, fmt.Errorf("inspect development catalog: %w", err)
 	}

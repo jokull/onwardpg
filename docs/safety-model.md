@@ -44,6 +44,18 @@ composites, ranges, and PostgreSQL 18 virtual generated columns have modeled
 paths; their support does not imply that every alteration is automatic.
 Subscription connection strings and security-label values are never included
 in diagnostics.
+Provider-owned state in a live cluster has one narrow exception. Ownership of an
+extension or a schema by a role other than the inspecting role, and
+`pg_parameter_acl` grants, remain blockers for every command, and the attribute
+ledger keeps them classified as blocked. A target's `live_ignore` list can
+acknowledge an exact selector for commands that read a live catalog
+(`drift check`, `contract check`, and `diff --target`). The list removes only
+that blocker marker, never a typed object, and it is not applied to replayed
+history, DDL sources, planning, or verification. It is not a default: a new
+parameter grant or a changed owner is a different selector and blocks again, and
+the acknowledged state is reported as `observer.live_ignored`. A parameter ACL
+or a foreign-owned schema can be a real privilege difference between
+environments, so onwardpg does not reclassify it as environmental.
 Extension-owned members are represented atomically by the typed extension
 name/version/schema boundary and are not independently planned. Physical
 member addresses alias to that Extension node for dependency ordering.

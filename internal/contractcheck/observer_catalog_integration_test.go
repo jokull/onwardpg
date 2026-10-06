@@ -55,7 +55,7 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 	}
 
 	ownerURL := restrictedScratchURL(database.Config)
-	baseline, ownerProjection, finding, err := InspectObserverCatalog(ctx, ownerURL, nil, 5*time.Second)
+	baseline, ownerProjection, finding, err := InspectObserverCatalog(ctx, ownerURL, nil, nil, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 	observerConfig.Password = observerPassword
 	observerURL := restrictedScratchURL(observerConfig)
 
-	observed, projection, finding, err := InspectObserverCatalog(ctx, observerURL, nil, 5*time.Second)
+	observed, projection, finding, err := InspectObserverCatalog(ctx, observerURL, nil, nil, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 		if _, err := owner.Exec(ctx, "GRANT SELECT ON app.orders TO "+pgx.Identifier{applicationRole}.Sanitize()); err != nil {
 			t.Fatal(err)
 		}
-		snapshot, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, 5*time.Second)
+		snapshot, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, nil, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +137,7 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 		t.Cleanup(func() {
 			_, _ = owner.Exec(context.Background(), "REVOKE GRANT OPTION FOR SELECT ON app.orders FROM "+pgx.Identifier{observerRole}.Sanitize())
 		})
-		_, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, 5*time.Second)
+		_, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, nil, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -156,7 +156,7 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 		t.Cleanup(func() {
 			_, _ = owner.Exec(context.Background(), "REVOKE INSERT ON app.orders FROM "+pgx.Identifier{observerRole}.Sanitize())
 		})
-		_, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, 5*time.Second)
+		_, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, nil, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -175,7 +175,7 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 		t.Cleanup(func() {
 			_, _ = owner.Exec(context.Background(), "GRANT SELECT ON app.orders TO "+pgx.Identifier{observerRole}.Sanitize())
 		})
-		_, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, 5*time.Second)
+		_, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, nil, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +204,7 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 		if _, err := adminDatabase.Exec(ctx, "ALTER TABLE app.externally_owned OWNER TO "+pgx.Identifier{externalOwnerRole}.Sanitize()+"; SET ROLE "+pgx.Identifier{externalOwnerRole}.Sanitize()+"; GRANT SELECT ON app.externally_owned TO "+pgx.Identifier{observerRole}.Sanitize()+"; RESET ROLE"); err != nil {
 			t.Fatal(err)
 		}
-		snapshot, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, 5*time.Second)
+		snapshot, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, nil, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}

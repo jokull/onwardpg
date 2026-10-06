@@ -121,6 +121,50 @@ catalog read-only. Every selector must match the exported DDL or development
 catalog, and the JSON receipt lists the exact excluded objects. This lets a
 target acknowledge provider-owned state that may be absent from replay history.
 
+A target may also list `live_ignore` selectors for provider-owned state that
+exists only in live clusters. See [live_ignore](#live_ignore).
+
+## live_ignore
+
+A managed PostgreSQL provider owns some state in its own clusters: extensions
+that its administrative role installed, its own schema, and `pg_parameter_acl`
+grants to its roles. That state cannot be in the exported DDL or in a
+development catalog, so it cannot be a target `ignore` selector, and it blocks
+every command that reads the live catalog as `unsupported`. A target can
+acknowledge exactly that state in `.onwardpg.toml`:
+
+~~~toml
+[targets.primary]
+live_ignore = [
+  "ownership:extension:earthdistance=pscale_admin",
+  "ownership:schema:pscale_extensions=pscale_admin",
+  "parameter_acl:session_replication_role",
+]
+~~~
+
+Only three selector forms are accepted: `ownership:extension:NAME=ROLE`,
+`ownership:schema:NAME=ROLE`, and `parameter_acl:NAME`, each exact, with no
+wildcard. The list is validated for syntax only. A selector that matches nothing
+in a given cluster is not an error, because one configuration serves clusters
+that differ in what their provider installs.
+
+`live_ignore` is read only by commands that inspect a live catalog: `drift
+check`, `contract check`, and `diff` when it is given `--target`. It removes
+the named blocker markers from the live snapshot and nothing else. It never
+removes a typed object, adds an ignore receipt, or changes a fingerprint, so
+every difference in the modeled graph stays visible; for example, the
+extension itself is still compared when the project DDL creates it, and a
+provider schema that is not in the project DDL still appears as an unexpected
+object. It does not apply to the replayed history or to DDL sources, to `init`,
+`plan`, `draft`, `verify`, or to `dev plan`. Acknowledged state is not hidden:
+`drift check` and `contract check` list it in `observer.live_ignored`, and
+`diff` lists it as `live_ignored:SELECTOR` in `workspace_compatibility`.
+
+An ownership selector names the owning role, so a change of owner blocks again.
+A new `pg_parameter_acl` grant is a new selector. Ownership of anything other
+than an extension or a schema, event triggers, and every other unsupported
+family cannot be acknowledged this way.
+
 ## history status
 
 ~~~sh
@@ -295,6 +339,7 @@ split boolean queries in verify.sql.
 ~~~sh
 onwardpg drift check \
   (--database "$PRODUCTION_DATABASE_URL" | --database-env ENV) \
+  [--target NAME] [--config .onwardpg.toml] \
   [--ignore SELECTOR]
 ~~~
 
@@ -313,7 +358,9 @@ selectors are listed in `unsupported`. `diff --from URL` refuses the same
 catalog with the same selectors. The `differences` are still computed and
 listed, so one run shows everything; the `unsupported` list also includes any
 such state in the replayed history. A result without `unsupported` entries
-means there is no modeled drift and nothing the planner would refuse.
+means there is no modeled drift and nothing the planner would refuse. State
+that the target's [live_ignore](#live_ignore) list acknowledges is not listed in
+`unsupported`; it appears in `observer.live_ignored`.
 
 The audit never generates repair SQL, changes history, or participates in
 ordinary draft generation.
@@ -374,6 +421,8 @@ DDL.
 | --hint JSON | Semantic decision; repeatable |
 | --hints-file FILE | Array of semantic decisions |
 | --output text\|json | JSON by default; text renders decisions or SQL |
+| --target NAME | Apply this target's [live_ignore](#live_ignore) list to PostgreSQL URL sources; the rest of the target is not read |
+| --config FILE | Repository configuration read for `--target`; requires `--target` |
 
 The remaining planner and ignore flags match dev plan. `diff` never writes a
 bundle. `plan --from --to` is retained as a compatibility spelling. Use the

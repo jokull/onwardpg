@@ -4840,9 +4840,10 @@
       "catalog": "pg_extension",
       "column": "extowner",
       "classification": "blocked",
-      "reason": "connection-relative ownership is accepted only for current_user; any noncurrent extension owner fails closed",
+      "reason": "connection-relative ownership is accepted only for current_user; any noncurrent extension owner fails closed; live observation can acknowledge an exact provider-owned selector through a target's live_ignore list, which only removes the blocker marker",
       "tests": [
-        "internal/source#TestLoadGraphBlocksPreviouslyBlindCatalogFamilies"
+        "internal/source#TestLoadGraphBlocksPreviouslyBlindCatalogFamilies",
+        "internal/contractcheck#TestLiveIgnoreAcknowledgesProviderStateWithoutHidingAnythingElse"
       ]
     },
     {
@@ -5425,9 +5426,10 @@
       "catalog": "pg_namespace",
       "column": "nspowner",
       "classification": "blocked",
-      "reason": "connection-relative ownership is accepted only for current_user or the database-local public-schema owner; other owners fail closed",
+      "reason": "connection-relative ownership is accepted only for current_user or the database-local public-schema owner; other owners fail closed; live observation can acknowledge an exact provider-owned selector through a target's live_ignore list, which only removes the blocker marker",
       "tests": [
-        "internal/source#TestLoadGraphBlocksPreviouslyBlindCatalogFamilies"
+        "internal/source#TestLoadGraphBlocksPreviouslyBlindCatalogFamilies",
+        "internal/contractcheck#TestLiveIgnoreAcknowledgesProviderStateWithoutHidingAnythingElse"
       ]
     },
     {
@@ -5713,18 +5715,20 @@
       "catalog": "pg_parameter_acl",
       "column": "paracl",
       "classification": "blocked",
-      "reason": "non-default user state is surfaced by a narrow unsupported-family selector",
+      "reason": "non-default user state is surfaced by a narrow unsupported-family selector; live observation can acknowledge an exact provider-owned selector through a target's live_ignore list, which only removes the blocker marker",
       "tests": [
-        "internal/source#TestLoadGraphBlocksPreviouslyBlindCatalogFamilies"
+        "internal/source#TestLoadGraphBlocksPreviouslyBlindCatalogFamilies",
+        "internal/contractcheck#TestLiveIgnoreAcknowledgesProviderStateWithoutHidingAnythingElse"
       ]
     },
     {
       "catalog": "pg_parameter_acl",
       "column": "parname",
       "classification": "blocked",
-      "reason": "non-default user state is surfaced by a narrow unsupported-family selector",
+      "reason": "non-default user state is surfaced by a narrow unsupported-family selector; live observation can acknowledge an exact provider-owned selector through a target's live_ignore list, which only removes the blocker marker",
       "tests": [
-        "internal/source#TestLoadGraphBlocksPreviouslyBlindCatalogFamilies"
+        "internal/source#TestLoadGraphBlocksPreviouslyBlindCatalogFamilies",
+        "internal/contractcheck#TestLiveIgnoreAcknowledgesProviderStateWithoutHidingAnythingElse"
       ]
     },
     {

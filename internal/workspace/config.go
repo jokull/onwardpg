@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jokull/onwardpg/internal/source"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -32,6 +33,10 @@ type Target struct {
 	ScratchDatabaseEnv string   `toml:"scratch_database_env" json:"scratch_database_env,omitempty"`
 	DevMode            string   `toml:"dev_mode" json:"dev_mode,omitempty"`
 	Ignore             []string `toml:"ignore" json:"ignore,omitempty"`
+	// LiveIgnore acknowledges unsupported state that a managed provider owns in
+	// live clusters (see source.ValidateLiveIgnoreSelectors). Only commands
+	// that read a live catalog consult it.
+	LiveIgnore []string `toml:"live_ignore" json:"live_ignore,omitempty"`
 }
 
 func Load(name string) (Config, error) {
@@ -129,6 +134,9 @@ func (t Target) Validate() error {
 		if !found || kind == "" || name == "" || strings.Contains(name, "*") && name != "*" || strings.TrimSpace(selector) != selector {
 			return fmt.Errorf("invalid ignore selector %q; expected kind:name or kind:*", selector)
 		}
+	}
+	if err := source.ValidateLiveIgnoreSelectors(t.LiveIgnore); err != nil {
+		return err
 	}
 	return nil
 }

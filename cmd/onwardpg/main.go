@@ -33,6 +33,7 @@ import (
 	"github.com/jokull/onwardpg/internal/targetlock"
 	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
+	"github.com/jokull/onwardpg/pgschema"
 )
 
 // buildVersion must remain a plain string initializer so release builds can
@@ -391,7 +392,8 @@ func runContractAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_config", err)
 	}
-	if _, err := resolveConfiguredTarget(config, targetName); err != nil {
+	target, err := resolveConfiguredTarget(config, targetName)
+	if err != nil {
 		return writeError("invalid_config", err)
 	}
 	chain, err := history.Load(filepath.Dir(configPath), config.BundleRoot, *targetName)
@@ -421,7 +423,7 @@ func runContractAt(arguments []string, start string) int {
 	}
 	report, err := contractcheck.Run(context.Background(), contractcheck.Input{
 		Artifact: entry.Artifact, ExpectedHead: chain.HeadDigest, DatabaseURL: databaseURL, Environment: *environment,
-		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options,
+		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options, LiveIgnore: target.LiveIgnore,
 	})
 	if err != nil {
 		return writeError("contract_check_error", err)
@@ -513,7 +515,7 @@ func runDriftAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
-	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, 30*time.Second)
+	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, target.LiveIgnore, 30*time.Second)
 	if err != nil {
 		return writeError("drift_observer_error", fmt.Errorf("inspect live catalog through the read-only observer boundary: %w", err))
 	}
@@ -534,6 +536,7 @@ func runDriftAt(arguments []string, start string) int {
 	report.Observer = &driftcheck.Observer{
 		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode,
 		ProjectedAccess: append([]string(nil), observer.ProjectedAccess...),
+		LiveIgnored:     append([]string(nil), observer.LiveIgnored...),
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
 	switch report.Outcome {
@@ -2048,6 +2051,8 @@ func runLowLevelPlan(command string, arguments []string) int {
 	flags.Var(&ignores, "ignore", "selector to exclude")
 	var ignoreExtensionVersions stringsFlag
 	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
+	targetName := flags.String("target", "", "configured target whose live_ignore list applies to PostgreSQL URL sources")
+	configName := flags.String("config", ".onwardpg.toml", "repository configuration read for --target")
 	if help, err := parseFlagSet(flags, arguments); help {
 		return 0
 	} else if err != nil {
@@ -2066,13 +2071,45 @@ func runLowLevelPlan(command string, arguments []string) int {
 	if err != nil {
 		return writeError("invalid_hints", err)
 	}
+	configSet := false
+	flags.Visit(func(f *flag.Flag) { configSet = configSet || f.Name == "config" })
+	if configSet && *targetName == "" {
+		return writeError("invalid_invocation", fmt.Errorf("%s --config requires --target", command))
+	}
+	var liveIgnore []string
+	if *targetName != "" {
+		configPath, err := filepath.Abs(*configName)
+		if err != nil {
+			return writeError("invalid_config", err)
+		}
+		config, err := workspace.Load(configPath)
+		if err != nil {
+			return writeError("invalid_config", err)
+		}
+		target, err := config.Target(*targetName)
+		if err != nil {
+			return writeError("invalid_config", err)
+		}
+		liveIgnore = target.LiveIgnore
+	}
 	ctx := context.Background()
 	fromSpec, toSpec := source.Parse(*from), source.Parse(*to)
-	current, err := source.LoadGraphForComparison(ctx, fromSpec, *devURL, ignores)
+	var liveIgnored []string
+	// Only a PostgreSQL URL is a live catalog; a DDL file never is.
+	load := func(spec source.Spec) (*pgschema.Snapshot, error) {
+		snapshot, err := source.LoadGraphForComparison(ctx, spec, *devURL, ignores)
+		if err != nil || spec.Kind != "database" {
+			return snapshot, err
+		}
+		snapshot, removed, err := source.ProjectLiveIgnored(snapshot, liveIgnore)
+		liveIgnored = append(liveIgnored, removed...)
+		return snapshot, err
+	}
+	current, err := load(fromSpec)
 	if err != nil {
 		return writeError("source_error", err)
 	}
-	desired, err := source.LoadGraphForComparison(ctx, toSpec, *devURL, ignores)
+	desired, err := load(toSpec)
 	if err != nil {
 		return writeError("source_error", err)
 	}
@@ -2105,6 +2142,9 @@ func runLowLevelPlan(command string, arguments []string) int {
 		if err != nil {
 			return writeError("planning_error", err)
 		}
+	}
+	for _, selector := range sortedUniqueStrings(liveIgnored) {
+		result.Compatibility = append(result.Compatibility, "live_ignored:"+selector)
 	}
 	if result.Status == protocol.NeedsInput {
 		decisions, decisionErr := semantichint.Decisions(result.Questions, current, desired)

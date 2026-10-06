@@ -63,6 +63,10 @@ type ObserverProjection struct {
 	DatabaseOwner   string   `json:"database_owner"`
 	Mode            string   `json:"mode"`
 	ProjectedAccess []string `json:"projected_access,omitempty"`
+	// LiveIgnored lists the unsupported-state selectors, observed in this
+	// catalog, that the target's live_ignore list acknowledged. They are
+	// environmental state the reader still sees, but not a blocker.
+	LiveIgnored []string `json:"live_ignored,omitempty"`
 }
 
 type ReconciliationReadiness struct {
@@ -101,6 +105,10 @@ type Input struct {
 	Now              time.Time
 	StatementTimeout time.Duration
 	Options          graphplan.Options
+	// LiveIgnore holds the target's live_ignore selectors. It can only
+	// acknowledge unsupported state; it cannot hide an object from the
+	// receipted checkpoint comparison.
+	LiveIgnore []string
 }
 
 type observerContext struct {
@@ -477,6 +485,10 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Findings = append(report.Findings, *finding)
 		return finalize(report), nil
 	}
+	actual, report.Observer.LiveIgnored, err = source.ProjectLiveIgnored(actual, input.LiveIgnore)
+	if err != nil {
+		return Report{}, err
+	}
 	if err := sqlcheck.RequireUnfilteredRows(ctx, tx); err != nil {
 		if !errors.Is(err, sqlcheck.ErrRowSecurity) {
 			return Report{}, err
@@ -506,7 +518,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		report.Findings = append(report.Findings, Finding{
 			Code:        "unsupported_catalog_state",
 			Message:     "production holds catalog state the planner cannot model: " + strings.Join(unsupported, ", "),
-			Remediation: "resolve the state or exclude it with a validated ignore selector; diff and drift check refuse the same catalog",
+			Remediation: "resolve the state; provider-owned extension, schema, and parameter ACL state can be acknowledged in the target's live_ignore list; diff and drift check refuse the same catalog",
 		})
 		modeled, err := actual.Project(nil, func(string) bool { return false })
 		if err != nil {

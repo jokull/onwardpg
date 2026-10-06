@@ -41,6 +41,10 @@ type Observer struct {
 	DatabaseOwner   string   `json:"database_owner"`
 	Mode            string   `json:"mode"`
 	ProjectedAccess []string `json:"projected_access,omitempty"`
+	// LiveIgnored lists unsupported state observed in the live catalog that
+	// the target's live_ignore list acknowledged: environmental state of the
+	// cluster, shown but not a blocker.
+	LiveIgnored []string `json:"live_ignored,omitempty"`
 }
 
 func Compare(target, historyHead string, expected, actual *pgschema.Snapshot) (Report, error) {

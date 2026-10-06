@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jokull/onwardpg/internal/contractcheck"
 	"github.com/jokull/onwardpg/internal/driftcheck"
 	"github.com/jokull/onwardpg/internal/protocol"
 )
@@ -165,6 +166,160 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		}
 		if result.code != 3 || report.Outcome != "unsupported" || !found {
 			t.Fatalf("exit = %d, report = %#v", result.code, report)
+		}
+	})
+}
+
+func TestLiveIgnoreAcknowledgesProviderOwnedStateAcrossLiveCommandsOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	liveURL, cleanup := createTestDatabase(t, adminURL)
+	defer cleanup()
+	role, _ := providerRole(t, adminURL, liveURL)
+	t.Setenv("ONWARDPG_PROVIDER_LIVE_URL", liveURL)
+	repository := t.TempDir()
+	writeConfig := func(liveIgnore ...string) {
+		quoted := make([]string, len(liveIgnore))
+		for index, selector := range liveIgnore {
+			quoted[index] = `"` + selector + `"`
+		}
+		writeTestFile(t, repository, ".onwardpg.toml", `version = 1
+bundle_root = "onward-bundles"
+[targets.primary]
+schema_file = "schema.sql"
+dev_database_env = "ONWARDPG_UNUSED_DEV_DATABASE_URL"
+scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
+live_ignore = [`+strings.Join(quoted, ", ")+`]
+`)
+	}
+	extension, schema := "ownership:extension:citext="+role, "ownership:schema:provider_ext="+role
+	writeConfig(extension, schema)
+	// The project's own DDL creates the extension and the schema; in the live
+	// cluster the provider's role owns both.
+	ddl := "CREATE EXTENSION citext;\nCREATE SCHEMA provider_ext;\nCREATE TABLE public.users (id bigint, email citext);\n"
+	writeTestFile(t, repository, "schema.sql", ddl)
+	if initialized := captureStdout(t, func() int {
+		return runInitAt([]string{"--target", "primary", "--bundle", "baseline"}, repository)
+	}); initialized.code != 0 {
+		t.Fatalf("init exit = %d, stdout = %s", initialized.code, initialized.stdout)
+	}
+	providerShape(t, liveURL, role)
+	connection, err := pgx.Connect(context.Background(), liveURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close(context.Background())
+	if _, err := connection.Exec(context.Background(), "CREATE TABLE public.users (id bigint, email citext)"); err != nil {
+		t.Fatal(err)
+	}
+	drift := func() (int, driftcheck.Report) {
+		t.Helper()
+		result := captureStdout(t, func() int {
+			return runDriftAt([]string{"check", "--target", "primary", "--database", liveURL}, repository)
+		})
+		var report driftcheck.Report
+		if err := json.Unmarshal([]byte(result.stdout), &report); err != nil {
+			t.Fatalf("drift response: %s: %v", result.stdout, err)
+		}
+		return result.code, report
+	}
+	diff := func(arguments ...string) captured {
+		t.Helper()
+		base := []string{"--from", liveURL, "--to", "file://" + repository + "/schema.sql", "--dev-url", adminURL}
+		return captureStdout(t, func() int { return runLowLevelPlan("diff", append(base, arguments...)) })
+	}
+
+	t.Run("drift check passes and shows the acknowledged state", func(t *testing.T) {
+		code, report := drift()
+		if code != 0 || report.Outcome != "drift_free" || len(report.Unsupported) != 0 || len(report.Differences) != 0 {
+			t.Fatalf("exit = %d, report = %#v", code, report)
+		}
+		if report.Observer == nil || !reflect.DeepEqual(report.Observer.LiveIgnored, []string{extension, schema}) {
+			t.Fatalf("observer = %#v", report.Observer)
+		}
+	})
+
+	t.Run("diff agrees only when it is given the target", func(t *testing.T) {
+		if refused := diff(); refused.code != 3 || !strings.Contains(refused.stdout, extension) {
+			t.Fatalf("diff without target: %d %s", refused.code, refused.stdout)
+		}
+		accepted := diff("--target", "primary", "--config", repository+"/.onwardpg.toml")
+		var result protocol.Result
+		if err := json.Unmarshal([]byte(accepted.stdout), &result); err != nil {
+			t.Fatal(err)
+		}
+		if accepted.code != 0 || result.Status != protocol.Planned || len(result.Statements) != 0 ||
+			!reflect.DeepEqual(result.Compatibility, []string{"live_ignored:" + extension, "live_ignored:" + schema}) {
+			t.Fatalf("diff with target: %d %s", accepted.code, accepted.stdout)
+		}
+		if invalid := diff("--config", repository+"/.onwardpg.toml"); invalid.code == 0 || !strings.Contains(invalid.stdout, "--config requires --target") {
+			t.Fatalf("--config without --target: %d %s", invalid.code, invalid.stdout)
+		}
+		if unknown := diff("--target", "absent", "--config", repository+"/.onwardpg.toml"); unknown.code == 0 || !strings.Contains(unknown.stdout, "invalid_config") {
+			t.Fatalf("unknown target: %d %s", unknown.code, unknown.stdout)
+		}
+	})
+
+	t.Run("a genuine blocker is still reported", func(t *testing.T) {
+		if _, err := connection.Exec(context.Background(), "CREATE SEQUENCE public.manual_seq; ALTER SEQUENCE public.manual_seq OWNER TO "+pgx.Identifier{role}.Sanitize()); err != nil {
+			t.Fatal(err)
+		}
+		code, report := drift()
+		if code != 3 || report.Outcome != "unsupported" || !reflect.DeepEqual(report.Unsupported, []string{"ownership:relation:public.manual_seq=" + role}) {
+			t.Fatalf("exit = %d, report = %#v", code, report)
+		}
+	})
+
+	t.Run("an acknowledged marker never hides a modeled object", func(t *testing.T) {
+		if _, err := connection.Exec(context.Background(), "DROP SEQUENCE public.manual_seq; CREATE SCHEMA provider_only AUTHORIZATION "+pgx.Identifier{role}.Sanitize()); err != nil {
+			t.Fatal(err)
+		}
+		writeConfig(extension, schema, "ownership:schema:provider_only="+role)
+		code, report := drift()
+		found := false
+		for _, difference := range report.Differences {
+			found = found || difference.Kind == "unexpected_in_actual" && strings.Contains(difference.ObjectID, "provider_only")
+		}
+		if code != 4 || report.Outcome != "drifted" || len(report.Unsupported) != 0 || !found {
+			t.Fatalf("exit = %d, report = %#v", code, report)
+		}
+	})
+	t.Run("contract check applies the same acknowledgement", func(t *testing.T) {
+		if _, err := connection.Exec(context.Background(), "DROP SCHEMA provider_only"); err != nil {
+			t.Fatal(err)
+		}
+		writeConfig(extension, schema)
+		writeTestFile(t, repository, "schema.sql", strings.Replace(ddl, "email citext", "email citext, note text", 1))
+		if planned := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"add-note", "--target", "primary"}, repository) }); planned.code != 0 {
+			t.Fatalf("plan: %d %s", planned.code, planned.stdout)
+		}
+		if verified := captureStdout(t, func() int { return runVerifyAt([]string{"--target", "primary", "--bundle", "add-note"}, repository) }); verified.code != 0 {
+			t.Fatalf("verify: %d %s", verified.code, verified.stdout)
+		}
+		if _, err := connection.Exec(context.Background(), "ALTER TABLE public.users ADD COLUMN note text"); err != nil {
+			t.Fatal(err)
+		}
+		check := func() (int, contractcheck.Report) {
+			t.Helper()
+			result := captureStdout(t, func() int {
+				return runContractAt([]string{"check", "--target", "primary", "--environment", "test", "--database-env", "ONWARDPG_PROVIDER_LIVE_URL"}, repository)
+			})
+			var report contractcheck.Report
+			if err := json.Unmarshal([]byte(result.stdout), &report); err != nil {
+				t.Fatalf("contract response: %s: %v", result.stdout, err)
+			}
+			return result.code, report
+		}
+		code, report := check()
+		if code != 0 || report.Status != "ready" || !reflect.DeepEqual(report.Observer.LiveIgnored, []string{extension, schema}) {
+			t.Fatalf("with live_ignore: %d %#v", code, report)
+		}
+		writeConfig()
+		code, report = check()
+		if code != 3 || report.Status != "unsupported" || !reflect.DeepEqual(sortedUnsupported(report.Unsupported), []string{extension, schema}) {
+			t.Fatalf("without live_ignore: %d %#v", code, report)
 		}
 	})
 }

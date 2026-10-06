@@ -188,3 +188,162 @@ func TestContractCheckDoesNotCallUnsupportedStateCatalogDrift(t *testing.T) {
 		t.Fatalf("report = %#v", report)
 	}
 }
+
+func TestLiveIgnoreAcknowledgesProviderStateWithoutHidingAnythingElse(t *testing.T) {
+	fixture := newProviderFixture(t)
+	ctx := context.Background()
+	fixture.ownExtension("citext")
+	fixture.ownSchema("provider_ext")
+	fixture.grantParameter("session_replication_role")
+	acknowledged := []string{
+		"ownership:extension:citext=" + fixture.Role,
+		"ownership:schema:provider_ext=" + fixture.Role,
+		"parameter_acl:session_replication_role",
+	}
+
+	t.Run("without live_ignore the state blocks", func(t *testing.T) {
+		snapshot, _, finding, err := InspectObserverCatalog(ctx, fixture.URL, nil, nil, 5*time.Second)
+		if err != nil || finding != nil {
+			t.Fatalf("finding = %#v, err = %v", finding, err)
+		}
+		if strings.Join(snapshot.Unsupported(), ",") != strings.Join(acknowledged, ",") {
+			t.Fatalf("unsupported = %#v", snapshot.Unsupported())
+		}
+	})
+
+	t.Run("live_ignore removes the markers, keeps the modeled objects, and reports what it removed", func(t *testing.T) {
+		snapshot, projection, finding, err := InspectObserverCatalog(ctx, fixture.URL, nil, acknowledged, 5*time.Second)
+		if err != nil || finding != nil {
+			t.Fatalf("finding = %#v, err = %v", finding, err)
+		}
+		if len(snapshot.Unsupported()) != 0 || strings.Join(projection.LiveIgnored, ",") != strings.Join(acknowledged, ",") {
+			t.Fatalf("unsupported = %#v, live ignored = %#v", snapshot.Unsupported(), projection.LiveIgnored)
+		}
+		if len(snapshot.Ignored()) != 0 {
+			t.Fatalf("live_ignore must not leave ignore receipts: %#v", snapshot.Ignored())
+		}
+		for _, id := range snapshot.IDs() {
+			if id.Name == "provider_ext" || id.Name == "citext" {
+				return
+			}
+		}
+		t.Fatalf("modeled provider objects were removed: %#v", snapshot.IDs())
+	})
+
+	t.Run("an ownership selector is pinned to its owner", func(t *testing.T) {
+		wrongOwner := []string{"ownership:schema:provider_ext=somebody_else", "ownership:extension:citext=" + fixture.Role, "parameter_acl:session_replication_role"}
+		snapshot, projection, _, err := InspectObserverCatalog(ctx, fixture.URL, nil, wrongOwner, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(snapshot.Unsupported(), ",") != acknowledged[1] || len(projection.LiveIgnored) != 2 {
+			t.Fatalf("unsupported = %#v, live ignored = %#v", snapshot.Unsupported(), projection.LiveIgnored)
+		}
+	})
+
+	t.Run("a new parameter grant is not covered by an older list", func(t *testing.T) {
+		fixture.grantParameter("work_mem")
+		snapshot, _, _, err := InspectObserverCatalog(ctx, fixture.URL, nil, acknowledged, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(snapshot.Unsupported(), ",") != "parameter_acl:work_mem" {
+			t.Fatalf("unsupported = %#v", snapshot.Unsupported())
+		}
+	})
+
+	t.Run("an event trigger survives the same list", func(t *testing.T) {
+		fixture.exec("CREATE FUNCTION public.audit_ddl() RETURNS event_trigger LANGUAGE plpgsql AS 'BEGIN NULL; END'; CREATE EVENT TRIGGER audit_ddl ON ddl_command_end EXECUTE FUNCTION public.audit_ddl()")
+		defer fixture.exec("DROP EVENT TRIGGER audit_ddl")
+		snapshot, _, _, err := InspectObserverCatalog(ctx, fixture.URL, nil, acknowledged, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, selector := range snapshot.Unsupported() {
+			found = found || selector == "event_trigger:audit_ddl"
+		}
+		if !found {
+			t.Fatalf("unsupported = %#v", snapshot.Unsupported())
+		}
+	})
+
+	t.Run("a genuine blocker survives the same list", func(t *testing.T) {
+		fixture.exec("CREATE SEQUENCE public.manual_seq; ALTER SEQUENCE public.manual_seq OWNER TO " + pgx.Identifier{fixture.Role}.Sanitize())
+		snapshot, _, _, err := InspectObserverCatalog(ctx, fixture.URL, nil, acknowledged, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "ownership:relation:public.manual_seq=" + fixture.Role
+		found := false
+		for _, selector := range snapshot.Unsupported() {
+			found = found || selector == want
+		}
+		if !found {
+			t.Fatalf("unsupported = %#v", snapshot.Unsupported())
+		}
+	})
+}
+
+func TestLiveIgnoreDoesNotCoverACustomNamedNotNullConstraint(t *testing.T) {
+	fixture := newProviderFixture(t)
+	var major int
+	if err := fixture.database.QueryRow(context.Background(), "SELECT current_setting('server_version_num')::integer / 10000").Scan(&major); err != nil {
+		t.Fatal(err)
+	}
+	if major < 18 {
+		t.Skip("named NOT NULL constraints are catalog state from PostgreSQL 18")
+	}
+	fixture.ownSchema("provider_ext")
+	fixture.exec("CREATE TABLE public.users (id bigint CONSTRAINT users_id_present NOT NULL)")
+	acknowledged := []string{"ownership:schema:provider_ext=" + fixture.Role}
+	snapshot, projection, _, err := InspectObserverCatalog(context.Background(), fixture.URL, nil, acknowledged, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(snapshot.Unsupported(), ",") != "not_null_constraint:public.users.users_id_present" || len(projection.LiveIgnored) != 1 {
+		t.Fatalf("unsupported = %#v, live ignored = %#v", snapshot.Unsupported(), projection.LiveIgnored)
+	}
+}
+
+func TestContractCheckAppliesLiveIgnoreToUnsupportedStateOnly(t *testing.T) {
+	fixture := newProviderFixture(t)
+	ctx := context.Background()
+	fixture.ownExtension("citext")
+	fixture.ownSchema("provider_ext")
+	fixture.grantParameter("session_replication_role")
+	// The receipted post-expand catalog already contains the provider's modeled
+	// objects, as it does when the project DDL creates the extension.
+	input := fixture.readinessInput()
+	acknowledged := []string{
+		"ownership:extension:citext=" + fixture.Role,
+		"ownership:schema:provider_ext=" + fixture.Role,
+		"parameter_acl:session_replication_role",
+	}
+	report, err := Run(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "unsupported" || len(report.Unsupported) != 3 {
+		t.Fatalf("without live_ignore: %#v", report)
+	}
+
+	input.LiveIgnore = acknowledged
+	report, err = Run(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "ready" || len(report.Unsupported) != 0 || strings.Join(report.Observer.LiveIgnored, ",") != strings.Join(acknowledged, ",") {
+		t.Fatalf("with live_ignore: %#v", report)
+	}
+
+	// live_ignore cannot hide a modeled difference from the receipted checkpoint.
+	fixture.exec("CREATE TABLE public.manual_table (id bigint)")
+	report, err = Run(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "blocked" || len(report.Findings) != 1 || report.Findings[0].Code != "catalog_drift" {
+		t.Fatalf("modeled drift under live_ignore: %#v", report)
+	}
+}

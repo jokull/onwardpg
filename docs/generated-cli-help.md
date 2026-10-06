@@ -165,6 +165,8 @@ Usage: onwardpg diff --from SOURCE --to SOURCE [options]
         emit CASCADE for schema and table drops
   -concurrent-indexes
         create standalone indexes concurrently
+  -config string
+        repository configuration read for --target (default ".onwardpg.toml")
   -dev-url string
         PostgreSQL admin URL for disposable materialization databases
   -from string
@@ -185,6 +187,8 @@ Usage: onwardpg diff --from SOURCE --to SOURCE [options]
         output format: text or json (default "json")
   -schema-qualifier value
         scope to one schema and render names using this qualifier (empty means unqualified)
+  -target string
+        configured target whose live_ignore list applies to PostgreSQL URL sources
   -to string
         desired PostgreSQL URL or CREATE-statement SQL file
 ```

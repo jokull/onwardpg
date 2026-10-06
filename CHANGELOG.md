@@ -25,6 +25,26 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   that also differs from the receipted checkpoint still gets its
   `catalog_drift`, `expand_not_applied`, or `contract_already_applied` finding.
 
+### Added
+
+- A target can list `live_ignore` selectors in `.onwardpg.toml` for state a
+  managed PostgreSQL provider owns in live clusters: an extension or a schema
+  owned by another role (`ownership:extension:NAME=ROLE`,
+  `ownership:schema:NAME=ROLE`) and a `pg_parameter_acl` grant
+  (`parameter_acl:NAME`). Those selectors can exist only in production, so they
+  could not be target `ignore` entries and every live command needed one
+  `--ignore` flag per selector. `drift check`, `contract check`, and `diff`
+  (with the new `--target NAME [--config FILE]`) remove exactly the named
+  blocker markers from the live snapshot and list them as
+  `observer.live_ignored` (`workspace_compatibility` for `diff`). Selectors are
+  exact, validated for syntax and kind only, and need not match in every
+  cluster. They never remove a typed object, add an ignore receipt, or change a
+  fingerprint, and planning, verification, replayed history, and DDL sources
+  ignore them. The attribute ledger keeps these catalogs classified as blocked:
+  a parameter ACL or a foreign-owned schema can be a real privilege difference
+  between environments, so nothing is acknowledged without an exact entry, and a
+  changed owner or a new grant blocks again.
+
 ## v0.1.0-preview.5 — 2026-10-06
 
 ### Fixed
