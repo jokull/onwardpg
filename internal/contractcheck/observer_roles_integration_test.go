@@ -351,7 +351,7 @@ func TestCatalogInspectionGivesEachValidObserverTheGraphOfTheOwner(t *testing.T)
 				t.Fatal(err)
 			}
 			if snapshot != nil || finding == nil || finding.Code != "observer_access_policy_unsafe" ||
-				!strings.HasPrefix(finding.Message, "observer is not read-only: ") || !strings.Contains(finding.Message, test.message) {
+				!strings.HasPrefix(finding.Message, "observer is not read-only: ") || !strings.Contains(finding.Message, test.message) || len(finding.NextActions) != 2 {
 				t.Fatalf("finding = %#v", finding)
 			}
 		})

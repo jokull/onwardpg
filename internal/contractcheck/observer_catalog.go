@@ -66,6 +66,7 @@ func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores, li
 	report.ProjectedAccess = projected
 	if finding != nil {
 		report.Mode = "refused"
+		finding.NextActions = observerRoleActions(observer.database, catalogAccess)
 		return snapshot, report, finding, nil
 	}
 	observed := snapshot

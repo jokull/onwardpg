@@ -141,7 +141,7 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if finding == nil || finding.Code != "observer_access_policy_unsafe" {
+		if finding == nil || finding.Code != "observer_access_policy_unsafe" || len(finding.NextActions) != 2 {
 			t.Fatalf("grant-option finding = %#v", finding)
 		}
 		if _, err := owner.Exec(ctx, "REVOKE GRANT OPTION FOR SELECT ON app.orders FROM "+pgx.Identifier{observerRole}.Sanitize()); err != nil {

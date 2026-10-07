@@ -182,6 +182,8 @@ type observerContext struct {
 	BypassRLS bool
 	// refused is set when the guard did not accept the role.
 	refused bool
+	// database is the name of the inspected database, for next actions.
+	database string
 }
 
 func (o observerContext) projection() ObserverProjection {
@@ -226,6 +228,10 @@ func inspectObserver(ctx context.Context, tx pgx.Tx, access observerAccess) (obs
 	if finding != nil && finding.Code != "observer_access_incomplete" {
 		observer.refused = true
 	}
+	// Each refusal carries the SQL for a valid role.
+	if finding != nil && len(finding.NextActions) == 0 {
+		finding.NextActions = observerRoleActions(observer.database, access)
+	}
 	return observer, finding, err
 }
 
@@ -248,6 +254,7 @@ WHERE d.datname = current_database()`).Scan(
 	observer.ContextualUnsupported = make(map[string]bool)
 	observer.AccessRoles = map[string]bool{observer.Role: true}
 	observer.BypassRLS = bypassRLS
+	observer.database = database
 	if observer.Role == observer.DatabaseOwner {
 		return observer, nil, nil
 	}
@@ -750,6 +757,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	report.Observer.ProjectedAccess = projected
 	if finding != nil {
 		report.Observer.Mode = "refused"
+		finding.NextActions = observerRoleActions(observer.database, dataAccess)
 		report.Findings = append(report.Findings, *finding)
 		return finalize(report), nil
 	}
