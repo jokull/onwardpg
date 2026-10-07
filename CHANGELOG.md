@@ -3,7 +3,7 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
-## Unreleased
+## v0.1.0-preview.8 — 2026-10-07
 
 ### Fixed
 
