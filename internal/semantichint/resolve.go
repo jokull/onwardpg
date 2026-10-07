@@ -42,7 +42,7 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 	for iteration := 0; iteration <= len(hints)*2+1; iteration++ {
 		resolution.Questions = mergeQuestions(resolution.Questions, resolution.Result.Questions)
 		if resolution.Result.Status != protocol.NeedsInput {
-			if err := rejectUnused(hints, used, current, desired); err != nil {
+			if err := rejectUnused(hints, used, current, desired, options); err != nil {
 				return Resolution{}, err
 			}
 			resolution.Hints = usedHints(hints, used)
@@ -88,7 +88,9 @@ func classifyDeferredHints(current, desired *pgschema.Snapshot, hints []protocol
 			deferred = append(deferred, hint)
 			continue
 		}
-		if Unneeded(hint, current, desired) {
+		// A workspace plan keeps surplus objects: there the index is not
+		// dropped, so a hint for it is not answered by the plan.
+		if !options.PreserveSurplus && Unneeded(hint, current, desired) {
 			continue
 		}
 		key, _ := hint.CanonicalKey()
@@ -233,10 +235,10 @@ func Unneeded(hint protocol.Hint, current, desired *pgschema.Snapshot) bool {
 	return graphplan.DropNeedsNoDecision(id, current, desired)
 }
 
-func rejectUnused(hints []protocol.Hint, used map[int]bool, current, desired *pgschema.Snapshot) error {
+func rejectUnused(hints []protocol.Hint, used map[int]bool, current, desired *pgschema.Snapshot, options graphplan.Options) error {
 	var unused []string
 	for index, hint := range hints {
-		if used[index] || Unneeded(hint, current, desired) {
+		if used[index] || !options.PreserveSurplus && Unneeded(hint, current, desired) {
 			continue
 		}
 		key, _ := hint.CanonicalKey()

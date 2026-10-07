@@ -53,6 +53,10 @@ func TestIndexDropHintsAreUnneededOnlyWhenNoDecisionIsAsked(t *testing.T) {
 	if got := strings.Join(decisions[0].Choices[0].Hazards, ","); got != "unique_index_enforcement_removed,duplicate_rows_possible" {
 		t.Fatalf("choice hazards = %s", got)
 	}
+	// A workspace plan preserves the index, so the hint answers nothing there.
+	if _, err := Resolve(current, desired, []protocol.Hint{hint("index", "accounts_org_idx")}, graphplan.Options{PreserveSurplus: true}); err == nil || !strings.Contains(err.Error(), "unused semantic hints") {
+		t.Fatalf("a drop hint for a preserved index must fail: %v", err)
+	}
 	if _, err := Resolve(current, desired, []protocol.Hint{hint("index", "accounts_name_idx")}, graphplan.Options{}); err == nil || !strings.Contains(err.Error(), "unused semantic hints") {
 		t.Fatalf("a hint for a retained index must still fail: %v", err)
 	}

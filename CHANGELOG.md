@@ -88,8 +88,6 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   was verified.
 - The timing stage for these replays is `history_replay`; `ddl_execute` now
   measures only the load of exported DDL.
-
-||||||| parent of 1b6ef58 (Keep the index lock mode with the bundle and stop treating index drops as data loss)
 - A bundle keeps its index lock mode. The mode was stored in the manifest
   (`planner.options.concurrent_indexes`) but never read: a bundle planned with
   `--concurrent-indexes` went back to plain `CREATE INDEX` and `DROP INDEX` in
