@@ -351,3 +351,98 @@ func TestNormalizeDefaultEquivalentTimestampForms(t *testing.T) {
 		t.Fatalf("equivalent timestamp defaults differ: %s != %s", leftFingerprint, rightFingerprint)
 	}
 }
+
+func TestCanonicalOrderFollowsEveryAdd(t *testing.T) {
+	snapshot := New()
+	if ids := snapshot.IDs(); ids == nil || len(ids) != 0 {
+		t.Fatalf("IDs of an empty snapshot = %#v, want an empty non-nil slice", ids)
+	}
+	names := func() []string {
+		var result []string
+		for _, object := range snapshot.Objects() {
+			result = append(result, object.ObjectID().String())
+		}
+		return result
+	}
+	for _, name := range []string{"m", "z"} {
+		if err := snapshot.Add(Schema{Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := names(), []string{"schema:m", "schema:z"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("objects = %#v, want %#v", got, want)
+	}
+	// The order was read once. An object added afterwards must appear, and in
+	// its canonical place, not at the end.
+	if err := snapshot.Add(Schema{Name: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := names(), []string{"schema:a", "schema:m", "schema:z"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("objects after a later Add = %#v, want %#v", got, want)
+	}
+	if got := len(snapshot.IDs()); got != 3 {
+		t.Fatalf("IDs after a later Add has %d entries, want 3", got)
+	}
+	// A rejected Add changes nothing.
+	if err := snapshot.Add(Schema{Name: "a"}); err == nil {
+		t.Fatal("a duplicate object was accepted")
+	}
+	if got, want := names(), []string{"schema:a", "schema:m", "schema:z"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("objects after a rejected Add = %#v, want %#v", got, want)
+	}
+}
+
+func TestIDsReturnsASliceTheCallerOwns(t *testing.T) {
+	snapshot := New()
+	for _, name := range []string{"a", "b", "c"} {
+		if err := snapshot.Add(Schema{Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := snapshot.IDs()
+	ids[0], ids[2] = ids[2], ids[0]
+	ids = append(ids[:1], ID{Kind: KindSchema, Name: "invented"})
+	_ = ids
+	want := []ID{{Kind: KindSchema, Name: "a"}, {Kind: KindSchema, Name: "b"}, {Kind: KindSchema, Name: "c"}}
+	if got := snapshot.IDs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("a caller changed the order kept by the snapshot: %#v", got)
+	}
+	objects := snapshot.Objects()
+	objects[0] = Schema{Name: "replaced"}
+	if got := snapshot.Objects()[0].ObjectID().Name; got != "a" {
+		t.Fatalf("a caller changed the objects kept by the snapshot: first is %q", got)
+	}
+}
+
+func TestFinishedSnapshotAllowsConcurrentReads(t *testing.T) {
+	snapshot := New()
+	for index := range 200 {
+		if err := snapshot.Add(Schema{Name: "s" + strings.Repeat("x", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := snapshot.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan string, 8)
+	for range 8 {
+		go func() {
+			if len(snapshot.IDs()) != 200 || len(snapshot.Objects()) != 200 {
+				results <- "wrong object count"
+				return
+			}
+			fingerprint, err := snapshot.Fingerprint()
+			if err != nil {
+				results <- err.Error()
+				return
+			}
+			results <- fingerprint
+		}()
+	}
+	for range 8 {
+		if got := <-results; got != want {
+			t.Fatalf("concurrent read = %s, want %s", got, want)
+		}
+	}
+}

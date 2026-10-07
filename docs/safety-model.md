@@ -159,9 +159,13 @@ switch rather than overwritten. `history status` and `draft --after` retain an
 exact `head_ref` boundary for expert diagnostics and compatibility. Target
 lifecycle locks and final artifact comparison reject concurrent onwardpg
 history forks or ordinary path-based edits during long clone verification. The
-final commit point also rematerializes configured DDL, reloads
+final commit point also runs the configured schema export again, reloads
 `.onwardpg.toml`, and rejects configuration or schema export state that changed
-during planning or verification.
+during planning or verification. An export with the same bytes as the export
+that was planned has the same catalog, so it is accepted without a second load;
+an export with other bytes is loaded into disposable PostgreSQL and must have
+the same catalog fingerprint. The same second run is the determinism check of
+the export: see [when the export runs](schema-inputs.md#when-the-export-runs).
 `history status` exposes the repository chain and selected relationship without
 reading Git. If accepted history fully absorbs generated feature work, the
 selected bundle is removed as `absorbed`; developer-owned SQL is never removed

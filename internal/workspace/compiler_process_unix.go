@@ -58,3 +58,23 @@ func openRegularCompilerFile(name string) (*os.File, error) {
 	}
 	return file, nil
 }
+
+// openListedRegularFile opens a checkout file that a directory listing
+// reported as regular, with no path lookup before the open. O_NOFOLLOW stops
+// the open at a symbolic link that replaced the file after the listing, and
+// O_NONBLOCK stops it from waiting on a FIFO. The open descriptor is then
+// inspected, and only a regular file is returned. ok is false when the caller
+// must inspect the path itself.
+func openListedRegularFile(name string) (file *os.File, info os.FileInfo, ok bool) {
+	fd, err := syscall.Open(name, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, nil, false
+	}
+	file = os.NewFile(uintptr(fd), name)
+	info, err = file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		file.Close()
+		return nil, nil, false
+	}
+	return file, info, true
+}

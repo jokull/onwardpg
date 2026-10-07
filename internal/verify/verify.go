@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jokull/onwardpg/internal/bundle"
@@ -17,6 +18,7 @@ import (
 	"github.com/jokull/onwardpg/internal/scratchdb"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/sqlcheck"
+	"github.com/jokull/onwardpg/internal/timing"
 	"github.com/jokull/onwardpg/pgschema"
 )
 
@@ -67,12 +69,16 @@ type Input struct {
 	ThroughPhase string
 	Ignores      []string
 	Options      graphplan.Options
+	// Executions lets several verifications of one command share executions
+	// that run the same SQL. A nil value gives this verification its own.
+	Executions *Executions
 }
 
 func Run(ctx context.Context, input Input) (Report, error) {
 	if input.AdminURL == "" {
 		return Report{}, fmt.Errorf("disposable database admin URL is required")
 	}
+	defer timing.Start("verify_run")()
 	if input.ThroughPhase == "" {
 		input.ThroughPhase = "contract"
 	}
@@ -112,12 +118,25 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	observed, batches, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, input.ThroughPhase, input.Ignores)
-	report.ExecutedBatches = batches
+	executions := input.Executions
+	if executions == nil {
+		executions = NewExecutions()
+	}
+	observedExecution, desiredExecution, err := executions.pair(ctx, input.AdminURL, chain, input.BundleID, input.ThroughPhase, input.Ignores)
 	if err != nil {
 		return Report{}, err
 	}
+	observed, failure := observedExecution.snapshot, observedExecution.failure
+	report.ExecutedBatches = observedExecution.batches
+	if observedExecution.err != nil {
+		// Both executions own a scratch database. Keep the cleanup error of
+		// the second when the first is the one that is reported.
+		return Report{}, errors.Join(observedExecution.err, desiredExecution.err)
+	}
 	if failure != nil {
+		if desiredExecution.err != nil {
+			return Report{}, desiredExecution.err
+		}
 		report.Failure = failure
 		report.Findings = []Finding{{Code: failure.Code, Message: failure.Message, Remediation: failure.Remediation}}
 		return report, nil
@@ -132,9 +151,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			assertionIDs = append(assertionIDs, assertion.ID)
 		}
 	}
-	desired, _, failure, err := executeDisposable(ctx, input.AdminURL, chain, input.BundleID, "contract", input.Ignores)
-	if err != nil {
-		return Report{}, err
+	desired, failure := desiredExecution.snapshot, desiredExecution.failure
+	if desiredExecution.err != nil {
+		return Report{}, desiredExecution.err
 	}
 	if failure != nil {
 		report.Failure = failure
@@ -155,7 +174,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if targetManifest.DesiredSource.Fingerprint != report.DesiredFingerprint {
 		return Report{}, fmt.Errorf("full history fingerprint %s does not match bundle desired fingerprint %s", report.DesiredFingerprint, targetManifest.DesiredSource.Fingerprint)
 	}
+	stopResidual := timing.Start("verify_residual_plan")
 	residual, err := graphplan.Build(observed, desired, protocol.Answers{}, input.Options)
+	stopResidual()
 	if err != nil {
 		return Report{}, fmt.Errorf("plan verification residual: %w", err)
 	}
@@ -239,6 +260,8 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 	if err != nil {
 		return nil, 0, nil, err
 	}
+	stopReplay := sync.OnceFunc(timing.Start("history_replay"))
+	defer stopReplay()
 	for _, entry := range chain.Entries {
 		data := entry.Artifact.Files["plan.json"]
 		var plan protocol.Result
@@ -315,6 +338,7 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 	if err := connection.Close(ctx); err != nil {
 		return nil, batches, nil, fmt.Errorf("close disposable execution connection: %w", err)
 	}
+	stopReplay()
 	snapshot, err = source.LoadDatabaseGraphForComparison(ctx, database.Config, ignores)
 	if err != nil {
 		return nil, batches, nil, fmt.Errorf("inspect disposable result: %w", err)

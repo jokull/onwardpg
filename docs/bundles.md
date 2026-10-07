@@ -218,6 +218,16 @@ Transactional batches roll back on failure.
 Non-transactional batches are executed outside explicit transactions. Optional
 boolean assertions in `verify.sql` must all return true.
 
+One command can verify a bundle twice: `plan` and `draft` verify the expand
+checkpoint and then the complete bundle, and `verify` does the same for an
+edited bundle. The second verification reuses an execution of the first only
+when both run exactly the same SQL, in the same order and transaction
+boundaries, with the same checks, on the same scratch server. Each verification
+still compares two separate executions in two databases. When expand is the
+last work of the bundle, both verifications compare the same two executions,
+and the command replays history twice, not four times. Results are held in
+memory for one command; onwardpg keeps no replayed database between commands.
+
 Verification proves replay and catalog convergence. It does not prove
 production timing, application compatibility, realistic data-volume behavior,
 or that production applied the chain.

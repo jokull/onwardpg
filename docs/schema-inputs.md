@@ -8,9 +8,9 @@ of two ways:
 - `schema_command` is an argument vector whose stdout is the SQL document.
 
 `schema_command` is trusted project code. onwardpg invokes the argument vector
-directly, without a shell, from the repository root. It runs the command twice,
-limits captured output, requires byte-identical DDL, and rejects direct changes
-to the checkout that it can observe. It is not an operating-system sandbox and
+directly, without a shell, from the repository root. It runs the command at
+least twice in each CLI command, limits captured output, requires byte-identical
+DDL, and rejects direct changes to the checkout that it can observe. It is not an operating-system sandbox and
 cannot prevent writes outside the checkout or through external symlink targets;
 use a read-only export command. Both input paths accept at most 64 MiB. Command
 exports have a five-minute deadline per run and their output size is monitored
@@ -67,9 +67,11 @@ DDL sources converge on equivalent catalog graphs.
 
 The export command runs from the repository root. PR regeneration runs it
 twice and rejects nondeterministic output, command failure, or changes to
-repository inputs. Version-control internals and dependency-installation trees
-(`.git` and `node_modules` at any depth) are excluded from that mutation check;
-generated project files are not. Commands should write the schema only to
+repository inputs. `plan`, `draft`, `verify`, and `init` run it once at the start
+and once immediately before they commit a result; see
+[when the export runs](#when-the-export-runs). Version-control internals and
+dependency-installation trees (`.git` and `node_modules` at any depth) are
+excluded from that mutation check; generated project files are not. Commands should write the schema only to
 stdout. Put credentials in the configured environment variable; URL-bearing
 command arguments are rejected, and receipts never record environment values.
 
@@ -85,3 +87,43 @@ The Go implementation contains internal artifact types used to move DDL and
 catalog snapshots between packages. They are not a promise of an integration
 ecosystem. New input mechanisms should not be added until the development and
 PR-restacking workflows are mature and a concrete need cannot be met by DDL.
+
+## When the export runs
+
+Each CLI command that reads the configured schema needs two proofs: the export
+is deterministic, and the export did not change while the command worked.
+
+`plan`, `draft`, `verify`, and `init` get both proofs from two runs:
+
+1. The first run is at the start. The command plans or verifies from its output.
+2. The second run is immediately before the command writes a bundle, installs
+   receipts, or prints its result.
+
+Byte-identical output from the two runs proves both properties. The catalog of
+identical DDL on the same scratch server is the catalog that the command
+already inspected, so the command does not load the DDL a second time.
+
+If the second run differs from the first, the command runs the export a third
+time. A third run that differs from the second is a nondeterministic export,
+and the command stops. A third run that equals the second means the schema
+changed while the command worked. The command then loads the new DDL into
+disposable PostgreSQL and compares catalog fingerprints, as every command did
+before; a different fingerprint stops the command and nothing is written.
+
+A command that ends without a write (for example an `unsupported` or
+`no_changes` result, or a failed verification) still does the second run. Its
+result describes the first export, so it is reported only when the second run
+has the same bytes. If the export changed, the command stops with an error and
+must be run again. A nondeterministic or outdated export is therefore never
+reported as a schema result.
+
+The second run happens once. A command does not repeat a rejected run to get
+another answer.
+
+`dev`, `config check`, and `diff --target` run the export twice back to back.
+
+onwardpg fingerprints the checkout before and after each run. The fingerprint
+reads the bytes of every file outside `.git` and `node_modules`. Do not change
+files in the checkout while an export runs: onwardpg cannot tell that change
+from a write by the export command, and stops with `DDL export command modified
+repository inputs`.

@@ -294,7 +294,10 @@ copied from `history status`; it is not a bare bundle name.
 3. that chain must end at the exact accepted name-and-digest `head_ref` named
    by `--after`;
 4. the chain is replayed in disposable PostgreSQL;
-5. working DDL is compiled twice and materialized in disposable PostgreSQL;
+5. working DDL is compiled and materialized in disposable PostgreSQL, while
+   step 4 runs; it is compiled again immediately before the bundle is written,
+   and the two outputs must be byte-identical or have the same catalog
+   fingerprint (see [when the export runs](schema-inputs.md#when-the-export-runs));
 6. the typed graph planner emits semantic choices or a complete plan;
 7. a complete generated plan is clone-verified before the bundle is written.
 
@@ -356,7 +359,8 @@ onwardpg verify \
 
 Creates disposable databases, executes validated history through the selected
 phase, catalog-inspects the result, and compares it with a separate full-chain
-execution. Full verification exits zero only for an empty residual. Edited
+execution. The two executions run at the same time, each in its own database.
+Full verification exits zero only for an empty residual. Edited
 phase files and verify.sql assertions are receipted only after this succeeds.
 Partial verification exits zero with `partial_verified` only after the exact
 prefix and its full continuation both succeed on independent disposable

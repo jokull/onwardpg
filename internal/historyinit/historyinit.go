@@ -59,6 +59,21 @@ type Input struct {
 // catalog to the configured declarative schema. The artifact is clone-verified
 // before it is installed in the real bundle root.
 func Run(ctx context.Context, input Input) (Report, error) {
+	var export *workspace.Export
+	report, err := run(ctx, input, &export)
+	if err != nil {
+		return report, err
+	}
+	// A result that did not pass the final input check still rests on one
+	// export run. Run the export again: a result is reported only for an
+	// export that is deterministic and did not change during the command.
+	if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
+		return report, fmt.Errorf("confirm desired schema export: %w", err)
+	}
+	return report, nil
+}
+
+func run(ctx context.Context, input Input, started **workspace.Export) (Report, error) {
 	report := Report{
 		Outcome:  "error",
 		Target:   input.TargetName,
@@ -109,15 +124,24 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return report, nil
 	}
 
-	compiled, err := workspace.CompileDDL(ctx, input.Root, input.TargetName, input.Target)
+	export, err := workspace.StartExport(ctx, input.Root, input.TargetName, input.Target)
 	if err != nil {
 		return report, fmt.Errorf("compile declarative schema: %w", err)
 	}
+	*started = export
+	compiled := export.Compiled()
 	empty, err := source.LoadDDLGraphForComparison(ctx, nil, "empty-postgresql", input.AdminURL, input.Ignores)
 	if err != nil {
+		if settleErr := export.Settle(); settleErr != nil {
+			return report, fmt.Errorf("compile declarative schema: %w", settleErr)
+		}
 		return report, fmt.Errorf("inspect empty PostgreSQL baseline: %w", err)
 	}
 	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
+	// The checkout fingerprint that follows the export ran during these loads.
+	if settleErr := export.Settle(); settleErr != nil {
+		return report, fmt.Errorf("compile declarative schema: %w", settleErr)
+	}
 	if err != nil {
 		return report, fmt.Errorf("inspect declarative schema: %w", err)
 	}
@@ -279,26 +303,30 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}}
 		return report, nil
 	}
-	compiledAfter, err := workspace.CompileDDL(ctx, input.Root, input.TargetName, input.Target)
+	compiledAfter, err := export.Confirm(ctx)
 	if err != nil {
 		return report, fmt.Errorf("recompile desired schema after baseline verification: %w", err)
 	}
-	desiredAfter, err := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, input.AdminURL, input.Ignores)
-	if err != nil {
-		return report, fmt.Errorf("rematerialize desired schema after baseline verification: %w", err)
-	}
-	desiredAfterFingerprint, err := graphplan.Fingerprint(desiredAfter, input.PlannerOptions)
-	if err != nil {
-		return report, fmt.Errorf("fingerprint desired schema after baseline verification: %w", err)
-	}
-	if desiredAfterFingerprint != plan.DesiredFingerprint {
-		report.Outcome = "blocked"
-		report.Findings = []Finding{{
-			Code:        "desired_schema_changed_during_init",
-			Message:     fmt.Sprintf("configured desired schema changed from %s to %s during baseline verification", plan.DesiredFingerprint, desiredAfterFingerprint),
-			Remediation: "rerun init against the current stable DDL; no baseline was installed",
-		}}
-		return report, nil
+	// A nil result is an export with the bytes that were planned, so its
+	// catalog is the planned catalog. Different bytes need a catalog comparison.
+	if compiledAfter != nil {
+		desiredAfter, err := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, input.AdminURL, input.Ignores)
+		if err != nil {
+			return report, fmt.Errorf("rematerialize desired schema after baseline verification: %w", err)
+		}
+		desiredAfterFingerprint, err := graphplan.Fingerprint(desiredAfter, input.PlannerOptions)
+		if err != nil {
+			return report, fmt.Errorf("fingerprint desired schema after baseline verification: %w", err)
+		}
+		if desiredAfterFingerprint != plan.DesiredFingerprint {
+			report.Outcome = "blocked"
+			report.Findings = []Finding{{
+				Code:        "desired_schema_changed_during_init",
+				Message:     fmt.Sprintf("configured desired schema changed from %s to %s during baseline verification", plan.DesiredFingerprint, desiredAfterFingerprint),
+				Remediation: "rerun init against the current stable DDL; no baseline was installed",
+			}}
+			return report, nil
+		}
 	}
 	destination, err := input.Config.BundlePath(input.Root, input.TargetName, input.BundleID)
 	if err != nil {
