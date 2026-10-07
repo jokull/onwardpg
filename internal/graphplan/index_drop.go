@@ -131,7 +131,9 @@ func onlinePartitionedIndexChildren(parent pgschema.Index, current, desired *pgs
 		if !exists || !ok || child.Constraint != "" || child.Primary || child.Exclusion || !sameTable(current, desired, child.Table) {
 			return nil, false
 		}
-		if _, present := current.Object(child.ObjectID()); present {
+		// A name that another relation has now would need the drop of that
+		// relation first; the plain statement has that ordering.
+		if _, present := current.Object(child.ObjectID()); present || relationNameExists(current, child.Table.Schema, child.Name) {
 			return nil, false
 		}
 		node := partitionIndexReplacement{after: child, partitioned: table.Partition != nil}
@@ -215,14 +217,22 @@ func DropNeedsNoDecision(id pgschema.ID, current, desired *pgschema.Snapshot) bo
 }
 
 // DropDecisionHazards names what the confirmation of a drop gives up. Only a
-// drop of an object that owns rows is data loss.
-func DropDecisionHazards(object pgschema.Object) []string {
+// drop of an object that owns rows is data loss. current is the snapshot that
+// holds the object; it tells whether an index has a second role.
+func DropDecisionHazards(current *pgschema.Snapshot, object pgschema.Object) []string {
 	switch object := object.(type) {
 	case pgschema.Index:
+		hazards := []string{HazardSlowerQueries}
 		if object.Unique {
-			return []string{"unique_index_enforcement_removed", "duplicate_rows_possible"}
+			hazards = []string{"unique_index_enforcement_removed", "duplicate_rows_possible"}
 		}
-		return []string{HazardSlowerQueries}
+		if isReplicaIdentityIndex(current, object) {
+			hazards = append(hazards, "replica_identity_removed", "logical_replication_change")
+		}
+		if isClusteredIndex(current, object) {
+			hazards = append(hazards, "clustered_index_removed")
+		}
+		return hazards
 	case pgschema.Constraint:
 		return constraintEnforcementHazards(object)
 	}

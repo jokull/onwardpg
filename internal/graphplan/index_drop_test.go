@@ -127,7 +127,7 @@ func TestUniqueIndexAndConstraintDropsKeepOneEnforcementDecision(t *testing.T) {
 				pending.Questions[0].Key != fixture.key.ObjectID().String() || !strings.Contains(pending.Questions[0].Message, fixture.message) {
 				t.Fatalf("a unique drop must ask exactly one enforcement decision: %#v", pending)
 			}
-			if hazards := DropDecisionHazards(fixture.key); containsString(hazards, "data_loss") || !containsString(hazards, fixture.hazard) || !containsString(hazards, "duplicate_rows_possible") {
+			if hazards := DropDecisionHazards(current, fixture.key); containsString(hazards, "data_loss") || !containsString(hazards, fixture.hazard) || !containsString(hazards, "duplicate_rows_possible") {
 				t.Fatalf("decision hazards = %v", hazards)
 			}
 			if DropNeedsNoDecision(fixture.key.ObjectID(), current, desired) {
@@ -164,6 +164,9 @@ func TestClusteredAndReplicaIdentityIndexDropsKeepADecision(t *testing.T) {
 		if err := clustered.AddIgnored(selector); err != nil {
 			t.Fatal(err)
 		}
+		if hazards := DropDecisionHazards(clustered, index); !containsString(hazards, "clustered_index_removed") {
+			t.Fatalf("%s: clustered decision hazards = %v", selector, hazards)
+		}
 		if DropNeedsNoDecision(index.ObjectID(), clustered, desired) {
 			t.Fatalf("%s: a clustered index drop must keep its decision", selector)
 		}
@@ -180,6 +183,9 @@ func TestClusteredAndReplicaIdentityIndexDropsKeepADecision(t *testing.T) {
 	if DropNeedsNoDecision(index.ObjectID(), identity, desired) {
 		t.Fatal("a replica identity index drop must keep its decision")
 	}
+	if hazards := DropDecisionHazards(identity, index); !containsString(hazards, "replica_identity_removed") {
+		t.Fatalf("replica identity decision hazards = %v", hazards)
+	}
 }
 
 func TestDataDropsKeepTheDataLossDecision(t *testing.T) {
@@ -190,7 +196,7 @@ func TestDataDropsKeepTheDataLossDecision(t *testing.T) {
 	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Key != column.ObjectID().String() {
 		t.Fatalf("a column drop must ask exactly its own decision: %#v", pending)
 	}
-	if hazards := DropDecisionHazards(column); len(hazards) != 1 || hazards[0] != "data_loss" {
+	if hazards := DropDecisionHazards(current, column); len(hazards) != 1 || hazards[0] != "data_loss" {
 		t.Fatalf("column decision hazards = %v", hazards)
 	}
 	if DropNeedsNoDecision(column.ObjectID(), current, desired) || !DropNeedsNoDecision(index.ObjectID(), current, desired) {

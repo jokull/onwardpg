@@ -292,6 +292,7 @@ A drop asks for a decision only when it loses rows or a guarantee. The
 | Schema, table, column, sequence, type, and every other object not listed here | Yes | `data_loss` |
 | Standalone index that is not unique, is not the replica identity, and is not the index that the table is clustered on | No | — |
 | Standalone unique index | Yes | `unique_index_enforcement_removed`, `duplicate_rows_possible` |
+| Index that is the replica identity of its table, or that the table is clustered on | Yes | `replica_identity_removed`, `logical_replication_change`, or `clustered_index_removed`, with the hazards of the index |
 | Primary-key or unique constraint | Yes | `temporary_or_permanent_uniqueness_unenforced`, `duplicate_rows_possible` |
 | Check, foreign-key, or exclusion constraint | Yes | The enforcement that is removed, for example `referential_enforcement_removed`, `orphan_rows_possible` |
 

@@ -354,7 +354,7 @@ func confirmationHazards(kind string) []string {
 func dropHazards(current *pgschema.Snapshot, id pgschema.ID) []string {
 	if current != nil {
 		if object, exists := current.Object(id); exists {
-			return graphplan.DropDecisionHazards(object)
+			return graphplan.DropDecisionHazards(current, object)
 		}
 	}
 	return []string{"data_loss"}
