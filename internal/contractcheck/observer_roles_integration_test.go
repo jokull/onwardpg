@@ -371,3 +371,60 @@ func TestCatalogInspectionGivesEachValidObserverTheGraphOfTheOwner(t *testing.T)
 		t.Fatalf("CREATE through a predefined role: %v, %#v", err, finding)
 	}
 }
+
+// Row-level security with no policy for a reader hides every row from a
+// pg_read_all_data role, with no error. Contract check refuses that reader,
+// because a data gate could pass on rows it cannot see. The same role with
+// BYPASSRLS sees every row and is ready.
+func TestContractCheckNeedsBypassRLSWhenPoliciesHideRowsFromTheReader(t *testing.T) {
+	fixture := newProviderFixture(t)
+	ctx := context.Background()
+	config, err := pgx.ParseConfig(fixture.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close(context.Background())
+	if _, err := owner.Exec(ctx, "CREATE SCHEMA app; CREATE TABLE app.orders (id bigint PRIMARY KEY); ALTER TABLE app.orders ENABLE ROW LEVEL SECURITY; INSERT INTO app.orders VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	const password = "observer-rls-test-password"
+	reader, bypass := config.User+"_reader", config.User+"_bypass"
+	database := pgx.Identifier{config.Database}.Sanitize()
+	for role, attribute := range map[string]string{reader: "NOBYPASSRLS", bypass: "BYPASSRLS"} {
+		quoted := pgx.Identifier{role}.Sanitize()
+		if _, err := fixture.cluster.Exec(ctx, "CREATE ROLE "+quoted+" LOGIN PASSWORD '"+password+"' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION "+attribute+" IN ROLE pg_read_all_data; GRANT CONNECT ON DATABASE "+database+" TO "+quoted); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			background := context.Background()
+			_, _ = fixture.cluster.Exec(background, "REVOKE CONNECT ON DATABASE "+database+" FROM "+quoted)
+			_, _ = fixture.cluster.Exec(background, "DROP ROLE IF EXISTS "+quoted)
+		})
+	}
+	input := fixture.readinessInput()
+	run := func(role string) Report {
+		t.Helper()
+		observer := config.Copy()
+		observer.User, observer.Password = role, password
+		next := input
+		next.DatabaseURL = restrictedScratchURL(observer)
+		report, err := Run(ctx, next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+	filtered := run(reader)
+	if filtered.Status != "blocked" || len(filtered.Findings) != 1 || filtered.Findings[0].Code != "observer_rls_incomplete" ||
+		filtered.Observer.Mode != "predefined_read_role" || filtered.Observer.BypassRLS {
+		t.Fatalf("reader that policies filter = %#v", filtered)
+	}
+	complete := run(bypass)
+	if complete.Status != "ready" || len(complete.Findings) != 0 || complete.Observer.Mode != "predefined_read_role" || !complete.Observer.BypassRLS {
+		t.Fatalf("reader with BYPASSRLS = %#v", complete)
+	}
+}
