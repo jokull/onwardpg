@@ -72,7 +72,7 @@ func observedCompile(t *testing.T, root string, target Target) []string {
 	if _, err := CompileDDL(ctx, root, "primary", target); err != nil {
 		t.Fatalf("CompileDDL = %v, want a successful export", err)
 	}
-	return observer.Take()
+	return observer.Take(context.Background())
 }
 
 func TestExportThatWritesToTheWorkTreeSucceedsAndIsReported(t *testing.T) {
@@ -99,19 +99,16 @@ func TestExportThatWritesToTheWorkTreeSucceedsAndIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := observer.Take(); len(got) != 0 {
-		t.Fatalf("side effects before the last run = %q, want none yet", got)
-	}
 	if changed, err := export.Confirm(ctx); err != nil || changed != nil {
 		t.Fatalf("Confirm = %v, %v; want an unchanged export", changed, err)
 	}
 	// A file that the command writes after its last export run is its own
 	// result, not a side effect of the export.
 	writeTreeFiles(t, root, map[string]string{"bundles/primary/plan.json": "{}\n"})
-	if got := observer.Take(); !slices.Equal(got, want) {
+	if got := observer.Take(context.Background()); !slices.Equal(got, want) {
 		t.Fatalf("side effects = %q, want %q", got, want)
 	}
-	if got := observer.Take(); len(got) != 0 {
+	if got := observer.Take(context.Background()); len(got) != 0 {
 		t.Fatalf("side effects were reported twice: %q", got)
 	}
 }
@@ -143,6 +140,44 @@ func TestSideEffectObservationDoesNotReplaceTheOutputCheck(t *testing.T) {
 	}
 	if _, err := export.Confirm(ctx); err == nil || !strings.Contains(err.Error(), "nondeterministic") {
 		t.Fatalf("Confirm = %v, want a nondeterministic export", err)
+	}
+}
+
+// A command that stops before the last export run still reports what the
+// export command wrote: the command closes the open watch as it writes its
+// output.
+func TestSideEffectsOfAFailedOrAbandonedExportAreReported(t *testing.T) {
+	files := map[string]string{"schema.sql": "CREATE TABLE users (id bigint);\n", "generated.ts": "export {}\n"}
+	failing := Target{SchemaCommand: []string{"sh", "-c", `printf x >> generated.ts; exit 3`}, DevDatabaseEnv: "DEV_DATABASE_URL"}
+	want := []string{"generated.ts"}
+
+	ctx, observer := ObserveExportSideEffects(context.Background())
+	if _, err := CompileDDL(ctx, gitCheckout(t, files), "primary", failing); err == nil || !strings.Contains(err.Error(), "failed") {
+		t.Fatalf("CompileDDL = %v, want a failed command", err)
+	}
+	if got := observer.Take(context.Background()); !slices.Equal(got, want) {
+		t.Fatalf("side effects of a failed CompileDDL = %q, want %q", got, want)
+	}
+
+	ctx, observer = ObserveExportSideEffects(context.Background())
+	if _, err := StartExport(ctx, gitCheckout(t, files), "primary", failing); err == nil {
+		t.Fatal("StartExport of a failing command returned no error")
+	}
+	if got := observer.Take(context.Background()); !slices.Equal(got, want) {
+		t.Fatalf("side effects of a failed StartExport = %q, want %q", got, want)
+	}
+
+	// The first run succeeds and the command then stops for another reason,
+	// so Confirm never runs.
+	ctx, observer = ObserveExportSideEffects(context.Background())
+	if _, err := StartExport(ctx, gitCheckout(t, files), "primary", exportThat(`printf x >> generated.ts`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := observer.Take(context.Background()); !slices.Equal(got, want) {
+		t.Fatalf("side effects of an abandoned export = %q, want %q", got, want)
+	}
+	if got := observer.Take(context.Background()); len(got) != 0 {
+		t.Fatalf("side effects were reported twice: %q", got)
 	}
 }
 

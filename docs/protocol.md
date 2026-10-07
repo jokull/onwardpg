@@ -248,8 +248,8 @@ validation and disposable clone convergence.
 
 ## Warnings
 
-A result document can have one more top-level member, `warnings`. It is always
-the last member. A warning is an observation for the reader. It never changes
+A result document, and an error diagnostic, can have one more top-level member,
+`warnings`. It is always the last member. A warning is an observation for the reader. It never changes
 `status` or the exit code, and a consumer can ignore it. It exists only in the
 output of the command: no bundle, manifest, receipt, or digest contains it.
 The member is absent when there is nothing to report.
@@ -273,7 +273,8 @@ Consumers should branch on `code`. The one current code is
 `export_side_effects`. `init`, `plan`, `draft`, `verify`, `dev plan`, and
 `config check` emit it when they run a `schema_command` in a git work tree and
 the output of `git status` after the last export run differs from the output
-before the first. `paths` lists up to 50 changed paths in sorted order,
+before the first. A command that stops with an error before its last export
+run takes the second status as it writes the diagnostic. `paths` lists up to 50 changed paths in sorted order,
 relative to the top level of the git work tree, and `path_count` is the number
 that changed. The paths can be the work of the export command, of another
 process, or of the developer. Files that git ignores are never listed. No

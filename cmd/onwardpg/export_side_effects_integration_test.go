@@ -89,6 +89,17 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 		return runVerifyAt([]string{"--target", "primary", "--bundle", "add-note", "--check"}, repository)
 	})
 
+	// A command that stops with an error reports the side effects too.
+	commit()
+	writeTestFile(t, repository, ".onwardpg.toml", configuration("printf x >> generated.txt; exit 3"))
+	git("add", ".onwardpg.toml")
+	git("commit", "--quiet", "--message=failing export")
+	warned("config check with a failing export", 1, func() int { return runConfig([]string{"check", "--config", configPath}) })
+	commit()
+	warned("verify --check with a failing export", 1, func() int {
+		return runVerifyAt([]string{"--target", "primary", "--bundle", "add-note", "--check"}, repository)
+	})
+
 	// A read-only export has nothing to report.
 	writeTestFile(t, repository, ".onwardpg.toml", configuration("cat schema.sql"))
 	commit()

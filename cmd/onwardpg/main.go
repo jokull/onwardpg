@@ -160,7 +160,7 @@ func commandContext() context.Context {
 
 // pendingWarnings returns the warnings that no output has carried yet.
 func pendingWarnings() []protocol.Warning {
-	paths := exportObserver.Take()
+	paths := exportObserver.Take(context.Background())
 	if len(paths) == 0 {
 		return nil
 	}
@@ -176,18 +176,29 @@ func writeJSON(writer io.Writer, value any) error {
 	if err := json.NewEncoder(&document).Encode(value); err != nil {
 		return err
 	}
-	_, err := writer.Write(appendWarnings(document.Bytes(), pendingWarnings()))
+	body := document.Bytes()
+	if isJSONObject(body) {
+		// Only a document that can carry the warnings takes them. Otherwise
+		// they stay pending for writePendingWarnings.
+		body = appendWarnings(body, pendingWarnings())
+	}
+	_, err := writer.Write(body)
 	return err
+}
+
+func isJSONObject(document []byte) bool {
+	object := bytes.TrimRight(document, "\n")
+	return len(object) >= 2 && object[0] == '{' && object[len(object)-1] == '}'
 }
 
 // appendWarnings adds a `warnings` member to a JSON object document.
 func appendWarnings(document []byte, warnings []protocol.Warning) []byte {
-	if len(warnings) == 0 {
+	if len(warnings) == 0 || !isJSONObject(document) {
 		return document
 	}
 	object := bytes.TrimRight(document, "\n")
 	encoded, err := json.Marshal(warnings)
-	if err != nil || len(object) < 2 || object[0] != '{' || object[len(object)-1] != '}' {
+	if err != nil {
 		return document
 	}
 	result := append([]byte(nil), object[:len(object)-1]...)

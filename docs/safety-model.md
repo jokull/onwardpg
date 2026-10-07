@@ -263,7 +263,9 @@ digest ever contained it, so its removal changes no stored format.
 
 In a git work tree, a command that runs `schema_command` reads the git status
 before the first export run and after the last one
-(`git status --porcelain=v2 -z --untracked-files=all`). If the status of a
+(`git status --porcelain=v2 -z --untracked-files=all`). A command that stops
+with an error before its last export run reads the second status as it
+reports the error. If the status of a
 path changed, the result document carries a `warnings` entry with the code
 `export_side_effects` and the paths: see
 [warnings](protocol.md#warnings). The warning never changes the status or the
@@ -278,7 +280,7 @@ The warning is an observation, not a check:
 
 - It needs a git work tree and a `git` executable. Without them there is no
   observation and no error. A status query that fails, or that takes longer
-  than 10 seconds, is ignored.
+  than 5 seconds, is ignored.
 - Files that git ignores are not reported.
 - Git status says that a file differs from the index. It does not say how. A
   second write to a file that was already modified or untracked before the

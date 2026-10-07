@@ -19,6 +19,8 @@ import (
 type SideEffectObserver struct {
 	mutex sync.Mutex
 	paths map[string]struct{}
+	// open holds the watches that have a first status and no second one yet.
+	open []*sideEffectWatch
 }
 
 type sideEffectObserverKey struct{}
@@ -33,9 +35,21 @@ func ObserveExportSideEffects(ctx context.Context) (context.Context, *SideEffect
 
 // Take returns the observed paths in sorted order and forgets them. The
 // paths are relative to the top level of the git work tree.
-func (o *SideEffectObserver) Take() []string {
+//
+// A command calls Take when it writes its output. An export that ended
+// without its last run, because the export command failed or because the
+// command stopped for another reason, still has an open watch at that time.
+// Take closes it, so the output of a failed command also reports what the
+// export command wrote.
+func (o *SideEffectObserver) Take(ctx context.Context) []string {
 	if o == nil {
 		return nil
+	}
+	o.mutex.Lock()
+	open := append([]*sideEffectWatch(nil), o.open...)
+	o.mutex.Unlock()
+	for _, watch := range open {
+		watch.finish(ctx)
 	}
 	o.mutex.Lock()
 	defer o.mutex.Unlock()
@@ -46,6 +60,20 @@ func (o *SideEffectObserver) Take() []string {
 	o.paths = nil
 	sort.Strings(paths)
 	return paths
+}
+
+// close removes watch from the open watches. It reports false when another
+// call already closed it.
+func (o *SideEffectObserver) close(watch *sideEffectWatch) bool {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
+	for index, candidate := range o.open {
+		if candidate == watch {
+			o.open = append(o.open[:index], o.open[index+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 func (o *SideEffectObserver) add(paths []string) {
@@ -93,14 +121,19 @@ func watchExportSideEffects(ctx context.Context, root string, target Target) *si
 	if !ok {
 		return nil
 	}
-	return &sideEffectWatch{observer: observer, root: root, before: before}
+	watch := &sideEffectWatch{observer: observer, root: root, before: before}
+	observer.mutex.Lock()
+	observer.open = append(observer.open, watch)
+	observer.mutex.Unlock()
+	return watch
 }
 
 // finish reads the git status again and gives the observer every path whose
 // status line differs. Call it after the last export run and before the
-// command writes its own files.
+// command writes its own files. Only the first call has an effect. A watch
+// that is never finished is closed by SideEffectObserver.Take.
 func (w *sideEffectWatch) finish(ctx context.Context) {
-	if w == nil {
+	if w == nil || !w.observer.close(w) {
 		return
 	}
 	after, ok := gitStatus(ctx, w.root)
@@ -122,8 +155,9 @@ func (w *sideEffectWatch) finish(ctx context.Context) {
 }
 
 // A status that takes longer than this is abandoned. The observation must
-// not make a command slow.
-const gitStatusTimeout = 10 * time.Second
+// not make a command slow. When the first status of a watch is abandoned,
+// there is no second one.
+const gitStatusTimeout = 5 * time.Second
 
 // gitStatus returns one status line for each path that git reports as
 // changed or untracked. Files that git ignores are not reported. The command

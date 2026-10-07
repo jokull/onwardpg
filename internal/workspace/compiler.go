@@ -30,6 +30,8 @@ type CompiledDDL struct {
 // byte deterministic output. It is the narrow CLI boundary for schema_file
 // and schema_command; it does not expose a framework integration API.
 func CompileDDL(ctx context.Context, root, targetName string, target Target) (CompiledDDL, error) {
+	// When a run fails, the watch stays open and the command closes it as it
+	// writes its output: see SideEffectObserver.Take.
 	watch := watchExportSideEffects(ctx, root, target)
 	first, err := compileDDLOnce(ctx, root, targetName, target)
 	if err != nil {
@@ -74,6 +76,8 @@ type Export struct {
 
 // StartExport runs the configured export once and keeps its output.
 func StartExport(ctx context.Context, root, targetName string, target Target) (*Export, error) {
+	// When this run or a later step fails, the watch stays open and the
+	// command closes it as it writes its output: see SideEffectObserver.Take.
 	watch := watchExportSideEffects(ctx, root, target)
 	first, err := compileDDLOnce(ctx, root, targetName, target)
 	if err != nil {
