@@ -393,9 +393,22 @@ onwardpg drift check \
 credential stays out of process arguments, like `contract check --database-env`.
 Pass exactly one of `--database` and `--database-env`.
 
-Replays the complete receipted history head in disposable PostgreSQL, inspects the
-explicitly supplied live catalog read-only, and reports typed missing,
+Inspects the explicitly supplied live catalog read-only, replays the complete
+receipted history head in disposable PostgreSQL, and reports typed missing,
 unexpected, and changed objects. Exit zero means drift_free; drift exits 4.
+
+The live catalog is read first. Each check that needs only the live connection
+(the [observer role](#observer-role) guard and the catalog read) runs before
+the history replay, so a wrong role or URL stops the command in about a second
+and creates no disposable database.
+
+The replay is the one that `verify` uses. Each bundle runs batch by batch in
+the mode that the bundle declares: a non-transactional batch, such as
+`CREATE INDEX CONCURRENTLY` or `DROP INDEX CONCURRENTLY` from
+`--concurrent-indexes`, is not put in a transaction, an edited phase is split
+at its batch directives, and one connection runs the complete history. `plan`
+and `draft` replay their base history the same way. A scratch server whose
+PostgreSQL major is not the one in the history receipts is refused.
 
 When the live catalog holds state the planner cannot model, such as an object
 owned by a role other than the one inspecting, a `pg_parameter_acl` grant, or
@@ -410,6 +423,102 @@ that the target's [live_ignore](#live_ignore) list acknowledges is not listed in
 
 The audit never generates repair SQL, changes history, or participates in
 ordinary draft generation.
+
+### Observer role
+
+`drift check` and `contract check` accept three kinds of role for the live
+connection. The result names the kind in `observer.mode`.
+
+| `observer.mode` | Role |
+| --- | --- |
+| `database_owner` | The owner of the database. |
+| `predefined_read_role` | A login role that is a member of PostgreSQL predefined read-only roles. |
+| `dedicated_read_only` | A login role with no membership, or with membership only in dedicated `NOLOGIN` roles. |
+
+A role that is not the database owner must be `NOSUPERUSER`, `NOCREATEDB`,
+`NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`. Each role that it is a
+member of, directly or through another role, must be one of these:
+
+- a predefined read-only role: `pg_read_all_data`, `pg_monitor`,
+  `pg_read_all_settings`, `pg_read_all_stats`, or `pg_stat_scan_tables`;
+- a dedicated role that it is a direct member of: not built in, `NOLOGIN`,
+  without those five capabilities, and without memberships of its own.
+
+No membership can have `ADMIN OPTION`. No such role can hold `CREATE` or a
+grant option on an application schema. Any other role stops the command with
+`observer_role_elevated` or `observer_access_policy_unsafe` (`drift check`
+prefixes the code with `drift_`). The error of `drift check` and the finding of
+`contract check` carry `next_actions` with the SQL for a valid role.
+
+What the role must be able to read depends on the command:
+
+- `drift check` reads system catalogs only. PostgreSQL lets every role read
+  them, and the inspection calls no function whose result depends on a
+  privilege of the caller. The role needs `CONNECT` on the database and
+  nothing else: no `USAGE` on a schema and no `SELECT` on a relation. A role
+  without access reads the same graph as the database owner; the test suite
+  proves this on PostgreSQL 15 to 18. There is therefore no access check, and
+  no object, ignored or not, can cause an access error. `dev plan` reads the
+  development catalog the same way.
+- `contract check` also runs data gates on application rows and proves that
+  row-level security hides no row. The role needs `USAGE` on each application
+  schema and `SELECT` on each table and view of the database, including
+  objects that an ignore selector excludes, or the result is
+  `observer_access_incomplete`. `pg_read_all_data` gives that access. It does
+  not bypass row-level security.
+
+The simplest valid role is a member of `pg_read_all_data`:
+
+~~~sql
+CREATE ROLE onwardpg_observer LOGIN PASSWORD '...'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+  IN ROLE pg_read_all_data;
+GRANT CONNECT ON DATABASE app TO onwardpg_observer;
+~~~
+
+On a managed provider, create a role that inherits `pg_read_all_data` with the
+provider's role tool. On PlanetScale:
+
+~~~sh
+pscale role create DATABASE BRANCH onwardpg-observer --inherited-roles pg_read_all_data --ttl 24h
+~~~
+
+This role puts no grant on an application object, so it adds nothing to the
+catalog and nothing shows as drift.
+
+The second form gets its access from a dedicated role:
+
+~~~sql
+CREATE ROLE onwardpg_observer_grants NOLOGIN
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE onwardpg_observer LOGIN PASSWORD '...'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+  IN ROLE onwardpg_observer_grants;
+GRANT CONNECT ON DATABASE app TO onwardpg_observer;
+-- contract check only; repeat for each application schema:
+GRANT USAGE ON SCHEMA app TO onwardpg_observer_grants;
+GRANT SELECT ON ALL TABLES IN SCHEMA app TO onwardpg_observer_grants;
+~~~
+
+For `drift check` the two `GRANT ... ON SCHEMA` statements are not necessary.
+When they exist, they are catalog state. A check that runs as this observer
+removes its own grants from the graph before the comparison and lists them in
+`observer.projected_access`: a non-grantable `USAGE` on a schema and a
+non-grantable `SELECT` on a relation, each granted by the owner, to the
+observer or to its dedicated role. A check that runs as another role (the
+database owner, or a `pg_read_all_data` role) does not remove them. It reports
+each `SELECT` grant as an `unexpected_in_actual` table privilege and each
+schema grant as `acl:schema:NAME` in `unsupported`. `live_ignore` does not
+accept these selectors. To get a clean result, run the checks as the role that
+holds the grants, or use the `pg_read_all_data` form and revoke the grants.
+A grant to a predefined role, such as `GRANT SELECT ON app.users TO
+pg_read_all_data`, is application state for every observer and is always
+compared.
+
+`--ignore` and `live_ignore` do not change what the role must be able to read.
+`--ignore SELECTOR` removes one object from the comparison. `live_ignore`
+acknowledges who owns provider state or a parameter grant; it removes no
+object from the comparison.
 
 It also does not normalize historical physical object names to a newer DDL
 exporter's naming convention. Such a difference is drift evidence. If a later

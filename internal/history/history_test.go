@@ -27,12 +27,8 @@ func TestLoadOrdersByHashChainAndReplaysPhases(t *testing.T) {
 	if chain.HeadDigest != second || len(chain.Entries) != 2 || chain.Entries[0].Directory != "z-first" || chain.Entries[1].Directory != "a-second" {
 		t.Fatalf("chain = %#v", chain)
 	}
-	replay, err := chain.Replay()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Index(string(replay.DDL), "SELECT 1") > strings.Index(string(replay.DDL), "SELECT 2") || replay.Digest != second {
-		t.Fatalf("replay = %#v\n%s", replay, replay.DDL)
+	if want := "onwardpg-history:primary:" + second; chain.Provenance() != want {
+		t.Fatalf("provenance = %q, want %q", chain.Provenance(), want)
 	}
 }
 

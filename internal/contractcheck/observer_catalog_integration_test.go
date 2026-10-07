@@ -168,19 +168,42 @@ func TestInspectObserverCatalogProjectsOnlyDedicatedAccess(t *testing.T) {
 		}
 	})
 
-	t.Run("observer revocation is rejected as incomplete", func(t *testing.T) {
+	// The catalog inspection reads system catalogs only. An observer without
+	// SELECT on a relation reads the same graph; only contract check, which
+	// reads rows, requires that access.
+	t.Run("observer revocation leaves the catalog graph complete", func(t *testing.T) {
 		if _, err := owner.Exec(ctx, "REVOKE SELECT ON app.orders FROM "+pgx.Identifier{observerRole}.Sanitize()); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
 			_, _ = owner.Exec(context.Background(), "GRANT SELECT ON app.orders TO "+pgx.Identifier{observerRole}.Sanitize())
 		})
-		_, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, nil, 5*time.Second)
+		asOwner, _, finding, err := InspectObserverCatalog(ctx, ownerURL, nil, nil, 5*time.Second)
+		if err != nil || finding != nil {
+			t.Fatalf("owner inspection: %v, %#v", err, finding)
+		}
+		// The owner sees the schema grant that the observer still holds.
+		withoutObserverGrant, err := asOwner.Project(nil, func(selector string) bool { return selector != "acl:schema:app" })
 		if err != nil {
 			t.Fatal(err)
 		}
-		if finding == nil || finding.Code != "observer_access_incomplete" {
+		want, err := withoutObserverGrant.Fingerprint()
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot, _, finding, err := InspectObserverCatalog(ctx, observerURL, nil, nil, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if finding != nil {
 			t.Fatalf("revoked-access finding = %#v", finding)
+		}
+		got, err := snapshot.Fingerprint()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("catalog graph without relation access = %s, owner graph = %s", got, want)
 		}
 		if _, err := owner.Exec(ctx, "GRANT SELECT ON app.orders TO "+pgx.Identifier{observerRole}.Sanitize()); err != nil {
 			t.Fatal(err)

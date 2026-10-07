@@ -3,6 +3,71 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## Unreleased
+
+### Fixed
+
+- `drift check`, `plan`, and `draft` work with a history that holds
+  non-transactional batches. A bundle from `plan --concurrent-indexes` has
+  `CREATE INDEX CONCURRENTLY` or `DROP INDEX CONCURRENTLY` in a
+  non-transactional batch. `verify` ran such a bundle correctly, but
+  `drift check`, and the base history replay of `plan` and `draft`, sent the
+  complete history to PostgreSQL as one query. PostgreSQL runs such a query in
+  one implicit transaction, and the command stopped with `CREATE INDEX
+  CONCURRENTLY cannot run inside a transaction block (SQLSTATE 25001)`. After
+  such a bundle was accepted, no drift check and no new plan was possible.
+  There is now one history replay, the one that `verify` uses. It runs each
+  batch in the mode that the bundle declares, splits an edited phase at its
+  batch directives, runs the checks that verification runs, and uses one
+  connection for the complete history, so session state such as `search_path`
+  from a baseline stays set. Bundle formats and digests are unchanged, and no
+  bundle has to be planned again.
+- `drift check` reads the live catalog before it replays history. A role that
+  the observer guard refuses, or a wrong URL, now stops the command in about a
+  second. Before, each such attempt cost a full history replay first.
+- `drift check` no longer requires access to application objects. It reads
+  system catalogs only, which every PostgreSQL role can read, and a role
+  without `USAGE` or `SELECT` on anything reads the same graph as the database
+  owner (proved by test on PostgreSQL 15 to 18). The check that stopped the
+  command with `drift_observer_access_incomplete`, and that listed objects
+  that `--ignore` excluded, such as the relations of a provider schema, is
+  removed from `drift check` and `dev plan`. `contract check` keeps it,
+  because its data gates read rows.
+
+### Added
+
+- A login role that only inherits predefined read-only roles is a valid
+  observer for `drift check` and `contract check`: `pg_read_all_data`,
+  `pg_monitor`, `pg_read_all_settings`, `pg_read_all_stats`, and
+  `pg_stat_scan_tables`. This is the role that the role tool of a managed
+  provider can create, for example `pscale role create DATABASE BRANCH NAME
+  --inherited-roles pg_read_all_data`. Before, such a role stopped with
+  `observer_role_elevated`, and only the database owner or a role with direct
+  grants on every relation passed. The result reports
+  `observer.mode: predefined_read_role`. The role must still have none of
+  `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, and `BYPASSRLS`. A
+  membership in any other predefined role (for example `pg_write_all_data`), in
+  a role that can log in, or with `ADMIN OPTION` is still refused. See the
+  [observer role](docs/cli.md#observer-role).
+- The error of `drift check` and the findings of `contract check` for a
+  refused or incomplete observer carry `next_actions` with the SQL for the two
+  valid forms of role.
+- `verify` explains the failure of a non-transactional batch with SQLSTATE
+  `25001`: PostgreSQL runs SQL that holds more than one statement in one
+  implicit transaction, so each statement that cannot run in a transaction
+  block needs its own `-- onwardpg:batch nontransactional` line in an edited
+  phase.
+
+### Changed
+
+- A history replay for `drift check`, `plan`, or `draft` now stops when the
+  scratch server is not the PostgreSQL major of the history receipts, as
+  `verify` does. It also runs the manual verification queries and the
+  `verify.sql` assertions of each bundle, which already passed when the bundle
+  was verified.
+- The timing stage for these replays is `history_replay`; `ddl_execute` now
+  measures only the load of exported DDL.
+
 ## v0.1.0-preview.7 — 2026-10-07
 
 ### Changed

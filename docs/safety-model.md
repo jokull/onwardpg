@@ -206,6 +206,45 @@ or application compatibility. Reviewers own those operational decisions. Test
 the generated plan on a clone and require an empty residual diff after it is
 applied.
 
+## One history replay
+
+One implementation executes accepted history, and each command that needs the
+catalog of that history uses it: `verify`, `drift check`, and `plan` and
+`draft` for their base. It runs each bundle batch by batch in the mode that
+the bundle declares. A transactional batch runs in one transaction. A
+non-transactional batch is never put in a transaction: each statement of a
+generated batch is its own query, and each chunk of an edited phase is sent as
+written. onwardpg does not strip `CONCURRENTLY` and does not rewrite SQL for a
+replay. One connection runs the complete history, so session state that a
+bundle sets, for example `search_path` in a baseline, stays set for the
+bundles after it. The checks that verification runs (manual verification
+queries and `verify.sql` assertions) run in every replay. A failure names the
+bundle, the phase, and the batch or check.
+
+Before this rule, `drift check` and the base replay of `plan` and `draft` sent
+the complete history as one query. PostgreSQL runs such a query in one
+implicit transaction, so a history with `CREATE INDEX CONCURRENTLY` could be
+verified but could not be checked for drift or planned on.
+
+## The live observer
+
+`drift check` and `contract check` read a live database. They accept the
+database owner, or a login role that cannot write, create, or administer: no
+capability attribute, and membership only in predefined read-only roles or in
+a dedicated `NOLOGIN` role, without `ADMIN OPTION`. The
+[observer role](cli.md#observer-role) section has the exact rules.
+
+The guard runs before the history replay. It does not require more than the
+command reads. `drift check` reads system catalogs, which every role can
+read, so its role needs no privilege on an application object; the test suite
+compares the graph that such a role reads with the graph of the database
+owner on PostgreSQL 15 to 18. `contract check` also reads rows, so its role
+must be able to read every relation, and row-level security must hide no row.
+
+Only the exact read-only grants of the observer and of its dedicated role are
+removed from the inspected graph, and they are listed in
+`observer.projected_access`. A grant to a predefined role is not removed.
+
 ## The schema export and the checkout
 
 onwardpg does not check what `schema_command` writes to the checkout. Earlier

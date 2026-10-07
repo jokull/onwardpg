@@ -2271,11 +2271,7 @@ func writeHistoryTransitionFixture(t *testing.T, root, devURL, id, desiredDDL st
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay, err := chain.Replay()
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, devURL, nil)
+	current, err := verify.ReplayHistory(ctx, devURL, chain, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2313,11 +2309,7 @@ func writeHistoryContractDropFixture(t *testing.T, root, devURL, id string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay, err := chain.Replay()
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, devURL, nil)
+	current, err := verify.ReplayHistory(ctx, devURL, chain, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

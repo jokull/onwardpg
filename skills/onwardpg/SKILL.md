@@ -153,6 +153,21 @@ disposable local database that holds the desired schema. A SQL file is also a
 valid side, as `file://PATH` together with `--dev-url`.
 
 `drift check` compares the live catalog with the replayed accepted history.
+The replay is the one that `verify` uses, so history that holds
+`CREATE INDEX CONCURRENTLY` or `DROP INDEX CONCURRENTLY` batches from
+`plan --concurrent-indexes` replays without a change to the bundles. Do not
+plan without `--concurrent-indexes` to make a check pass.
+
+The role in the URL can be the database owner, a login role that only inherits
+`pg_read_all_data` (on PlanetScale: `pscale role create DATABASE BRANCH NAME
+--inherited-roles pg_read_all_data --ttl 24h`), or a login role with no
+membership and no grants: `drift check` reads system catalogs only. The result
+names the kind in `observer.mode`. A role that can write, create, or
+administer is refused before the history replay with
+`drift_observer_role_elevated`; give the user the SQL in `next_actions`.
+`contract check` also reads rows, so its role needs `pg_read_all_data` or
+`USAGE` and `SELECT` grants.
+
 Read `status`, the exit code, and every list in the result:
 
 - `drift_free` (exit 0): no modeled difference and nothing the planner cannot

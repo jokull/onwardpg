@@ -86,8 +86,8 @@ useful. The SQL is D → W, not the PR bundle; it does not prove that local stat
 followed accepted migration order.
 
 The read-only inspection boundary treats the database owner's ambient identity
-and the dedicated observer's minimum `USAGE`/`SELECT` grants as an explained
-inspection overlay. Those facts do not become workspace drift. Grants to an
+and the dedicated observer's own `USAGE`/`SELECT` grants, when it has any, as
+an explained inspection overlay. The catalog read itself needs no grant. Those facts do not become workspace drift. Grants to an
 application role, grant options, ownership transfers, RLS, and policy changes
 remain visible. Omit `dev_database_env` entirely when this optional D → W view
 is not useful; `scratch_database_env` still supplies disposable verification.

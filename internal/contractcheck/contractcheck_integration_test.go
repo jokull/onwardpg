@@ -6,7 +6,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,13 +128,17 @@ func TestContractCheckProjectsDedicatedObserverAccessAndFailsClosed(t *testing.T
 	}
 	observerRole := database.Role + "_observer"
 	observerGrantRole := database.Role + "_observer_grants"
+	readerRole := database.Role + "_reader"
+	bareRole := database.Role + "_bare"
 	observerPassword := "observer-test-password"
 	admin, err := pgx.Connect(ctx, adminURL)
 	if err != nil {
 		database.Close()
 		t.Fatal(err)
 	}
-	if _, err := admin.Exec(ctx, "CREATE ROLE "+pgx.Identifier{observerGrantRole}.Sanitize()+" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; CREATE ROLE "+pgx.Identifier{observerRole}.Sanitize()+" LOGIN PASSWORD '"+observerPassword+"' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; GRANT "+pgx.Identifier{observerGrantRole}.Sanitize()+" TO "+pgx.Identifier{observerRole}.Sanitize()); err != nil {
+	if _, err := admin.Exec(ctx, "CREATE ROLE "+pgx.Identifier{observerGrantRole}.Sanitize()+" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; CREATE ROLE "+pgx.Identifier{observerRole}.Sanitize()+" LOGIN PASSWORD '"+observerPassword+"' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; GRANT "+pgx.Identifier{observerGrantRole}.Sanitize()+" TO "+pgx.Identifier{observerRole}.Sanitize()+
+		"; CREATE ROLE "+pgx.Identifier{readerRole}.Sanitize()+" LOGIN PASSWORD '"+observerPassword+"' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE pg_read_all_data"+
+		"; CREATE ROLE "+pgx.Identifier{bareRole}.Sanitize()+" LOGIN PASSWORD '"+observerPassword+"' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
 		admin.Close(ctx)
 		database.Close()
 		t.Fatal(err)
@@ -142,8 +148,9 @@ func TestContractCheckProjectsDedicatedObserverAccessAndFailsClosed(t *testing.T
 		_ = database.Close()
 		cleanup, cleanupErr := pgx.Connect(context.Background(), adminURL)
 		if cleanupErr == nil {
-			_, _ = cleanup.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{observerRole}.Sanitize())
-			_, _ = cleanup.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{observerGrantRole}.Sanitize())
+			for _, role := range []string{observerRole, observerGrantRole, readerRole, bareRole} {
+				_, _ = cleanup.Exec(context.Background(), "DROP ROLE IF EXISTS "+pgx.Identifier{role}.Sanitize())
+			}
 			_ = cleanup.Close(context.Background())
 		}
 	}()
@@ -188,25 +195,70 @@ func TestContractCheckProjectsDedicatedObserverAccessAndFailsClosed(t *testing.T
 		t.Fatal(err)
 	}
 
-	if _, err := admin.Exec(ctx, "GRANT CONNECT ON DATABASE "+pgx.Identifier{database.Name}.Sanitize()+" TO "+pgx.Identifier{observerRole}.Sanitize()); err != nil {
+	liveDatabase := pgx.Identifier{database.Name}.Sanitize()
+	if _, err := admin.Exec(ctx, "GRANT CONNECT ON DATABASE "+liveDatabase+" TO "+pgx.Identifier{observerRole}.Sanitize()+", "+pgx.Identifier{readerRole}.Sanitize()+", "+pgx.Identifier{bareRole}.Sanitize()); err != nil {
 		t.Fatal(err)
 	}
+	inputFor := func(role string) Input {
+		config := database.Config.Copy()
+		config.User = role
+		config.Password = observerPassword
+		return Input{
+			Artifact: artifact, ExpectedHead: artifact.Manifest.History.EntryDigest,
+			DatabaseURL: restrictedScratchURL(config), Environment: "production", Now: time.Now().UTC(),
+		}
+	}
+
+	// A login role whose only membership is pg_read_all_data reads every row
+	// that a data gate needs, and it puts no grant on an application object.
+	report, err := Run(ctx, inputFor(readerRole))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "ready" || report.Observer.Mode != "predefined_read_role" || report.Observer.Role != readerRole {
+		t.Fatalf("predefined read role report=%#v", report)
+	}
+	for _, entry := range report.Observer.ProjectedAccess {
+		if !strings.HasPrefix(entry, "ownership:") {
+			t.Fatalf("predefined read role projected a grant: %#v", report.Observer.ProjectedAccess)
+		}
+	}
+	// A role without access cannot run the data gates. Contract check says
+	// so before it reads the catalog, with the SQL for both valid forms.
+	report, err = Run(ctx, inputFor(bareRole))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "blocked" || len(report.Findings) != 1 || report.Findings[0].Code != "observer_access_incomplete" ||
+		!strings.Contains(report.Findings[0].Message, "schema:app") || !strings.Contains(report.Findings[0].Message, "relation:app.orders") {
+		t.Fatalf("observer without access report=%#v", report)
+	}
+	if actions := report.Findings[0].NextActions; len(actions) != 2 ||
+		!strings.Contains(actions[0].SQL, "IN ROLE pg_read_all_data;") ||
+		!strings.Contains(actions[1].SQL, "GRANT SELECT ON ALL TABLES IN SCHEMA <schema> TO onwardpg_observer_grants;") {
+		t.Fatalf("next actions=%#v", report.Findings[0].NextActions)
+	}
+
 	if _, err := owner.Exec(ctx, "GRANT USAGE ON SCHEMA app TO "+pgx.Identifier{observerGrantRole}.Sanitize()+"; GRANT SELECT ON ALL TABLES IN SCHEMA app TO "+pgx.Identifier{observerGrantRole}.Sanitize()); err != nil {
 		t.Fatal(err)
 	}
-	observerConfig := database.Config.Copy()
-	observerConfig.User = observerRole
-	observerConfig.Password = observerPassword
-	input := Input{
-		Artifact: artifact, ExpectedHead: artifact.Manifest.History.EntryDigest,
-		DatabaseURL: restrictedScratchURL(observerConfig), Environment: "production", Now: time.Now().UTC(),
-	}
-	report, err := Run(ctx, input)
+	input := inputFor(observerRole)
+	report, err = Run(ctx, input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.Status != "ready" || report.Observer.Mode != "dedicated_read_only" || len(report.Observer.ProjectedAccess) < 3 {
 		t.Fatalf("dedicated observer report=%#v", report)
+	}
+	// The grants of the dedicated role are the access of that observer only.
+	// Another observer does not own them: it reports the schema grant as
+	// unsupported state and the catalog as changed.
+	report, err = Run(ctx, inputFor(readerRole))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "unsupported" || !slices.Contains(report.Unsupported, "acl:schema:app") {
+		t.Fatalf("another observer accepted the grants of the dedicated role: %#v", report)
 	}
 	if _, err := owner.Exec(ctx, "GRANT SELECT ON app.orders TO PUBLIC"); err != nil {
 		t.Fatal(err)
