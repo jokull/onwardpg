@@ -92,7 +92,7 @@ func TestExportReturnsAChangedDeterministicExport(t *testing.T) {
 }
 
 func TestExportRejectsANondeterministicExport(t *testing.T) {
-	target, _ := countingCommand(t, "SELECT 1;\n", "SELECT 2;\n", "SELECT 3;\n")
+	target, runs := countingCommand(t, "SELECT 1;\n", "SELECT 2;\n", "SELECT 3;\n")
 	export, err := StartExport(context.Background(), t.TempDir(), "primary", target)
 	if err != nil {
 		t.Fatal(err)
@@ -101,8 +101,18 @@ func TestExportRejectsANondeterministicExport(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "DDL export is nondeterministic") || changed != nil {
 		t.Fatalf("Confirm = %v, %v; want a nondeterministic export error", changed, err)
 	}
-	if export.confirmed {
-		t.Fatal("a failed confirmation was recorded as a determinism proof")
+	// The rejection is final. Nothing runs the export again to get another
+	// answer: after three different outputs the fake export is stable, and a
+	// new pair of runs would accept it.
+	rejected := runs()
+	if err := ConfirmDeterministic(context.Background(), export); err != nil {
+		t.Fatalf("ConfirmDeterministic after a reported rejection = %v", err)
+	}
+	if _, err := export.Confirm(context.Background()); err == nil {
+		t.Fatal("a second Confirm of a rejected export returned no error")
+	}
+	if runs() != rejected {
+		t.Fatalf("a rejected export ran again: %d runs, then %d", rejected, runs())
 	}
 }
 
@@ -184,9 +194,6 @@ func TestExportSettleReportsAFirstRunThatWritesToTheCheckout(t *testing.T) {
 	}
 	if _, err := export.Confirm(context.Background()); err == nil || !strings.Contains(err.Error(), "modified repository inputs") {
 		t.Fatalf("Confirm = %v, want a modified inputs rejection", err)
-	}
-	if err := ConfirmDeterministic(context.Background(), export); err == nil || !strings.Contains(err.Error(), "modified repository inputs") {
-		t.Fatalf("ConfirmDeterministic = %v, want a modified inputs rejection", err)
 	}
 	if body, err := os.ReadFile(filepath.Join(state, "runs")); err != nil || string(body) != "1" {
 		t.Fatalf("a rejected first run was followed by another run: runs=%q err=%v", body, err)
@@ -276,8 +283,10 @@ func TestPreparedConfirmRejectsACommandThatWritesToTheCheckout(t *testing.T) {
 	if _, err := export.Confirm(context.Background()); err == nil || !strings.Contains(err.Error(), "modified repository inputs") {
 		t.Fatalf("Confirm = %v, want a modified inputs rejection", err)
 	}
-	if export.confirmed {
-		t.Fatal("a rejected run was recorded as a determinism proof")
+	// The run with the prepared fingerprint and the run with a fingerprint of
+	// its own were both rejected. The rejection is final.
+	if _, err := export.Confirm(context.Background()); err == nil || strings.Contains(err.Error(), "modified repository inputs") {
+		t.Fatalf("a second Confirm ran the export again: %v", err)
 	}
 }
 

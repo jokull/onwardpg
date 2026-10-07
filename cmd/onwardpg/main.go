@@ -1125,11 +1125,17 @@ func runBundleAt(arguments []string, start string) int {
 	}
 	if report.Outcome == "verified" || report.Outcome == "partial_verified" {
 		if lockErr := lock.ValidatePath(); lockErr != nil {
+			if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+				return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
+			}
 			return writeVerifyFinding(*targetName, *bundleID, chain.HeadDigest, *through, "blocked", "configuration_changed_during_verify",
 				lockErr.Error(),
 				"rerun verification against the current stable configuration; no receipts were installed")
 		}
 		if configErr := workspace.RequireUnchanged(configPath, config); configErr != nil {
+			if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+				return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
+			}
 			return writeVerifyFinding(*targetName, *bundleID, chain.HeadDigest, *through, "blocked", "configuration_changed_during_verify",
 				configErr.Error(),
 				"rerun verification against the current stable configuration; no receipts were installed")

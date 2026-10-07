@@ -78,7 +78,9 @@ type Export struct {
 	first      CompiledDDL
 	firstCheck *readOnlyCheck
 	prepared   *treeDigest
-	confirmed  bool
+	// attempted is set by the first Confirm, whatever its result. The
+	// confirming run is the final check of a command: it is not repeated.
+	attempted bool
 }
 
 // StartExport runs the configured export once and keeps its output.
@@ -119,7 +121,14 @@ func (e *Export) Prepare(ctx context.Context) {
 // requires a third run to equal the second, so that the returned export is
 // deterministic, and returns it for the caller to compare with the first by
 // catalog fingerprint. A second and third run that differ are an error.
+//
+// Confirm is the final check of a command and runs once. A caller that
+// receives an error must not commit a result that rests on the export.
 func (e *Export) Confirm(ctx context.Context) (*CompiledDDL, error) {
+	if e.attempted {
+		return nil, errors.New("the schema export of this command was already confirmed or rejected")
+	}
+	e.attempted = true
 	if err := e.Settle(); err != nil {
 		return nil, err
 	}
@@ -128,7 +137,6 @@ func (e *Export) Confirm(ctx context.Context) (*CompiledDDL, error) {
 		return nil, err
 	}
 	if e.first.equal(second) {
-		e.confirmed = true
 		return nil, nil
 	}
 	third, _, err := compileDDLOnce(ctx, e.root, e.targetName, e.target, tree)
@@ -138,7 +146,6 @@ func (e *Export) Confirm(ctx context.Context) (*CompiledDDL, error) {
 	if !second.equal(third) {
 		return nil, nondeterministicExport(second, third)
 	}
-	e.confirmed = true
 	return &second, nil
 }
 
@@ -168,9 +175,12 @@ func (e *Export) confirmingRun(ctx context.Context) (CompiledDDL, string, error)
 // ends without committing a result that depends on a stable export, for
 // example a report of an unsupported schema. It accepts an export that changed
 // while the command worked, as two back-to-back runs at the start would have.
-// A nil or already confirmed export needs no further run.
+// A command that started no export needs no run. A command whose Confirm
+// already ran needs none either: Confirm returned its result, or its error,
+// to the code that then reported it, and a rejected export is not run again
+// in the hope of another answer.
 func ConfirmDeterministic(ctx context.Context, export *Export) error {
-	if export == nil || export.confirmed {
+	if export == nil || export.attempted {
 		return nil
 	}
 	_, err := export.Confirm(ctx)
