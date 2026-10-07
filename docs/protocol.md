@@ -311,6 +311,9 @@ depend on the index for speed.
 A `drop` hint for an index that needs no decision is accepted
 and is not written to the bundle. `plan` and `draft` report it as a finding
 with the code `hint_not_needed`. Earlier versions asked for these hints.
+Known limit: a run that still needs other decisions (`needs_input`) accepts
+the hint but does not report the finding, and does not carry the hint to the
+next command.
 
 ### One hints file for many confirmations
 
