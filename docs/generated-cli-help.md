@@ -46,7 +46,7 @@ Usage of init:
   -bundle string
         root history bundle identifier (default "baseline")
   -concurrent-indexes
-        create standalone indexes concurrently
+        record the concurrent index mode in the baseline manifest; a baseline is the exported DDL as written and runs on empty databases, so the flag changes no statement and init does not read concurrent_indexes of the target (default false)
   -config string
         repository configuration path (default ".onwardpg.toml")
   -ignore value
@@ -66,7 +66,7 @@ Usage: onwardpg plan [NAME] [options]
   -cascade-drops
         emit CASCADE for schema and table drops
   -concurrent-indexes
-        create standalone indexes concurrently
+        create and drop standalone indexes with CREATE INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY, in nontransactional batches; without the flag an existing bundle keeps its stored choice, and a new bundle uses concurrent_indexes of the target (default false). --concurrent-indexes=false selects plain CREATE INDEX and DROP INDEX
   -config string
         repository configuration path (default ".onwardpg.toml")
   -dev-hint value
@@ -164,7 +164,7 @@ Usage: onwardpg diff --from SOURCE --to SOURCE [options]
   -cascade-drops
         emit CASCADE for schema and table drops
   -concurrent-indexes
-        create standalone indexes concurrently
+        create and drop standalone indexes with CREATE INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY, in nontransactional batches (default false)
   -config string
         repository configuration read for --target (default ".onwardpg.toml")
   -dev-url string
@@ -216,7 +216,7 @@ Usage of dev plan:
   -cascade-drops
         emit CASCADE for schema and table drops
   -concurrent-indexes
-        create standalone indexes concurrently
+        create and drop standalone indexes with CREATE INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY, in nontransactional batches; without the flag the command uses concurrent_indexes of the target (default false)
   -config string
         repository configuration path (default ".onwardpg.toml")
   -hint value
@@ -250,7 +250,7 @@ Usage of draft:
   -cascade-drops
         emit CASCADE for schema and table drops
   -concurrent-indexes
-        create standalone indexes concurrently
+        create and drop standalone indexes with CREATE INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY, in nontransactional batches; without the flag an existing bundle keeps its stored choice, and a new bundle uses concurrent_indexes of the target (default false). --concurrent-indexes=false selects plain CREATE INDEX and DROP INDEX
   -config string
         repository configuration path (default ".onwardpg.toml")
   -create

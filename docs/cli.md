@@ -43,6 +43,7 @@ onwardpg plan [NAME] \
   [--purpose feature|repair|contract] \
   [--hint JSON] [--hints-file FILE] \
   [--dev-hint JSON] [--dev-hints-file FILE] \
+  [--concurrent-indexes[=false]] \
   [--output json|text|sql]
 ~~~
 
@@ -93,6 +94,82 @@ answer is never guessed to mean the same thing for an arbitrary long-lived
 development database. Workspace mode preserves an absence-only object from D
 rather than proposing a local rename or drop; scoped development hints are for
 strict/disposable databases or an actual incompatible D → W transition.
+
+## Index lock mode
+
+A plan builds and drops standalone indexes in one of two modes.
+
+| Mode | Statements | Batches | Locks |
+| --- | --- | --- | --- |
+| Blocking (default) | `CREATE INDEX`, `DROP INDEX` | Transactional | `CREATE INDEX` blocks every write to the table until the build is complete. `DROP INDEX` takes `ACCESS EXCLUSIVE` on the table; in a transactional batch each lock stays until the batch commits. |
+| Concurrent | `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY` | Nontransactional (`-- onwardpg:batch nontransactional`), one statement at a time | Reads and writes continue. Each statement waits for older transactions on the table, so it can take a long time. |
+
+Use the concurrent mode for every database with live traffic. The mode applies
+to both statements: a plan cannot build concurrently and drop with a lock.
+
+The mode of a bundle comes from the first of these that exists:
+
+1. `--concurrent-indexes` or `--concurrent-indexes=false` on this run.
+2. The choice that the previous generation of the bundle stored
+   (`planner.options.concurrent_indexes` in `manifest.json`). A restack with a
+   plain `onwardpg plan` therefore keeps the mode of the bundle.
+3. `concurrent_indexes = true` in the target of `.onwardpg.toml`.
+4. The blocking mode.
+
+~~~toml
+[targets.primary]
+schema_command = ["pnpm", "--silent", "db:export"]
+scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
+concurrent_indexes = true
+~~~
+
+`plan` and `draft` use all four steps and report the result as
+`index_lock_mode` (see the [JSON interface](protocol.md#index-lock-mode)).
+`dev plan` has no bundle: it uses the flag, then the key. `init` does not read
+the key: a baseline is the exported DDL as written and runs on empty
+databases, where a concurrent build only costs time. `init
+--concurrent-indexes` records the flag in the baseline manifest and changes no
+statement. `diff` and `plan --from --to` read no configuration; they use the
+flag only.
+
+Two warnings keep the mode visible. `index_lock_mode_changed` reports that a
+run wrote a bundle in another mode than its previous generation.
+`index_lock_mode_differs_from_config` reports that a bundle stays blocking
+although the target has `concurrent_indexes = true`; this is the state of a
+bundle that was planned before the key was set. Run `onwardpg plan
+--concurrent-indexes` once to move that bundle.
+
+Operations that are not concurrent in the concurrent mode:
+
+- A primary-key, unique, or exclusion constraint that is added to an existing
+  table (`ALTER TABLE ... ADD CONSTRAINT`) builds its index under the table
+  lock; the statement has the hazard `blocking_index_build`. A changed
+  primary-key or unique constraint is different: its replacement index is
+  built concurrently and attached with `USING INDEX`.
+- The removal of a constraint drops its index with `ALTER TABLE ... DROP
+  CONSTRAINT`.
+- PostgreSQL has no `CREATE INDEX CONCURRENTLY` and no `DROP INDEX
+  CONCURRENTLY` for a partitioned table. A new non-unique index on an existing
+  partitioned table is built online in steps: `CREATE INDEX ... ON ONLY` for
+  each partitioned table, `CREATE INDEX CONCURRENTLY` for each leaf partition,
+  and `ALTER INDEX ... ATTACH PARTITION`. A new unique index on a partitioned
+  table, an index on a partition hierarchy that the same plan changes, and
+  every drop of a partitioned index use the plain statement and have the
+  hazard `partitioned_index_not_concurrent`.
+
+An index on a table that the same plan creates is also built concurrently. The
+table is empty, so this costs only the extra statement.
+
+A concurrent build that fails leaves an `INVALID` index in the database
+(for example after a lock timeout, a deadlock, or a duplicate key for a unique
+index). PostgreSQL does not use that index, but it still maintains it on every
+write. The plan does not remove it: onwardpg applies no SQL, and the bundle
+runs each statement one time. The operator drops the invalid index with `DROP
+INDEX CONCURRENTLY` and runs the same statement again. For an online build on
+a partitioned table, drop the invalid leaf index and run the remaining
+statements; the parent index stays invalid until every partition is attached.
+`drift check` reports an invalid index in a live catalog as unsupported state,
+so a failed build cannot go unnoticed.
 
 ## status
 
@@ -231,7 +308,11 @@ onwardpg init \
 ~~~
 
 Creates the first content-addressed history entry from empty PostgreSQL to the
-configured desired DDL. It clone-verifies the bundle before installation and
+configured desired DDL. The baseline is the exported DDL as written, so
+`--concurrent-indexes` changes no statement; it is recorded in the manifest.
+`init` does not read `concurrent_indexes` from the target (see
+[index lock mode](#index-lock-mode)).
+ It clone-verifies the bundle before installation and
 refuses a non-empty target history. It creates databases only through the
 configured administrative role.
 
@@ -259,7 +340,7 @@ Planner options include:
 | --- | --- |
 | --hint JSON | Semantic decision; repeatable |
 | --hints-file FILE | Array of semantic decisions |
-| --concurrent-indexes | Build eligible standalone indexes concurrently |
+| --concurrent-indexes | Create and drop standalone indexes with `CONCURRENTLY` in nontransactional batches; see [index lock mode](#index-lock-mode) |
 | --if-not-exists | Use supported IF NOT EXISTS forms |
 | --if-exists | Use supported IF EXISTS forms |
 | --cascade-drops | Permit supported CASCADE rendering after destructive approval |

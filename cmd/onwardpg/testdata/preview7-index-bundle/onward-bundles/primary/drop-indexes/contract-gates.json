@@ -1,0 +1,17 @@
+[
+  {
+    "id": "writers:legacy",
+    "kind": "writer_attestation",
+    "scope_fingerprint": "sha256:a056a4eeb080b5c96036c51dea9afeec96189591e83caa74de08e86dfe58982c",
+    "reason": "pre-deployment write-capable cohorts must be upgraded, drained, isolated, or read-only before contract",
+    "required_evidence": [
+      "ad_hoc_writers",
+      "connection_pools",
+      "previews",
+      "queues",
+      "scheduled_jobs",
+      "web",
+      "workers"
+    ]
+  }
+]

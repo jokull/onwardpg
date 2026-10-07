@@ -32,7 +32,12 @@ type Target struct {
 	DevDatabaseEnv     string   `toml:"dev_database_env" json:"dev_database_env"`
 	ScratchDatabaseEnv string   `toml:"scratch_database_env" json:"scratch_database_env,omitempty"`
 	DevMode            string   `toml:"dev_mode" json:"dev_mode,omitempty"`
-	Ignore             []string `toml:"ignore" json:"ignore,omitempty"`
+	// ConcurrentIndexes is the repository policy for the index lock mode: plan,
+	// draft, and dev plan build and drop standalone indexes with CONCURRENTLY
+	// unless the command line or the stored choice of a bundle says otherwise.
+	// init does not read it.
+	ConcurrentIndexes bool     `toml:"concurrent_indexes" json:"concurrent_indexes,omitempty"`
+	Ignore            []string `toml:"ignore" json:"ignore,omitempty"`
 	// LiveIgnore acknowledges unsupported state that a managed provider owns in
 	// live clusters (see source.ValidateLiveIgnoreSelectors). Only commands
 	// that read a live catalog consult it.

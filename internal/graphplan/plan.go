@@ -338,7 +338,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		sort.Strings(result.Compatibility)
 	}
 	droppingSchemas, droppingTables := droppingParents(changes)
-	questions, approvedDrops, err := destructiveQuestions(changes, droppingSchemas, droppingTables, resolver, currentFingerprint, desiredFingerprint)
+	questions, approvedDrops, err := destructiveQuestions(changes, droppingSchemas, droppingTables, current, resolver, currentFingerprint, desiredFingerprint)
 	if err != nil {
 		return protocol.Result{}, err
 	}
@@ -4464,11 +4464,22 @@ func renderChange(item change.Change, current, desired *pgschema.Snapshot, creat
 			}
 			return statements, consumed, unsupported, err
 		}
+		if index, ok := item.After.(pgschema.Index); ok && options.ConcurrentIndexes {
+			if statements, ok := renderOnlinePartitionedIndexCreate(index, current, desired); ok {
+				return statements, nil, nil, nil
+			}
+		}
 		statements, consumed, unsupported, err := renderCreate(item.After, desired, createdTables, options)
 		return statements, consumed, unsupported, err
 	case change.Drop:
 		if routine, ok := item.Before.(pgschema.Routine); ok && routineDropCircular(routine, current, desired) {
 			return nil, nil, []string{"routine_drop_circular_dependency:" + routine.ObjectID().String()}, nil
+		}
+		if index, ok := item.Before.(pgschema.Index); ok && options.ConcurrentIndexes && indexOnPartitionedTable(current, index) {
+			// PostgreSQL has no DROP INDEX CONCURRENTLY for a partitioned index.
+			plain := options
+			plain.ConcurrentIndexes = false
+			return withHazards(renderDropWithOptions(index, plain), HazardPartitionedIndexNotConcurrent), nil, nil, nil
 		}
 		return renderDropWithOptions(item.Before, options), nil, nil, nil
 	case change.Modify:
@@ -4758,13 +4769,20 @@ func renderCreate(object pgschema.Object, desired *pgschema.Snapshot, createdTab
 			return nil, nil, []string{unsupported}, nil
 		}
 		transactional := true
-		if options.ConcurrentIndexes && !object.Primary && object.Constraint == "" {
+		// PostgreSQL has no CREATE INDEX CONCURRENTLY for a partitioned table.
+		// renderChange emits the online form where it can; this is the plain
+		// statement for every other case.
+		partitioned := indexOnPartitionedTable(desired, object)
+		if options.ConcurrentIndexes && !object.Primary && object.Constraint == "" && !partitioned {
 			sql = strings.Replace(sql, "CREATE INDEX", "CREATE INDEX CONCURRENTLY", 1)
 			sql = strings.Replace(sql, "CREATE UNIQUE INDEX", "CREATE UNIQUE INDEX CONCURRENTLY", 1)
 			transactional = false
 		}
 		phase := "expand"
 		hazards := []string{"index_build", "table_lock_possible"}
+		if options.ConcurrentIndexes && partitioned {
+			hazards = append(hazards, HazardPartitionedIndexNotConcurrent)
+		}
 		if object.Unique && !createdTables[object.Table] {
 			phase = "contract"
 			hazards = append(hazards, "compatible_writers_required")
@@ -5593,12 +5611,16 @@ func renderDropWithOptions(object pgschema.Object, options Options) []protocol.S
 		if object.Parent != nil {
 			return nil
 		}
+		// An index holds no rows. Its removal can slow the queries that used
+		// it, and the statement takes a lock; neither is data loss.
+		risk = "review"
 		if options.ConcurrentIndexes && !object.Primary && !object.Exclusion && object.Constraint == "" {
 			sql = "DROP INDEX CONCURRENTLY " + qualified(object.Table.Schema, object.Name) + ";"
 			transactional = false
-			hazards = []string{"data_loss", "concurrent_index_drop"}
+			hazards = []string{HazardSlowerQueries, "concurrent_index_drop"}
 		} else {
 			sql = "DROP INDEX " + qualified(object.Table.Schema, object.Name) + ";"
+			hazards = []string{HazardSlowerQueries, "blocking_lock"}
 		}
 		if object.Unique && object.Constraint == "" {
 			phase = protocol.PhaseExpand
@@ -5659,18 +5681,23 @@ func renderDropWithOptions(object pgschema.Object, options Options) []protocol.S
 }
 
 func constraintRemovalHazards(object pgschema.Constraint) []string {
-	hazards := []string{"constraint_relaxation", "brief_lock", "access_exclusive_lock"}
+	return append([]string{"constraint_relaxation", "brief_lock", "access_exclusive_lock"}, constraintEnforcementHazards(object)...)
+}
+
+// constraintEnforcementHazards names the guarantee that the removal of a
+// constraint gives up.
+func constraintEnforcementHazards(object pgschema.Constraint) []string {
 	switch object.Type {
 	case pgschema.ConstraintCheck:
-		return append(hazards, "check_enforcement_removed", "overlap_rows_may_violate_retired_check")
+		return []string{"check_enforcement_removed", "overlap_rows_may_violate_retired_check"}
 	case pgschema.ConstraintUnique, pgschema.ConstraintPrimary:
-		return append(hazards, "temporary_or_permanent_uniqueness_unenforced", "duplicate_rows_possible")
+		return []string{"temporary_or_permanent_uniqueness_unenforced", "duplicate_rows_possible"}
 	case pgschema.ConstraintExclusion:
-		return append(hazards, "temporary_or_permanent_exclusion_unenforced", "conflicting_rows_possible")
+		return []string{"temporary_or_permanent_exclusion_unenforced", "conflicting_rows_possible"}
 	case pgschema.ConstraintForeign:
-		return append(hazards, "referential_enforcement_removed", "orphan_rows_possible", "referential_action_behavior_change")
+		return []string{"referential_enforcement_removed", "orphan_rows_possible", "referential_action_behavior_change"}
 	default:
-		return append(hazards, "enforcement_removed")
+		return []string{"enforcement_removed"}
 	}
 }
 
@@ -9601,11 +9628,18 @@ func notNullCheckName(id pgschema.ID) string {
 	return "onwardpg_nn_" + hex.EncodeToString(sum[:4])
 }
 
-func destructiveQuestions(changes []change.Change, schemas, tables map[pgschema.ID]bool, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, map[pgschema.ID]bool, error) {
+// destructiveQuestions asks for a confirmation of each drop that loses rows or
+// a guarantee. A drop that loses neither (see dropNeedsNoDecision) is approved
+// without a question.
+func destructiveQuestions(changes []change.Change, schemas, tables map[pgschema.ID]bool, current *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string) ([]protocol.Question, map[pgschema.ID]bool, error) {
 	var questions []protocol.Question
 	approved := make(map[pgschema.ID]bool)
 	for _, item := range changes {
 		if item.Kind != change.Drop || coveredByParent(item.ID, schemas, tables) && !foreignKeyMustDropBeforeReferencedTable(item, tables) || implicitConstraintIndexDrop(item, changes) || propagatedPartitionChildDrop(item, changes) || propagatedPartitionChildRebuild(item, changes) {
+			continue
+		}
+		if dropNeedsNoDecision(item, current) {
+			approved[item.ID] = true
 			continue
 		}
 		message := "The desired graph omits " + item.ID.String() + ". Confirm destructive removal."

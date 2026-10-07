@@ -158,13 +158,58 @@ func commandContext() context.Context {
 	return ctx
 }
 
+// queuedWarnings holds the warnings of the command that do not come from the
+// export observer. The next output carries them.
+var queuedWarnings []protocol.Warning
+
+func queueWarning(warning protocol.Warning) {
+	queuedWarnings = append(queuedWarnings, warning)
+}
+
 // pendingWarnings returns the warnings that no output has carried yet.
 func pendingWarnings() []protocol.Warning {
-	paths := exportObserver.Take(context.Background())
-	if len(paths) == 0 {
-		return nil
+	warnings := queuedWarnings
+	queuedWarnings = nil
+	if paths := exportObserver.Take(context.Background()); len(paths) > 0 {
+		warnings = append(warnings, protocol.ExportSideEffects(paths))
 	}
-	return []protocol.Warning{protocol.ExportSideEffects(paths)}
+	return warnings
+}
+
+// The index lock mode has one flag in five commands. The effect is the same
+// in each; the default is not.
+const (
+	concurrentIndexesEffect     = "create and drop standalone indexes with CREATE INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY, in nontransactional batches"
+	concurrentIndexesBundleHelp = concurrentIndexesEffect + "; without the flag an existing bundle keeps its stored choice, and a new bundle uses concurrent_indexes of the target (default false). --concurrent-indexes=false selects plain CREATE INDEX and DROP INDEX"
+	concurrentIndexesDevHelp    = concurrentIndexesEffect + "; without the flag the command uses concurrent_indexes of the target (default false)"
+	concurrentIndexesInitHelp   = "record the concurrent index mode in the baseline manifest; a baseline is the exported DDL as written and runs on empty databases, so the flag changes no statement and init does not read concurrent_indexes of the target (default false)"
+	concurrentIndexesPlainHelp  = concurrentIndexesEffect + " (default false)"
+)
+
+// explicitBoolFlag returns the value of a boolean flag only when the command
+// line has the flag.
+func explicitBoolFlag(flags *flag.FlagSet, name string, value bool) *bool {
+	var result *bool
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			result = &value
+		}
+	})
+	return result
+}
+
+// queueIndexLockModeWarnings makes a change of the index lock mode, and a
+// bundle that stays blocking against the configuration, plain in the result.
+func queueIndexLockModeWarnings(bundleID string, mode *protocol.IndexLockMode) {
+	if mode == nil {
+		return
+	}
+	if mode.PreviousConcurrentIndexes != nil {
+		queueWarning(protocol.IndexLockModeChanged(bundleID, *mode.PreviousConcurrentIndexes, mode.ConcurrentIndexes, mode.Source))
+	}
+	if mode.ConfigConcurrentIndexes != nil {
+		queueWarning(protocol.IndexLockModeDiffersFromConfig(bundleID))
+	}
 }
 
 // writeJSON prints one result document. It appends the pending warnings of
@@ -654,7 +699,7 @@ func runHistoryAt(arguments []string, start string) int {
 	targetName := flags.String("target", "", "configured database target name")
 	bundleID := flags.String("bundle", "baseline", "root history bundle identifier")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
-	concurrentIndexes := flags.Bool("concurrent-indexes", false, "create standalone indexes concurrently")
+	concurrentIndexes := flags.Bool("concurrent-indexes", false, concurrentIndexesInitHelp)
 	var ignores stringsFlag
 	flags.Var(&ignores, "ignore", "validated catalog selector to exclude")
 	var ignoreExtensionVersions stringsFlag
@@ -741,7 +786,7 @@ func runDevAt(arguments []string, start string) int {
 	flags.Var(&inlineHints, "hint", "semantic JSON hint; repeat for multiple decisions")
 	hintsFile := flags.String("hints-file", "", "JSON array of semantic hints")
 	output := flags.String("output", "json", "output format: text or json")
-	concurrentIndexes := flags.Bool("concurrent-indexes", false, "create standalone indexes concurrently")
+	concurrentIndexes := flags.Bool("concurrent-indexes", false, concurrentIndexesDevHelp)
 	ifNotExists := flags.Bool("if-not-exists", false, "emit IF NOT EXISTS for schema and table creation")
 	ifExists := flags.Bool("if-exists", false, "emit IF EXISTS for schema and table drops")
 	cascadeDrops := flags.Bool("cascade-drops", false, "emit CASCADE for schema and table drops")
@@ -792,11 +837,14 @@ func runDevAt(arguments []string, start string) int {
 		return writeError("invalid_hints", err)
 	}
 	options := graphplan.Options{
-		ConcurrentIndexes:       *concurrentIndexes,
+		ConcurrentIndexes:       target.ConcurrentIndexes,
 		IfNotExists:             *ifNotExists,
 		IfExists:                *ifExists,
 		CascadeDrops:            *cascadeDrops,
 		IgnoreExtensionVersions: sortedUniqueStrings(ignoreExtensionVersions),
+	}
+	if explicit := explicitBoolFlag(flags, "concurrent-indexes", *concurrentIndexes); explicit != nil {
+		options.ConcurrentIndexes = *explicit
 	}
 	if schemaQualifier.set {
 		options.SchemaQualifier = &schemaQualifier.value
@@ -882,7 +930,7 @@ func runDraftAt(arguments []string, start string) int {
 	hintsFile := flags.String("hints-file", "", "JSON array of semantic hints")
 	output := flags.String("output", "json", "output format: text or json")
 	purpose := flags.String("purpose", "feature", "feature, repair, or contract")
-	concurrentIndexes := flags.Bool("concurrent-indexes", false, "create standalone indexes concurrently")
+	concurrentIndexes := flags.Bool("concurrent-indexes", false, concurrentIndexesBundleHelp)
 	ifNotExists := flags.Bool("if-not-exists", false, "emit IF NOT EXISTS for schema and table creation")
 	ifExists := flags.Bool("if-exists", false, "emit IF EXISTS for schema and table drops")
 	cascadeDrops := flags.Bool("cascade-drops", false, "emit CASCADE for schema and table drops")
@@ -931,8 +979,8 @@ func runDraftAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_hints", err)
 	}
+	// draftflow sets ConcurrentIndexes: see draftflow.Input.ConcurrentIndexes.
 	options := graphplan.Options{
-		ConcurrentIndexes:       *concurrentIndexes,
 		IfNotExists:             *ifNotExists,
 		IfExists:                *ifExists,
 		CascadeDrops:            *cascadeDrops,
@@ -959,9 +1007,14 @@ func runDraftAt(arguments []string, start string) int {
 		Ignores:         targetIgnoreSelectors(target, ignores),
 		RequiredIgnores: sortedUniqueStrings(ignores),
 		PlannerOptions:  options,
+
+		ConcurrentIndexes: explicitBoolFlag(flags, "concurrent-indexes", *concurrentIndexes),
 	})
 	if err != nil {
 		return writeError("draft_error", err)
+	}
+	if !report.RemovedBundle {
+		queueIndexLockModeWarnings(report.BundleID, report.IndexLockMode)
 	}
 	if err := writeDraftReport(os.Stdout, report, *output); err != nil {
 		return writeError("output_error", err)
@@ -1336,7 +1389,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	devHintsFile := flags.String("dev-hints-file", "", "JSON array of development-workspace semantic hints")
 	output := flags.String("output", "json", "output format: sql, text, or json")
 	purpose := flags.String("purpose", "feature", "feature, repair, or contract")
-	concurrentIndexes := flags.Bool("concurrent-indexes", false, "create standalone indexes concurrently")
+	concurrentIndexes := flags.Bool("concurrent-indexes", false, concurrentIndexesBundleHelp)
 	ifNotExists := flags.Bool("if-not-exists", false, "emit IF NOT EXISTS for schema and table creation")
 	ifExists := flags.Bool("if-exists", false, "emit IF EXISTS for schema and table drops")
 	cascadeDrops := flags.Bool("cascade-drops", false, "emit CASCADE for schema and table drops")
@@ -1386,8 +1439,8 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("invalid_development_hints", err)
 	}
+	// draftflow sets ConcurrentIndexes: see draftflow.Input.ConcurrentIndexes.
 	options := graphplan.Options{
-		ConcurrentIndexes:       *concurrentIndexes,
 		IfNotExists:             *ifNotExists,
 		IfExists:                *ifExists,
 		CascadeDrops:            *cascadeDrops,
@@ -1396,6 +1449,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	if schemaQualifier.set {
 		options.SchemaQualifier = &schemaQualifier.value
 	}
+	explicitConcurrentIndexes := explicitBoolFlag(flags, "concurrent-indexes", *concurrentIndexes)
 	anchor, stored, err := activeplan.Load(root, *targetName)
 	if err != nil {
 		return writeError("active_plan_error", err)
@@ -1493,9 +1547,23 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 		AdminURL: adminURL, BundleID: *bundleID, PlanID: planID, InferBase: true,
 		Create: createBundle, BuildVersion: currentBuildVersion(), BuildIdentity: currentBundleBuildIdentity(), Purpose: *purpose,
 		Hints: hints, HintsGiven: len(inlineHints) > 0 || *hintsFile != "", Ignores: targetIgnoreSelectors(target, ignores), RequiredIgnores: sortedUniqueStrings(ignores), PlannerOptions: options,
+		ConcurrentIndexes: explicitConcurrentIndexes,
 	})
 	if err != nil {
 		return writeError("plan_error", err)
+	}
+	if !report.RemovedBundle {
+		queueIndexLockModeWarnings(report.BundleID, report.IndexLockMode)
+	}
+	// The development reconciliation uses the lock mode of the durable bundle.
+	// A run that stopped before it selected a bundle has no stored choice.
+	switch {
+	case report.IndexLockMode != nil:
+		options.ConcurrentIndexes = report.IndexLockMode.ConcurrentIndexes
+	case explicitConcurrentIndexes != nil:
+		options.ConcurrentIndexes = *explicitConcurrentIndexes
+	default:
+		options.ConcurrentIndexes = target.ConcurrentIndexes
 	}
 	// Durable H -> W state is authoritative and independently resumable. Store
 	// its local selector before the optional companion D -> W inspection so an
@@ -1576,6 +1644,7 @@ type workflowDurableOutcome struct {
 	Path            string                       `json:"path,omitempty"`
 	Verification    *workflowVerificationSummary `json:"verification,omitempty"`
 	Findings        []draftflow.Finding          `json:"findings,omitempty"`
+	IndexLockMode   *protocol.IndexLockMode      `json:"index_lock_mode,omitempty"`
 	WrittenReceipts []string                     `json:"written_receipts,omitempty"`
 	Edits           []workflowEditReference      `json:"edits,omitempty"`
 }
@@ -1626,6 +1695,12 @@ type workflowNextAction struct {
 	CurrentSQL      string                 `json:"current_sql,omitempty"`
 	NewGeneratedSQL string                 `json:"new_generated_sql,omitempty"`
 	Resolution      string                 `json:"resolution,omitempty"`
+	// Hints, Hazards, and DecisionCount belong to a semantic_hints_file
+	// action: the complete content of a hints file for every decision that
+	// has exactly one choice.
+	Hints         []protocol.Hint `json:"hints,omitempty"`
+	Hazards       []string        `json:"hazards,omitempty"`
+	DecisionCount int             `json:"decision_count,omitempty"`
 }
 
 type workflowActionChoice struct {
@@ -1648,6 +1723,7 @@ func compactDurableOutcome(report draftflow.Report) workflowDurableOutcome {
 		Outcome: report.Outcome, Target: report.Target, BundleID: report.BundleID,
 		PlanID: report.PlanID, Generation: report.Generation, Path: report.Path,
 		Findings:        append([]draftflow.Finding(nil), report.Findings...),
+		IndexLockMode:   report.IndexLockMode,
 		WrittenReceipts: append([]string(nil), report.WrittenReceipts...),
 	}
 	if report.AnswerRebind != nil {
@@ -1787,6 +1863,9 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 		}
 	}
 	appendDecisions("durable", "--hint", durable.AppliedHints, durable.Decisions)
+	if action := hintsFileAction("durable", "--hints-file", workflowPlanArgv(durable.Target, ""), durable.AppliedHints, durable.Decisions); action != nil {
+		result = append(result, *action)
+	}
 	if durable.EditReconciliation != nil && durable.EditReconciliation.Outcome == "conflict" {
 		for _, conflict := range durable.EditReconciliation.Conflicts {
 			action := workflowNextAction{
@@ -1847,6 +1926,9 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 		}
 	}
 	appendDecisions("development", "--dev-hint", development.AppliedHints, development.Decisions)
+	if action := hintsFileAction("development", "--dev-hints-file", workflowPlanArgv(durable.Target, ""), development.AppliedHints, development.Decisions); action != nil {
+		result = append(result, *action)
+	}
 	for _, hint := range development.DeferredHints {
 		argv := workflowPlanArgv(durable.Target, "")
 		for _, carried := range append(append([]protocol.Hint(nil), development.AppliedHints...), hint) {
@@ -1932,6 +2014,47 @@ func workflowNextActions(durable draftflow.Report, development devflow.Report) [
 	return result
 }
 
+// hintsFileName is the file name in the argv of a semantic_hints_file action.
+// The caller writes the file; onwardpg never does.
+const hintsFileName = "onwardpg-hints.json"
+
+// hintsFileAction offers one answer for many decisions of the same shape. A
+// decision with exactly one choice is a confirmation: the only way to go on is
+// that hint. With two or more of them (for example thirty dropped columns) the
+// action lists every such hint, with the hints that the plan already carries,
+// as the complete content of a hints file. A decision with several choices is
+// never in the list: the caller must choose. The caller still reviews each
+// hint and passes the file; nothing is confirmed for the caller.
+func hintsFileAction(scope, flag string, argv []string, carried []protocol.Hint, decisions []protocol.Decision) *workflowNextAction {
+	hints := append([]protocol.Hint(nil), carried...)
+	hazards := make(map[string]bool)
+	count := 0
+	for _, decision := range decisions {
+		if len(decision.Choices) != 1 {
+			continue
+		}
+		count++
+		hints = append(hints, decision.Choices[0].Hint)
+		for _, hazard := range decision.Choices[0].Hazards {
+			hazards[hazard] = true
+		}
+	}
+	if count < 2 {
+		return nil
+	}
+	action := &workflowNextAction{
+		Scope: scope, Kind: "semantic_hints_file", DecisionCount: count, Hints: hints,
+		Argv:       append(append([]string(nil), argv...), flag, hintsFileName),
+		Purpose:    fmt.Sprintf("answer the %d decisions that have exactly one choice with one file", count),
+		Resolution: "review every hint and the hazards, remove each hint that the repository does not prove, write the hints array to " + hintsFileName + ", and run argv",
+	}
+	for hazard := range hazards {
+		action.Hazards = append(action.Hazards, hazard)
+	}
+	sort.Strings(action.Hazards)
+	return action
+}
+
 func durablePlanReady(outcome string) bool {
 	return outcome == string(protocol.Planned) || outcome == "no_changes" || outcome == "absorbed"
 }
@@ -1994,6 +2117,8 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 					for _, choice := range action.Choices {
 						_, _ = fmt.Fprintf(writer, "  %s %s: %s\n", action.Scope, action.Kind, renderArgv(choice.Argv))
 					}
+				case "semantic_hints_file":
+					_, _ = fmt.Fprintf(writer, "  %s hints file: %s (%s; the JSON output lists the hints)\n", action.Scope, renderArgv(action.Argv), action.Purpose)
 				case "edit_file":
 					_, _ = fmt.Fprintf(writer, "  durable edit: %s (%s; proof: %s)\n", action.Path, action.Purpose, action.RequiredProof)
 				case "review_postcondition":
@@ -2170,7 +2295,7 @@ func runLowLevelPlan(command string, arguments []string) int {
 	var inlineHints stringsFlag
 	flags.Var(&inlineHints, "hint", "semantic JSON hint; repeat for multiple decisions")
 	hintsFile := flags.String("hints-file", "", "JSON array of semantic hints")
-	concurrentIndexes := flags.Bool("concurrent-indexes", false, "create standalone indexes concurrently")
+	concurrentIndexes := flags.Bool("concurrent-indexes", false, concurrentIndexesPlainHelp)
 	ifNotExists := flags.Bool("if-not-exists", false, "emit IF NOT EXISTS for schema and table creation")
 	ifExists := flags.Bool("if-exists", false, "emit IF EXISTS for schema and table drops")
 	cascadeDrops := flags.Bool("cascade-drops", false, "emit CASCADE for schema and table drops")
@@ -2387,6 +2512,7 @@ func runConfig(arguments []string) int {
 		DevPostgresMajor     int      `json:"dev_postgres_major,omitempty"`
 		ScratchPostgresMajor int      `json:"scratch_postgres_major"`
 		HistoryPostgresMajor int      `json:"history_postgres_major,omitempty"`
+		ConcurrentIndexes    bool     `json:"concurrent_indexes,omitempty"`
 		Ignored              []string `json:"ignored,omitempty"`
 	}
 	checked := make([]checkedTarget, 0, len(targets))
@@ -2470,7 +2596,8 @@ func runConfig(arguments []string) int {
 		checked = append(checked, checkedTarget{
 			Name: targetName, Provenance: compiled.Provenance, Fingerprint: fingerprint,
 			DevPostgresMajor: devMajor, ScratchPostgresMajor: scratchMajor, HistoryPostgresMajor: historyMajor,
-			Ignored: ignored,
+			ConcurrentIndexes: target.ConcurrentIndexes,
+			Ignored:           ignored,
 		})
 	}
 	_ = writeJSON(os.Stdout, struct {
@@ -2592,8 +2719,9 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 			Decisions       []protocol.Decision         `json:"decisions"`
 			Analysis        []protocol.DecisionAnalysis `json:"analysis,omitempty"`
 			Guidance        []protocol.Guidance         `json:"guidance,omitempty"`
+			IndexLockMode   *protocol.IndexLockMode     `json:"index_lock_mode,omitempty"`
 		}{
-			Status: "needs_decisions", NextAction: nextAction,
+			Status: "needs_decisions", NextAction: nextAction, IndexLockMode: report.IndexLockMode,
 			Path: report.Path, WrittenReceipts: report.WrittenReceipts,
 			Decisions: decisionsWithArgv(report.Decisions, []string{"onwardpg", "draft"}, "--hint"),
 			Analysis:  analysisFromPlan(report.Plan), Guidance: guidanceFromPlan(report.Plan),
@@ -2601,14 +2729,17 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 	}
 	if report.Outcome == string(protocol.NeedsSQLEdits) {
 		return writeJSON(writer, struct {
-			Status          string   `json:"status"`
-			NextAction      string   `json:"next_action"`
-			Path            string   `json:"path"`
-			Edit            []string `json:"edit"`
-			WrittenReceipts []string `json:"written_receipts"`
+			Status          string                  `json:"status"`
+			NextAction      string                  `json:"next_action"`
+			Path            string                  `json:"path"`
+			Edit            []string                `json:"edit"`
+			WrittenReceipts []string                `json:"written_receipts"`
+			IndexLockMode   *protocol.IndexLockMode `json:"index_lock_mode,omitempty"`
+			Findings        []draftflow.Finding     `json:"findings,omitempty"`
 		}{
-			Status: string(protocol.NeedsSQLEdits), NextAction: "edit_files_then_verify", Path: report.Path,
-			Edit: report.EditFiles, WrittenReceipts: report.WrittenReceipts,
+			Status: string(protocol.NeedsSQLEdits), NextAction: "edit_files_then_verify", Path: report.Path, IndexLockMode: report.IndexLockMode,
+			Findings: report.Findings,
+			Edit:     report.EditFiles, WrittenReceipts: report.WrittenReceipts,
 		})
 	}
 	return writeJSON(writer, report)

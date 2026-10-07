@@ -1,0 +1,62 @@
+{
+  "bundle_id": "drop-indexes",
+  "plan_id": "plan_b54dced402c3ecf16206cd904a33df73",
+  "generation": 1,
+  "target": "primary",
+  "purpose": "feature",
+  "state": "planned",
+  "baseline_source": {
+    "kind": "onwardpg_history",
+    "description": "onwardpg-history:primary:sha256:4cd023b0666bb7ce8f7ae34191c441629c37e875dbff85ed3fa643f712026745",
+    "fingerprint": "sha256:a82cec39bdf56a22543887a968b6e6e2c9c1b0816c81262c301031ce879a3a4d",
+    "postgres_major": 18
+  },
+  "desired_source": {
+    "kind": "ddl_export",
+    "description": "schema_file:schema.sql",
+    "fingerprint": "sha256:948710249ed0dd892d4fee01249184047123ab2a8dfaad963e8d57832005ec28",
+    "postgres_major": 18
+  },
+  "planner": {
+    "version": "dev",
+    "build": {
+      "version": "dev",
+      "commit": "unknown",
+      "dirty": false,
+      "go_version": "go1.26.8",
+      "supported_postgres_majors": [
+        15,
+        16,
+        17,
+        18
+      ]
+    },
+    "options": {
+      "concurrent_indexes": true
+    }
+  },
+  "history": {
+    "parent_digest": "sha256:4cd023b0666bb7ce8f7ae34191c441629c37e875dbff85ed3fa643f712026745",
+    "entry_digest": "sha256:3c3b5552ac462697098ad8384d046978d061c4c3f53f535f3621cad2286e06ce"
+  },
+  "result_digest": "sha256:e250c23bc448970cb1f4a5161c82f0585e3becaf28593fe525606748466ac823",
+  "plan_digest": "sha256:e250c23bc448970cb1f4a5161c82f0585e3becaf28593fe525606748466ac823",
+  "answers_digest": "sha256:d68f1d0675fcc77707d0e4881d44a39cfc85405eb63198b8daedab8ce258b08b",
+  "questions_digest": "sha256:ae65e6d344e0eb3b8ae82db9da2fdc69c5a2f9a1195cd257eb8428674f235a61",
+  "semantic_decisions_digest": "sha256:9a87c9a5d1d736051c47686944d202b93db15be6b36beb6f7076c4c30228415a",
+  "contract_gates_digest": "sha256:4681430f7fbe0207fbeffa40f7f5d2b04b9a608a406f267fdacb53dcdae81dca",
+  "expand_checkpoint_digest": "sha256:c62098cf75c5f7a0b82b1a1f3edd6288bf373c790c94cab8d81e76c2f89bc504",
+  "phase_source": "generated",
+  "phases": {
+    "contract": {
+      "path": "phases/contract.sql",
+      "digest": "sha256:67581dc590f5eaf9c52d75f99a61379eda013842c7f2ca9eb08c832fc3d5df41",
+      "transactional": false
+    },
+    "expand": {
+      "path": "phases/expand.sql",
+      "digest": "sha256:73819fda9cf43833f8e4a0f5e6efd7d7de45ac16802c82f9b970df86ff908221",
+      "transactional": false
+    }
+  }
+}

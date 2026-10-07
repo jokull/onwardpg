@@ -3874,15 +3874,7 @@ func TestBuildSeparatesConcurrentIndexDropIntoNonTransactionalBatch(t *testing.T
 	if err := current.AddDependency(index.ObjectID(), table.ObjectID()); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
-		t.Fatalf("expected destructive index-drop question: %#v", pending)
-	}
-	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: index.ObjectID().String(), Value: "drop"}}}
-	result, err := Build(current, desired, answers, Options{ConcurrentIndexes: true})
+	result, err := Build(current, desired, protocol.Answers{}, Options{ConcurrentIndexes: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4283,15 +4275,7 @@ func TestBuildDropsSameNamedIndexBeforeMovingItToAnotherTable(t *testing.T) {
 	if err := desired.Add(newIndex); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := Build(current, desired, protocol.Answers{}, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 {
-		t.Fatalf("expected destructive index question: %#v", pending)
-	}
-	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "drop", Key: oldIndex.ObjectID().String(), Value: "drop"}}}
-	planned, err := Build(current, desired, answers, Options{})
+	planned, err := Build(current, desired, protocol.Answers{}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

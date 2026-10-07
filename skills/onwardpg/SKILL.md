@@ -92,6 +92,53 @@ For product-specific transformations:
    readiness evidence.
 6. Rerun `onwardpg plan` when the declarative schema changes, then run `onwardpg verify` against the exact edited bundle.
 
+## Index locks
+
+Read `durable.index_lock_mode` in every plan result. The default mode builds
+and drops indexes with plain `CREATE INDEX` and `DROP INDEX` in transactional
+batches. On a database with live traffic that is a hazard: `CREATE INDEX`
+blocks every write to the table until the build is complete, and each `DROP
+INDEX` holds `ACCESS EXCLUSIVE` on its table until the batch commits (hazard
+`blocking_lock`).
+
+For any database with live traffic, use the concurrent mode. It emits `CREATE
+INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY`, each in a nontransactional
+batch.
+
+- Repository policy: `concurrent_indexes = true` in the target of
+  `.onwardpg.toml`. Propose this key when the repository has live traffic and
+  the key is absent; change it only with the user's approval.
+- One bundle: `onwardpg plan NAME --concurrent-indexes`. The bundle stores the
+  choice, and a later plain `onwardpg plan` keeps it. `--concurrent-indexes=false`
+  selects the blocking mode.
+- Precedence: the flag of the run, then the stored choice of the bundle, then
+  the target key. `init` does not read the key.
+- A `warnings` entry with the code `index_lock_mode_changed` means that this
+  run changed the locks of an existing migration. Report it. An entry with the
+  code `index_lock_mode_differs_from_config` means that the bundle is blocking
+  although the target is configured as concurrent; rerun once with
+  `--concurrent-indexes` unless the user wants the blocking mode.
+- Not concurrent in either mode: an index that a new constraint builds
+  (`blocking_index_build`), and a unique index or any index drop on a
+  partitioned table (`partitioned_index_not_concurrent`). Report these hazards.
+- A concurrent build that fails in deployment leaves an `INVALID` index. The
+  operator drops it with `DROP INDEX CONCURRENTLY` and runs the statement
+  again. Say so in the handoff.
+
+The removal of an index is not data loss. A standalone index that enforces
+nothing is dropped without a decision; do not supply a `drop` hint for it. A
+unique index always asks one decision with the hazards
+`unique_index_enforcement_removed` and `duplicate_rows_possible`, also when
+another index has the same columns. Answer it only when the application no
+longer relies on that index: check `ON CONFLICT` targets and foreign keys that
+reference its columns.
+
+When a result has many decisions with one choice each (for example many
+dropped columns), `next_actions` has a `semantic_hints_file` action with the
+complete `hints` array. Review each hint against the repository, remove the
+ones that are not proven, write the array to the named file, and run its
+argv. The action never includes a decision with several choices.
+
 ## Development databases and branches
 
 `onwardpg plan --output sql` emits only direct development reconciliation (`D -> W`). It is never the PR bundle. In workspace mode, preserve development-only objects that may belong to another branch.

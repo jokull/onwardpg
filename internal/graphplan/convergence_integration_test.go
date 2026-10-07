@@ -1289,8 +1289,9 @@ func TestPartitionedIndexAndConstraintDropConvergesOnPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
-		t.Fatalf("expected exactly parent destructive questions, got %#v", pending)
+	// The primary key asks its decision. The plain parent index asks none.
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || !strings.Contains(pending.Questions[0].Key, "events_pkey") {
+		t.Fatalf("expected exactly the parent primary-key question, got %#v", pending)
 	}
 	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint}
 	for _, question := range pending.Questions {
@@ -6923,19 +6924,18 @@ CREATE TABLE "` + schemaName + `".keep (id bigint, retained_column text);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 3 {
-		t.Fatalf("expected table, column, and index drop questions: %#v", pending)
+	// The index holds no rows: only the table and the column ask a decision.
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
+		t.Fatalf("expected table and column drop questions: %#v", pending)
 	}
 	keepTable := (pgschema.Table{Schema: schemaName, Name: "keep"}).ObjectID()
 	removeTable := (pgschema.Table{Schema: schemaName, Name: "remove_me"}).ObjectID()
 	oldColumn := (pgschema.Column{Table: keepTable, Name: "old_column"}).ObjectID()
-	oldIndex := (pgschema.Index{Table: keepTable, Name: "keep_old_column_idx"}).ObjectID()
 	answers := protocol.Answers{
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
 			{Kind: "drop", Key: removeTable.String(), Value: "drop"},
 			{Kind: "drop", Key: oldColumn.String(), Value: "drop"},
-			{Kind: "drop", Key: oldIndex.String(), Value: "drop"},
 		},
 	}
 	plan, err := buildIntegration(current, desired, answers, Options{ConcurrentIndexes: true})

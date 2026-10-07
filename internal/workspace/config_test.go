@@ -236,3 +236,23 @@ live_ignore = [
 		t.Fatalf("live_ignore = %#v", got)
 	}
 }
+
+func TestConcurrentIndexesIsAnOptionalBooleanTargetKey(t *testing.T) {
+	load := func(line string) (Config, error) {
+		name := filepath.Join(t.TempDir(), ".onwardpg.toml")
+		data := "version = 1\nbundle_root = \"onward-bundles\"\n[targets.primary]\nschema_file = \"schema.sql\"\n" + line
+		if err := os.WriteFile(name, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(name)
+	}
+	for line, want := range map[string]bool{"": false, "concurrent_indexes = false\n": false, "concurrent_indexes = true\n": true} {
+		config, err := load(line)
+		if err != nil || config.Targets["primary"].ConcurrentIndexes != want {
+			t.Fatalf("%q: concurrent_indexes = %t, %v", line, config.Targets["primary"].ConcurrentIndexes, err)
+		}
+	}
+	if _, err := load("concurrent_indexes = \"yes\"\n"); err == nil {
+		t.Fatal("a string value must be rejected")
+	}
+}

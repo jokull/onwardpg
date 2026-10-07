@@ -246,6 +246,100 @@ supply typed `work` directly, including a bounded operator-batched template.
 One-shot edited SQL and Boolean gate pockets are receipted only after structural
 validation and disposable clone convergence.
 
+## Index lock mode
+
+`plan` reports the mode of the durable bundle as `durable.index_lock_mode`.
+`draft` reports the same object as the top-level `index_lock_mode`. The member
+is absent when the command stopped before it selected a bundle. It names the mode
+of the bundle on disk: a run that stops before it writes an existing bundle
+reports the stored mode.
+
+```json
+{
+  "status": "ready",
+  "durable": {
+    "status": "planned",
+    "bundle_id": "search-indexes",
+    "generation": 3,
+    "index_lock_mode": {
+      "concurrent_indexes": true,
+      "source": "bundle"
+    }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `concurrent_indexes` | `true`: `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY` in nontransactional batches. `false`: plain statements in transactional batches. |
+| `source` | What decided the mode: `flag` (`--concurrent-indexes` on this run), `bundle` (the choice in `planner.options.concurrent_indexes` of the previous generation), `config` (`concurrent_indexes` of the target), or `default`. |
+| `previous_concurrent_indexes` | Present only when this run wrote the bundle in another mode than its previous generation. The run also emits the warning `index_lock_mode_changed`. |
+| `config_concurrent_indexes` | Present, and `true`, only when the bundle keeps the blocking mode of its previous generation although the target has `concurrent_indexes = true`. The run also emits the warning `index_lock_mode_differs_from_config`. |
+
+The stored choice is the existing optional manifest member
+`planner.options.concurrent_indexes`. It is absent for the blocking mode. No
+bundle file has a new member, and no digest changes. The
+[CLI reference](cli.md#index-lock-mode) has the precedence and the operations
+that stay non-concurrent.
+
+## Drop decisions
+
+A drop asks for a decision only when it loses rows or a guarantee. The
+`hazards` of the `drop` choice name what is lost:
+
+| Dropped object | Decision | Choice hazards |
+| --- | --- | --- |
+| Schema, table, column, sequence, type, and every other object not listed here | Yes | `data_loss` |
+| Standalone index that is not unique, is not the replica identity, and is not the index that the table is clustered on | No | — |
+| Standalone unique index | Yes | `unique_index_enforcement_removed`, `duplicate_rows_possible` |
+| Index that is the replica identity of its table, or that the table is clustered on | Yes | `replica_identity_removed`, `logical_replication_change`, or `clustered_index_removed`, with the hazards of the index |
+| Primary-key or unique constraint | Yes | `temporary_or_permanent_uniqueness_unenforced`, `duplicate_rows_possible` |
+| Check, foreign-key, or exclusion constraint | Yes | The enforcement that is removed, for example `referential_enforcement_removed`, `orphan_rows_possible` |
+
+Every drop of a unique index or of a constraint keeps one decision, also when
+another index enforces the same uniqueness. onwardpg does not try to prove
+that a unique index is redundant: uniqueness has other uses (foreign-key
+targets, `ON CONFLICT`, replica identity) that such a proof must cover.
+
+A statement that needs no decision is still in the plan and is still
+classified. An index that enforces nothing is dropped in `contract` with
+`safety=review` and the hazards `slower_queries_possible` and `blocking_lock`
+(or `concurrent_index_drop`). Each contract statement requires the
+`writers:legacy` gate, as before: code from before the deployment can still
+depend on the index for speed.
+
+A `drop` hint for an index that needs no decision is accepted
+and is not written to the bundle. `plan` and `draft` report it as a finding
+with the code `hint_not_needed`. Earlier versions asked for these hints.
+Known limit: a run that still needs other decisions (`needs_input`) accepts
+the hint but does not report the finding, and does not carry the hint to the
+next command.
+
+### One hints file for many confirmations
+
+A decision with exactly one choice is a confirmation. When a result has two or
+more of them, `next_actions` has one more action after the `semantic_hint`
+actions:
+
+```json
+{
+  "scope": "durable",
+  "kind": "semantic_hints_file",
+  "decision_count": 30,
+  "purpose": "answer the 30 decisions that have exactly one choice with one file",
+  "hints": [{"kind": "drop", "object": "column", "name": ["public", "users", "legacy_a"]}],
+  "hazards": ["data_loss"],
+  "argv": ["onwardpg", "plan", "--target", "primary", "--hints-file", "onwardpg-hints.json"],
+  "resolution": "review every hint and the hazards, remove each hint that the repository does not prove, write the hints array to onwardpg-hints.json, and run argv"
+}
+```
+
+`hints` is the complete content of the file: the hints that the plan already
+carries, then the one hint of each such decision. `hazards` is the union of
+their hazards. A decision with more than one choice, such as rename or drop,
+is never in the list. onwardpg does not write the file and confirms nothing by
+itself. The `development` scope has the same action with `--dev-hints-file`.
+
 ## Warnings
 
 A result document, and an error diagnostic, can have one more top-level member,
@@ -269,8 +363,17 @@ The member is absent when there is nothing to report.
 }
 ```
 
-Consumers should branch on `code`. The one current code is
-`export_side_effects`. `init`, `plan`, `draft`, `verify`, `dev plan`, and
+Consumers should branch on `code`. The codes are:
+
+| Code | Commands | Meaning |
+| --- | --- | --- |
+| `export_side_effects` | `init`, `plan`, `draft`, `verify`, `dev plan`, `config check` | The git status of the work tree changed while `schema_command` ran. |
+| `index_lock_mode_changed` | `plan`, `draft` | The run wrote a bundle whose [index lock mode](#index-lock-mode) differs from its previous generation, in either direction. The message names both modes and what decided the new one. |
+| `index_lock_mode_differs_from_config` | `plan`, `draft` | The bundle keeps the blocking mode of its previous generation although the target has `concurrent_indexes = true`. Run the plan once with `--concurrent-indexes` to move it. |
+
+The two `index_lock_mode` warnings have `code`, `message`, and `remediation`.
+
+For `export_side_effects`: `init`, `plan`, `draft`, `verify`, `dev plan`, and
 `config check` emit it when they run a `schema_command` in a git work tree and
 the output of `git status` after the last export run differs from the output
 before the first. A command that stops with an error before its last export

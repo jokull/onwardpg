@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/pgschema"
 )
@@ -91,7 +92,7 @@ func choicesForQuestion(question protocol.Question, current, desired *pgschema.S
 			if value == "create" {
 				result = append(result, protocol.DecisionChoice{
 					Hint:    protocol.Hint{Kind: "drop", Object: object, Name: fromName},
-					Hazards: []string{"data_loss"},
+					Hazards: notRenamedHazards(current, from),
 				})
 				continue
 			}
@@ -127,7 +128,7 @@ func choicesForQuestion(question protocol.Question, current, desired *pgschema.S
 	switch question.Kind {
 	case "drop":
 		return []protocol.DecisionChoice{{
-			Hint: protocol.Hint{Kind: "drop", Object: object, Name: name}, Hazards: []string{"data_loss"},
+			Hint: protocol.Hint{Kind: "drop", Object: object, Name: name}, Hazards: dropHazards(current, id),
 		}}, nil
 	case "type_change":
 		result := make([]protocol.DecisionChoice, 0, len(question.Choices))
@@ -346,6 +347,33 @@ func confirmationHazards(kind string) []string {
 	default:
 		return nil
 	}
+}
+
+// dropHazards names what the drop of one current object gives up. An object
+// that the current snapshot does not hold keeps the most severe label.
+func dropHazards(current *pgschema.Snapshot, id pgschema.ID) []string {
+	if current != nil {
+		if object, exists := current.Object(id); exists {
+			return graphplan.DropDecisionHazards(current, object)
+		}
+	}
+	return []string{"data_loss"}
+}
+
+// notRenamedHazards names what the answer "this is not a rename" costs. For an
+// index the answer means a second build of the same index under the new name.
+func notRenamedHazards(current *pgschema.Snapshot, id pgschema.ID) []string {
+	hazards := dropHazards(current, id)
+	if id.Kind != pgschema.KindIndex {
+		return hazards
+	}
+	result := []string{"index_rebuild"}
+	for _, hazard := range hazards {
+		if hazard != graphplan.HazardSlowerQueries {
+			result = append(result, hazard)
+		}
+	}
+	return result
 }
 
 func findID(snapshot *pgschema.Snapshot, value string) (pgschema.ID, bool) {
