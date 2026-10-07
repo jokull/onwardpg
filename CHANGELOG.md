@@ -33,6 +33,12 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   that `--ignore` excluded, such as the relations of a provider schema, is
   removed from `drift check` and `dev plan`. `contract check` keeps it,
   because its data gates read rows.
+- The concurrent mode no longer emits `CREATE INDEX CONCURRENTLY` or `DROP
+  INDEX CONCURRENTLY` for an index of a partitioned table. PostgreSQL rejects
+  both, so such a plan could not be verified. A new non-unique index is built
+  with an `ON ONLY` parent, a concurrent build for each leaf partition, and an
+  attach. A unique index and every drop use the plain statement, with the
+  hazard `partitioned_index_not_concurrent`.
 
 ### Added
 
@@ -82,6 +88,50 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   was verified.
 - The timing stage for these replays is `history_replay`; `ddl_execute` now
   measures only the load of exported DDL.
+
+||||||| parent of 1b6ef58 (Keep the index lock mode with the bundle and stop treating index drops as data loss)
+- A bundle keeps its index lock mode. The mode was stored in the manifest
+  (`planner.options.concurrent_indexes`) but never read: a bundle planned with
+  `--concurrent-indexes` went back to plain `CREATE INDEX` and `DROP INDEX` in
+  transactional batches on the next plain `onwardpg plan`, with no message.
+  `plan` and `draft` now use the flag of the run, then the stored choice of
+  the bundle, then the target configuration, then the blocking default.
+  `--concurrent-indexes=false` selects the blocking mode.
+- New optional target key `concurrent_indexes = true` in `.onwardpg.toml`.
+  `plan`, `draft`, and `dev plan` then use the concurrent mode without the
+  flag. `init` does not read the key. `config check` reports the key.
+- `plan` and `draft` report `index_lock_mode` (`concurrent_indexes`, `source`,
+  and, after a change, `previous_concurrent_indexes`). Two new warning codes:
+  `index_lock_mode_changed` when a run writes a bundle in another mode than
+  its previous generation, and `index_lock_mode_differs_from_config` when a
+  bundle stays blocking although the target is configured as concurrent.
+- The removal of an index is no longer `data_loss`. A standalone index that
+  enforces nothing is dropped without a decision hint, in `contract`, with
+  `safety=review` and the hazards `slower_queries_possible` and
+  `blocking_lock` or `concurrent_index_drop`. Before, each one was
+  `safety=dangerous`, `data_loss`, and needed its own `drop` hint.
+- Every drop of a unique index or of a constraint keeps one decision. Its
+  choice hazard is now the enforcement that is removed (for a unique index:
+  `unique_index_enforcement_removed`, `duplicate_rows_possible`), not
+  `data_loss`. An index that is the replica identity of its table, or that the
+  table is clustered on, also keeps its decision.
+- A `drop` hint for an index that needs no decision is accepted
+  and reported as the finding `hint_not_needed`.
+- `next_actions` has a `semantic_hints_file` action when two or more decisions
+  have exactly one choice. It lists the complete `hints` array for
+  `--hints-file`.
+- The help text of `--concurrent-indexes` states the whole effect: create and
+  drop, with `CONCURRENTLY`, in nontransactional batches.
+
+### Compatibility
+
+- No bundle file has a new member. Bundles in accepted history verify with no
+  change to a byte: `verify` replays the stored SQL and does not plan it
+  again.
+- A bundle that is planned again gets the new classification, so its
+  `plan.json`, phase SQL comments, and digests change. This is intended for a
+  bundle that is not yet in accepted history. Stored answers for index drops
+  that need no decision now are dropped from the bundle on that replan.
 
 ## v0.1.0-preview.7 — 2026-10-07
 

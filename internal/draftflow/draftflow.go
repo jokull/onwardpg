@@ -83,6 +83,7 @@ type Report struct {
 	EditReconciliation        *bundle.EditReconciliation `json:"edit_reconciliation,omitempty"`
 	Verification              *verify.Report             `json:"verification,omitempty"`
 	Findings                  []Finding                  `json:"findings,omitempty"`
+	IndexLockMode             *protocol.IndexLockMode    `json:"index_lock_mode,omitempty"`
 	RemovedBundle             bool                       `json:"removed_bundle,omitempty"`
 	CreatedBundle             bool                       `json:"created_bundle,omitempty"`
 	WrittenReceipts           []string                   `json:"written_receipts,omitempty"`
@@ -117,6 +118,37 @@ type Input struct {
 	Ignores         []string
 	RequiredIgnores []string
 	PlannerOptions  graphplan.Options
+	// ConcurrentIndexes is the --concurrent-indexes flag when the command line
+	// has it, and nil otherwise. The run sets PlannerOptions.ConcurrentIndexes
+	// from it, from the stored choice of the selected bundle, or from the
+	// target configuration, in that order.
+	ConcurrentIndexes *bool
+}
+
+// resolveIndexLockMode applies the precedence: the flag of this run, then the
+// choice that the previous generation of the bundle stored in its manifest,
+// then the target configuration, then the blocking default. A bundle keeps
+// its mode through every restack: a plain plan never changes the locks that
+// an existing migration takes.
+func resolveIndexLockMode(flag *bool, selected *history.Entry, target workspace.Target) protocol.IndexLockMode {
+	switch {
+	case flag != nil:
+		return protocol.IndexLockMode{ConcurrentIndexes: *flag, Source: "flag"}
+	case selected != nil:
+		mode := protocol.IndexLockMode{ConcurrentIndexes: selected.Artifact.Manifest.Planner.Options.ConcurrentIndexes, Source: "bundle"}
+		// A manifest without the option and a manifest that chose the blocking
+		// mode are the same bytes. Only this direction is a risk on a live
+		// database, so only this direction is reported.
+		if !mode.ConcurrentIndexes && target.ConcurrentIndexes {
+			configured := true
+			mode.ConfigConcurrentIndexes = &configured
+		}
+		return mode
+	case target.ConcurrentIndexes:
+		return protocol.IndexLockMode{ConcurrentIndexes: true, Source: "config"}
+	default:
+		return protocol.IndexLockMode{Source: "default"}
+	}
 }
 
 // Run replaces one explicitly selected draft while treating every other entry
@@ -322,6 +354,28 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 		}}
 		return report, nil
 	}
+	lockMode := resolveIndexLockMode(input.ConcurrentIndexes, selected, input.Target)
+	input.PlannerOptions.ConcurrentIndexes = lockMode.ConcurrentIndexes
+	report.IndexLockMode = &lockMode
+	// The report names the mode that the bundle on disk has. A run that
+	// stops before it writes an existing bundle reports the stored mode again.
+	lockModeWritten := false
+	defer func() {
+		if selected != nil && !lockModeWritten {
+			lockMode = resolveIndexLockMode(nil, selected, input.Target)
+		}
+	}()
+	// markLockModeWritten records a mode change only after the bundle is
+	// written with it.
+	markLockModeWritten := func() {
+		lockModeWritten = true
+		if selected == nil {
+			return
+		}
+		if previous := selected.Artifact.Manifest.Planner.Options.ConcurrentIndexes; previous != lockMode.ConcurrentIndexes {
+			lockMode.PreviousConcurrentIndexes = &previous
+		}
+	}
 	if selected != nil {
 		report.PreviousParent = selected.Artifact.Manifest.History.ParentDigest
 		report.ParentChanged = report.PreviousParent != chain.HeadDigest
@@ -390,6 +444,20 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 	// available for cumulative follow-up commands even when an edited bundle
 	// must wait for more decisions before its receipts can be replaced.
 	report.AppliedHints = append([]protocol.Hint(nil), hints...)
+	if plan.Status != protocol.NeedsInput {
+		// While decisions remain, a later question can still use the hint.
+		for _, hint := range suppliedHintsNotReceipted(input.Hints, hints) {
+			if !semantichint.Unneeded(hint, current, desired) {
+				continue
+			}
+			key, _ := hint.CanonicalKey()
+			report.Findings = append(report.Findings, Finding{
+				Code:        "hint_not_needed",
+				Message:     "hint " + key + " answers no decision: the removal of an index that enforces nothing needs no hint",
+				Remediation: "remove the hint from the command; the plan is the same with it and without it",
+			})
+		}
+	}
 	if plan.Status == protocol.NeedsInput {
 		report.DeferredHints = suppliedHintsNotReceipted(input.Hints, hints)
 		report.Decisions, err = semantichint.Decisions(plan.Questions, current, desired)
@@ -540,6 +608,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 			if err := bundle.Write(destination, artifact, bundle.WriteOptions{ReplaceDraft: true, PreserveEdited: preserve, ExpectedPrevious: &selected.Artifact}); err != nil {
 				return report, fmt.Errorf("write conflict handoff: %w", err)
 			}
+			markLockModeWritten()
 			relative, pathErr := filepath.Rel(input.Root, destination)
 			if pathErr != nil {
 				return report, pathErr
@@ -632,6 +701,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 	if err := bundle.Write(destination, artifact, writeOptions); err != nil {
 		return report, fmt.Errorf("write draft bundle: %w", err)
 	}
+	markLockModeWritten()
 	relative, err := filepath.Rel(input.Root, destination)
 	if err != nil {
 		return report, err
@@ -976,7 +1046,7 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 	}
 	for iteration := 0; iteration <= len(allHints)*2+1; iteration++ {
 		if plan.Status != protocol.NeedsInput {
-			if err := rejectUnusedSuppliedHints(allHints, used, len(previous)); err != nil {
+			if err := rejectUnusedSuppliedHints(allHints, used, len(previous), current, desired); err != nil {
 				return protocol.Result{}, nil, nil, nil, nil, err
 			}
 			refreshRebindAfterHints(rebind, answers, plan)
@@ -1068,10 +1138,10 @@ func refreshRebindAfterHints(report *protocol.RebindReport, answers protocol.Ans
 	})
 }
 
-func rejectUnusedSuppliedHints(hints []protocol.Hint, used map[int]bool, suppliedAt int) error {
+func rejectUnusedSuppliedHints(hints []protocol.Hint, used map[int]bool, suppliedAt int, current, desired *pgschema.Snapshot) error {
 	var unused []string
 	for index := suppliedAt; index < len(hints); index++ {
-		if used[index] {
+		if used[index] || semantichint.Unneeded(hints[index], current, desired) {
 			continue
 		}
 		key, _ := hints[index].CanonicalKey()

@@ -42,7 +42,7 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 	for iteration := 0; iteration <= len(hints)*2+1; iteration++ {
 		resolution.Questions = mergeQuestions(resolution.Questions, resolution.Result.Questions)
 		if resolution.Result.Status != protocol.NeedsInput {
-			if err := rejectUnused(hints, used); err != nil {
+			if err := rejectUnused(hints, used, current, desired); err != nil {
 				return Resolution{}, err
 			}
 			resolution.Hints = usedHints(hints, used)
@@ -86,6 +86,9 @@ func classifyDeferredHints(current, desired *pgschema.Snapshot, hints []protocol
 		}
 		if reachable {
 			deferred = append(deferred, hint)
+			continue
+		}
+		if Unneeded(hint, current, desired) {
 			continue
 		}
 		key, _ := hint.CanonicalKey()
@@ -218,10 +221,22 @@ func ApplyIdentityHints(current, desired *pgschema.Snapshot, hints []protocol.Hi
 	return used, nil
 }
 
-func rejectUnused(hints []protocol.Hint, used map[int]bool) error {
+// Unneeded reports whether a drop hint names an index that the plan removes
+// without a decision because it enforces nothing. Earlier versions asked for
+// these hints, so a caller that still supplies one gets the same plan and no
+// error. The hint is not written to the bundle.
+func Unneeded(hint protocol.Hint, current, desired *pgschema.Snapshot) bool {
+	if hint.Kind != "drop" || hint.Object != string(pgschema.KindIndex) || len(hint.Name) != 3 {
+		return false
+	}
+	id := pgschema.ID{Kind: pgschema.KindIndex, Schema: hint.Name[0], Name: hint.Name[1], Part: hint.Name[2]}
+	return graphplan.DropNeedsNoDecision(id, current, desired)
+}
+
+func rejectUnused(hints []protocol.Hint, used map[int]bool, current, desired *pgschema.Snapshot) error {
 	var unused []string
 	for index, hint := range hints {
-		if used[index] {
+		if used[index] || Unneeded(hint, current, desired) {
 			continue
 		}
 		key, _ := hint.CanonicalKey()

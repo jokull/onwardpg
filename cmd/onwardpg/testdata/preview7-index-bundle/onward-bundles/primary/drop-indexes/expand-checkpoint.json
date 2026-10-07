@@ -1,0 +1,8 @@
+{
+  "bundle_id": "drop-indexes",
+  "plan_id": "plan_b54dced402c3ecf16206cd904a33df73",
+  "generation": 1,
+  "baseline_fingerprint": "sha256:a82cec39bdf56a22543887a968b6e6e2c9c1b0816c81262c301031ce879a3a4d",
+  "expand_fingerprint": "sha256:10190ffd078f314b156ab3a4c287364987b893094c7583fc089527019db31eb7",
+  "desired_fingerprint": "sha256:948710249ed0dd892d4fee01249184047123ab2a8dfaad963e8d57832005ec28"
+}

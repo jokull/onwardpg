@@ -1,0 +1,50 @@
+[
+  {
+    "id": "drop:index:app:accounts:accounts_email_idx",
+    "kind": "drop",
+    "message": "The desired graph removes unique-index enforcement index:app:accounts:accounts_email_idx. Confirm the expand schema may admit duplicate rows while legacy and new code overlap.",
+    "key": "index:app:accounts:accounts_email_idx",
+    "choices": [
+      "drop"
+    ],
+    "current_fingerprint": "sha256:a82cec39bdf56a22543887a968b6e6e2c9c1b0816c81262c301031ce879a3a4d",
+    "desired_fingerprint": "sha256:948710249ed0dd892d4fee01249184047123ab2a8dfaad963e8d57832005ec28",
+    "scope_fingerprint": "sha256:ba74fb30a59a2b654c303721aca8a2079b5231b06d196fcad3a8097655de48b4"
+  },
+  {
+    "id": "drop:index:app:accounts:accounts_id_copy_idx",
+    "kind": "drop",
+    "message": "The desired graph removes unique-index enforcement index:app:accounts:accounts_id_copy_idx. Confirm the expand schema may admit duplicate rows while legacy and new code overlap.",
+    "key": "index:app:accounts:accounts_id_copy_idx",
+    "choices": [
+      "drop"
+    ],
+    "current_fingerprint": "sha256:a82cec39bdf56a22543887a968b6e6e2c9c1b0816c81262c301031ce879a3a4d",
+    "desired_fingerprint": "sha256:948710249ed0dd892d4fee01249184047123ab2a8dfaad963e8d57832005ec28",
+    "scope_fingerprint": "sha256:e5a2d264b7cf66f41cbde6513c333b0cdff7f52282afac997b21515d12447aa8"
+  },
+  {
+    "id": "drop:index:app:accounts:accounts_name_idx",
+    "kind": "drop",
+    "message": "The desired graph omits index:app:accounts:accounts_name_idx. Confirm destructive removal.",
+    "key": "index:app:accounts:accounts_name_idx",
+    "choices": [
+      "drop"
+    ],
+    "current_fingerprint": "sha256:a82cec39bdf56a22543887a968b6e6e2c9c1b0816c81262c301031ce879a3a4d",
+    "desired_fingerprint": "sha256:948710249ed0dd892d4fee01249184047123ab2a8dfaad963e8d57832005ec28",
+    "scope_fingerprint": "sha256:2d383d6d6beb4d738c59d7414a51a3a02e211bb669873e621cf6986ff6659e5b"
+  },
+  {
+    "id": "drop:index:app:accounts:accounts_org_idx",
+    "kind": "drop",
+    "message": "The desired graph omits index:app:accounts:accounts_org_idx. Confirm destructive removal.",
+    "key": "index:app:accounts:accounts_org_idx",
+    "choices": [
+      "drop"
+    ],
+    "current_fingerprint": "sha256:a82cec39bdf56a22543887a968b6e6e2c9c1b0816c81262c301031ce879a3a4d",
+    "desired_fingerprint": "sha256:948710249ed0dd892d4fee01249184047123ab2a8dfaad963e8d57832005ec28",
+    "scope_fingerprint": "sha256:432c224f0304f1e3f87530935f08cfcc09f69aed457cf8987122ea7a76d38866"
+  }
+]

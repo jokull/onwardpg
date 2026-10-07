@@ -1,0 +1,156 @@
+{
+  "current_fingerprint": "sha256:a82cec39bdf56a22543887a968b6e6e2c9c1b0816c81262c301031ce879a3a4d",
+  "desired_fingerprint": "sha256:948710249ed0dd892d4fee01249184047123ab2a8dfaad963e8d57832005ec28",
+  "status": "planned",
+  "statements": [
+    {
+      "id": "stmt-sha256-c7248fd77b286e7e2894b29055a789474daaf059d72bfc4f06c5cfc2c316ea2e",
+      "sql": "CREATE INDEX CONCURRENTLY \"accounts_email_org_idx\" ON \"app\".\"accounts\" USING \"btree\" (\"email\" NULLS LAST, \"org\" NULLS LAST);",
+      "safety": "review",
+      "hazards": [
+        "index_build",
+        "table_lock_possible"
+      ],
+      "phase": "expand"
+    },
+    {
+      "id": "stmt-sha256-8b14193dd9a91dfbd03dba380e7da531cef37f8d6e8d0dd0facf08ce78c794b9",
+      "sql": "DROP INDEX CONCURRENTLY \"app\".\"accounts_id_copy_idx\";",
+      "safety": "review",
+      "hazards": [
+        "unique_index_enforcement_removed",
+        "duplicate_rows_possible",
+        "concurrent_index_drop"
+      ],
+      "phase": "expand"
+    },
+    {
+      "id": "stmt-sha256-4582e765a902d864271f90e588adb0c30dd592f10c991b882bc089a285ebc8f4",
+      "sql": "DROP INDEX CONCURRENTLY \"app\".\"accounts_email_idx\";",
+      "safety": "review",
+      "hazards": [
+        "unique_index_enforcement_removed",
+        "duplicate_rows_possible",
+        "concurrent_index_drop"
+      ],
+      "phase": "expand"
+    },
+    {
+      "id": "stmt-sha256-a14705613e4a7855f8a9fe0677ca173bbfda2b86604c9841592ff47ab1e8d83b",
+      "sql": "DROP INDEX CONCURRENTLY \"app\".\"accounts_org_idx\";",
+      "safety": "dangerous",
+      "hazards": [
+        "data_loss",
+        "concurrent_index_drop"
+      ],
+      "requires_gates": [
+        "writers:legacy"
+      ],
+      "phase": "contract"
+    },
+    {
+      "id": "stmt-sha256-23706b95b1b71982661482cfe10de7b04740b02e9bb7f8157df1f0d2bb36bee6",
+      "sql": "DROP INDEX CONCURRENTLY \"app\".\"accounts_name_idx\";",
+      "safety": "dangerous",
+      "hazards": [
+        "data_loss",
+        "concurrent_index_drop"
+      ],
+      "requires_gates": [
+        "writers:legacy"
+      ],
+      "phase": "contract"
+    }
+  ],
+  "batches": [
+    {
+      "id": "batch-expand-001",
+      "phase": "expand",
+      "transactional": false,
+      "statements": [
+        {
+          "id": "stmt-sha256-c7248fd77b286e7e2894b29055a789474daaf059d72bfc4f06c5cfc2c316ea2e",
+          "sql": "CREATE INDEX CONCURRENTLY \"accounts_email_org_idx\" ON \"app\".\"accounts\" USING \"btree\" (\"email\" NULLS LAST, \"org\" NULLS LAST);",
+          "safety": "review",
+          "hazards": [
+            "index_build",
+            "table_lock_possible"
+          ],
+          "phase": "expand"
+        },
+        {
+          "id": "stmt-sha256-8b14193dd9a91dfbd03dba380e7da531cef37f8d6e8d0dd0facf08ce78c794b9",
+          "sql": "DROP INDEX CONCURRENTLY \"app\".\"accounts_id_copy_idx\";",
+          "safety": "review",
+          "hazards": [
+            "unique_index_enforcement_removed",
+            "duplicate_rows_possible",
+            "concurrent_index_drop"
+          ],
+          "phase": "expand"
+        },
+        {
+          "id": "stmt-sha256-4582e765a902d864271f90e588adb0c30dd592f10c991b882bc089a285ebc8f4",
+          "sql": "DROP INDEX CONCURRENTLY \"app\".\"accounts_email_idx\";",
+          "safety": "review",
+          "hazards": [
+            "unique_index_enforcement_removed",
+            "duplicate_rows_possible",
+            "concurrent_index_drop"
+          ],
+          "phase": "expand"
+        }
+      ]
+    },
+    {
+      "id": "batch-contract-001",
+      "phase": "contract",
+      "transactional": false,
+      "statements": [
+        {
+          "id": "stmt-sha256-a14705613e4a7855f8a9fe0677ca173bbfda2b86604c9841592ff47ab1e8d83b",
+          "sql": "DROP INDEX CONCURRENTLY \"app\".\"accounts_org_idx\";",
+          "safety": "dangerous",
+          "hazards": [
+            "data_loss",
+            "concurrent_index_drop"
+          ],
+          "requires_gates": [
+            "writers:legacy"
+          ],
+          "phase": "contract"
+        },
+        {
+          "id": "stmt-sha256-23706b95b1b71982661482cfe10de7b04740b02e9bb7f8157df1f0d2bb36bee6",
+          "sql": "DROP INDEX CONCURRENTLY \"app\".\"accounts_name_idx\";",
+          "safety": "dangerous",
+          "hazards": [
+            "data_loss",
+            "concurrent_index_drop"
+          ],
+          "requires_gates": [
+            "writers:legacy"
+          ],
+          "phase": "contract"
+        }
+      ]
+    }
+  ],
+  "contract_gates": [
+    {
+      "id": "writers:legacy",
+      "kind": "writer_attestation",
+      "scope_fingerprint": "sha256:a056a4eeb080b5c96036c51dea9afeec96189591e83caa74de08e86dfe58982c",
+      "reason": "pre-deployment write-capable cohorts must be upgraded, drained, isolated, or read-only before contract",
+      "required_evidence": [
+        "ad_hoc_writers",
+        "connection_pools",
+        "previews",
+        "queues",
+        "scheduled_jobs",
+        "web",
+        "workers"
+      ]
+    }
+  ]
+}

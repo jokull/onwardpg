@@ -95,6 +95,24 @@ adds, unchanged state, both foreign-key enforcement transitions, check
 rebuilds, temporal renames/rebuilds, and approved drops converge on PostgreSQL
 18. These forms remain version-gated and are not emitted on older servers.
 
+The concurrent index mode (`--concurrent-indexes`, or `concurrent_indexes =
+true` in the target) creates and drops standalone indexes with `CREATE INDEX
+CONCURRENTLY` and `DROP INDEX CONCURRENTLY` in nontransactional batches. A
+bundle keeps its mode through every restack. A new non-unique index on an
+existing partitioned table is built online: an `ON ONLY` index on each
+partitioned table, a concurrent build on each leaf partition, and an attach of
+each child. Constraint-backed indexes that are added or removed, unique
+indexes on a partitioned table, and drops of a partitioned index stay
+non-concurrent, because PostgreSQL has no concurrent form for them. See
+[index lock mode](cli.md#index-lock-mode) for the precedence, the exceptions,
+and the recovery from an `INVALID` index.
+
+The removal of a standalone index that enforces nothing needs no decision. It
+is a `contract` review statement with the hazard `slower_queries_possible`.
+The removal of a unique index or of a constraint keeps one decision about
+enforcement. See
+[drop decisions](protocol.md#drop-decisions).
+
 Standalone same-name **non-unique** index definition changes on ordinary
 tables, materialized views, and independent local partition indexes support
 continuous replacement when concurrent indexes are enabled: the typed old

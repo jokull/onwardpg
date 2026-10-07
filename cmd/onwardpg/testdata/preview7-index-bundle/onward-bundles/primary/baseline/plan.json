@@ -1,0 +1,34 @@
+{
+  "current_fingerprint": "sha256:c8134f690504dc3eea7bab77111cfb1fb631e8365ae7922cad76e1461206bdb8",
+  "desired_fingerprint": "sha256:a82cec39bdf56a22543887a968b6e6e2c9c1b0816c81262c301031ce879a3a4d",
+  "status": "planned",
+  "statements": [
+    {
+      "id": "stmt-sha256-048298236e5444463a0aa232115f564882e52b2572cc2a8d8636ebf0df7ce99f",
+      "sql": "CREATE SCHEMA app;\nCREATE TABLE app.accounts (\n  id bigint PRIMARY KEY,\n  email text NOT NULL,\n  org bigint,\n  name text\n);\nCREATE INDEX accounts_org_idx ON app.accounts (org);\nCREATE INDEX accounts_name_idx ON app.accounts (name);\nCREATE UNIQUE INDEX accounts_id_copy_idx ON app.accounts (id);\nCREATE UNIQUE INDEX accounts_email_idx ON app.accounts (email);\n",
+      "safety": "review",
+      "hazards": [
+        "baseline_replay"
+      ],
+      "phase": "expand"
+    }
+  ],
+  "batches": [
+    {
+      "id": "batch-expand-001",
+      "phase": "expand",
+      "transactional": false,
+      "statements": [
+        {
+          "id": "stmt-sha256-048298236e5444463a0aa232115f564882e52b2572cc2a8d8636ebf0df7ce99f",
+          "sql": "CREATE SCHEMA app;\nCREATE TABLE app.accounts (\n  id bigint PRIMARY KEY,\n  email text NOT NULL,\n  org bigint,\n  name text\n);\nCREATE INDEX accounts_org_idx ON app.accounts (org);\nCREATE INDEX accounts_name_idx ON app.accounts (name);\nCREATE UNIQUE INDEX accounts_id_copy_idx ON app.accounts (id);\nCREATE UNIQUE INDEX accounts_email_idx ON app.accounts (email);\n",
+          "safety": "review",
+          "hazards": [
+            "baseline_replay"
+          ],
+          "phase": "expand"
+        }
+      ]
+    }
+  ]
+}

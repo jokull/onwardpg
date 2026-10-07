@@ -102,6 +102,13 @@ The generated internal receipt remains fingerprint-bound. Every emitted
 authorization statement carries lock/statement timeout guidance; onwardpg
 does not set those values on a caller session.
 
+A drop is destructive when it loses rows or a guarantee. The removal of an
+index that enforces nothing loses neither: it is planned without a decision, in
+`contract`, as a review statement with a query-performance hazard and the lock
+hazard of its mode. The removal of a unique index or of a constraint always
+keeps one decision; it is a decision about enforcement, not about data. The
+rule is in the [JSON interface](protocol.md#drop-decisions).
+
 Product-specific SQL is developer/agent-owned and is never invented from
 catalog state. Choosing `manual_sql` writes an explicit `ONWARDPG TODO` into the
 relevant phase. Typed operator work can also carry reviewed statements and
