@@ -3,7 +3,7 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
-## Unreleased
+## v0.1.0-preview.7 — 2026-10-07
 
 ### Changed
 
@@ -54,9 +54,9 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   agent) wrote a file during an export run. On the schema above, in
   interleaved runs on one machine, `plan` went from 24–27 s to 16–19 s (27 s
   in one run, whose two export runs took 17 s), `verify` from 20–24 s to
-  15 s, and `verify --check` from 27–31 s to 16–22 s. Other work can now run in the same checkout while a
-  command runs. The fingerprint was never stored, so bundle formats and
-  digests are unchanged. The
+  15 s, and `verify --check` from 27–31 s to 16–22 s. Other work can now run
+  in the same checkout while a command runs. The fingerprint was never
+  stored, so bundle formats and digests are unchanged. The
   [safety model](docs/safety-model.md#the-schema-export-and-the-checkout)
   states what carries the guarantee and what is no longer caught.
 
