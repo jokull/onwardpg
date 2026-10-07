@@ -103,7 +103,9 @@ INDEX` holds `ACCESS EXCLUSIVE` on its table until the batch commits (hazard
 
 For any database with live traffic, use the concurrent mode. It emits `CREATE
 INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY`, each in a nontransactional
-batch.
+batch of its own. Each has a `-- onwardpg:batch nontransactional` line in the
+phase file. Keep those lines when you edit the file: an edited phase is split
+only there, and PostgreSQL refuses two such statements in one chunk.
 
 - Repository policy: `concurrent_indexes = true` in the target of
   `.onwardpg.toml`. Propose this key when the repository has live traffic and

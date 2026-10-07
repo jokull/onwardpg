@@ -156,7 +156,9 @@ func batchesForRender(statements []Statement) []Batch {
 		transactional := !statement.NonTransactional
 		if len(batches) > 0 {
 			last := &batches[len(batches)-1]
-			if last.Phase == phase && last.Transactional == transactional && !statement.BatchBoundaryBefore {
+			// A statement that cannot run in a transaction block is a batch
+			// of its own; see rebuildBatches in the planner.
+			if transactional && last.Phase == phase && last.Transactional && !statement.BatchBoundaryBefore {
 				last.Statements = append(last.Statements, statement)
 				continue
 			}

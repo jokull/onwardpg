@@ -9981,6 +9981,14 @@ func appendStatement(result *protocol.Result, item protocol.Statement) {
 	result.Statements = append(result.Statements, item)
 }
 
+// rebuildBatches groups the statements of each phase into execution batches.
+//
+// Adjacent transactional statements share one batch. A statement that cannot
+// run in a transaction block is always a batch of its own. PostgreSQL runs a
+// query that holds several statements in one implicit transaction, so only a
+// batch with one such statement can be sent as written. The phase file then
+// has one "-- onwardpg:batch nontransactional" line for each such statement,
+// and an edited phase, which is split only at those lines, stays executable.
 func rebuildBatches(result *protocol.Result) error {
 	orderedPhases := []string{protocol.PhaseExpand, protocol.PhaseContract}
 	byPhase := make(map[string][]protocol.Statement, len(orderedPhases))
@@ -9999,7 +10007,7 @@ func rebuildBatches(result *protocol.Result) error {
 			if len(result.Batches) > 0 {
 				last := &result.Batches[len(result.Batches)-1]
 				lastIsManual := len(last.Statements) > 0 && last.Statements[len(last.Statements)-1].Manual != nil
-				if last.Phase == phase && last.Transactional == transactional && !lastIsManual && item.Manual == nil && !item.BatchBoundaryBefore {
+				if transactional && last.Phase == phase && last.Transactional && !lastIsManual && item.Manual == nil && !item.BatchBoundaryBefore {
 					last.Statements = append(last.Statements, item)
 					continue
 				}
@@ -10023,7 +10031,7 @@ func rebuildUnsortedBatches(result *protocol.Result) error {
 		transactional := !item.NonTransactional
 		if len(result.Batches) > 0 {
 			last := &result.Batches[len(result.Batches)-1]
-			if last.Transactional == transactional && !item.BatchBoundaryBefore {
+			if transactional && last.Transactional && !item.BatchBoundaryBefore {
 				last.Statements = append(last.Statements, item)
 				continue
 			}

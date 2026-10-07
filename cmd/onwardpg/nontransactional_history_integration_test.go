@@ -190,14 +190,21 @@ func TestHistoryWithConcurrentIndexBundleReplaysInEveryCommandOnPostgreSQL(t *te
 	if err := json.Unmarshal(artifact.Files["plan.json"], &plan); err != nil {
 		t.Fatal(err)
 	}
-	largest := 0
+	// Each statement that cannot run in a transaction block is a batch of its
+	// own. The preview.7 fixture keeps the proof for a stored batch that holds
+	// several of them.
+	nonTransactional := 0
 	for _, batch := range plan.Batches {
-		if !batch.Transactional {
-			largest = max(largest, len(batch.Statements))
+		if batch.Transactional {
+			continue
+		}
+		nonTransactional++
+		if len(batch.Statements) != 1 {
+			t.Fatalf("a non-transactional batch holds %d statements: %#v", len(batch.Statements), plan.Batches)
 		}
 	}
-	if largest < 2 {
-		t.Fatalf("no non-transactional batch holds two statements: %#v", plan.Batches)
+	if nonTransactional != 5 || strings.Count(expand+contract, "-- onwardpg:batch nontransactional") != 5 {
+		t.Fatalf("the plan has %d non-transactional batches, want 5: %#v", nonTransactional, plan.Batches)
 	}
 
 	if code, report := verifyReport(t, repository, "--bundle", "concurrent-indexes"); code != 0 || report.Outcome != "verified" {
@@ -349,38 +356,31 @@ func TestEditedConcurrentBundleAndSessionStateReplayAsVerifiedOnPostgreSQL(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(generated), "-- onwardpg:batch nontransactional") != 1 || strings.Count(string(generated), "CREATE INDEX CONCURRENTLY") != 2 {
-		t.Fatalf("generated expand phase is not one batch with two concurrent builds:\n%s", generated)
+	if strings.Count(string(generated), "-- onwardpg:batch nontransactional") != 2 || strings.Count(string(generated), "CREATE INDEX CONCURRENTLY") != 2 {
+		t.Fatalf("generated expand phase is not one batch for each concurrent build:\n%s", generated)
 	}
 
-	// An edit that leaves both statements in one chunk cannot run: onwardpg
-	// sends a chunk as written, and PostgreSQL runs a query with two
-	// statements in one implicit transaction. The report must say what to do.
+	// The generator gives each concurrent build its own batch directive. A
+	// developer who removes one puts both statements in one chunk. That cannot
+	// run: onwardpg sends a chunk as written, and PostgreSQL runs a query with
+	// two statements in one implicit transaction. The report must say what to
+	// do.
 	unqualified := strings.ReplaceAll(string(generated), `ON "app"."users"`, "ON users")
 	if unqualified == string(generated) {
 		t.Fatalf("generated expand phase has no qualified table name to edit:\n%s", generated)
 	}
-	writeTestFile(t, bundlePath, "phases/expand.sql", unqualified)
+	lastDirective := strings.LastIndex(unqualified, "-- onwardpg:batch nontransactional\n")
+	merged := unqualified[:lastDirective] + unqualified[lastDirective+len("-- onwardpg:batch nontransactional\n"):]
+	writeTestFile(t, bundlePath, "phases/expand.sql", merged)
 	code, failed := verifyReport(t, repository, "--bundle", "two-indexes")
 	if code == 0 || failed.Outcome != "failed" || failed.Failure == nil || failed.Failure.Code != "non_transactional_batch_failed" ||
 		!strings.Contains(failed.Failure.Message, "25001") || !strings.Contains(failed.Failure.Remediation, `its own "-- onwardpg:batch nontransactional" line`) {
 		t.Fatalf("verify of two concurrent builds in one edited chunk = %d, %#v", code, failed)
 	}
 
-	// One directive for each statement gives two chunks.
-	lines := strings.SplitAfter(unqualified, "\n")
-	var edited strings.Builder
-	builds := 0
-	for _, line := range lines {
-		if strings.HasPrefix(line, "CREATE INDEX CONCURRENTLY") {
-			builds++
-			if builds == 2 {
-				edited.WriteString("-- onwardpg:batch nontransactional\n")
-			}
-		}
-		edited.WriteString(line)
-	}
-	writeTestFile(t, bundlePath, "phases/expand.sql", edited.String())
+	// The edit of the statements alone keeps the generated directives: one
+	// for each statement, so two chunks.
+	writeTestFile(t, bundlePath, "phases/expand.sql", unqualified)
 	if code, report := verifyReport(t, repository, "--bundle", "two-indexes"); code != 0 || report.Outcome != "verified" || report.SelectedBatches != 2 {
 		t.Fatalf("verify of the edited bundle = %d, %#v", code, report)
 	}
@@ -417,4 +417,94 @@ func TestEditedConcurrentBundleAndSessionStateReplayAsVerifiedOnPostgreSQL(t *te
 	applyBundlePhase(t, live, repository, "add-age", "expand")
 	applyBundlePhase(t, live, repository, "add-age", "contract")
 	requireDriftFree(t, repository, liveURL)
+}
+
+// A generated phase stays executable when a developer edits it. The phase
+// file of an edited bundle is split only at its batch directives, and each
+// chunk is one query. Two concurrent index statements in one chunk fail,
+// because PostgreSQL runs such a query in one implicit transaction. The
+// generator therefore writes one directive for each statement that cannot
+// run in a transaction block. Before that, a bundle with two concurrent
+// builds failed verification after any edit of the file, even a comment.
+func TestCommentEditOfConcurrentIndexBundleVerifiesAndReplaysOnPostgreSQL(t *testing.T) {
+	adminURL := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("ONWARDPG_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	liveURL, cleanup := createTestDatabase(t, adminURL)
+	defer cleanup()
+	live, err := pgx.Connect(ctx, liveURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close(context.Background())
+
+	repository := t.TempDir()
+	writeTestFile(t, repository, ".onwardpg.toml", nontransactionalHistoryConfig+"concurrent_indexes = true\n")
+	table := "CREATE SCHEMA app;\nCREATE TABLE app.users (id bigint PRIMARY KEY, email text, name text, org bigint);\n"
+	writeTestFile(t, repository, "schema.sql", table+"CREATE INDEX users_org_idx ON app.users (org);\n")
+	if initialized := captureStdout(t, func() int {
+		return runInitAt([]string{"--target", "primary"}, repository)
+	}); initialized.code != 0 {
+		t.Fatalf("init = %d, %s", initialized.code, initialized.stdout)
+	}
+	writeTestFile(t, repository, "schema.sql", table+"CREATE INDEX users_email_idx ON app.users (email);\nCREATE INDEX users_name_idx ON app.users (name);\n")
+	if planned := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"swap-indexes", "--target", "primary"}, repository)
+	}); planned.code != 0 {
+		t.Fatalf("plan = %d, %s", planned.code, planned.stdout)
+	}
+	bundlePath := filepath.Join(repository, "onward-bundles", "primary", "swap-indexes")
+	directives, statements := 0, 0
+	for _, phase := range []string{"expand", "contract"} {
+		name := filepath.Join("phases", phase+".sql")
+		generated, err := os.ReadFile(filepath.Join(bundlePath, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(generated), "-- onwardpg:batch transactional") {
+			t.Fatalf("%s has a transactional batch:\n%s", name, generated)
+		}
+		directives += strings.Count(string(generated), "-- onwardpg:batch nontransactional\n")
+		statements += strings.Count(string(generated), "\nCREATE INDEX CONCURRENTLY ") + strings.Count(string(generated), "\nDROP INDEX CONCURRENTLY ")
+		// The only edit is a comment.
+		writeTestFile(t, bundlePath, name, string(generated)+"-- Reviewed for the release of this week.\n")
+	}
+	if statements != 3 || directives != 3 {
+		t.Fatalf("generated phases hold %d concurrent statements and %d directives, want 3 and 3", statements, directives)
+	}
+
+	code, report := verifyReport(t, repository, "--bundle", "swap-indexes")
+	if code != 0 || report.Outcome != "verified" || report.SelectedBatches != 3 {
+		t.Fatalf("verify after a comment edit = %d, %#v", code, report)
+	}
+	artifact, err := bundle.Read(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Manifest.PhaseSource != "edited" {
+		t.Fatalf("phase source = %q, want edited", artifact.Manifest.PhaseSource)
+	}
+	if code, checked := verifyReport(t, repository, "--bundle", "swap-indexes", "--check"); code != 0 || checked.Outcome != "verified" {
+		t.Fatalf("verify --check after a comment edit = %d, %#v", code, checked)
+	}
+
+	// drift check replays the edited bundle as accepted history. The live
+	// database gets the same chunks, each as one query.
+	applyBundlePhase(t, live, repository, "baseline", "expand")
+	applyBundlePhase(t, live, repository, "swap-indexes", "expand")
+	applyBundlePhase(t, live, repository, "swap-indexes", "contract")
+	requireDriftFree(t, repository, liveURL)
+
+	// The base replay of the next plan runs the edited bundle too.
+	if err := os.RemoveAll(filepath.Join(repository, ".onwardpg")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, repository, "schema.sql", strings.Replace(table, "org bigint", "org bigint, age integer", 1)+"CREATE INDEX users_email_idx ON app.users (email);\nCREATE INDEX users_name_idx ON app.users (name);\n")
+	if next := captureStdout(t, func() int {
+		return runWorkflowPlanAt([]string{"add-age", "--target", "primary"}, repository)
+	}); next.code != 0 {
+		t.Fatalf("plan after the edited concurrent bundle = %d, %s", next.code, next.stdout)
+	}
 }

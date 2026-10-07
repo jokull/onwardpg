@@ -181,7 +181,11 @@ another plan.
 
 `batches` are the execution boundary: a batch declares whether it is
 transactional and carries its statements. A non-transactional batch must not
-be wrapped in an explicit transaction by an executor.
+be wrapped in an explicit transaction by an executor. The planner gives each
+statement that cannot run in a transaction block its own batch, so an
+executor can send the SQL of one batch as one query. A `plan.json` from
+preview.7 or earlier can hold several statements in one non-transactional
+batch; send each of those statements as its own query.
 
 Manual execution modes are `transactional_once`, `nontransactional_once`,
 `operator_batched`, and `external_attestation`. An operator-batched operation
