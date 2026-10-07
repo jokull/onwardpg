@@ -590,16 +590,12 @@ func runDriftAt(arguments []string, start string) int {
 	if len(chain.Entries) == 0 {
 		return writeError("invalid_history", errors.New("target history is empty; run onwardpg init first"))
 	}
-	replay, err := chain.Replay()
-	if err != nil {
-		return writeError("invalid_history", err)
-	}
 	ctx := context.Background()
 	selectors := targetIgnoreSelectors(target, ignores)
-	expected, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, scratchURL, selectors)
-	if err != nil {
-		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
-	}
+	// Read the live catalog first. Everything that can refuse the live
+	// connection (the role guard, the read itself) needs only that
+	// connection, so a wrong role or URL stops here, before the history
+	// replay, which is the slow part of the command.
 	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, target.LiveIgnore, 30*time.Second)
 	if err != nil {
 		return writeError("drift_observer_error", fmt.Errorf("inspect live catalog through the read-only observer boundary: %w", err))
@@ -609,7 +605,22 @@ func runDriftAt(arguments []string, start string) int {
 		if observerFinding.Remediation != "" {
 			message += "; " + observerFinding.Remediation
 		}
-		return writeError("drift_"+observerFinding.Code, errors.New(message))
+		_ = writeJSON(os.Stdout, struct {
+			protocol.Diagnostic
+			Observer    *driftcheck.Observer       `json:"observer,omitempty"`
+			NextActions []contractcheck.NextAction `json:"next_actions,omitempty"`
+		}{
+			Diagnostic:  protocol.ErrorDiagnostic("drift_"+observerFinding.Code, errors.New(message)),
+			Observer:    &driftcheck.Observer{Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode, BypassRLS: observer.BypassRLS},
+			NextActions: observerFinding.NextActions,
+		})
+		return 1
+	}
+	// The expected catalog comes from the one history replay, which runs each
+	// batch in the mode that its bundle declares.
+	expected, err := verify.ReplayHistory(ctx, scratchURL, chain, selectors)
+	if err != nil {
+		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
 	if err := source.ValidateIgnoreSelectors(ignores, expected, actual); err != nil {
 		return writeError("invalid_ignore", err)
@@ -619,7 +630,7 @@ func runDriftAt(arguments []string, start string) int {
 		return writeError("drift_error", err)
 	}
 	report.Observer = &driftcheck.Observer{
-		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode,
+		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode, BypassRLS: observer.BypassRLS,
 		ProjectedAccess:     append([]string(nil), observer.ProjectedAccess...),
 		LiveIgnored:         append([]string(nil), observer.LiveIgnored...),
 		LiveIgnoreUnmatched: append([]string(nil), observer.LiveIgnoreUnmatched...),

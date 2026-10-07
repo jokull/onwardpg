@@ -11,7 +11,10 @@ import (
 )
 
 // InspectObserverCatalog reads a live catalog through the same explicit
-// least-privilege observer boundary used by contract readiness. The returned
+// least-privilege observer boundary used by contract readiness, without the
+// row access that only contract readiness needs: this read uses system
+// catalogs only (see catalogAccess). The role guard runs first, so a refused
+// role costs one short query. The returned
 // graph projects only the proven inspection overlay: the database owner's
 // ambient identity and owner-granted, non-grantable SELECT access belonging to
 // the dedicated observer roles. Application authorization remains in the
@@ -43,11 +46,12 @@ func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores, li
 		return nil, ObserverProjection{}, nil, fmt.Errorf("set observer statement timeout: %w", err)
 	}
 
-	observer, finding, err := inspectObserver(ctx, tx)
+	// This path reads system catalogs only. See catalogAccess.
+	observer, finding, err := inspectObserver(ctx, tx, catalogAccess)
 	if err != nil {
 		return nil, ObserverProjection{}, nil, fmt.Errorf("inspect observer: %w", err)
 	}
-	report := ObserverProjection{Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode()}
+	report := observer.projection()
 	if finding != nil {
 		return nil, report, finding, nil
 	}
@@ -61,6 +65,8 @@ func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores, li
 	}
 	report.ProjectedAccess = projected
 	if finding != nil {
+		report.Mode = "refused"
+		finding.NextActions = observerRoleActions(observer.database, catalogAccess)
 		return snapshot, report, finding, nil
 	}
 	observed := snapshot

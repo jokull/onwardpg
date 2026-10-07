@@ -37,9 +37,11 @@ type Report struct {
 // Observer describes environmental catalog state proven to belong only to a
 // dedicated read-only inspection role and projected before comparison.
 type Observer struct {
-	Role            string   `json:"role"`
-	DatabaseOwner   string   `json:"database_owner"`
-	Mode            string   `json:"mode"`
+	Role          string `json:"role"`
+	DatabaseOwner string `json:"database_owner"`
+	Mode          string `json:"mode"`
+	// BypassRLS reports that the observer role has BYPASSRLS.
+	BypassRLS       bool     `json:"bypass_rls,omitempty"`
 	ProjectedAccess []string `json:"projected_access,omitempty"`
 	// LiveIgnored lists unsupported state observed in the live catalog that
 	// the target's live_ignore list acknowledged: environmental state of the

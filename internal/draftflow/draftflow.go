@@ -334,10 +334,6 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 		}
 	}
 
-	replay, err := chain.Replay()
-	if err != nil {
-		return report, fmt.Errorf("render base history: %w", err)
-	}
 	// The base history replay and the schema export do not read each other's
 	// results, so they run at the same time. The replay works only in its own
 	// scratch database. Failures keep their order: a replay failure is reported
@@ -353,7 +349,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 		export, err := workspace.StartExport(exportCtx, input.Root, input.TargetName, input.Target)
 		exported <- exportResult{export: export, err: err}
 	}()
-	current, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, input.AdminURL, input.Ignores)
+	current, err := verify.ReplayHistory(ctx, input.AdminURL, chain, input.Ignores)
 	if err != nil {
 		stopExport()
 		// Let the stopped export end before this returns.
@@ -466,7 +462,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 		Target:   input.TargetName,
 		Purpose:  input.Purpose,
 		BaselineSource: bundle.SourceReceipt{
-			Kind: "onwardpg_history", Description: replay.Provenance,
+			Kind: "onwardpg_history", Description: chain.Provenance(),
 			Fingerprint: plan.CurrentFingerprint, PostgresMajor: postgresMajor,
 		},
 		DesiredSource: bundle.SourceReceipt{

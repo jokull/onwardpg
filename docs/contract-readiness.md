@@ -26,10 +26,16 @@ it back on internally. The database-wide preflight prevents that hidden-row
 case. Queries and functions still require review, particularly functions that
 change execution identity or have external effects.
 
-A dedicated observer needs schema `USAGE` and relation `SELECT` across the
-inspected database, including ignored framework journals. Catalog exclusions
-do not bypass access or RLS preflight. Grant that access directly or through a
-dedicated restricted role; inherited `pg_read_all_data` is rejected as elevated.
+An observer that is not the database owner needs schema `USAGE` and relation
+`SELECT` across the inspected database, including ignored framework journals.
+Catalog exclusions do not bypass access or RLS preflight. A login role that is
+a member of `pg_read_all_data` has that access; so does a role that gets
+direct grants, or grants through a dedicated restricted role. Membership in
+`pg_read_all_data` does not bypass row-level security: when policies hide rows
+from the reader, give the observer `BYPASSRLS`, which the guard permits on a
+role that it proved read-only. A role that can write, create, or administer is
+rejected. See the
+[observer role](cli.md#observer-role) for the exact rules and the SQL.
 
 ## What the planner generates
 

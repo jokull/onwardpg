@@ -55,8 +55,8 @@ names can change between versions.
 | `schema_command` | one run of the configured export command |
 | `export_side_effect_status` | one `git status` query for the [side-effect warning](protocol.md#warnings), before the first export run or after the last |
 | `scratch_create`, `scratch_drop` | create or drop one disposable database and its role |
-| `ddl_execute` | load exported DDL or replayed history into a disposable database |
-| `history_replay` | execute the history chain batch by batch for verification |
+| `ddl_execute` | load exported DDL into a disposable database |
+| `history_replay` | execute the history chain batch by batch: for verification, for the base of `plan` and `draft`, and for `drift check` |
 | `catalog_inspect` | read one catalog into a typed graph; `catalog_inspect.<part>` is one inspector |
 | `plan_build`, `verify_residual_plan` | run the graph planner |
 | `verify_run` | one complete verification |

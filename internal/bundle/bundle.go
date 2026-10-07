@@ -873,30 +873,6 @@ func renderPhases(result protocol.Result) (map[string]PhaseArtifact, map[string]
 	return phases, files, nil
 }
 
-// RenderReplaySQL renders phase artifacts exactly as bundle history will replay
-// them, in lifecycle order. It is used to prove a draft before its bundle is
-// written.
-func RenderReplaySQL(result protocol.Result) ([]byte, error) {
-	_, files, err := renderPhases(result)
-	if err != nil {
-		return nil, err
-	}
-	var sql strings.Builder
-	for _, phase := range []string{protocol.PhaseExpand, protocol.PhaseContract} {
-		name := path.Join("phases", phase+".sql")
-		body, exists := files[name]
-		if !exists {
-			continue
-		}
-		sql.WriteString("\n-- onwardpg proposed phase: " + phase + "\n")
-		sql.Write(body)
-		if len(body) == 0 || body[len(body)-1] != '\n' {
-			sql.WriteByte('\n')
-		}
-	}
-	return []byte(sql.String()), nil
-}
-
 func (m Manifest) Validate() error {
 	if !safeName(m.BundleID) || !safeName(m.Target) {
 		return fmt.Errorf("bundle_id and target must contain only letters, numbers, dot, underscore, or dash")

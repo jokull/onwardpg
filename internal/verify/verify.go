@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jokull/onwardpg/internal/bundle"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/history"
@@ -89,15 +90,8 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	postgresMajor, err := source.PostgresMajor(ctx, input.AdminURL)
-	if err != nil {
+	if err := requirePostgresMajor(ctx, input.AdminURL, chain); err != nil {
 		return Report{}, err
-	}
-	for _, entry := range chain.Entries {
-		recorded := entry.Artifact.Manifest.DesiredSource.PostgresMajor
-		if recorded != 0 && recorded != postgresMajor {
-			return Report{}, fmt.Errorf("history bundle %s targets PostgreSQL %d but the scratch server is PostgreSQL %d", entry.Directory, recorded, postgresMajor)
-		}
 	}
 	report := Report{
 		Outcome: "failed", Target: chain.Target,
@@ -351,12 +345,24 @@ func batchFailure(bundleID, batchID, phase string, transactional bool, err error
 	if transactional {
 		mode, code = "transactional", "transactional_batch_failed"
 	}
+	remediation := "review and edit phases/" + phase + ".sql, then rerun onwardpg verify; execution occurred only in a disposable database"
+	var serverError *pgconn.PgError
+	if !transactional && errors.As(err, &serverError) && serverError.Code == activeSQLTransaction {
+		// The batch was not put in a transaction, but PostgreSQL runs one
+		// query that holds several statements in one implicit transaction.
+		// onwardpg sends SQL as written and does not split it.
+		remediation = "PostgreSQL runs SQL that holds more than one statement in one implicit transaction; in phases/" + phase + ".sql, give each statement that cannot run in a transaction block its own \"-- onwardpg:batch nontransactional\" line, then rerun onwardpg verify; execution occurred only in a disposable database"
+	}
 	return &Failure{
 		Code: code, BundleID: bundleID, BatchID: batchID, Phase: phase,
 		ExecutionMode: mode, Message: err.Error(),
-		Remediation: "review and edit phases/" + phase + ".sql, then rerun onwardpg verify; execution occurred only in a disposable database",
+		Remediation: remediation,
 	}
 }
+
+// activeSQLTransaction is the SQLSTATE that PostgreSQL gives a statement that
+// cannot run in a transaction block, such as CREATE INDEX CONCURRENTLY.
+const activeSQLTransaction = "25001"
 
 func assertionFailure(bundleID, checkID, code, message string) *Failure {
 	return &Failure{

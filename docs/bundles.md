@@ -218,6 +218,21 @@ Transactional batches roll back on failure.
 Non-transactional batches are executed outside explicit transactions. Optional
 boolean assertions in `verify.sql` must all return true.
 
+Every command that needs the catalog of accepted history uses this same
+replay: `verify`, `drift check`, and `plan` and `draft` for their base. A
+bundle with `CREATE INDEX CONCURRENTLY` in its history therefore replays in
+each of them.
+
+A generated bundle runs each statement of a non-transactional batch as its own
+query. An edited phase is different: onwardpg does not parse SQL, so it sends
+each chunk between two `-- onwardpg:batch` lines as one query, as written.
+PostgreSQL runs a query that holds more than one statement in one implicit
+transaction. If you edit a phase that holds two statements that cannot run in
+a transaction block, such as two `CREATE INDEX CONCURRENTLY` statements, put
+a `-- onwardpg:batch nontransactional` line before each of them. Without
+that, `verify` fails with `non_transactional_batch_failed` and SQLSTATE
+`25001`, and its remediation says the same.
+
 One command can verify a bundle twice: `plan` and `draft` verify the expand
 checkpoint and then the complete bundle, and `verify` does the same for an
 edited bundle. The second verification reuses an execution of the first only

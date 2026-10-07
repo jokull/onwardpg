@@ -432,4 +432,12 @@ expected and actual fingerprints, exact ignored objects, and deterministic
 differences classified as `missing_in_actual`, `unexpected_in_actual`, or
 `changed_in_actual`. Drift exits `4`; a matching live catalog exits `0`. Catalog
 state the planner cannot model is listed in `unsupported` with status
-`unsupported` and exit `3`, alongside the differences.
+`unsupported` and exit `3`, alongside the differences. `observer.mode` is
+`database_owner`, `predefined_read_role`, or `dedicated_read_only` (`refused`
+in the error for a role that the guard did not accept), and
+`observer.bypass_rls` is present and `true` when the role has `BYPASSRLS`. When the
+role of the live connection is refused, the error diagnostic also has
+`observer` and `next_actions`; each action has `kind`, `reason`, and a `sql`
+template for a [valid observer role](cli.md#observer-role). The findings
+`observer_role_elevated` and `observer_access_incomplete` of `contract check`
+carry the same `next_actions`.

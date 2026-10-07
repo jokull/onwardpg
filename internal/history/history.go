@@ -13,8 +13,6 @@ import (
 	"github.com/jokull/onwardpg/internal/bundle"
 )
 
-var phaseOrder = []string{"expand", "contract"}
-
 type Entry struct {
 	Directory string
 	Artifact  bundle.Artifact
@@ -25,13 +23,6 @@ type Chain struct {
 	RootDigest string
 	HeadDigest string
 	Entries    []Entry
-}
-
-type Replay struct {
-	DDL        []byte
-	Files      []string
-	Digest     string
-	Provenance string
 }
 
 type StatusEntry struct {
@@ -351,34 +342,10 @@ func load(root, bundleRoot, target, excludedBundleID string, editedCandidate boo
 	return chain, excluded, nil
 }
 
-// Replay concatenates the already-validated phase artifacts in chain and
-// lifecycle order. It does not execute them.
-func (c Chain) Replay() (Replay, error) {
-	var ddl strings.Builder
-	var files []string
-	for _, entry := range c.Entries {
-		for _, phase := range phaseOrder {
-			artifact, exists := entry.Artifact.Manifest.Phases[phase]
-			if !exists {
-				continue
-			}
-			body, exists := entry.Artifact.Files[artifact.Path]
-			if !exists {
-				return Replay{}, fmt.Errorf("history bundle %s is missing %s", entry.Directory, artifact.Path)
-			}
-			name := filepath.ToSlash(filepath.Join(entry.Directory, artifact.Path))
-			files = append(files, name)
-			ddl.WriteString("\n-- onwardpg history: " + name + "\n")
-			ddl.Write(body)
-			if len(body) == 0 || body[len(body)-1] != '\n' {
-				ddl.WriteByte('\n')
-			}
-		}
-	}
-	return Replay{
-		DDL: []byte(ddl.String()), Files: files, Digest: c.HeadDigest,
-		Provenance: "onwardpg-history:" + c.Target + ":" + c.HeadDigest,
-	}, nil
+// Provenance names the history head that a bundle was planned from. It is
+// stored in the bundle manifest and holds no secret.
+func (c Chain) Provenance() string {
+	return "onwardpg-history:" + c.Target + ":" + c.HeadDigest
 }
 
 func validateRelativePath(name string) error {
