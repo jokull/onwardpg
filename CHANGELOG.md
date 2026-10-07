@@ -28,6 +28,10 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
     third run decides whether the export is nondeterministic, and a changed
     export must have the same catalog fingerprint. A nondeterministic export
     is therefore reported at the end of the command, not at the start.
+  - A command that ends without a write (for example `unsupported`,
+    `no_changes`, or a failed verification) now stops with an error if the
+    export changed while it worked. Before, it reported a result for the
+    export it read at the start.
   - One command no longer replays the same SQL more often than its checks
     need. A verification still compares two separate executions in two
     databases; they now run at the same time. A second verification in the
@@ -35,9 +39,9 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
     of the first only when both run exactly the same SQL with the same checks.
     `plan` used seven scratch databases and five history replays; it now uses
     four and three.
-  - Base history replay runs during the first export, and checkout
-    fingerprints run during scratch database work where neither reads the
-    result of the other.
+  - Base history replay runs during the first export, and the checkout
+    fingerprint that follows the first export runs while its DDL is loaded
+    into scratch PostgreSQL.
 - `dev`, `config check`, and `diff --target` still run the export twice back to
   back. The second run now starts from the checkout fingerprint that followed
   the first, so a file that changes between the two runs stops the command.

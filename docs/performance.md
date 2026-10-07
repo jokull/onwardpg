@@ -88,8 +88,12 @@ other's results:
 - the first export runs while base history is replayed for planning;
 - the checkout fingerprint after the first export runs while the DDL is loaded
   into disposable PostgreSQL;
-- the two executions of one verification run at the same time;
-- the checkout fingerprint before the second export runs during verification.
+- the two executions of one verification run at the same time.
+
+The checkout fingerprint before the second export is not taken early. It must
+describe the checkout at the moment that run starts: a fingerprint from before
+verification could not tell an edit during verification from a write by the
+export command.
 
 onwardpg keeps no replayed database between commands. A replay of this history
 takes about 2 seconds and runs while the export command runs, so a cache of

@@ -1054,7 +1054,7 @@ func runBundleAt(arguments []string, start string) int {
 	if workingFingerprint != manifest.DesiredSource.Fingerprint {
 		// This result rests on one export run. Run the export again so that
 		// a nondeterministic export is reported as such, not as a stale bundle.
-		if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+		if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 			return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(verify.Report{
@@ -1076,8 +1076,6 @@ func runBundleAt(arguments []string, start string) int {
 	verificationChain := chain
 	var checkpointArtifact *bundle.Artifact
 	var report verify.Report
-	// Only scratch database work is left before the final input check.
-	export.Prepare(ctx)
 	if edited != nil {
 		// The expand checkpoint receipt added below changes the manifest, not
 		// the SQL. The second verification therefore asks for executions that
@@ -1091,7 +1089,7 @@ func runBundleAt(arguments []string, start string) int {
 			return writeError("verification_error", expandErr)
 		}
 		if expandReport.Outcome != "verified" && expandReport.Outcome != "partial_verified" {
-			if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+			if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 				return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 			}
 			_ = json.NewEncoder(os.Stdout).Encode(expandReport)
@@ -1125,7 +1123,7 @@ func runBundleAt(arguments []string, start string) int {
 	}
 	if report.Outcome == "verified" || report.Outcome == "partial_verified" {
 		if lockErr := lock.ValidatePath(); lockErr != nil {
-			if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+			if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 				return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 			}
 			return writeVerifyFinding(*targetName, *bundleID, chain.HeadDigest, *through, "blocked", "configuration_changed_during_verify",
@@ -1133,7 +1131,7 @@ func runBundleAt(arguments []string, start string) int {
 				"rerun verification against the current stable configuration; no receipts were installed")
 		}
 		if configErr := workspace.RequireUnchanged(configPath, config); configErr != nil {
-			if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+			if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 				return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 			}
 			return writeVerifyFinding(*targetName, *bundleID, chain.HeadDigest, *through, "blocked", "configuration_changed_during_verify",
@@ -1196,7 +1194,7 @@ func runBundleAt(arguments []string, start string) int {
 	}
 	// A successful result confirmed the export above. A failed result still
 	// rests on one export run, so run the export again before it is reported.
-	if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+	if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 		return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)

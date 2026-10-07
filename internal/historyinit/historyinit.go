@@ -65,9 +65,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return report, err
 	}
 	// A result that did not pass the final input check still rests on one
-	// export run. Run the export again so that every result has the same
-	// determinism proof.
-	if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+	// export run. Run the export again: a result is reported only for an
+	// export that is deterministic and did not change during the command.
+	if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 		return report, fmt.Errorf("confirm desired schema export: %w", err)
 	}
 	return report, nil
@@ -253,8 +253,6 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 	if err != nil {
 		return report, fmt.Errorf("load staged baseline history: %w", err)
 	}
-	// Only scratch database work is left before the final input check.
-	export.Prepare(ctx)
 	verification, err := verify.Run(ctx, verify.Input{
 		AdminURL: input.AdminURL, Chain: stagedChain, BundleID: input.BundleID,
 		ThroughPhase: "contract", Ignores: input.Ignores, Options: input.PlannerOptions,

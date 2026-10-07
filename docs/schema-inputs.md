@@ -111,8 +111,14 @@ disposable PostgreSQL and compares catalog fingerprints, as every command did
 before; a different fingerprint stops the command and nothing is written.
 
 A command that ends without a write (for example an `unsupported` or
-`no_changes` result, or a failed verification) still does the second run, so
-that a nondeterministic export is never reported as a schema result.
+`no_changes` result, or a failed verification) still does the second run. Its
+result describes the first export, so it is reported only when the second run
+has the same bytes. If the export changed, the command stops with an error and
+must be run again. A nondeterministic or outdated export is therefore never
+reported as a schema result.
+
+The second run happens once. A command does not repeat a rejected run to get
+another answer.
 
 `dev`, `config check`, and `diff --target` run the export twice back to back.
 

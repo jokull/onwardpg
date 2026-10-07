@@ -77,7 +77,6 @@ type Export struct {
 	target     Target
 	first      CompiledDDL
 	firstCheck *readOnlyCheck
-	prepared   *treeDigest
 	// attempted is set by the first Confirm, whatever its result. The
 	// confirming run is the final check of a command: it is not repeated.
 	attempted bool
@@ -105,17 +104,6 @@ func (e *Export) Settle() error {
 	return err
 }
 
-// Prepare starts the checkout fingerprint that Confirm needs before its run.
-// A caller that has only scratch database work left calls it, so that the
-// fingerprint and that work overlap. The fingerprint then describes a state
-// that is older than the confirming run by the length of that work. Confirm
-// handles a checkout that changed in that time.
-func (e *Export) Prepare(ctx context.Context) {
-	if e.prepared == nil && e.target.SchemaFile == "" {
-		e.prepared = startTreeDigest(ctx, e.root)
-	}
-}
-
 // Confirm runs the export again. A nil result means the bytes equal the first
 // run. Otherwise the export changed after the command started: Confirm then
 // requires a third run to equal the second, so that the returned export is
@@ -132,7 +120,7 @@ func (e *Export) Confirm(ctx context.Context) (*CompiledDDL, error) {
 	if err := e.Settle(); err != nil {
 		return nil, err
 	}
-	second, tree, err := e.confirmingRun(ctx)
+	second, tree, err := compileDDLOnce(ctx, e.root, e.targetName, e.target, "")
 	if err != nil {
 		return nil, err
 	}
@@ -149,43 +137,34 @@ func (e *Export) Confirm(ctx context.Context) (*CompiledDDL, error) {
 	return &second, nil
 }
 
-// confirmingRun runs the export with the prepared fingerprint when there is
-// one. A prepared fingerprint is older than the run. A checkout that differs
-// from it after the run was changed either by the run or by something else
-// before the run. One more run with a fingerprint of its own decides which,
-// with the rule that every run has always had.
-func (e *Export) confirmingRun(ctx context.Context) (CompiledDDL, string, error) {
-	prepared := e.prepared
-	e.prepared = nil
-	if prepared == nil {
-		return compileDDLOnce(ctx, e.root, e.targetName, e.target, "")
-	}
-	before, err := prepared.wait()
-	if err != nil {
-		return CompiledDDL{}, "", fmt.Errorf("fingerprint DDL export tree before command: %w", err)
-	}
-	compiled, tree, err := compileDDLOnce(ctx, e.root, e.targetName, e.target, before)
-	if errors.Is(err, errModifiedInputs) {
-		return compileDDLOnce(ctx, e.root, e.targetName, e.target, "")
-	}
-	return compiled, tree, err
-}
-
-// ConfirmDeterministic completes the determinism proof for a command that
-// ends without committing a result that depends on a stable export, for
-// example a report of an unsupported schema. It accepts an export that changed
-// while the command worked, as two back-to-back runs at the start would have.
+// ConfirmUnchanged is the confirming run of a command that ends without the
+// catalog comparison that precedes a write, for example with a report of an
+// unsupported schema or of a failed verification. Such a result describes the
+// first export. It is reported only when the confirming run has the same
+// bytes; an export that changed while the command worked is an error, because
+// the result would describe a schema that is no longer the configured one.
+//
 // A command that started no export needs no run. A command whose Confirm
 // already ran needs none either: Confirm returned its result, or its error,
 // to the code that then reported it, and a rejected export is not run again
 // in the hope of another answer.
-func ConfirmDeterministic(ctx context.Context, export *Export) error {
+func ConfirmUnchanged(ctx context.Context, export *Export) error {
 	if export == nil || export.attempted {
 		return nil
 	}
-	_, err := export.Confirm(ctx)
-	return err
+	changed, err := export.Confirm(ctx)
+	if err != nil {
+		return err
+	}
+	if changed != nil {
+		return ErrExportChanged
+	}
+	return nil
 }
+
+// ErrExportChanged reports a deterministic export whose output changed after
+// the command read it.
+var ErrExportChanged = errors.New("the configured schema export changed while the command worked; run the command again")
 
 var errModifiedInputs = errors.New("DDL export command modified repository inputs; schema_command must be read-only")
 

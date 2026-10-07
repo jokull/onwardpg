@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,7 +61,7 @@ func TestExportConfirmsEqualBytesWithTwoRuns(t *testing.T) {
 		t.Fatalf("an unchanged export ran the command %d times, want 2", runs())
 	}
 	// The proof is complete. A later request for it must not run the command.
-	if err := ConfirmDeterministic(context.Background(), export); err != nil {
+	if err := ConfirmUnchanged(context.Background(), export); err != nil {
 		t.Fatal(err)
 	}
 	if runs() != 2 {
@@ -105,8 +106,8 @@ func TestExportRejectsANondeterministicExport(t *testing.T) {
 	// answer: after three different outputs the fake export is stable, and a
 	// new pair of runs would accept it.
 	rejected := runs()
-	if err := ConfirmDeterministic(context.Background(), export); err != nil {
-		t.Fatalf("ConfirmDeterministic after a reported rejection = %v", err)
+	if err := ConfirmUnchanged(context.Background(), export); err != nil {
+		t.Fatalf("ConfirmUnchanged after a reported rejection = %v", err)
 	}
 	if _, err := export.Confirm(context.Background()); err == nil {
 		t.Fatal("a second Confirm of a rejected export returned no error")
@@ -116,19 +117,19 @@ func TestExportRejectsANondeterministicExport(t *testing.T) {
 	}
 }
 
-func TestConfirmDeterministicCompletesTheSecondRun(t *testing.T) {
+func TestConfirmUnchangedRunsTheExportOnceMore(t *testing.T) {
 	stable, runs := countingCommand(t, "SELECT 1;\n")
 	export, err := StartExport(context.Background(), t.TempDir(), "primary", stable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmDeterministic(context.Background(), export); err != nil {
+	if err := ConfirmUnchanged(context.Background(), export); err != nil {
 		t.Fatal(err)
 	}
 	if runs() != 2 {
 		t.Fatalf("the determinism proof ran the command %d times, want 2", runs())
 	}
-	if err := ConfirmDeterministic(context.Background(), nil); err != nil {
+	if err := ConfirmUnchanged(context.Background(), nil); err != nil {
 		t.Fatalf("a command that started no export must need no proof: %v", err)
 	}
 
@@ -137,19 +138,39 @@ func TestConfirmDeterministicCompletesTheSecondRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmDeterministic(context.Background(), export); err == nil || !strings.Contains(err.Error(), "DDL export is nondeterministic") {
-		t.Fatalf("ConfirmDeterministic = %v, want a nondeterministic export error", err)
+	if err := ConfirmUnchanged(context.Background(), export); err == nil || !strings.Contains(err.Error(), "DDL export is nondeterministic") {
+		t.Fatalf("ConfirmUnchanged = %v, want a nondeterministic export error", err)
 	}
 
-	// An export that changed once and is then stable is deterministic. Two
-	// back-to-back runs at the start would also have accepted it.
+	// An export that changed once and is then stable is deterministic, but the
+	// result of the command describes the first output. It is not reported.
 	edited, _ := countingCommand(t, "SELECT 1;\n", "SELECT 2;\n")
 	export, err = StartExport(context.Background(), t.TempDir(), "primary", edited)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmDeterministic(context.Background(), export); err != nil {
-		t.Fatalf("ConfirmDeterministic rejected a changed deterministic export: %v", err)
+	if err := ConfirmUnchanged(context.Background(), export); !errors.Is(err, ErrExportChanged) {
+		t.Fatalf("ConfirmUnchanged = %v, want ErrExportChanged", err)
+	}
+
+	// A schema file has no command, and the same rule.
+	root := t.TempDir()
+	name := filepath.Join(root, "schema.sql")
+	if err := os.WriteFile(name, []byte("SELECT 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	export, err = StartExport(context.Background(), root, "primary", Target{SchemaFile: "schema.sql", DevDatabaseEnv: "DEV_DATABASE_URL"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := export.Settle(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, []byte("SELECT 2;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ConfirmUnchanged(context.Background(), export); !errors.Is(err, ErrExportChanged) {
+		t.Fatalf("ConfirmUnchanged of an edited schema file = %v, want ErrExportChanged", err)
 	}
 }
 
@@ -214,100 +235,26 @@ func TestCompileDDLReportsAChangedCheckoutBeforeAFailedCommand(t *testing.T) {
 	}
 }
 
-func TestPreparedConfirmAcceptsACheckoutEditBeforeTheRun(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("one"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	target, runs := countingCommand(t, "SELECT 1;\n")
-	export, err := StartExport(context.Background(), root, "primary", target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := export.Settle(); err != nil {
-		t.Fatal(err)
-	}
-	export.Prepare(context.Background())
-	// Wait for the prepared fingerprint, then edit a file. The edit is before
-	// the confirming run, so the run did not make it.
-	if _, err := export.prepared.wait(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("two"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	changed, err := export.Confirm(context.Background())
-	if err != nil || changed != nil {
-		t.Fatalf("Confirm = %v, %v; want an unchanged export", changed, err)
-	}
-	// The run with the prepared fingerprint was not accepted. One more run
-	// with a fingerprint of its own was.
-	if runs() != 3 {
-		t.Fatalf("the command ran %d times, want 3", runs())
-	}
-}
-
-func TestPreparedConfirmUsesThePreparedFingerprint(t *testing.T) {
-	root := t.TempDir()
-	target, runs := countingCommand(t, "SELECT 1;\n")
-	export, err := StartExport(context.Background(), root, "primary", target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	export.Prepare(context.Background())
-	first := export.prepared
-	export.Prepare(context.Background())
-	if export.prepared != first {
-		t.Fatal("a second Prepare replaced the fingerprint in progress")
-	}
-	changed, err := export.Confirm(context.Background())
-	if err != nil || changed != nil {
-		t.Fatalf("Confirm = %v, %v; want an unchanged export", changed, err)
-	}
-	if runs() != 2 || export.prepared != nil {
-		t.Fatalf("runs=%d prepared=%v; want 2 runs and a used fingerprint", runs(), export.prepared)
-	}
-}
-
-func TestPreparedConfirmRejectsACommandThatWritesToTheCheckout(t *testing.T) {
+func TestExportConfirmRejectsAnIdempotentWriteByTheConfirmingRun(t *testing.T) {
 	root := t.TempDir()
 	state := t.TempDir()
-	// The first run is read-only. Every later run writes to the checkout.
-	script := `if [ -e "$0/later" ]; then date +%s%N >> leaked; printf x >> leaked; fi; : > "$0/later"; printf 'SELECT 1;\n'`
+	// The first run is read-only. Every later run writes the same bytes to the
+	// same file, so a run that started after the write would see no change.
+	script := `if [ -e "$0/later" ]; then printf cache > leaked; fi; : > "$0/later"; printf 'SELECT 1;\n'`
 	target := Target{SchemaCommand: []string{"sh", "-c", script, state}, DevDatabaseEnv: "DEV_DATABASE_URL"}
 	export, err := StartExport(context.Background(), root, "primary", target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	export.Prepare(context.Background())
-	if _, err := export.Confirm(context.Background()); err == nil || !strings.Contains(err.Error(), "modified repository inputs") {
-		t.Fatalf("Confirm = %v, want a modified inputs rejection", err)
+	if err := ConfirmUnchanged(context.Background(), export); err == nil || !strings.Contains(err.Error(), "modified repository inputs") {
+		t.Fatalf("ConfirmUnchanged = %v, want a modified inputs rejection", err)
 	}
-	// The run with the prepared fingerprint and the run with a fingerprint of
-	// its own were both rejected. The rejection is final.
+	// The rejection is final: no later run can find the file in place and pass.
+	if err := ConfirmUnchanged(context.Background(), export); err != nil {
+		t.Fatalf("ConfirmUnchanged after a reported rejection = %v", err)
+	}
 	if _, err := export.Confirm(context.Background()); err == nil || strings.Contains(err.Error(), "modified repository inputs") {
 		t.Fatalf("a second Confirm ran the export again: %v", err)
-	}
-}
-
-func TestPrepareDoesNothingForASchemaFile(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "schema.sql"), []byte("SELECT 1;\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	export, err := StartExport(context.Background(), root, "primary", Target{SchemaFile: "schema.sql", DevDatabaseEnv: "DEV_DATABASE_URL"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := export.Settle(); err != nil {
-		t.Fatal(err)
-	}
-	export.Prepare(context.Background())
-	if export.prepared != nil {
-		t.Fatal("a schema file needs no checkout fingerprint")
-	}
-	if changed, err := export.Confirm(context.Background()); err != nil || changed != nil {
-		t.Fatalf("Confirm = %v, %v; want an unchanged export", changed, err)
 	}
 }
 
