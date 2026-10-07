@@ -180,6 +180,8 @@ type observerContext struct {
 	PredefinedRoles []string
 	// BypassRLS is the BYPASSRLS attribute of the observer role.
 	BypassRLS bool
+	// refused is set when the guard did not accept the role.
+	refused bool
 }
 
 func (o observerContext) projection() ObserverProjection {
@@ -189,6 +191,9 @@ func (o observerContext) projection() ObserverProjection {
 func (o observerContext) Mode() string {
 	if o.Role == o.DatabaseOwner {
 		return "database_owner"
+	}
+	if o.refused {
+		return "refused"
 	}
 	if len(o.PredefinedRoles) > 0 {
 		return "predefined_read_role"
@@ -212,7 +217,19 @@ WITH RECURSIVE held AS (
 
 const observerRoleRule = "use the database owner, or a login role that is NOSUPERUSER/NOCREATEDB/NOCREATEROLE/NOREPLICATION (BYPASSRLS is permitted) and whose memberships, without ADMIN OPTION, are only predefined read-only roles (pg_read_all_data, pg_monitor, pg_read_all_settings, pg_read_all_stats, pg_stat_scan_tables) or dedicated NOLOGIN roles that have no capabilities and no memberships of their own"
 
+// inspectObserver runs the role guard. It needs only the live connection and
+// a few short queries, so callers run it before any slower work.
 func inspectObserver(ctx context.Context, tx pgx.Tx, access observerAccess) (observerContext, *Finding, error) {
+	observer, finding, err := inspectObserverRole(ctx, tx, access)
+	// A role without the access that data gates need is still a valid kind
+	// of observer. Every other finding means the role itself is refused.
+	if finding != nil && finding.Code != "observer_access_incomplete" {
+		observer.refused = true
+	}
+	return observer, finding, err
+}
+
+func inspectObserverRole(ctx context.Context, tx pgx.Tx, access observerAccess) (observerContext, *Finding, error) {
 	var observer observerContext
 	var database string
 	var superuser, createDB, createRole, replication, bypassRLS bool
@@ -732,6 +749,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	report.Observer.ProjectedAccess = projected
 	if finding != nil {
+		report.Observer.Mode = "refused"
 		report.Findings = append(report.Findings, *finding)
 		return finalize(report), nil
 	}

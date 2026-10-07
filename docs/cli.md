@@ -434,6 +434,7 @@ connection. The result names the kind in `observer.mode`.
 | `database_owner` | The owner of the database. |
 | `predefined_read_role` | A login role that is a member of PostgreSQL predefined read-only roles. |
 | `dedicated_read_only` | A login role with no membership, or with membership only in dedicated `NOLOGIN` roles. |
+| `refused` | A role that the guard did not accept. The command stops; see the error or the finding. |
 
 A role that is not the database owner must be `NOSUPERUSER`, `NOCREATEDB`,
 `NOCREATEROLE`, and `NOREPLICATION`. Each role that it is a member of, directly

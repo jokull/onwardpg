@@ -233,7 +233,7 @@ scratch_database_env = "` + scratchEnv + `"
 	}
 	if refused.code != 1 || diagnostic.Status != "error" || diagnostic.Code != "drift_observer_role_elevated" ||
 		!strings.Contains(diagnostic.Message, "inherits unsafe role pg_write_all_data") ||
-		diagnostic.Observer == nil || diagnostic.Observer.Role != prefix+"writer" {
+		diagnostic.Observer == nil || diagnostic.Observer.Role != prefix+"writer" || diagnostic.Observer.Mode != "refused" {
 		t.Fatalf("refused role = %d, %s", refused.code, refused.stdout)
 	}
 	if len(diagnostic.NextActions) != 2 || diagnostic.NextActions[0].Kind != "create_observer_role" ||
