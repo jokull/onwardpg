@@ -3,6 +3,52 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## Unreleased
+
+### Changed
+
+- `plan`, `draft`, `verify`, and `init` are about five times faster on a large
+  schema. On a schema of 271 tables, about 3,500 constraints and about 1,170
+  indexes, with a one-column change, `plan` went from 126–149 s to 22–27 s,
+  `verify` from 114 s to 21 s, and `verify --check` from 107 s to 25 s on the
+  same machine. Plans, phase SQL, and catalog fingerprints are byte-identical.
+  The changes:
+  - The catalog reader no longer searches every snapshot object once for each
+    column, and a snapshot keeps its sorted object order between writes. These
+    two loops were quadratic and cost about 7 seconds for each catalog read of
+    that schema.
+  - The checkout fingerprint that guards each `schema_command` run reads up to
+    16 files at the same time. It still reads the bytes of every file outside
+    `.git` and `node_modules`.
+  - These commands run the export two times, not four: once at the start, and
+    once immediately before they write or report. Byte-identical output proves
+    that the export is deterministic and that it did not change while the
+    command worked, and the command does not load identical DDL into scratch
+    PostgreSQL a second time. Output that differs is handled as before: a
+    third run decides whether the export is nondeterministic, and a changed
+    export must have the same catalog fingerprint. A nondeterministic export
+    is therefore reported at the end of the command, not at the start.
+  - One command no longer replays the same SQL more often than its checks
+    need. A verification still compares two separate executions in two
+    databases; they now run at the same time. A second verification in the
+    same command (expand checkpoint, then complete bundle) reuses an execution
+    of the first only when both run exactly the same SQL with the same checks.
+    `plan` used seven scratch databases and five history replays; it now uses
+    four and three.
+  - Base history replay runs during the first export, and checkout
+    fingerprints run during scratch database work where neither reads the
+    result of the other.
+- `dev`, `config check`, and `diff --target` still run the export twice back to
+  back. The second run now starts from the checkout fingerprint that followed
+  the first, so a file that changes between the two runs stops the command.
+
+### Added
+
+- `ONWARDPG_TIMINGS=1` writes one JSON line to standard error with the wall
+  time and run count of each stage of the command (export runs, checkout
+  fingerprints, scratch databases, history replays, catalog reads, planner).
+  See [performance](docs/performance.md#end-to-end-stage-timings).
+
 ## v0.1.0-preview.6 — 2026-10-06
 
 ### Fixed

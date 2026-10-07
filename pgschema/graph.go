@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type Kind string
@@ -553,6 +554,13 @@ type Snapshot struct {
 	deps        map[ID]map[ID]struct{}
 	unsupported map[string]struct{}
 	ignored     map[string]struct{}
+
+	// order is the canonical ID order. It is built on the first read after a
+	// write, because planners list every object many times and a sort per call
+	// made large schemas quadratic. Add clears it. The mutex makes concurrent
+	// reads of a finished snapshot safe; writes are still single-threaded.
+	orderMu sync.Mutex
+	order   []ID
 }
 
 func New() *Snapshot {
@@ -581,6 +589,9 @@ func (s *Snapshot) Add(object Object) error {
 	}
 	s.objects[id] = object
 	s.deps[id] = make(map[ID]struct{})
+	s.orderMu.Lock()
+	s.order = nil
+	s.orderMu.Unlock()
 	return nil
 }
 
@@ -642,7 +653,7 @@ func (s *Snapshot) Object(id ID) (Object, bool) {
 }
 
 func (s *Snapshot) Objects() []Object {
-	ids := s.IDs()
+	ids := s.canonicalOrder()
 	objects := make([]Object, 0, len(ids))
 	for _, id := range ids {
 		objects = append(objects, s.objects[id])
@@ -715,13 +726,28 @@ func (s *Snapshot) Project(transform func(Object) (Object, bool), keepUnsupporte
 	return projected, nil
 }
 
+// IDs returns every object ID in canonical order. The caller owns the slice.
 func (s *Snapshot) IDs() []ID {
-	ids := make([]ID, 0, len(s.objects))
-	for id := range s.objects {
-		ids = append(ids, id)
-	}
-	sortIDs(ids)
+	order := s.canonicalOrder()
+	ids := make([]ID, len(order))
+	copy(ids, order)
 	return ids
+}
+
+// canonicalOrder returns the shared sorted ID slice. Callers must not change
+// it. An empty snapshot yields an empty, non-nil slice, as IDs always has.
+func (s *Snapshot) canonicalOrder() []ID {
+	s.orderMu.Lock()
+	defer s.orderMu.Unlock()
+	if s.order == nil {
+		ids := make([]ID, 0, len(s.objects))
+		for id := range s.objects {
+			ids = append(ids, id)
+		}
+		sortIDs(ids)
+		s.order = ids
+	}
+	return s.order
 }
 
 // ValidateObjectOrder verifies that order is an exact permutation of the

@@ -111,3 +111,7 @@ func openRegularCompilerFile(name string) (*os.File, error) {
 	}
 	return file, nil
 }
+
+// openListedRegularFile has no Windows form: os.Open cannot refuse to follow
+// a link. The caller inspects every path itself.
+func openListedRegularFile(string) (*os.File, os.FileInfo, bool) { return nil, nil, false }

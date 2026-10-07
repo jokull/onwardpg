@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jokull/onwardpg/internal/scratchdb"
+	"github.com/jokull/onwardpg/internal/timing"
 	"github.com/jokull/onwardpg/pgschema"
 )
 
@@ -56,7 +57,10 @@ func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devUR
 	if err != nil {
 		return nil, err
 	}
-	if _, err = target.Exec(ctx, string(ddl)); err != nil {
+	stopExecute := timing.Start("ddl_execute")
+	_, err = target.Exec(ctx, string(ddl))
+	stopExecute()
+	if err != nil {
 		target.Close(ctx)
 		return nil, fmt.Errorf("execute declarative DDL from %s: %w", provenance, err)
 	}
@@ -67,6 +71,7 @@ func materializeDDLBytesGraph(ctx context.Context, ddl []byte, provenance, devUR
 }
 
 func inspectGraphConfig(ctx context.Context, config *pgx.ConnConfig, ignores []string, validateIgnores bool) (*pgschema.Snapshot, error) {
+	defer timing.Start("catalog_inspect")()
 	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, err
@@ -110,62 +115,43 @@ func InspectGraphTransaction(ctx context.Context, tx pgx.Tx, ignores []string, v
 	}
 
 	snapshot := pgschema.New()
-	for _, inspect := range []func(context.Context, pgx.Tx, *pgschema.Snapshot, *ignoreTracker) error{
-		inspectGraphSchemas,
-		inspectGraphExtensions,
-		inspectGraphEnums,
-		inspectGraphDomains,
-		inspectGraphComposites,
-		inspectGraphRanges,
-		inspectGraphTables,
-		inspectGraphConstraints,
-		inspectGraphSequences,
+	// Each inspector is one timing stage. The names are fixed strings, so the
+	// stage report does not change when a function is renamed.
+	stage := func(name string, inspect func() error) error {
+		defer timing.Start("catalog_inspect." + name)()
+		return inspect()
+	}
+	for _, step := range []struct {
+		name    string
+		inspect func() error
+	}{
+		{"schemas", func() error { return inspectGraphSchemas(ctx, tx, snapshot, tracker) }},
+		{"extensions", func() error { return inspectGraphExtensions(ctx, tx, snapshot, tracker) }},
+		{"enums", func() error { return inspectGraphEnums(ctx, tx, snapshot, tracker) }},
+		{"domains", func() error { return inspectGraphDomains(ctx, tx, snapshot, tracker) }},
+		{"composites", func() error { return inspectGraphComposites(ctx, tx, snapshot, tracker) }},
+		{"ranges", func() error { return inspectGraphRanges(ctx, tx, snapshot, tracker) }},
+		{"tables", func() error { return inspectGraphTables(ctx, tx, snapshot, tracker) }},
+		{"constraints", func() error { return inspectGraphConstraints(ctx, tx, snapshot, tracker) }},
+		{"sequences", func() error { return inspectGraphSequences(ctx, tx, snapshot, tracker) }},
+		{"columns", func() error { return inspectGraphColumns(ctx, tx, snapshot, tracker, version) }},
+		{"sequence_ownership", func() error { return addSequenceOwnershipDependencies(snapshot) }},
+		{"constraint_columns", func() error { return addConstraintColumnDependencies(ctx, tx, snapshot) }},
+		{"views", func() error { return inspectGraphViews(ctx, tx, snapshot, tracker) }},
+		{"indexes", func() error { return inspectGraphIndexes(ctx, tx, snapshot, tracker, version) }},
+		{"replica_identities", func() error { return inspectGraphReplicaIdentities(ctx, tx, snapshot, tracker) }},
+		{"routines", func() error { return inspectGraphRoutines(ctx, tx, snapshot, tracker) }},
+		{"routine_dependencies", func() error { return addRoutineDependencies(ctx, tx, snapshot) }},
+		{"view_routine_dependencies", func() error { return addViewRoutineDependencies(ctx, tx, snapshot) }},
+		{"triggers", func() error { return inspectGraphTriggers(ctx, tx, snapshot, tracker) }},
+		{"policies", func() error { return inspectGraphPolicies(ctx, tx, snapshot, tracker) }},
+		{"table_privileges", func() error { return inspectGraphTablePrivileges(ctx, tx, snapshot, tracker) }},
+		{"catalog_dependencies", func() error { return addCatalogDependencies(ctx, tx, snapshot) }},
+		{"blockers", func() error { return inspectGraphBlockers(ctx, tx, snapshot, tracker, version) }},
 	} {
-		if err := inspect(ctx, tx, snapshot, tracker); err != nil {
+		if err := stage(step.name, step.inspect); err != nil {
 			return nil, err
 		}
-	}
-	if err := inspectGraphColumns(ctx, tx, snapshot, tracker, version); err != nil {
-		return nil, err
-	}
-	if err := addSequenceOwnershipDependencies(snapshot); err != nil {
-		return nil, err
-	}
-	if err := addConstraintColumnDependencies(ctx, tx, snapshot); err != nil {
-		return nil, err
-	}
-	if err := inspectGraphViews(ctx, tx, snapshot, tracker); err != nil {
-		return nil, err
-	}
-	if err := inspectGraphIndexes(ctx, tx, snapshot, tracker, version); err != nil {
-		return nil, err
-	}
-	if err := inspectGraphReplicaIdentities(ctx, tx, snapshot, tracker); err != nil {
-		return nil, err
-	}
-	if err := inspectGraphRoutines(ctx, tx, snapshot, tracker); err != nil {
-		return nil, err
-	}
-	if err := addRoutineDependencies(ctx, tx, snapshot); err != nil {
-		return nil, err
-	}
-	if err := addViewRoutineDependencies(ctx, tx, snapshot); err != nil {
-		return nil, err
-	}
-	if err := inspectGraphTriggers(ctx, tx, snapshot, tracker); err != nil {
-		return nil, err
-	}
-	if err := inspectGraphPolicies(ctx, tx, snapshot, tracker); err != nil {
-		return nil, err
-	}
-	if err := inspectGraphTablePrivileges(ctx, tx, snapshot, tracker); err != nil {
-		return nil, err
-	}
-	if err := addCatalogDependencies(ctx, tx, snapshot); err != nil {
-		return nil, err
-	}
-	if err := inspectGraphBlockers(ctx, tx, snapshot, tracker, version); err != nil {
-		return nil, err
 	}
 	if validateIgnores {
 		if err := tracker.Validate(); err != nil {
@@ -820,6 +806,7 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 	}
 	defer rows.Close()
 	positions := make(map[pgschema.ID]int)
+	multiranges := multirangeOwners(snapshot)
 	for rows.Next() {
 		var namespace, tableName, identity, generated string
 		var defaultOrGenerated, collation, typeSchema, typeName, extensionSchema, extensionName, defaultSequenceSchema, defaultSequenceName, serialSequenceName, notNullName *string
@@ -911,13 +898,8 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 				}
 			}
 			if dependencyID == nil {
-				for _, candidate := range snapshot.Objects() {
-					rangeType, ok := candidate.(pgschema.Range)
-					if ok && rangeType.Schema == *typeSchema && rangeType.MultirangeName == *typeName {
-						id := rangeType.ObjectID()
-						dependencyID = &id
-						break
-					}
+				if id, exists := multiranges[multirangeKey{schema: *typeSchema, name: *typeName}]; exists {
+					dependencyID = &id
 				}
 			}
 			if dependencyID != nil {
@@ -961,6 +943,28 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 		}
 	}
 	return rows.Err()
+}
+
+type multirangeKey struct{ schema, name string }
+
+// multirangeOwners maps each multirange type name to the range that owns it.
+// Ranges are inspected before columns, and the column inspector adds none, so
+// one pass replaces a search of every snapshot object for each column. The
+// objects arrive in canonical order; the first range that claims a name wins,
+// as it did when each column searched that same order.
+func multirangeOwners(snapshot *pgschema.Snapshot) map[multirangeKey]pgschema.ID {
+	owners := make(map[multirangeKey]pgschema.ID)
+	for _, candidate := range snapshot.Objects() {
+		rangeType, ok := candidate.(pgschema.Range)
+		if !ok {
+			continue
+		}
+		key := multirangeKey{schema: rangeType.Schema, name: rangeType.MultirangeName}
+		if _, exists := owners[key]; !exists {
+			owners[key] = rangeType.ObjectID()
+		}
+	}
+	return owners
 }
 
 func serialTypeForCatalogType(typ string) (string, bool) {

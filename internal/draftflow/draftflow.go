@@ -20,6 +20,7 @@ import (
 	"github.com/jokull/onwardpg/internal/semantichint"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/targetlock"
+	"github.com/jokull/onwardpg/internal/timing"
 	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
 	"github.com/jokull/onwardpg/pgschema"
@@ -123,6 +124,21 @@ type Input struct {
 // remains mutable for the life of the feature. All SQL execution happens only
 // in disposable databases created through AdminURL.
 func Run(ctx context.Context, input Input) (Report, error) {
+	var export *workspace.Export
+	report, err := run(ctx, input, &export)
+	if err != nil {
+		return report, err
+	}
+	// A result that did not pass the final input check still rests on one
+	// export run. Run the export again so that every result has the same
+	// determinism proof.
+	if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+		return report, fmt.Errorf("confirm desired schema export: %w", err)
+	}
+	return report, nil
+}
+
+func run(ctx context.Context, input Input, started **workspace.Export) (Report, error) {
 	report := Report{
 		Outcome:  "error",
 		Target:   input.TargetName,
@@ -322,15 +338,44 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("render base history: %w", err)
 	}
+	// The base history replay and the schema export do not read each other's
+	// results, so they run at the same time. The replay works only in its own
+	// scratch database and writes nothing to the checkout that the export
+	// fingerprints. Failures keep their order: a replay failure is reported
+	// before an export failure, and it stops an export that is still running.
+	exportCtx, stopExport := context.WithCancel(ctx)
+	defer stopExport()
+	type exportResult struct {
+		export *workspace.Export
+		err    error
+	}
+	exported := make(chan exportResult, 1)
+	go func() {
+		export, err := workspace.StartExport(exportCtx, input.Root, input.TargetName, input.Target)
+		exported <- exportResult{export: export, err: err}
+	}()
 	current, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, input.AdminURL, input.Ignores)
 	if err != nil {
+		stopExport()
+		if result := <-exported; result.export != nil {
+			// Let the stopped checkout fingerprint end before this returns.
+			_ = result.export.Settle()
+		}
 		return report, fmt.Errorf("replay base history: %w", err)
 	}
-	compiled, err := workspace.CompileDDL(ctx, input.Root, input.TargetName, input.Target)
-	if err != nil {
-		return report, fmt.Errorf("compile desired schema: %w", err)
+	result := <-exported
+	if result.err != nil {
+		return report, fmt.Errorf("compile desired schema: %w", result.err)
 	}
+	export := result.export
+	*started = export
+	compiled := export.Compiled()
+	// The checkout fingerprint that follows the export is still in progress.
+	// It reads the checkout; this load works only in scratch PostgreSQL.
 	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
+	if settleErr := export.Settle(); settleErr != nil {
+		return report, fmt.Errorf("compile desired schema: %w", settleErr)
+	}
 	if err != nil {
 		return report, fmt.Errorf("materialize desired schema: %w", err)
 	}
@@ -347,7 +392,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	input.Ignores = activeIgnores
 
+	stopPlan := timing.Start("plan_build")
 	plan, rebind, answerReceipt, questions, hints, err := buildPlan(current, desired, input, selected)
+	stopPlan()
 	if err != nil {
 		return report, err
 	}
@@ -398,7 +445,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			return report, nil
 		}
 		if selected.Artifact.Manifest.PhaseSource != "edited" {
-			if err := ensureInputsUnchanged(ctx, input, lock, chain, selected, plan.DesiredFingerprint); err != nil {
+			if err := ensureInputsUnchanged(ctx, input, lock, export, chain, selected, plan.DesiredFingerprint); err != nil {
 				return historyChangedReport(report, err), nil
 			}
 			if err := bundle.RemoveDraft(destination, selected.Artifact); err != nil {
@@ -499,7 +546,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			for _, conflict := range reconciliation.Conflicts {
 				preserve = append(preserve, conflict.Path)
 			}
-			if err := ensureInputsUnchanged(ctx, input, lock, chain, selected, plan.DesiredFingerprint); err != nil {
+			if err := ensureInputsUnchanged(ctx, input, lock, export, chain, selected, plan.DesiredFingerprint); err != nil {
 				return historyChangedReport(report, err), nil
 			}
 			if err := bundle.Write(destination, artifact, bundle.WriteOptions{ReplaceDraft: true, PreserveEdited: preserve, ExpectedPrevious: &selected.Artifact}); err != nil {
@@ -540,9 +587,16 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			Artifact:  artifact,
 		})
 		proposed.HeadDigest = artifact.Manifest.History.EntryDigest
+		// The expand checkpoint receipt added below changes the manifest, not
+		// the SQL. The second verification therefore asks for executions that
+		// the first has already run; they are shared, not repeated.
+		executions := verify.NewExecutions()
+		// Only scratch database work is left before the final input check.
+		export.Prepare(ctx)
 		expandVerification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: protocol.PhaseExpand, Ignores: input.Ignores, Options: input.PlannerOptions,
+			Executions: executions,
 		})
 		if err != nil {
 			return report, fmt.Errorf("verify generated expand checkpoint: %w", err)
@@ -565,6 +619,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		verification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: "contract", Ignores: input.Ignores, Options: input.PlannerOptions,
+			Executions: executions,
 		})
 		if err != nil {
 			return report, fmt.Errorf("verify generated draft: %w", err)
@@ -581,7 +636,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}
 	}
 
-	if err := ensureInputsUnchanged(ctx, input, lock, chain, selected, plan.DesiredFingerprint); err != nil {
+	if err := ensureInputsUnchanged(ctx, input, lock, export, chain, selected, plan.DesiredFingerprint); err != nil {
 		return historyChangedReport(report, err), nil
 	}
 	writeOptions := bundle.WriteOptions{ReplaceDraft: selected != nil}
@@ -763,7 +818,7 @@ func developmentPostconditionsSince(chain history.Chain, previousParent string) 
 	return checks, nil
 }
 
-func ensureInputsUnchanged(ctx context.Context, input Input, lock *targetlock.Lock, expected history.Chain, selected *history.Entry, desiredFingerprint string) error {
+func ensureInputsUnchanged(ctx context.Context, input Input, lock *targetlock.Lock, export *workspace.Export, expected history.Chain, selected *history.Entry, desiredFingerprint string) error {
 	if err := lock.ValidatePath(); err != nil {
 		return err
 	}
@@ -786,9 +841,14 @@ func ensureInputsUnchanged(ctx context.Context, input Input, lock *targetlock.Lo
 	if selected != nil && !reflect.DeepEqual(selected.Artifact, current.Artifact) {
 		return fmt.Errorf("selected bundle changed while the draft was being prepared")
 	}
-	compiled, err := workspace.CompileDDL(ctx, input.Root, input.TargetName, input.Target)
+	compiled, err := export.Confirm(ctx)
 	if err != nil {
 		return fmt.Errorf("recompile desired schema before lifecycle write: %w", err)
+	}
+	if compiled == nil {
+		// The export has the bytes that were planned, so its catalog is the
+		// planned catalog.
+		return nil
 	}
 	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jokull/onwardpg/internal/timing"
 )
 
 // Database owns one random database and its short-lived login role. Admin is
@@ -44,6 +45,7 @@ func Create(ctx context.Context, adminURL, prefix string) (_ *Database, resultEr
 	if adminURL == "" {
 		return nil, fmt.Errorf("scratch administrative URL is required")
 	}
+	defer timing.Start("scratch_create")()
 	admin, err := pgx.Connect(ctx, adminURL)
 	if err != nil {
 		return nil, fmt.Errorf("connect scratch administrator: %w", err)
@@ -191,6 +193,7 @@ func (d *Database) Close() error {
 	if d == nil || (d.admin == nil && d.adminConfig == nil) {
 		return nil
 	}
+	defer timing.Start("scratch_drop")()
 	var failures []error
 	if err := d.drop("DROP DATABASE IF EXISTS " + quoteIdentifier(d.Name) + " WITH (FORCE)"); err != nil {
 		failures = append(failures, fmt.Errorf("drop database %q: %w", d.Name, err))

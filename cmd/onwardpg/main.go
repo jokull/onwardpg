@@ -31,6 +31,7 @@ import (
 	"github.com/jokull/onwardpg/internal/semantichint"
 	"github.com/jokull/onwardpg/internal/source"
 	"github.com/jokull/onwardpg/internal/targetlock"
+	"github.com/jokull/onwardpg/internal/timing"
 	"github.com/jokull/onwardpg/internal/verify"
 	"github.com/jokull/onwardpg/internal/workspace"
 	"github.com/jokull/onwardpg/pgschema"
@@ -133,7 +134,14 @@ Diagnostics and compatibility:
 
 onwardpg generates and verifies plans; it never applies them to caller databases.`
 
-func main() { os.Exit(run()) }
+func main() {
+	if value := os.Getenv(timing.EnvVar); value != "" && value != "0" {
+		timing.Enable()
+	}
+	code := run()
+	timing.Write(os.Stderr)
+	os.Exit(code)
+}
 
 func run() int {
 	if len(os.Args) < 2 {
@@ -1025,11 +1033,17 @@ func runBundleAt(arguments []string, start string) int {
 		IgnoreExtensionVersions: append([]string(nil), manifest.Planner.Options.IgnoreExtensionVersions...),
 	}
 	ctx := context.Background()
-	compiled, err := workspace.CompileDDL(ctx, root, *targetName, target)
+	export, err := workspace.StartExport(ctx, root, *targetName, target)
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("compile current desired schema: %w", err))
 	}
+	compiled := export.Compiled()
+	// The checkout fingerprint that follows the export is still in progress.
+	// It reads the checkout; this load works only in scratch PostgreSQL.
 	working, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, manifest.Planner.IgnoreSelectors)
+	if settleErr := export.Settle(); settleErr != nil {
+		return writeError("source_error", fmt.Errorf("compile current desired schema: %w", settleErr))
+	}
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("materialize current desired schema: %w", err))
 	}
@@ -1038,6 +1052,11 @@ func runBundleAt(arguments []string, start string) int {
 		return writeError("source_error", fmt.Errorf("fingerprint current desired schema: %w", err))
 	}
 	if workingFingerprint != manifest.DesiredSource.Fingerprint {
+		// This result rests on one export run. Run the export again so that
+		// a nondeterministic export is reported as such, not as a stale bundle.
+		if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+			return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
+		}
 		_ = json.NewEncoder(os.Stdout).Encode(verify.Report{
 			Outcome:            "stale",
 			Target:             *targetName,
@@ -1057,15 +1076,24 @@ func runBundleAt(arguments []string, start string) int {
 	verificationChain := chain
 	var checkpointArtifact *bundle.Artifact
 	var report verify.Report
+	// Only scratch database work is left before the final input check.
+	export.Prepare(ctx)
 	if edited != nil {
+		// The expand checkpoint receipt added below changes the manifest, not
+		// the SQL. The second verification therefore asks for executions that
+		// the first has already run; they are shared, not repeated.
+		executions := verify.NewExecutions()
 		expandReport, expandErr := verify.Run(ctx, verify.Input{
 			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: protocol.PhaseExpand,
-			Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+			Ignores: manifest.Planner.IgnoreSelectors, Options: options, Executions: executions,
 		})
 		if expandErr != nil {
 			return writeError("verification_error", expandErr)
 		}
 		if expandReport.Outcome != "verified" && expandReport.Outcome != "partial_verified" {
+			if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+				return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
+			}
 			_ = json.NewEncoder(os.Stdout).Encode(expandReport)
 			return 4
 		}
@@ -1083,7 +1111,7 @@ func runBundleAt(arguments []string, start string) int {
 		} else {
 			report, err = verify.Run(ctx, verify.Input{
 				AdminURL: adminURL, Chain: verificationChain, BundleID: *bundleID, ThroughPhase: *through,
-				Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+				Ignores: manifest.Planner.IgnoreSelectors, Options: options, Executions: executions,
 			})
 		}
 	} else {
@@ -1106,22 +1134,27 @@ func runBundleAt(arguments []string, start string) int {
 				configErr.Error(),
 				"rerun verification against the current stable configuration; no receipts were installed")
 		}
-		compiledAfter, compileErr := workspace.CompileDDL(ctx, root, *targetName, target)
+		compiledAfter, compileErr := export.Confirm(ctx)
 		if compileErr != nil {
 			return writeError("source_error", fmt.Errorf("recompile desired schema after verification: %w", compileErr))
 		}
-		workingAfter, loadErr := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, adminURL, manifest.Planner.IgnoreSelectors)
-		if loadErr != nil {
-			return writeError("source_error", fmt.Errorf("rematerialize desired schema after verification: %w", loadErr))
-		}
-		workingAfterFingerprint, fingerprintErr := workingAfter.Fingerprint()
-		if fingerprintErr != nil {
-			return writeError("source_error", fmt.Errorf("fingerprint desired schema after verification: %w", fingerprintErr))
-		}
-		if workingAfterFingerprint != workingFingerprint {
-			return writeVerifyFinding(*targetName, *bundleID, chain.HeadDigest, *through, "blocked", "working_schema_changed_during_verify",
-				fmt.Sprintf("configured desired schema changed from %s to %s while clone verification was running", workingFingerprint, workingAfterFingerprint),
-				"rerun draft against the current exported DDL before verifying again; no receipts were installed")
+		// A nil result is an export with the bytes that were verified, so its
+		// catalog is the verified catalog. Different bytes need a catalog
+		// comparison.
+		if compiledAfter != nil {
+			workingAfter, loadErr := source.LoadDDLGraphForComparison(ctx, compiledAfter.DDL, compiledAfter.Provenance, adminURL, manifest.Planner.IgnoreSelectors)
+			if loadErr != nil {
+				return writeError("source_error", fmt.Errorf("rematerialize desired schema after verification: %w", loadErr))
+			}
+			workingAfterFingerprint, fingerprintErr := workingAfter.Fingerprint()
+			if fingerprintErr != nil {
+				return writeError("source_error", fmt.Errorf("fingerprint desired schema after verification: %w", fingerprintErr))
+			}
+			if workingAfterFingerprint != workingFingerprint {
+				return writeVerifyFinding(*targetName, *bundleID, chain.HeadDigest, *through, "blocked", "working_schema_changed_during_verify",
+					fmt.Sprintf("configured desired schema changed from %s to %s while clone verification was running", workingFingerprint, workingAfterFingerprint),
+					"rerun draft against the current exported DDL before verifying again; no receipts were installed")
+			}
 		}
 		if edited == nil {
 			latest, loadErr := history.Load(root, config.BundleRoot, *targetName)
@@ -1154,6 +1187,11 @@ func runBundleAt(arguments []string, start string) int {
 			return writeError("bundle_receipt_update_failed", err)
 		}
 		report.ReceiptsUpdated = true
+	}
+	// A successful result confirmed the export above. A failed result still
+	// rests on one export run, so run the export again before it is reported.
+	if err := workspace.ConfirmDeterministic(ctx, export); err != nil {
+		return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(report)
 	if report.Outcome == "verified" || report.Outcome == "partial_verified" {

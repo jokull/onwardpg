@@ -50,6 +50,8 @@ onwardpg plan
 
 Do not stack local fixup migrations. Git moves the feature; rerunning `plan` restacks the same feature bundle on the currently accepted history and carries forward only decisions whose scoped meaning still holds.
 
+`plan`, `verify`, and `init` run the schema exporter two times: at the start, and again immediately before the result. Do not change any file in the checkout while one of them runs, and run only one of them at a time in a checkout. A file that changes during an export run stops the command with `DDL export command modified repository inputs`; rerun it. If a command is slow, run it with `ONWARDPG_TIMINGS=1` and read the per-stage JSON line on standard error before you change anything.
+
 Use JSON output, which is the default. Follow the high-level `status`, ordered
 `next_actions`, nested decision choices, named edit requirements, and exit
 codes rather than guessing. A `workspace_fast_forward` action contains direct

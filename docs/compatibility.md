@@ -26,7 +26,7 @@ PostgreSQL variation is equivalent to onwardpg or safe for unattended use.
 | --- | --- | --- | --- |
 | Compare two live PostgreSQL schemas | Yes | **Plannable** | Both are PostgreSQL-only schema diff tools. |
 | Declarative SQL-file desired input | Indirect / external setup | **Plannable** | onwardpg applies `CREATE` DDL to a disposable PostgreSQL database, then catalog-inspects it. |
-| Project DDL export command | External setup | **Plannable** | `schema_command` is executed twice and must emit deterministic PostgreSQL DDL; no framework adapter is required or planned. |
+| Project DDL export command | External setup | **Plannable** | `schema_command` is executed at least twice in each command and must emit deterministic PostgreSQL DDL; no framework adapter is required or planned. |
 | SQL output | Ordered SQL | **Plannable** | onwardpg also returns JSON plan data. |
 | Automatic application | `Migration.apply()` exists | Never to an existing target | onwardpg executes only for self-created disposable clone verification. |
 | Down migrations | No separate planner model | Never | Recovery is a new reviewed forward migration. |
