@@ -41,7 +41,7 @@ ONWARDPG_TIMINGS=1 onwardpg plan add-settlement 2>timings.json
 ```
 
 ```json
-{"timings":{"total_ms":21700,"stages":[{"name":"schema_command","count":2,"ms":9890},{"name":"input_tree_digest","count":4,"ms":8560}]}}
+{"timings":{"total_ms":26300,"stages":[{"name":"schema_command","count":2,"ms":11100},{"name":"input_tree_digest","count":4,"ms":10280}]}}
 ```
 
 Each stage has a name, the number of times it ran, and the sum of its wall
@@ -70,11 +70,16 @@ files, and an Apple silicon laptop that other work also used:
 
 | Command | Export runs | Checkout fingerprints | Disposable databases | Full history replays | Wall time |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `plan` (new bundle) | 2 | 4 | 4 | 3 | 22 s |
-| `plan` (existing bundle) | 2 | 4 | 4 | 3 | 27 s |
-| `verify` | 2 | 4 | 3 | 2 | 21 s |
-| `verify --check` | 2 | 4 | 3 | 2 | 25 s |
-| `init` | 2 | 4 | 4 | 2 | 25 s |
+| `plan` (new bundle) | 2 | 4 | 4 | 3 | 26 s |
+| `plan` (existing bundle) | 2 | 4 | 4 | 3 | 23 s |
+| `verify` | 2 | 4 | 3 | 2 | 22 s |
+| `verify --check` | 2 | 4 | 3 | 2 | 20 s |
+| `init` | 2 | 4 | 4 | 2 | 20 s |
+
+Wall time follows the load of the machine closely, because the export command
+and the checkout fingerprint are both bound by the operating system. The same
+commands took two to three times as long while other work kept the machine
+busy.
 
 The two export runs are the largest part and are sequential by design: the
 second run is the check that the schema did not change while the command

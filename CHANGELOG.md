@@ -9,8 +9,8 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 - `plan`, `draft`, `verify`, and `init` are about five times faster on a large
   schema. On a schema of 271 tables, about 3,500 constraints and about 1,170
-  indexes, with a one-column change, `plan` went from 126–149 s to 22–27 s,
-  `verify` from 114 s to 21 s, and `verify --check` from 107 s to 25 s on the
+  indexes, with a one-column change, `plan` went from 126–149 s to 23–26 s,
+  `verify` from 114 s to 22 s, and `verify --check` from 107 s to 20 s on the
   same machine. Plans, phase SQL, and catalog fingerprints are byte-identical.
   The changes:
   - The catalog reader no longer searches every snapshot object once for each
