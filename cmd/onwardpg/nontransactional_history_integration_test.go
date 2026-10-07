@@ -190,14 +190,21 @@ func TestHistoryWithConcurrentIndexBundleReplaysInEveryCommandOnPostgreSQL(t *te
 	if err := json.Unmarshal(artifact.Files["plan.json"], &plan); err != nil {
 		t.Fatal(err)
 	}
-	largest := 0
+	// Each statement that cannot run in a transaction block is a batch of its
+	// own. The preview.7 fixture keeps the proof for a stored batch that holds
+	// several of them.
+	nonTransactional := 0
 	for _, batch := range plan.Batches {
-		if !batch.Transactional {
-			largest = max(largest, len(batch.Statements))
+		if batch.Transactional {
+			continue
+		}
+		nonTransactional++
+		if len(batch.Statements) != 1 {
+			t.Fatalf("a non-transactional batch holds %d statements: %#v", len(batch.Statements), plan.Batches)
 		}
 	}
-	if largest < 2 {
-		t.Fatalf("no non-transactional batch holds two statements: %#v", plan.Batches)
+	if nonTransactional != 5 || strings.Count(expand+contract, "-- onwardpg:batch nontransactional") != 5 {
+		t.Fatalf("the plan has %d non-transactional batches, want 5: %#v", nonTransactional, plan.Batches)
 	}
 
 	if code, report := verifyReport(t, repository, "--bundle", "concurrent-indexes"); code != 0 || report.Outcome != "verified" {
