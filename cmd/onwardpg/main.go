@@ -139,8 +139,74 @@ func main() {
 		timing.Enable()
 	}
 	code := run()
+	writePendingWarnings(os.Stderr)
 	timing.Write(os.Stderr)
 	os.Exit(code)
+}
+
+// exportObserver receives the side effects of the schema export that the
+// current command observes. commandContext replaces it, so one command never
+// reports what another one saw.
+var exportObserver *workspace.SideEffectObserver
+
+// commandContext returns the context of one command that runs the schema
+// export. Under it the export runs are watched for writes to the git work
+// tree, and writeJSON reports them.
+func commandContext() context.Context {
+	ctx, observer := workspace.ObserveExportSideEffects(context.Background())
+	exportObserver = observer
+	return ctx
+}
+
+// pendingWarnings returns the warnings that no output has carried yet.
+func pendingWarnings() []protocol.Warning {
+	paths := exportObserver.Take()
+	if len(paths) == 0 {
+		return nil
+	}
+	return []protocol.Warning{protocol.ExportSideEffects(paths)}
+}
+
+// writeJSON prints one result document. It appends the pending warnings of
+// the command as the last top-level member, `warnings`. The member exists
+// only in this output: no file that onwardpg writes contains it, and without
+// a warning the bytes are the ones that json.Encoder writes for value.
+func writeJSON(writer io.Writer, value any) error {
+	var document bytes.Buffer
+	if err := json.NewEncoder(&document).Encode(value); err != nil {
+		return err
+	}
+	_, err := writer.Write(appendWarnings(document.Bytes(), pendingWarnings()))
+	return err
+}
+
+// appendWarnings adds a `warnings` member to a JSON object document.
+func appendWarnings(document []byte, warnings []protocol.Warning) []byte {
+	if len(warnings) == 0 {
+		return document
+	}
+	object := bytes.TrimRight(document, "\n")
+	encoded, err := json.Marshal(warnings)
+	if err != nil || len(object) < 2 || object[0] != '{' || object[len(object)-1] != '}' {
+		return document
+	}
+	result := append([]byte(nil), object[:len(object)-1]...)
+	if len(bytes.TrimSpace(object[1:len(object)-1])) > 0 {
+		result = append(result, ',')
+	}
+	result = append(result, `"warnings":`...)
+	result = append(result, encoded...)
+	return append(result, '}', '\n')
+}
+
+// writePendingWarnings prints warnings that no JSON document carried, for
+// example after SQL or text output, as one JSON line.
+func writePendingWarnings(writer io.Writer) {
+	if warnings := pendingWarnings(); len(warnings) > 0 {
+		_ = json.NewEncoder(writer).Encode(struct {
+			Warnings []protocol.Warning `json:"warnings"`
+		}{Warnings: warnings})
+	}
 }
 
 func run() int {
@@ -159,7 +225,7 @@ func run() int {
 		if os.Args[1] == "version" && len(os.Args) > 2 {
 			return writeError("invalid_invocation", errors.New("version does not accept arguments"))
 		}
-		_ = json.NewEncoder(os.Stdout).Encode(struct {
+		_ = writeJSON(os.Stdout, struct {
 			Status string        `json:"status"`
 			Build  buildIdentity `json:"build"`
 		}{Status: "ok", Build: currentBuildIdentity()})
@@ -249,7 +315,7 @@ func runStatusAt(arguments []string, start string) int {
 		if found && len(anchor.Parked) > 0 {
 			status = "parked"
 		}
-		_ = json.NewEncoder(os.Stdout).Encode(struct {
+		_ = writeJSON(os.Stdout, struct {
 			Status string                 `json:"status"`
 			Target string                 `json:"target"`
 			Parked []activeplan.SavedPlan `json:"parked,omitempty"`
@@ -258,7 +324,7 @@ func runStatusAt(arguments []string, start string) int {
 	}
 	historyStatus, err := history.Inspect(root, config.BundleRoot, *targetName, anchor.BundleID)
 	if err != nil {
-		_ = json.NewEncoder(os.Stdout).Encode(struct {
+		_ = writeJSON(os.Stdout, struct {
 			Status   string                  `json:"status"`
 			Target   string                  `json:"target"`
 			Plan     activeplan.Anchor       `json:"plan"`
@@ -287,7 +353,7 @@ func runStatusAt(arguments []string, start string) int {
 			}
 		}
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(struct {
+	_ = writeJSON(os.Stdout, struct {
 		Status       string               `json:"status"`
 		Verification string               `json:"verification"`
 		Target       string               `json:"target"`
@@ -339,7 +405,7 @@ func runHistoryStatusAt(arguments []string, start string) int {
 	}
 	report, err := history.Inspect(filepath.Dir(configPath), config.BundleRoot, *targetName, *bundleID)
 	if err != nil {
-		_ = json.NewEncoder(os.Stdout).Encode(history.StatusReport{
+		_ = writeJSON(os.Stdout, history.StatusReport{
 			Status: "blocked", Target: *targetName,
 			Findings: []history.StatusFinding{{
 				Code: "invalid_history", Message: err.Error(),
@@ -348,7 +414,7 @@ func runHistoryStatusAt(arguments []string, start string) int {
 		})
 		return 4
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(report)
+	_ = writeJSON(os.Stdout, report)
 	if report.Status == "valid" {
 		return 0
 	}
@@ -436,7 +502,7 @@ func runContractAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("contract_check_error", err)
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(report)
+	_ = writeJSON(os.Stdout, report)
 	switch report.Status {
 	case "ready":
 		return 0
@@ -548,7 +614,7 @@ func runDriftAt(arguments []string, start string) int {
 		LiveIgnoreUnmatched: append([]string(nil), observer.LiveIgnoreUnmatched...),
 		ObservedFingerprint: observer.ObservedFingerprint,
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(report)
+	_ = writeJSON(os.Stdout, report)
 	switch report.Outcome {
 	case "drift_free":
 		return 0
@@ -601,7 +667,7 @@ func runHistoryAt(arguments []string, start string) int {
 		return writeError("source_error", fmt.Errorf("environment variable %s is required", adminEnv))
 	}
 	selectors := targetIgnoreSelectors(target, ignores)
-	report, err := historyinit.Run(context.Background(), historyinit.Input{
+	report, err := historyinit.Run(commandContext(), historyinit.Input{
 		Root:            filepath.Dir(configPath),
 		ConfigPath:      configPath,
 		Config:          config,
@@ -621,7 +687,7 @@ func runHistoryAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("history_init_error", err)
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(report)
+	_ = writeJSON(os.Stdout, report)
 	switch report.Outcome {
 	case "initialized":
 		return 0
@@ -713,7 +779,7 @@ func runDevAt(arguments []string, start string) int {
 	if schemaQualifier.set {
 		options.SchemaQualifier = &schemaQualifier.value
 	}
-	report, err := devflow.Run(context.Background(), devflow.Input{
+	report, err := devflow.Run(commandContext(), devflow.Input{
 		Root: filepath.Dir(configPath), TargetName: *targetName, Target: target, DevURL: devURL, AdminURL: scratchURL,
 		Hints: hints, Ignores: targetIgnoreSelectors(target, ignores), RequiredIgnores: sortedUniqueStrings(ignores), PlannerOptions: options,
 	})
@@ -754,7 +820,7 @@ func runDevAt(arguments []string, start string) int {
 		}
 	} else {
 		if result.Status == protocol.Planned && len(result.Statements) == 0 {
-			_ = json.NewEncoder(os.Stdout).Encode(struct {
+			_ = writeJSON(os.Stdout, struct {
 				Status             string   `json:"status"`
 				Changed            bool     `json:"changed"`
 				CurrentFingerprint string   `json:"current_fingerprint"`
@@ -767,7 +833,7 @@ func runDevAt(arguments []string, start string) int {
 				Preserved: result.Preserved, Ignored: result.Ignored,
 			})
 		} else {
-			_ = json.NewEncoder(os.Stdout).Encode(result)
+			_ = writeJSON(os.Stdout, result)
 		}
 	}
 	return resultExitCode(result.Status)
@@ -853,7 +919,7 @@ func runDraftAt(arguments []string, start string) int {
 	if schemaQualifier.set {
 		options.SchemaQualifier = &schemaQualifier.value
 	}
-	report, err := draftflow.Run(context.Background(), draftflow.Input{
+	report, err := draftflow.Run(commandContext(), draftflow.Input{
 		Root:            filepath.Dir(configPath),
 		ConfigPath:      configPath,
 		Config:          config,
@@ -995,7 +1061,7 @@ func runBundleAt(arguments []string, start string) int {
 		if len(chain.Entries) > 0 {
 			head = chain.Entries[len(chain.Entries)-1].Artifact.Manifest.BundleID
 		}
-		_ = json.NewEncoder(os.Stdout).Encode(verify.Report{
+		_ = writeJSON(os.Stdout, verify.Report{
 			Outcome:      "blocked",
 			Target:       *targetName,
 			BundleID:     *bundleID,
@@ -1032,18 +1098,13 @@ func runBundleAt(arguments []string, start string) int {
 		SchemaQualifier:         manifest.Planner.Options.SchemaQualifier,
 		IgnoreExtensionVersions: append([]string(nil), manifest.Planner.Options.IgnoreExtensionVersions...),
 	}
-	ctx := context.Background()
+	ctx := commandContext()
 	export, err := workspace.StartExport(ctx, root, *targetName, target)
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("compile current desired schema: %w", err))
 	}
 	compiled := export.Compiled()
-	// The checkout fingerprint that follows the export is still in progress.
-	// It reads the checkout; this load works only in scratch PostgreSQL.
 	working, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, manifest.Planner.IgnoreSelectors)
-	if settleErr := export.Settle(); settleErr != nil {
-		return writeError("source_error", fmt.Errorf("compile current desired schema: %w", settleErr))
-	}
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("materialize current desired schema: %w", err))
 	}
@@ -1057,7 +1118,7 @@ func runBundleAt(arguments []string, start string) int {
 		if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 			return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 		}
-		_ = json.NewEncoder(os.Stdout).Encode(verify.Report{
+		_ = writeJSON(os.Stdout, verify.Report{
 			Outcome:            "stale",
 			Target:             *targetName,
 			BundleID:           *bundleID,
@@ -1092,7 +1153,7 @@ func runBundleAt(arguments []string, start string) int {
 			if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 				return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 			}
-			_ = json.NewEncoder(os.Stdout).Encode(expandReport)
+			_ = writeJSON(os.Stdout, expandReport)
 			return 4
 		}
 		receipted, receiptErr := bundle.WithExpandCheckpoint(edited.Artifact, expandReport.ObservedFingerprint)
@@ -1197,7 +1258,7 @@ func runBundleAt(arguments []string, start string) int {
 	if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
 		return writeError("source_error", fmt.Errorf("confirm current desired schema: %w", err))
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(report)
+	_ = writeJSON(os.Stdout, report)
 	if report.Outcome == "verified" || report.Outcome == "partial_verified" {
 		return 0
 	}
@@ -1205,7 +1266,7 @@ func runBundleAt(arguments []string, start string) int {
 }
 
 func writeVerifyFinding(target, bundleID, historyHead, through, outcome, code, message, remediation string) int {
-	_ = json.NewEncoder(os.Stdout).Encode(verify.Report{
+	_ = writeJSON(os.Stdout, verify.Report{
 		Outcome:      outcome,
 		Target:       target,
 		BundleID:     bundleID,
@@ -1404,7 +1465,8 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	if adminURL == "" {
 		return writeError("source_error", fmt.Errorf("environment variable %s is required", target.ScratchEnv()))
 	}
-	report, err := draftflow.Run(context.Background(), draftflow.Input{
+	ctx := commandContext()
+	report, err := draftflow.Run(ctx, draftflow.Input{
 		Root: root, ConfigPath: configPath, Config: config, TargetName: *targetName, Target: target,
 		AdminURL: adminURL, BundleID: *bundleID, PlanID: planID, InferBase: true,
 		Create: createBundle, BuildVersion: currentBuildVersion(), BuildIdentity: currentBundleBuildIdentity(), Purpose: *purpose,
@@ -1440,7 +1502,7 @@ func runWorkflowPlanAt(arguments []string, start string) int {
 	// Durable semantic hints are intentionally not forwarded blindly to D -> W.
 	// The source graph can differ from H, so an otherwise valid durable rename
 	// hint may be unused locally. Devflow reports its own scoped ambiguity.
-	development, err := devflow.Run(context.Background(), devflow.Input{
+	development, err := devflow.Run(ctx, devflow.Input{
 		Root: root, TargetName: *targetName, Target: target, DevURL: devURL, AdminURL: adminURL,
 		Hints: devHints, Ignores: targetIgnoreSelectors(target, ignores), RequiredIgnores: sortedUniqueStrings(ignores), PlannerOptions: options,
 		Postconditions: developmentPostconditions(report.DevelopmentPostconditions),
@@ -1892,7 +1954,7 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 			return err
 		}
 		// Never mix an incomplete executable stream with human or JSON data.
-		return json.NewEncoder(os.Stderr).Encode(newWorkflowPlanReport(durable, development))
+		return writeJSON(os.Stderr, newWorkflowPlanReport(durable, development))
 	}
 	if output == "text" {
 		envelope := newWorkflowPlanReport(durable, development)
@@ -1948,7 +2010,7 @@ func writeWorkflowPlanReport(writer io.Writer, output string, durable draftflow.
 		}
 		return nil
 	}
-	return json.NewEncoder(writer).Encode(newWorkflowPlanReport(durable, development))
+	return writeJSON(writer, newWorkflowPlanReport(durable, development))
 }
 
 func renderArgv(argv []string) string {
@@ -2039,7 +2101,7 @@ func failedDevelopmentPostconditions(checks []devflow.PostconditionResult) bool 
 }
 
 func writeWorkflowPlanFinding(target, bundleID, outcome, code, message, remediation string) int {
-	_ = json.NewEncoder(os.Stdout).Encode(struct {
+	_ = writeJSON(os.Stdout, struct {
 		Status   string              `json:"status"`
 		Target   string              `json:"target"`
 		BundleID string              `json:"bundle_id,omitempty"`
@@ -2245,7 +2307,7 @@ func runLowLevelPlan(command string, arguments []string) int {
 			_, _ = fmt.Fprintln(os.Stdout, protocol.RenderSQL(result, ""))
 		}
 	} else {
-		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		if err := writeJSON(os.Stdout, result); err != nil {
 			return writeError("output_error", err)
 		}
 	}
@@ -2306,7 +2368,7 @@ func runConfig(arguments []string) int {
 		Ignored              []string `json:"ignored,omitempty"`
 	}
 	checked := make([]checkedTarget, 0, len(targets))
-	ctx := context.Background()
+	ctx := commandContext()
 	root := filepath.Dir(configPath)
 	for _, targetName := range targets {
 		target := config.Targets[targetName]
@@ -2389,7 +2451,7 @@ func runConfig(arguments []string) int {
 			Ignored: ignored,
 		})
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(struct {
+	_ = writeJSON(os.Stdout, struct {
 		Status        string          `json:"status"`
 		ConfigVersion int             `json:"config_version"`
 		Targets       []checkedTarget `json:"targets"`
@@ -2500,7 +2562,7 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 		if report.CreatedBundle {
 			nextAction = "rerun_without_create_with_hints"
 		}
-		return json.NewEncoder(writer).Encode(struct {
+		return writeJSON(writer, struct {
 			Status          string                      `json:"status"`
 			NextAction      string                      `json:"next_action"`
 			Path            string                      `json:"path,omitempty"`
@@ -2516,7 +2578,7 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 		})
 	}
 	if report.Outcome == string(protocol.NeedsSQLEdits) {
-		return json.NewEncoder(writer).Encode(struct {
+		return writeJSON(writer, struct {
 			Status          string   `json:"status"`
 			NextAction      string   `json:"next_action"`
 			Path            string   `json:"path"`
@@ -2527,7 +2589,7 @@ func writeDraftReport(writer io.Writer, report draftflow.Report, output string) 
 			Edit: report.EditFiles, WrittenReceipts: report.WrittenReceipts,
 		})
 	}
-	return json.NewEncoder(writer).Encode(report)
+	return writeJSON(writer, report)
 }
 
 func analysisFromPlan(plan *protocol.Result) []protocol.DecisionAnalysis {
@@ -2612,7 +2674,7 @@ func shellQuote(value string) string {
 }
 
 func writeDecisionEnvelope(writer io.Writer, command []string, flagName string, decisions []protocol.Decision, analysis []protocol.DecisionAnalysis, guidance []protocol.Guidance) error {
-	return json.NewEncoder(writer).Encode(struct {
+	return writeJSON(writer, struct {
 		Status     string                      `json:"status"`
 		NextAction string                      `json:"next_action"`
 		Decisions  []protocol.Decision         `json:"decisions"`
@@ -2641,7 +2703,7 @@ func writeError(code string, err error) int {
 	if code == "invalid_config" && errors.Is(err, os.ErrNotExist) {
 		err = fmt.Errorf("%w; create .onwardpg.toml (see .onwardpg.example.toml), then run onwardpg config check", err)
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(protocol.ErrorDiagnostic(code, err))
+	_ = writeJSON(os.Stdout, protocol.ErrorDiagnostic(code, err))
 	return 1
 }
 

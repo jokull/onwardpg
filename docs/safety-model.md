@@ -205,3 +205,97 @@ The planner cannot prove data validity, safe casts, backfills, lock duration,
 or application compatibility. Reviewers own those operational decisions. Test
 the generated plan on a clone and require an empty residual diff after it is
 applied.
+
+## The schema export and the checkout
+
+onwardpg does not check what `schema_command` writes to the checkout. Earlier
+versions did. They read the bytes of every file outside `.git` and
+`node_modules` before and after each export run, and stopped with `DDL export
+command modified repository inputs` when anything differed. That check is
+removed. This section states what carries the guarantee now, what the removed
+check added to it, and what is no longer caught.
+
+### What carries the guarantee
+
+A plan, a bundle, and a verification depend on the DDL that the export prints.
+They depend on nothing else that the export does. onwardpg holds that output
+to two rules:
+
+- **The output must be the same twice.** A command runs the export at its start
+  and again immediately before its result. The two outputs must be
+  byte-identical. An export that is not deterministic stops the command. A
+  schema that changes while the command works stops the command, or is loaded
+  and proved again by catalog fingerprint. See
+  [when the export runs](schema-inputs.md#when-the-export-runs).
+- **The result is proved on PostgreSQL.** The DDL is loaded into a disposable
+  database, the history is replayed in another, and the two catalogs must be
+  equal.
+
+`verify --check` on a clean checkout, as CI runs it, applies both rules again
+to the committed bundle: it runs the export, requires the bundle to be the
+head, and compares the desired fingerprint.
+
+### What the removed check added
+
+`schema_command` is code that the project configured and trusts. The check was
+never a defense against a hostile command. Such a command can print false DDL,
+write outside the checkout, or write into `.git` or `node_modules`, which the
+check did not read.
+
+Beyond the two rules above, the check caught one thing: a command that writes
+files to the checkout while it prints the same DDL each time. That write does
+not make a plan wrong.
+
+The check had two costs:
+
+- It walked the checkout four times for each command. In a clean checkout of
+  50,000 files that was 8 to 10 seconds of a `plan` of about 25 seconds. In a
+  long-lived checkout with 1.3 million paths and 24 GB of build caches, package
+  stores, build outputs, and nested work trees, one walk took 96 seconds.
+- It stopped the command when any other process wrote any file during an
+  export run: a build, a development server, another agent in the same
+  checkout. The export itself had written nothing.
+
+The walk was held in memory for one command. No bundle, manifest, receipt, or
+digest ever contained it, so its removal changes no stored format.
+
+### What replaces it: a warning
+
+In a git work tree, a command that runs `schema_command` reads the git status
+before the first export run and after the last one
+(`git status --porcelain=v2 -z --untracked-files=all`). If the status of a
+path changed, the result document carries a `warnings` entry with the code
+`export_side_effects` and the paths: see
+[warnings](protocol.md#warnings). The warning never changes the status or the
+exit code of the command. It exists only in the output of the command. No file
+that onwardpg writes contains it.
+
+The status query takes no optional lock (`GIT_OPTIONAL_LOCKS=0`). It does not
+refresh or write the git index, and it does not make another git command in
+the same work tree fail.
+
+The warning is an observation, not a check:
+
+- It needs a git work tree and a `git` executable. Without them there is no
+  observation and no error. A status query that fails, or that takes longer
+  than 10 seconds, is ignored.
+- Files that git ignores are not reported.
+- Git status says that a file differs from the index. It does not say how. A
+  second write to a file that was already modified or untracked before the
+  command is not reported.
+- It cannot tell a write by the export command from a write by another
+  process, or by the developer, during the same command.
+- No warning is therefore not a proof that the export command is read-only.
+
+### What is no longer caught
+
+- **An export command that writes to the checkout is not stopped.** Write the
+  schema only to standard output. A command that writes a file and reads it in
+  a later run (a cache) can give an output that a clean checkout does not
+  give. Within one command the two runs must still agree. Across commands and
+  machines, the `verify --check` run on a clean checkout rejects a bundle
+  whose desired schema is not what the sources export there. Do not merge a
+  bundle without that run.
+- **A file that changes during a command does not stop it.** If the change
+  alters the export output, the comparison of the two runs stops the command,
+  as before. If it does not, the result does not depend on it.

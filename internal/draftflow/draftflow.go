@@ -340,8 +340,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 	}
 	// The base history replay and the schema export do not read each other's
 	// results, so they run at the same time. The replay works only in its own
-	// scratch database and writes nothing to the checkout that the export
-	// fingerprints. Failures keep their order: a replay failure is reported
+	// scratch database. Failures keep their order: a replay failure is reported
 	// before an export failure, and it stops an export that is still running.
 	exportCtx, stopExport := context.WithCancel(ctx)
 	defer stopExport()
@@ -357,10 +356,8 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 	current, err := source.LoadDDLGraphForComparison(ctx, replay.DDL, replay.Provenance, input.AdminURL, input.Ignores)
 	if err != nil {
 		stopExport()
-		if result := <-exported; result.export != nil {
-			// Let the stopped checkout fingerprint end before this returns.
-			_ = result.export.Settle()
-		}
+		// Let the stopped export end before this returns.
+		<-exported
 		return report, fmt.Errorf("replay base history: %w", err)
 	}
 	result := <-exported
@@ -370,12 +367,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 	export := result.export
 	*started = export
 	compiled := export.Compiled()
-	// The checkout fingerprint that follows the export is still in progress.
-	// It reads the checkout; this load works only in scratch PostgreSQL.
 	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
-	if settleErr := export.Settle(); settleErr != nil {
-		return report, fmt.Errorf("compile desired schema: %w", settleErr)
-	}
 	if err != nil {
 		return report, fmt.Errorf("materialize desired schema: %w", err)
 	}

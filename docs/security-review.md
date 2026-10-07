@@ -19,8 +19,10 @@ not a third-party audit or a production-safety certification.
   database's encoding, locale provider, locale, collation, and ctype, and
   rejects a collation-version mismatch.
 - `schema_command` is trusted project code, invoked directly without a shell.
-  It is checked for deterministic output and observable checkout mutations,
-  but it is not an operating-system sandbox.
+  It is checked for deterministic output. It is not an operating-system
+  sandbox, and onwardpg does not check what the command writes; in a git work
+  tree it reports files whose status changed as a non-blocking warning. See
+  [the schema export and the checkout](safety-model.md#the-schema-export-and-the-checkout).
 - Generated SQL and edited phase SQL are untrusted until clone verification
   succeeds. Verification proves declared catalog convergence and assertions;
   it does not prove production traffic safety.
@@ -43,7 +45,7 @@ not a third-party audit or a production-safety certification.
 - Configuration files and exporter reads are bounded. Both schema input paths
   accept at most 64 MiB; command output is monitored while the process runs,
   and each export has a five-minute deadline. Stdout remains a regular file.
-  Checkout hashing streams input. The monitor is not a strict disk quota;
+  The monitor is not a strict disk quota;
   see [exporter limits](exporter-limits.md) for process and platform boundaries.
 - User-authored Boolean checks use one shared executor: a read-only transaction
   or savepoint, pre-execution Parse/Describe, forced extended protocol, exactly

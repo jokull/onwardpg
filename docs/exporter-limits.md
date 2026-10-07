@@ -1,6 +1,6 @@
 # Schema exporter resource limits
 
-`schema_file` and `schema_command` each accept at most 64 MiB of DDL. File reads stop after 64 MiB plus one byte, so an oversized file cannot be loaded in full. Checkout fingerprints stream file contents through SHA-256 instead of loading every file into memory. Up to 16 files are read at the same time; the fingerprint does not depend on the order in which the reads finish.
+`schema_file` and `schema_command` each accept at most 64 MiB of DDL. File reads stop after 64 MiB plus one byte, so an oversized file cannot be loaded in full.
 
 Each `schema_command` run has a five-minute deadline, in addition to the caller's deadline. The command runs at least twice in each CLI command to check that its output is deterministic and did not change while the command worked; see [when the export runs](schema-inputs.md#when-the-export-runs). Stdout remains a regular temporary file because some exporters truncate output when stdout is a pipe. A watcher checks the file every 20 ms and cancels the command when it exceeds 64 MiB. Stderr is retained up to 1 MiB.
 
