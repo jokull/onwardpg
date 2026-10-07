@@ -51,7 +51,7 @@ func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores, li
 	if err != nil {
 		return nil, ObserverProjection{}, nil, fmt.Errorf("inspect observer: %w", err)
 	}
-	report := ObserverProjection{Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode()}
+	report := observer.projection()
 	if finding != nil {
 		return nil, report, finding, nil
 	}

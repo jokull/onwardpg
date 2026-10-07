@@ -92,7 +92,7 @@ func TestCatalogInspectionGivesEachValidObserverTheGraphOfTheOwner(t *testing.T)
 			"GRANT CONNECT ON DATABASE " + pgx.Identifier{database.Name}.Sanitize() + " TO " + quoted(suffix) + ";"
 	}
 	roles := []string{
-		"bare", "reader", "monitor", "grants", "dedicated", "application",
+		"bare", "reader", "monitor", "bypass", "grants", "dedicated", "application",
 		"writer", "creator", "administrator", "person", "impersonator", "nested_grants", "nested",
 	}
 	defer func() {
@@ -112,6 +112,8 @@ func TestCatalogInspectionGivesEachValidObserverTheGraphOfTheOwner(t *testing.T)
 		login("bare", "") +
 		login("reader", "IN ROLE pg_read_all_data") +
 		login("monitor", "IN ROLE pg_monitor, pg_read_all_data") +
+		// A reader that row-level security hides no row from. It can write nothing.
+		login("bypass", "IN ROLE pg_read_all_data, pg_read_all_stats") + "ALTER ROLE " + quoted("bypass") + " BYPASSRLS;" +
 		"CREATE ROLE " + quoted("grants") + " NOLOGIN" + plain + ";" +
 		login("dedicated", "IN ROLE "+quoted("grants")+", pg_read_all_stats") +
 		// Roles that the guard must refuse.
@@ -185,12 +187,16 @@ func TestCatalogInspectionGivesEachValidObserverTheGraphOfTheOwner(t *testing.T)
 		mode string
 		// projected is the number of grants removed as observer access.
 		projected int
+		bypassRLS bool
 	}{
 		// No membership and no grant: not even USAGE on the schemas.
 		{role: "bare", mode: "dedicated_read_only"},
 		{role: "reader", mode: "predefined_read_role"},
 		// pg_monitor holds three predefined read-only roles itself.
 		{role: "monitor", mode: "predefined_read_role"},
+		// Row-level security is on for private.orders. The catalog graph is
+		// the same for a role that it applies to and for a role that bypasses it.
+		{role: "bypass", mode: "predefined_read_role", bypassRLS: true},
 		// The exact grants of the dedicated role are removed and reported.
 		{role: "dedicated", mode: "predefined_read_role", projected: 2},
 	} {
@@ -202,8 +208,8 @@ func TestCatalogInspectionGivesEachValidObserverTheGraphOfTheOwner(t *testing.T)
 			if finding != nil {
 				t.Fatalf("finding = %#v", finding)
 			}
-			if projection.Mode != test.mode || projection.Role != name(test.role) || projection.DatabaseOwner != database.Role {
-				t.Fatalf("projection = %#v, want mode %s", projection, test.mode)
+			if projection.Mode != test.mode || projection.Role != name(test.role) || projection.DatabaseOwner != database.Role || projection.BypassRLS != test.bypassRLS {
+				t.Fatalf("projection = %#v, want mode %s and bypass_rls %t", projection, test.mode, test.bypassRLS)
 			}
 			observed := snapshot
 			if test.projected == 0 {
@@ -268,13 +274,100 @@ func TestCatalogInspectionGivesEachValidObserverTheGraphOfTheOwner(t *testing.T)
 		})
 	}
 
+	// A valid role with one privilege to write, by any route, is refused. The
+	// role with BYPASSRLS is the important case: with a write privilege it
+	// could change rows that policies protect.
+	adminConfig, err := pgx.ParseConfig(adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminConfig.Database = database.Name
+	adminDatabase, err := pgx.ConnectConfig(ctx, adminConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminDatabase.Close(context.Background())
+	for _, test := range []struct {
+		name    string
+		role    string
+		grant   string
+		revoke  string
+		message string
+	}{
+		{
+			name: "direct INSERT with BYPASSRLS", role: "bypass",
+			grant:   "GRANT INSERT ON private.orders TO " + quoted("bypass"),
+			revoke:  "REVOKE INSERT ON private.orders FROM " + quoted("bypass"),
+			message: name("bypass") + " can write to relation private.orders",
+		},
+		{
+			name: "column UPDATE", role: "reader",
+			grant:   "GRANT UPDATE (nickname) ON app.accounts TO " + quoted("reader"),
+			revoke:  "REVOKE UPDATE (nickname) ON app.accounts FROM " + quoted("reader"),
+			message: name("reader") + " can write to relation app.accounts",
+		},
+		{
+			name: "sequence USAGE", role: "reader",
+			grant:   "GRANT USAGE ON SEQUENCE app.ticket_seq TO " + quoted("reader"),
+			revoke:  "REVOKE USAGE ON SEQUENCE app.ticket_seq FROM " + quoted("reader"),
+			message: name("reader") + " can change sequence app.ticket_seq",
+		},
+		{
+			name: "DELETE granted to PUBLIC", role: "bare",
+			grant:   "GRANT DELETE ON app.accounts TO PUBLIC",
+			revoke:  "REVOKE DELETE ON app.accounts FROM PUBLIC",
+			message: name("bare") + " can write to relation app.accounts",
+		},
+		{
+			name: "TRUNCATE granted to a predefined role", role: "monitor",
+			grant:   "GRANT TRUNCATE ON app.accounts TO pg_read_all_stats",
+			revoke:  "REVOKE TRUNCATE ON app.accounts FROM pg_read_all_stats",
+			message: "pg_read_all_stats can write to relation app.accounts",
+		},
+		{
+			name: "CREATE on the database", role: "reader",
+			grant:   "GRANT CREATE ON DATABASE " + pgx.Identifier{database.Name}.Sanitize() + " TO " + quoted("reader"),
+			revoke:  "REVOKE CREATE ON DATABASE " + pgx.Identifier{database.Name}.Sanitize() + " FROM " + quoted("reader"),
+			message: name("reader") + " has CREATE on database",
+		},
+		{
+			name: "ownership of an object", role: "bypass",
+			grant:   "CREATE SCHEMA owned_by_observer AUTHORIZATION " + quoted("bypass"),
+			revoke:  "DROP SCHEMA owned_by_observer",
+			message: name("bypass") + " owns schema owned_by_observer",
+		},
+	} {
+		t.Run(test.name+" is refused", func(t *testing.T) {
+			if _, err := adminDatabase.Exec(ctx, test.grant); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if _, err := adminDatabase.Exec(context.Background(), test.revoke); err != nil {
+					t.Fatal(err)
+				}
+			}()
+			snapshot, _, finding, err := InspectObserverCatalog(ctx, urlFor(test.role), nil, nil, 10*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot != nil || finding == nil || finding.Code != "observer_access_policy_unsafe" ||
+				!strings.HasPrefix(finding.Message, "observer is not read-only: ") || !strings.Contains(finding.Message, test.message) {
+				t.Fatalf("finding = %#v", finding)
+			}
+		})
+	}
+	// Each grant is gone again: the roles are valid as before.
+	if _, _, finding, err := InspectObserverCatalog(ctx, urlFor("bypass"), nil, nil, 10*time.Second); err != nil || finding != nil {
+		t.Fatalf("observer after the grants were revoked: %v, %#v", err, finding)
+	}
+
 	// A role that holds CREATE on an application schema through a predefined
 	// role is not read-only.
 	if _, err := owner.Exec(ctx, "GRANT CREATE ON SCHEMA app TO pg_read_all_data"); err != nil {
 		t.Fatal(err)
 	}
 	_, _, finding, err = InspectObserverCatalog(ctx, urlFor("reader"), nil, nil, 10*time.Second)
-	if err != nil || finding == nil || finding.Code != "observer_access_policy_unsafe" || !strings.Contains(finding.Message, "pg_read_all_data:app:CREATE") {
+	if err != nil || finding == nil || finding.Code != "observer_access_policy_unsafe" || !strings.Contains(finding.Message, "pg_read_all_data has CREATE on schema app") {
 		t.Fatalf("CREATE through a predefined role: %v, %#v", err, finding)
 	}
 }

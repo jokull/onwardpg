@@ -45,10 +45,15 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   `observer_role_elevated`, and only the database owner or a role with direct
   grants on every relation passed. The result reports
   `observer.mode: predefined_read_role`. The role must still have none of
-  `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, and `BYPASSRLS`. A
-  membership in any other predefined role (for example `pg_write_all_data`), in
-  a role that can log in, or with `ADMIN OPTION` is still refused. See the
+  `SUPERUSER`, `CREATEDB`, `CREATEROLE`, and `REPLICATION`. A membership in any
+  other predefined role (for example `pg_write_all_data`), in a role that can
+  log in, or with `ADMIN OPTION` is still refused. See the
   [observer role](docs/cli.md#observer-role).
+- An observer login role can have `BYPASSRLS`, reported as
+  `observer.bypass_rls: true`. Row-level security with no policy for a reader
+  hides every row from a `pg_read_all_data` role with no error, so a team
+  needs `BYPASSRLS` on its read-only role. Before, `BYPASSRLS` stopped the
+  command with `observer_role_elevated`.
 - The error of `drift check` and the findings of `contract check` for a
   refused or incomplete observer carry `next_actions` with the SQL for the two
   valid forms of role.
@@ -60,6 +65,16 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ### Changed
 
+- The observer guard now proves that a role that is not the database owner is
+  read-only. It reads the effective privileges of the role and of each role
+  that it is a member of, and stops with `observer_access_policy_unsafe` when
+  one of them can write to a relation or a sequence, has `CREATE` on the
+  database or on a schema, or owns an object. A grant to `PUBLIC` counts.
+  Before, the guard read only the schema grants and the table grants of the
+  observer's own roles, so a write privilege through `PUBLIC` (for example
+  `CREATE` on `public` in a database made before PostgreSQL 15) or on a
+  sequence passed. An observer that was accepted with such a privilege is now
+  refused; revoke the privilege or use the database owner.
 - A history replay for `drift check`, `plan`, or `draft` now stops when the
   scratch server is not the PostgreSQL major of the history receipts, as
   `verify` does. It also runs the manual verification queries and the

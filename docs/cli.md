@@ -436,19 +436,48 @@ connection. The result names the kind in `observer.mode`.
 | `dedicated_read_only` | A login role with no membership, or with membership only in dedicated `NOLOGIN` roles. |
 
 A role that is not the database owner must be `NOSUPERUSER`, `NOCREATEDB`,
-`NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`. Each role that it is a
-member of, directly or through another role, must be one of these:
+`NOCREATEROLE`, and `NOREPLICATION`. Each role that it is a member of, directly
+or through another role, must be one of these:
 
 - a predefined read-only role: `pg_read_all_data`, `pg_monitor`,
   `pg_read_all_settings`, `pg_read_all_stats`, or `pg_stat_scan_tables`;
 - a dedicated role that it is a direct member of: not built in, `NOLOGIN`,
-  without those five capabilities, and without memberships of its own.
+  without `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, or
+  `BYPASSRLS`, and without memberships of its own.
 
-No membership can have `ADMIN OPTION`. No such role can hold `CREATE` or a
-grant option on an application schema. Any other role stops the command with
-`observer_role_elevated` or `observer_access_policy_unsafe` (`drift check`
-prefixes the code with `drift_`). The error of `drift check` and the finding of
-`contract check` carry `next_actions` with the SQL for a valid role.
+No membership can have `ADMIN OPTION`. A role that breaks one of these rules
+stops the command with `observer_role_elevated`.
+
+The role must also be read-only in the database. The guard asks PostgreSQL for
+the effective privileges of the role and of each role that it is a member of,
+so a direct grant, a grant to one of its roles, and a grant to `PUBLIC` all
+count. The command stops with `observer_access_policy_unsafe`, and names each
+case, when one of them:
+
+- has `CREATE` on the database or on a schema, or a grant option on a schema;
+- has `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, or
+  (PostgreSQL 17 and later) `MAINTAIN` on a table or view, or `INSERT`,
+  `UPDATE`, or `REFERENCES` on a column;
+- has `USAGE` or `UPDATE` on a sequence;
+- owns an object in the database, or owns a database or a tablespace.
+
+The guard does not examine what a function does when the role calls it, and it
+cannot see the other databases of the cluster.
+
+The observer login role can have `BYPASSRLS`. Row-level security that has no
+policy for a reader hides every row from a `pg_read_all_data` role, with no
+error. `BYPASSRLS` shows those rows. On a role that the guard proved
+read-only, it adds reading only, so it is not an elevation. The result reports
+it as `observer.bypass_rls: true`. `drift check` does not need it: row-level
+security applies to the rows of user tables, never to system catalogs, so the
+catalog inspection gives the same graph with and without it. `contract check`
+does need complete row visibility for its data gates; a `BYPASSRLS` observer
+has it, and a reader that policies filter is stopped with
+`observer_rls_incomplete`.
+
+`drift check` prefixes each of these codes with `drift_`. The error of
+`drift check` and the finding of `contract check` carry `next_actions` with the
+SQL for a valid role.
 
 What the role must be able to read depends on the command:
 
@@ -465,15 +494,17 @@ What the role must be able to read depends on the command:
   schema and `SELECT` on each table and view of the database, including
   objects that an ignore selector excludes, or the result is
   `observer_access_incomplete`. `pg_read_all_data` gives that access. It does
-  not bypass row-level security.
+  not bypass row-level security; add `BYPASSRLS` for that.
 
 The simplest valid role is a member of `pg_read_all_data`:
 
 ~~~sql
 CREATE ROLE onwardpg_observer LOGIN PASSWORD '...'
-  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
   IN ROLE pg_read_all_data;
 GRANT CONNECT ON DATABASE app TO onwardpg_observer;
+-- Only when row-level security hides rows from the role:
+ALTER ROLE onwardpg_observer BYPASSRLS;
 ~~~
 
 On a managed provider, create a role that inherits `pg_read_all_data` with the
@@ -492,7 +523,7 @@ The second form gets its access from a dedicated role:
 CREATE ROLE onwardpg_observer_grants NOLOGIN
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 CREATE ROLE onwardpg_observer LOGIN PASSWORD '...'
-  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
   IN ROLE onwardpg_observer_grants;
 GRANT CONNECT ON DATABASE app TO onwardpg_observer;
 -- contract check only; repeat for each application schema:

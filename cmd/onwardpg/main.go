@@ -611,7 +611,7 @@ func runDriftAt(arguments []string, start string) int {
 			NextActions []contractcheck.NextAction `json:"next_actions,omitempty"`
 		}{
 			Diagnostic:  protocol.ErrorDiagnostic("drift_"+observerFinding.Code, errors.New(message)),
-			Observer:    &driftcheck.Observer{Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode},
+			Observer:    &driftcheck.Observer{Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode, BypassRLS: observer.BypassRLS},
 			NextActions: observerFinding.NextActions,
 		})
 		return 1
@@ -630,7 +630,7 @@ func runDriftAt(arguments []string, start string) int {
 		return writeError("drift_error", err)
 	}
 	report.Observer = &driftcheck.Observer{
-		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode,
+		Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode, BypassRLS: observer.BypassRLS,
 		ProjectedAccess:     append([]string(nil), observer.ProjectedAccess...),
 		LiveIgnored:         append([]string(nil), observer.LiveIgnored...),
 		LiveIgnoreUnmatched: append([]string(nil), observer.LiveIgnoreUnmatched...),

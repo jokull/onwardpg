@@ -49,7 +49,7 @@ func TestDriftCheckRunsAsReadOnlyRolesAndRefusesAWrongRoleBeforeReplayOnPostgreS
 	const plain = " NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
 	prefix := "onwardpg_drift_" + randomToken(t)[:12] + "_"
 	role := func(suffix string) string { return pgx.Identifier{prefix + suffix}.Sanitize() }
-	suffixes := []string{"provider", "bare", "reader", "writer"}
+	suffixes := []string{"provider", "bare", "reader", "bypass", "writer"}
 	defer func() {
 		// The provider owns objects in the live database. Drop them first.
 		_, _ = live.Exec(context.Background(), "DROP SCHEMA IF EXISTS provider_ext CASCADE")
@@ -61,6 +61,9 @@ func TestDriftCheckRunsAsReadOnlyRolesAndRefusesAWrongRoleBeforeReplayOnPostgreS
 		"CREATE ROLE "+role("provider")+" NOLOGIN"+plain+";"+
 			"CREATE ROLE "+role("bare")+" LOGIN PASSWORD '"+password+"'"+plain+";"+
 			"CREATE ROLE "+role("reader")+" LOGIN PASSWORD '"+password+"'"+plain+" IN ROLE pg_read_all_data;"+
+			// The role of a team whose tables have row-level security with
+			// no policy for a reader: read-only memberships and BYPASSRLS.
+			"CREATE ROLE "+role("bypass")+" LOGIN PASSWORD '"+password+"' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS IN ROLE pg_read_all_data, pg_read_all_stats;"+
 			"CREATE ROLE "+role("writer")+" LOGIN PASSWORD '"+password+"'"+plain+" IN ROLE pg_read_all_data, pg_write_all_data;"); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +96,7 @@ scratch_database_env = "` + scratchEnv + `"
 	// No server listens here: a command that reaches the replay fails on it.
 	t.Setenv("ONWARDPG_TEST_NO_SCRATCH_URL", "postgres://onwardpg@127.0.0.1:1/onwardpg?sslmode=disable&connect_timeout=2")
 	writeTestFile(t, repository, "no-scratch.toml", config("ONWARDPG_TEST_NO_SCRATCH_URL", true))
-	ddl := "CREATE SCHEMA app;\nCREATE TABLE app.users (id bigint PRIMARY KEY, email text);\n"
+	ddl := "CREATE SCHEMA app;\nCREATE TABLE app.users (id bigint PRIMARY KEY, email text);\nALTER TABLE app.users ENABLE ROW LEVEL SECURITY;\n"
 	writeTestFile(t, repository, "schema.sql", ddl)
 	if initialized := captureStdout(t, func() int {
 		return runInitAt([]string{"--target", "primary"}, repository)
@@ -111,6 +114,25 @@ scratch_database_env = "` + scratchEnv + `"
 	var usable bool
 	if err := live.QueryRow(ctx, "SELECT has_schema_privilege($1, 'app', 'USAGE') OR has_schema_privilege($1, 'provider_ext', 'USAGE') OR has_table_privilege($1, 'app.users', 'SELECT')", prefix+"bare").Scan(&usable); err != nil || usable {
 		t.Fatalf("the bare observer has access to an application or provider object: %t, %v", usable, err)
+	}
+
+	// Row-level security without a policy hides each row from a plain
+	// reader, with no error. BYPASSRLS shows them. Neither changes what the
+	// catalog holds.
+	if _, err := live.Exec(ctx, "INSERT INTO app.users VALUES (1, 'a@example.com')"); err != nil {
+		t.Fatal(err)
+	}
+	for suffix, want := range map[string]int{"reader": 0, "bypass": 1} {
+		connection, err := pgx.Connect(ctx, urlFor(suffix))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var visible int
+		err = connection.QueryRow(ctx, "SELECT count(*) FROM app.users").Scan(&visible)
+		_ = connection.Close(ctx)
+		if err != nil || visible != want {
+			t.Fatalf("%s reads %d rows of app.users, want %d: %v", suffix, visible, want, err)
+		}
 	}
 
 	type result struct {
@@ -163,16 +185,34 @@ scratch_database_env = "` + scratchEnv + `"
 
 	// --ignore removes the objects. Nothing asks for access to them.
 	ignores := []string{"--ignore", "schema:provider_ext", "--ignore", "table:provider_ext.listing"}
-	for suffix, mode := range map[string]string{"bare": "dedicated_read_only", "reader": "predefined_read_role"} {
+	for suffix, mode := range map[string]string{"bare": "dedicated_read_only", "reader": "predefined_read_role", "bypass": "predefined_read_role"} {
 		ignored := check(suffix, "acknowledged.toml", ignores...)
 		if ignored.code != 0 || ignored.report.Outcome != "drift_free" || len(ignored.report.Differences) != 0 ||
 			ignored.report.ExpectedFingerprint != ignored.report.ActualFingerprint ||
 			!slices.Contains(ignored.report.Ignored, "schema:provider_ext") || !slices.Contains(ignored.report.Ignored, "table:provider_ext.listing") {
 			t.Fatalf("%s observer with --ignore = %d, %s", suffix, ignored.code, ignored.stdout)
 		}
-		if ignored.report.Observer == nil || ignored.report.Observer.Mode != mode || ignored.report.Observer.Role != prefix+suffix {
-			t.Fatalf("%s observer = %#v, want mode %s", suffix, ignored.report.Observer, mode)
+		if ignored.report.Observer == nil || ignored.report.Observer.Mode != mode || ignored.report.Observer.Role != prefix+suffix ||
+			ignored.report.Observer.BypassRLS != (suffix == "bypass") || strings.Contains(ignored.stdout, `"bypass_rls":true`) != (suffix == "bypass") {
+			t.Fatalf("%s observer = %s, want mode %s", suffix, ignored.stdout, mode)
 		}
+	}
+
+	// The same role with one direct INSERT grant can change rows that
+	// policies protect. The guard refuses it, also before the replay.
+	if _, err := live.Exec(ctx, "GRANT INSERT ON app.users TO "+role("bypass")); err != nil {
+		t.Fatal(err)
+	}
+	withInsert := captureStdout(t, func() int {
+		return runDriftAt(append([]string{"check", "--target", "primary", "--config", "no-scratch.toml", "--database", urlFor("bypass")}, ignores...), repository)
+	})
+	if withInsert.code != 1 || !strings.Contains(withInsert.stdout, `"code":"drift_observer_access_policy_unsafe"`) ||
+		!strings.Contains(withInsert.stdout, "observer is not read-only: ") || !strings.Contains(withInsert.stdout, "can write to relation app.users") ||
+		!strings.Contains(withInsert.stdout, `"bypass_rls":true`) {
+		t.Fatalf("BYPASSRLS role with an INSERT grant = %d, %s", withInsert.code, withInsert.stdout)
+	}
+	if _, err := live.Exec(ctx, "REVOKE INSERT ON app.users FROM "+role("bypass")); err != nil {
+		t.Fatal(err)
 	}
 
 	// A role that can write is refused. The scratch server of this

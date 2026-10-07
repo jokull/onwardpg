@@ -70,9 +70,13 @@ type NextAction struct {
 }
 
 type ObserverProjection struct {
-	Role            string   `json:"role"`
-	DatabaseOwner   string   `json:"database_owner"`
-	Mode            string   `json:"mode"`
+	Role          string `json:"role"`
+	DatabaseOwner string `json:"database_owner"`
+	Mode          string `json:"mode"`
+	// BypassRLS reports that the observer role has BYPASSRLS. On a role that
+	// the guard accepted, it adds reading only: the role sees the rows that
+	// row-level security hides from other readers.
+	BypassRLS       bool     `json:"bypass_rls,omitempty"`
 	ProjectedAccess []string `json:"projected_access,omitempty"`
 	// LiveIgnored lists the unsupported-state selectors, observed in this
 	// catalog, that the target's live_ignore list acknowledged. They are
@@ -174,6 +178,12 @@ type observerContext struct {
 	// PredefinedRoles are the predefined read-only roles that the observer
 	// is a member of, directly or through another of them.
 	PredefinedRoles []string
+	// BypassRLS is the BYPASSRLS attribute of the observer role.
+	BypassRLS bool
+}
+
+func (o observerContext) projection() ObserverProjection {
+	return ObserverProjection{Role: o.Role, DatabaseOwner: o.DatabaseOwner, Mode: o.Mode(), BypassRLS: o.BypassRLS}
 }
 
 func (o observerContext) Mode() string {
@@ -200,7 +210,7 @@ WITH RECURSIVE held AS (
   JOIN held ON held.roleid = membership.member
 )`
 
-const observerRoleRule = "use the database owner, or a login role that is NOSUPERUSER/NOCREATEDB/NOCREATEROLE/NOREPLICATION/NOBYPASSRLS and whose memberships, without ADMIN OPTION, are only predefined read-only roles (pg_read_all_data, pg_monitor, pg_read_all_settings, pg_read_all_stats, pg_stat_scan_tables) or dedicated NOLOGIN roles that have no capabilities and no memberships of their own"
+const observerRoleRule = "use the database owner, or a login role that is NOSUPERUSER/NOCREATEDB/NOCREATEROLE/NOREPLICATION (BYPASSRLS is permitted) and whose memberships, without ADMIN OPTION, are only predefined read-only roles (pg_read_all_data, pg_monitor, pg_read_all_settings, pg_read_all_stats, pg_stat_scan_tables) or dedicated NOLOGIN roles that have no capabilities and no memberships of their own"
 
 func inspectObserver(ctx context.Context, tx pgx.Tx, access observerAccess) (observerContext, *Finding, error) {
 	var observer observerContext
@@ -220,15 +230,20 @@ WHERE d.datname = current_database()`).Scan(
 	}
 	observer.ContextualUnsupported = make(map[string]bool)
 	observer.AccessRoles = map[string]bool{observer.Role: true}
+	observer.BypassRLS = bypassRLS
 	if observer.Role == observer.DatabaseOwner {
 		return observer, nil, nil
 	}
 	roleActions := observerRoleActions(database, access)
 
+	// BYPASSRLS is not in this list. It lets a role read the rows that
+	// row-level security hides, and a team needs that to read tables whose
+	// policies give a plain reader no row. It adds no privilege to write.
+	// requireReadOnly below proves that the role has none by another route.
 	var elevated []string
 	for name, enabled := range map[string]bool{
 		"SUPERUSER": superuser, "CREATEDB": createDB, "CREATEROLE": createRole,
-		"REPLICATION": replication, "BYPASSRLS": bypassRLS,
+		"REPLICATION": replication,
 	} {
 		if enabled {
 			elevated = append(elevated, name)
@@ -314,6 +329,13 @@ ORDER BY parent.rolname, member.rolname, held.admin_option`)
 	}
 	sort.Strings(observer.PredefinedRoles)
 
+	finding, err := requireReadOnly(ctx, tx)
+	if err != nil || finding != nil {
+		return observer, finding, err
+	}
+
+	// requireReadOnly refused CREATE. This query still refuses a grant option
+	// on USAGE, which lets the holder give schema access to other roles.
 	var unsafeSchemaAccess []string
 	rows, err := tx.Query(ctx, heldRolesCTE+`, access_roles AS (
   SELECT oid FROM pg_roles WHERE rolname = current_user
@@ -419,15 +441,96 @@ ORDER BY 1`)
 	return observer, nil, nil
 }
 
+// requireReadOnly proves that the observer cannot write or change the schema
+// of this database by any route. It asks PostgreSQL for the effective
+// privileges of the observer and of each role that it is a member of, so a
+// direct grant, a grant to one of its roles, and a grant to PUBLIC all count.
+// It also refuses ownership: an owner can do anything to its object.
+//
+// The check covers the database, each schema, and each relation and sequence
+// outside the system schemas. It does not cover what a function does when the
+// observer calls it, and it cannot see another database of the cluster.
+func requireReadOnly(ctx context.Context, tx pgx.Tx) (*Finding, error) {
+	var version int
+	if err := tx.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
+		return nil, err
+	}
+	// MAINTAIN (VACUUM, REINDEX, REFRESH MATERIALIZED VIEW, LOCK TABLE) is a
+	// privilege from PostgreSQL 17.
+	relationPrivileges := "INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER"
+	if version >= 170000 {
+		relationPrivileges += ", MAINTAIN"
+	}
+	const limit = 20
+	rows, err := tx.Query(ctx, heldRolesCTE+`, identity AS (
+  SELECT oid, rolname FROM pg_roles WHERE rolname = current_user
+  UNION
+  SELECT role.oid, role.rolname FROM held JOIN pg_roles role ON role.oid = held.roleid
+), this_database AS (
+  SELECT oid FROM pg_database WHERE datname = current_database()
+)
+SELECT quote_ident(i.rolname) || ' has CREATE on database ' || quote_ident(current_database())
+FROM identity i
+WHERE has_database_privilege(i.oid, (SELECT oid FROM this_database), 'CREATE')
+UNION ALL
+SELECT quote_ident(i.rolname) || ' has CREATE on schema ' || quote_ident(n.nspname)
+FROM identity i CROSS JOIN pg_namespace n
+WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+  AND has_schema_privilege(i.oid, n.oid, 'CREATE')
+UNION ALL
+SELECT quote_ident(i.rolname) || ' can write to relation ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+FROM identity i CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+  AND (has_table_privilege(i.oid, c.oid, $1) OR has_any_column_privilege(i.oid, c.oid, 'INSERT, UPDATE, REFERENCES'))
+UNION ALL
+SELECT quote_ident(i.rolname) || ' can change sequence ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+FROM identity i CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'S' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+  AND has_sequence_privilege(i.oid, c.oid, 'USAGE, UPDATE')
+UNION ALL
+SELECT quote_ident(i.rolname) || ' owns ' || pg_describe_object(d.classid, d.objid, d.objsubid)
+FROM identity i
+JOIN pg_shdepend d ON d.refclassid = 'pg_authid'::regclass AND d.refobjid = i.oid AND d.deptype = 'o'
+WHERE d.dbid IN (0, (SELECT oid FROM this_database))
+ORDER BY 1
+LIMIT $2`, relationPrivileges, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var writes []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		writes = append(writes, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(writes) == 0 {
+		return nil, nil
+	}
+	if len(writes) > limit {
+		writes = append(writes[:limit], "and more")
+	}
+	return &Finding{
+		Code:        "observer_access_policy_unsafe",
+		Message:     "observer is not read-only: " + strings.Join(writes, ", "),
+		Remediation: "revoke each privilege that is not CONNECT, USAGE on a schema, or SELECT, and give the objects another owner; a privilege that PUBLIC or a role of the observer holds counts as a privilege of the observer",
+	}, nil
+}
+
 // observerRoleActions gives the SQL for the two forms of a valid observer.
 // The names are examples. A statement about a schema is repeated for each
 // application schema.
 func observerRoleActions(database string, access observerAccess) []NextAction {
 	quotedDatabase := pgx.Identifier{database}.Sanitize()
-	const attributes = "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+	const attributes = "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION"
 	predefined := NextAction{
 		Kind:   "create_observer_role",
-		Reason: "a login role whose only membership is the predefined read-only role pg_read_all_data; on a managed provider, create a role that inherits pg_read_all_data with the provider's role tool; no grant is put on an application object, so nothing shows as drift",
+		Reason: "a login role whose only membership is the predefined read-only role pg_read_all_data; on a managed provider, create a role that inherits pg_read_all_data with the provider's role tool; no grant is put on an application object, so nothing shows as drift; add BYPASSRLS (ALTER ROLE onwardpg_observer BYPASSRLS) when row-level security hides rows from the role",
 		SQL: "CREATE ROLE onwardpg_observer LOGIN PASSWORD '<password>' " + attributes + " IN ROLE pg_read_all_data;\n" +
 			"GRANT CONNECT ON DATABASE " + quotedDatabase + " TO onwardpg_observer;",
 	}
@@ -614,7 +717,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("inspect readiness observer: %w", err)
 	}
-	report.Observer = ObserverProjection{Role: observer.Role, DatabaseOwner: observer.DatabaseOwner, Mode: observer.Mode()}
+	report.Observer = observer.projection()
 	if finding != nil {
 		report.Findings = append(report.Findings, *finding)
 		return finalize(report), nil

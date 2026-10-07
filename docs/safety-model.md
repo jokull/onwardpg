@@ -229,16 +229,24 @@ verified but could not be checked for drift or planned on.
 ## The live observer
 
 `drift check` and `contract check` read a live database. They accept the
-database owner, or a login role that cannot write, create, or administer: no
-capability attribute, and membership only in predefined read-only roles or in
-a dedicated `NOLOGIN` role, without `ADMIN OPTION`. The
-[observer role](cli.md#observer-role) section has the exact rules.
+database owner, or a login role that cannot write, create, or administer: not
+`SUPERUSER`, `CREATEDB`, `CREATEROLE`, or `REPLICATION`, and membership only in
+predefined read-only roles or in a dedicated `NOLOGIN` role, without
+`ADMIN OPTION`. The guard also proves, from the effective privileges that
+PostgreSQL reports, that the role and each role it is a member of hold no
+privilege to write or to create in the database and own nothing in it; a grant
+to `PUBLIC` counts. `BYPASSRLS` is permitted on such a role: with no privilege
+to write, it adds reading only, and it is reported as `observer.bypass_rls`.
+The proof does not cover the effects of functions that the role can call, or
+other databases of the cluster. The [observer role](cli.md#observer-role)
+section has the exact rules.
 
 The guard runs before the history replay. It does not require more than the
 command reads. `drift check` reads system catalogs, which every role can
 read, so its role needs no privilege on an application object; the test suite
 compares the graph that such a role reads with the graph of the database
-owner on PostgreSQL 15 to 18. `contract check` also reads rows, so its role
+owner on PostgreSQL 15 to 18. Row-level security does not change that graph:
+it applies to rows of user tables and never to system catalogs. `contract check` also reads rows, so its role
 must be able to read every relation, and row-level security must hide no row.
 
 Only the exact read-only grants of the observer and of its dedicated role are
