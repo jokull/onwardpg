@@ -9,10 +9,11 @@ of two ways:
 
 `schema_command` is trusted project code. onwardpg invokes the argument vector
 directly, without a shell, from the repository root. It runs the command at
-least twice in each CLI command, limits captured output, requires byte-identical
-DDL, and rejects direct changes to the checkout that it can observe. It is not an operating-system sandbox and
-cannot prevent writes outside the checkout or through external symlink targets;
-use a read-only export command. Both input paths accept at most 64 MiB. Command
+least twice in each CLI command, limits captured output, and requires
+byte-identical DDL. It is not an operating-system sandbox and does not prevent
+writes by the command, inside or outside the checkout. Use a read-only export
+command: in a git work tree, onwardpg reports files that changed while the
+command ran as a warning, and it does not stop. Both input paths accept at most 64 MiB. Command
 exports have a five-minute deadline per run and their output size is monitored
 while running. See [exporter resource limits](exporter-limits.md) for the exact
 limits and process-containment boundaries.
@@ -66,13 +67,11 @@ names, expressions, dependencies, and version-specific semantics. Equivalent
 DDL sources converge on equivalent catalog graphs.
 
 The export command runs from the repository root. PR regeneration runs it
-twice and rejects nondeterministic output, command failure, or changes to
-repository inputs. `plan`, `draft`, `verify`, and `init` run it once at the start
-and once immediately before they commit a result; see
-[when the export runs](#when-the-export-runs). Version-control internals and
-dependency-installation trees (`.git` and `node_modules` at any depth) are
-excluded from that mutation check; generated project files are not. Commands should write the schema only to
-stdout. Put credentials in the configured environment variable; URL-bearing
+twice and rejects nondeterministic output and command failure. `plan`, `draft`,
+`verify`, and `init` run it once at the start and once immediately before they
+commit a result; see [when the export runs](#when-the-export-runs). Commands
+should write the schema only to stdout. onwardpg does not stop a command that
+also writes files; see [side effects of the export](#side-effects-of-the-export). Put credentials in the configured environment variable; URL-bearing
 command arguments are rejected, and receipts never record environment values.
 
 ## Stable boundary, framework recipes
@@ -122,8 +121,24 @@ another answer.
 
 `dev`, `config check`, and `diff --target` run the export twice back to back.
 
-onwardpg fingerprints the checkout before and after each run. The fingerprint
-reads the bytes of every file outside `.git` and `node_modules`. Do not change
-files in the checkout while an export runs: onwardpg cannot tell that change
-from a write by the export command, and stops with `DDL export command modified
-repository inputs`.
+## Side effects of the export
+
+onwardpg does not check what the export command writes. A result depends on
+the DDL that the command prints, and the two runs with equal bytes prove that
+output. Other work can therefore run in the same checkout while a command
+runs: a file that another process writes does not stop the command.
+
+Two things still stop a command, because they change the export output between
+its two runs:
+
+- an edit to the schema sources; and
+- a new build of a package that the export command imports.
+
+In a git work tree, a command compares `git status` from before the first
+export run with `git status` after the last one. If the status of a path
+changed, the result has a `warnings` entry with the code `export_side_effects`
+and the paths. The warning does not change the status or the exit code. It
+does not say who wrote the files. If the export command wrote them, change the
+command so that it writes only to stdout. The
+[safety model](safety-model.md#the-schema-export-and-the-checkout) states why
+the earlier check of the checkout was removed, and the limits of the warning.

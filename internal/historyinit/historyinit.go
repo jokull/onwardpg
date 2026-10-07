@@ -132,16 +132,9 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 	compiled := export.Compiled()
 	empty, err := source.LoadDDLGraphForComparison(ctx, nil, "empty-postgresql", input.AdminURL, input.Ignores)
 	if err != nil {
-		if settleErr := export.Settle(); settleErr != nil {
-			return report, fmt.Errorf("compile declarative schema: %w", settleErr)
-		}
 		return report, fmt.Errorf("inspect empty PostgreSQL baseline: %w", err)
 	}
 	desired, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, input.AdminURL, input.Ignores)
-	// The checkout fingerprint that follows the export ran during these loads.
-	if settleErr := export.Settle(); settleErr != nil {
-		return report, fmt.Errorf("compile declarative schema: %w", settleErr)
-	}
 	if err != nil {
 		return report, fmt.Errorf("inspect declarative schema: %w", err)
 	}

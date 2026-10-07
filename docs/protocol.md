@@ -246,6 +246,44 @@ supply typed `work` directly, including a bounded operator-batched template.
 One-shot edited SQL and Boolean gate pockets are receipted only after structural
 validation and disposable clone convergence.
 
+## Warnings
+
+A result document, and an error diagnostic, can have one more top-level member,
+`warnings`. It is always the last member. A warning is an observation for the reader. It never changes
+`status` or the exit code, and a consumer can ignore it. It exists only in the
+output of the command: no bundle, manifest, receipt, or digest contains it.
+The member is absent when there is nothing to report.
+
+```json
+{
+  "status": "verified",
+  "warnings": [
+    {
+      "code": "export_side_effects",
+      "message": "the git status of 2 path(s) changed while schema_command ran; ...",
+      "paths": ["generated/schema.ts", "packages/db/meta/_journal.json"],
+      "path_count": 2,
+      "remediation": "make schema_command write only to standard output; ..."
+    }
+  ]
+}
+```
+
+Consumers should branch on `code`. The one current code is
+`export_side_effects`. `init`, `plan`, `draft`, `verify`, `dev plan`, and
+`config check` emit it when they run a `schema_command` in a git work tree and
+the output of `git status` after the last export run differs from the output
+before the first. A command that stops with an error before its last export
+run takes the second status as it writes the diagnostic. `paths` lists up to 50 changed paths in sorted order,
+relative to the top level of the git work tree, and `path_count` is the number
+that changed. The paths can be the work of the export command, of another
+process, or of the developer. Files that git ignores are never listed. No
+warning does not prove that the export command wrote nothing: see the limits in
+the [safety model](safety-model.md#the-schema-export-and-the-checkout).
+
+When a command prints SQL or text instead of a JSON document, it writes the
+same member as one JSON line, `{"warnings":[...]}`, to standard error.
+
 ## Exit codes and diagnostics
 
 | Exit code | Meaning | Standard output |

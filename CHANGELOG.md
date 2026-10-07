@@ -17,9 +17,6 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
     column, and a snapshot keeps its sorted object order between writes. These
     two loops were quadratic and cost about 7 seconds for each catalog read of
     that schema.
-  - The checkout fingerprint that guards each `schema_command` run reads up to
-    16 files at the same time. It still reads the bytes of every file outside
-    `.git` and `node_modules`.
   - These commands run the export two times, not four: once at the start, and
     once immediately before they write or report. Byte-identical output proves
     that the export is deterministic and that it did not change while the
@@ -39,18 +36,42 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
     of the first only when both run exactly the same SQL with the same checks.
     `plan` used seven scratch databases and five history replays; it now uses
     four and three.
-  - Base history replay runs during the first export, and the checkout
-    fingerprint that follows the first export runs while its DDL is loaded
-    into scratch PostgreSQL.
+  - Base history replay runs during the first export.
 - `dev`, `config check`, and `diff --target` still run the export twice back to
-  back. The second run now starts from the checkout fingerprint that followed
-  the first, so a file that changes between the two runs stops the command.
+  back.
+- onwardpg no longer checks what `schema_command` writes to the checkout. The
+  earlier check read the bytes of every file outside `.git` and `node_modules`
+  before and after each export run, four times for each command, and stopped
+  with `DDL export command modified repository inputs` when any file differed.
+  It is removed, with that error. A result depends on the DDL that the export
+  prints: the two export runs of a command must give the same bytes, and the
+  result is proved by replay on PostgreSQL. The removed check added one thing
+  to that, a stop when the command also wrote files, which does not make a
+  plan wrong. It cost 8 to 10 seconds for each command in a clean checkout of
+  50,000 files, and 96 seconds for each of the four walks in a checkout with
+  1.3 million paths and 24 GB of caches and build outputs. It also stopped the
+  command whenever another process (a build, a development server, another
+  agent) wrote a file during an export run. On the schema above, in
+  interleaved runs on one machine, `plan` went from 24–27 s to 16–19 s (27 s
+  in one run, whose two export runs took 17 s), `verify` from 20–24 s to
+  15 s, and `verify --check` from 27–31 s to 16–22 s. Other work can now run in the same checkout while a
+  command runs. The fingerprint was never stored, so bundle formats and
+  digests are unchanged. The
+  [safety model](docs/safety-model.md#the-schema-export-and-the-checkout)
+  states what carries the guarantee and what is no longer caught.
 
 ### Added
 
+- A result document can have a `warnings` member, which never changes the
+  status or the exit code. The first warning code is `export_side_effects`:
+  in a git work tree, a command that runs `schema_command` compares
+  `git status` from before the first export run with `git status` after the
+  last, and lists the paths whose status changed. Files that git ignores are
+  not listed, and without git there is no observation. See
+  [warnings](docs/protocol.md#warnings).
 - `ONWARDPG_TIMINGS=1` writes one JSON line to standard error with the wall
-  time and run count of each stage of the command (export runs, checkout
-  fingerprints, scratch databases, history replays, catalog reads, planner).
+  time and run count of each stage of the command (export runs, scratch
+  databases, history replays, catalog reads, planner).
   See [performance](docs/performance.md#end-to-end-stage-timings).
 
 ## v0.1.0-preview.6 — 2026-10-06
