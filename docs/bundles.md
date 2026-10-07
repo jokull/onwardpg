@@ -227,11 +227,21 @@ A generated bundle runs each statement of a non-transactional batch as its own
 query. An edited phase is different: onwardpg does not parse SQL, so it sends
 each chunk between two `-- onwardpg:batch` lines as one query, as written.
 PostgreSQL runs a query that holds more than one statement in one implicit
-transaction. If you edit a phase that holds two statements that cannot run in
-a transaction block, such as two `CREATE INDEX CONCURRENTLY` statements, put
-a `-- onwardpg:batch nontransactional` line before each of them. Without
-that, `verify` fails with `non_transactional_batch_failed` and SQLSTATE
-`25001`, and its remediation says the same.
+transaction, and it refuses a statement that cannot run in a transaction
+block, such as `CREATE INDEX CONCURRENTLY`, in such a query.
+
+The planner therefore makes each statement that cannot run in a transaction
+block a batch of its own. A generated phase has one
+`-- onwardpg:batch nontransactional` line for each such statement, so the
+phase stays executable when you edit it. Keep those lines. When you add such
+a statement by hand, put a `-- onwardpg:batch nontransactional` line before
+it. Without that, `verify` fails with `non_transactional_batch_failed` and
+SQLSTATE `25001`, and its remediation says the same.
+
+A bundle that preview.7 or an earlier build planned can hold several such
+statements under one directive. It verifies as generated. If you edit its
+phase file, add the directive lines first, or plan the bundle again with a
+newer build before you edit it.
 
 One command can verify a bundle twice: `plan` and `draft` verify the expand
 checkpoint and then the complete bundle, and `verify` does the same for an

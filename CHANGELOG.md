@@ -22,6 +22,17 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   connection for the complete history, so session state such as `search_path`
   from a baseline stays set. Bundle formats and digests are unchanged, and no
   bundle has to be planned again.
+- A bundle with more than one statement that cannot run in a transaction
+  block stays verifiable after its phase file is edited. The generator wrote
+  one `-- onwardpg:batch nontransactional` line for a batch that could hold
+  several such statements, for example two `CREATE INDEX CONCURRENTLY` from
+  `concurrent_indexes = true`. An edited phase is split only at those lines
+  and each chunk is one query, so after any edit of the file, even a comment,
+  `verify` failed with `non_transactional_batch_failed` and SQLSTATE `25001`.
+  The planner now makes each such statement a batch of its own, so the phase
+  file has one directive for each. `verify`, `drift check`, and the base
+  replay of `plan` and `draft` then run an edited phase statement by
+  statement.
 - `drift check` reads the live catalog before it replays history. A role that
   the observer guard refuses, or a wrong URL, now stops the command in about a
   second. Before, each such attempt cost a full history replay first.
@@ -126,6 +137,14 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 - No bundle file has a new member. Bundles in accepted history verify with no
   change to a byte: `verify` replays the stored SQL and does not plan it
   again.
+- A new plan can have more batches than the same plan from preview.7: one for
+  each statement that cannot run in a transaction block. The statements and
+  their order are the same. The format of `plan.json` and of the phase files
+  is unchanged, and a bundle from preview.7 with several such statements in
+  one batch still verifies with no change to a byte. If such a preview.7
+  bundle was edited and is planned again, the phase reconciliation can report
+  a conflict, because the generated text around the edit changed; resolve it
+  in the phase file.
 - A bundle that is planned again gets the new classification, so its
   `plan.json`, phase SQL comments, and digests change. This is intended for a
   bundle that is not yet in accepted history. Stored answers for index drops

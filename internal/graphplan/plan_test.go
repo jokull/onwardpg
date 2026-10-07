@@ -4293,6 +4293,47 @@ func TestRebuildBatchesRejectsUnknownPhase(t *testing.T) {
 	}
 }
 
+// A statement that cannot run in a transaction block is a batch of its own,
+// so the phase file has one batch directive for each such statement. An
+// edited phase is split only at those directives, and PostgreSQL refuses two
+// such statements in one query.
+func TestRebuildBatchesGivesEachNonTransactionalStatementItsOwnBatch(t *testing.T) {
+	statements := []protocol.Statement{
+		{SQL: "ALTER TABLE t ADD COLUMN a bigint;", Phase: protocol.PhaseExpand, Safety: "safe"},
+		{SQL: "ALTER TABLE t ADD COLUMN b bigint;", Phase: protocol.PhaseExpand, Safety: "safe"},
+		{SQL: "CREATE INDEX CONCURRENTLY a_idx ON t (a);", Phase: protocol.PhaseExpand, Safety: "review", NonTransactional: true},
+		{SQL: "CREATE INDEX CONCURRENTLY b_idx ON t (b);", Phase: protocol.PhaseExpand, Safety: "review", NonTransactional: true},
+		{SQL: "DROP INDEX CONCURRENTLY old_a_idx;", Phase: protocol.PhaseContract, Safety: "review", NonTransactional: true},
+		{SQL: "DROP INDEX CONCURRENTLY old_b_idx;", Phase: protocol.PhaseContract, Safety: "review", NonTransactional: true},
+	}
+	want := []struct {
+		id            string
+		transactional bool
+		statements    int
+	}{
+		{"batch-expand-001", true, 2}, {"batch-expand-002", false, 1}, {"batch-expand-003", false, 1},
+		{"batch-contract-001", false, 1}, {"batch-contract-002", false, 1},
+	}
+	for name, rebuild := range map[string]func(*protocol.Result) error{"sorted": rebuildBatches, "unsorted": rebuildUnsortedBatches} {
+		result := protocol.Result{Statements: append([]protocol.Statement(nil), statements...)}
+		if err := rebuild(&result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Batches) != len(want) {
+			t.Fatalf("%s: %d batches, want %d: %#v", name, len(result.Batches), len(want), result.Batches)
+		}
+		for index, batch := range result.Batches {
+			if batch.ID != want[index].id || batch.Transactional != want[index].transactional || len(batch.Statements) != want[index].statements {
+				t.Fatalf("%s: batch %d = %s transactional=%t statements=%d, want %#v", name, index, batch.ID, batch.Transactional, len(batch.Statements), want[index])
+			}
+		}
+		rendered := protocol.RenderSQL(result, "")
+		if strings.Count(rendered, "-- onwardpg:batch nontransactional") != 4 || strings.Count(rendered, "-- onwardpg:batch transactional") != 1 {
+			t.Fatalf("%s: rendered directives:\n%s", name, rendered)
+		}
+	}
+}
+
 func TestConstraintUsingIndexRejectsMismatchedStructure(t *testing.T) {
 	table := pgschema.Table{Schema: "app", Name: "orders"}
 	constraint := pgschema.Constraint{Table: table.ObjectID(), Name: "orders_key", Type: pgschema.ConstraintUnique, UsingIndex: "orders_key"}

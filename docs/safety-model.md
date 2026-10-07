@@ -221,7 +221,9 @@ catalog of that history uses it: `verify`, `drift check`, and `plan` and
 the bundle declares. A transactional batch runs in one transaction. A
 non-transactional batch is never put in a transaction: each statement of a
 generated batch is its own query, and each chunk of an edited phase is sent as
-written. onwardpg does not strip `CONCURRENTLY` and does not rewrite SQL for a
+written. The planner gives each statement that cannot run in a transaction
+block its own batch, so a generated phase has one batch directive for each
+such statement and stays executable after an edit. onwardpg does not strip `CONCURRENTLY` and does not rewrite SQL for a
 replay. One connection runs the complete history, so session state that a
 bundle sets, for example `search_path` in a baseline, stays set for the
 bundles after it. The checks that verification runs (manual verification

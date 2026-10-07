@@ -102,7 +102,7 @@ A plan builds and drops standalone indexes in one of two modes.
 | Mode | Statements | Batches | Locks |
 | --- | --- | --- | --- |
 | Blocking (default) | `CREATE INDEX`, `DROP INDEX` | Transactional | `CREATE INDEX` blocks every write to the table until the build is complete. `DROP INDEX` takes `ACCESS EXCLUSIVE` on the table; in a transactional batch each lock stays until the batch commits. |
-| Concurrent | `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY` | Nontransactional (`-- onwardpg:batch nontransactional`), one statement at a time | Reads and writes continue. Each statement waits for older transactions on the table, so it can take a long time. |
+| Concurrent | `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY` | Nontransactional (`-- onwardpg:batch nontransactional`), one batch for each statement | Reads and writes continue. Each statement waits for older transactions on the table, so it can take a long time. |
 
 Use the concurrent mode for every database with live traffic. The mode applies
 to both statements: a plan cannot build concurrently and drop with a lock.
