@@ -4569,7 +4569,16 @@ func renderChange(item change.Change, current, desired *pgschema.Snapshot, creat
 			}
 			statements, consumed, unsupported, err := renderConstraintCreateUsingExistingIndex(constraint, current, desired)
 			if !createdTables[constraint.Table] {
-				statements = withPhase(statements, protocol.PhaseContract, "review", "compatible_writers_required")
+				if provingKey, implied := uniqueConstraintImpliedByExistingKey(constraint, current, desired); implied {
+					// The existing key already rejects every row this
+					// constraint would reject, so no writer can violate it
+					// and it is additive expand work.
+					for index := range statements {
+						statements[index].Hazards = append(statements[index].Hazards, "unique_implied_by_existing_key:"+provingKey)
+					}
+				} else {
+					statements = withPhase(statements, protocol.PhaseContract, "review", "compatible_writers_required")
+				}
 			}
 			return statements, consumed, unsupported, err
 		}
