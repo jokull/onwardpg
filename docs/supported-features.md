@@ -233,9 +233,13 @@ confirmed identity then offers only `direct_rename` and `split_plan`, and the
 question names the reason. `direct_rename` is one native `ALTER TABLE ...
 RENAME COLUMN` in expand with no overlap: the previous release stops working
 the moment it runs, which the statement carries as the
-`single_deployment_cutover` hazard. A rename whose dependent view changes
-keeps the bridge and its handoff pockets; `direct_rename` is not offered
-there.
+`single_deployment_cutover` hazard. It renders the name change and nothing
+else, so it is offered only when the name is the whole difference: a rename
+whose dependent view changes keeps the bridge and its handoff pockets, and an
+asserted identity whose default or another property also changes is not
+offered `direct_rename`. On a partitioned table the parent's native rename
+propagates to every partition, so a child's `direct_rename` renders no
+statement of its own.
 
 Cross-type drop/create pairs on one table are reported as
 `cross_type_column_identity` analysis. The analysis is informational: it

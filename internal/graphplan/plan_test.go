@@ -4887,3 +4887,108 @@ func TestBuildKeepsRenameAnswersWhenTriggerWithholdsBridge(t *testing.T) {
 		t.Fatalf("the index on a directly renamed column is PostgreSQL's automatic rewrite; it must not be replaced:\n%s", joined)
 	}
 }
+
+// direct_rename renders the name change and nothing else, so it is withheld
+// when more than the name differs, and a partition child's column is renamed
+// by its parent's statement.
+func TestBuildDirectRenameBounds(t *testing.T) {
+	t.Run("asserted identity with a changed default withholds direct_rename", func(t *testing.T) {
+		current, desired := pgschema.New(), pgschema.New()
+		table := pgschema.Table{Schema: "public", Name: "orders"}
+		before := pgschema.Column{Table: table.ObjectID(), Name: "old_name", Position: 1, Type: "text", Default: stringPointer("'before'::text")}
+		after := pgschema.Column{Table: table.ObjectID(), Name: "new_name", Position: 1, Type: "text", Default: stringPointer("'after'::text")}
+		for _, item := range []struct {
+			snapshot *pgschema.Snapshot
+			column   pgschema.Column
+		}{{current, before}, {desired, after}} {
+			if err := item.snapshot.Add(table); err != nil {
+				t.Fatal(err)
+			}
+			if err := item.snapshot.Add(item.column); err != nil {
+				t.Fatal(err)
+			}
+			if err := item.snapshot.AddDependency(item.column.ObjectID(), table.ObjectID()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		options := Options{IdentityHints: []protocol.Hint{{Kind: "rename", Object: "column", From: []string{"public", "orders", "old_name"}, To: []string{"public", "orders", "new_name"}}}}
+		pending, err := Build(current, desired, protocol.Answers{}, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		answers := protocol.Answers{
+			CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+			Answers: []protocol.Answer{{Kind: "rename_column", Key: before.ObjectID().String(), Value: after.ObjectID().String()}},
+		}
+		strategy, err := Build(current, desired, answers, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strategy.Status != protocol.NeedsInput || len(strategy.Questions) != 1 || strategy.Questions[0].Kind != "rename_backfill_strategy" {
+			t.Fatalf("expected the strategy question, got %#v", strategy)
+		}
+		question := strategy.Questions[0]
+		if !reflect.DeepEqual(question.Choices, []string{"split_plan"}) || !strings.Contains(question.Message, "column_default_requires_write_precedence") {
+			t.Fatalf("a changed default must withhold direct_rename and the bridge: %#v", question)
+		}
+	})
+	t.Run("partition child is renamed by its parent", func(t *testing.T) {
+		current, desired := pgschema.New(), pgschema.New()
+		parent := pgschema.Table{Schema: "public", Name: "orders", Partition: &pgschema.Partition{Strategy: "RANGE", Raw: "RANGE (id)", Parts: []pgschema.PartitionPart{{Column: "id"}}}}
+		child := pgschema.Table{Schema: "public", Name: "orders_2026", PartitionOf: &pgschema.PartitionOf{Parent: parent.ObjectID(), Bound: "FOR VALUES FROM (0) TO (10)"}}
+		for index, snapshot := range []*pgschema.Snapshot{current, desired} {
+			name := "old_name"
+			if index == 1 {
+				name = "new_name"
+			}
+			for _, table := range []pgschema.Table{parent, child} {
+				if err := snapshot.Add(table); err != nil {
+					t.Fatal(err)
+				}
+				for _, column := range []pgschema.Column{
+					{Table: table.ObjectID(), Name: "id", Position: 1, Type: "integer", NotNull: true},
+					{Table: table.ObjectID(), Name: name, Position: 2, Type: "text"},
+				} {
+					if err := snapshot.Add(column); err != nil {
+						t.Fatal(err)
+					}
+					if err := snapshot.AddDependency(column.ObjectID(), table.ObjectID()); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := snapshot.AddDependency(child.ObjectID(), parent.ObjectID()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		answers := protocol.Answers{}
+		var planned protocol.Result
+		for iteration := 0; iteration < 4; iteration++ {
+			result, err := Build(current, desired, answers, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			answers.CurrentFingerprint, answers.DesiredFingerprint = result.CurrentFingerprint, result.DesiredFingerprint
+			if result.Status != protocol.NeedsInput {
+				planned = result
+				break
+			}
+			for _, question := range result.Questions {
+				value := "direct_rename"
+				if question.Kind == "rename_column" {
+					value = question.Choices[0]
+				} else if question.Kind != "rename_backfill_strategy" || !strings.Contains(question.Message, "partition_trigger_propagation") {
+					t.Fatalf("unexpected question %#v", question)
+				}
+				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
+			}
+		}
+		if planned.Status != protocol.Planned {
+			t.Fatalf("expected a planned direct rename, got %#v", planned)
+		}
+		joined := joinSQL(planned)
+		if strings.Count(joined, " RENAME COLUMN ") != 1 || !strings.Contains(joined, `ALTER TABLE "public"."orders" RENAME COLUMN "old_name" TO "new_name";`) {
+			t.Fatalf("only the partitioned parent is renamed natively; PostgreSQL propagates it:\n%s", joined)
+		}
+	})
+}

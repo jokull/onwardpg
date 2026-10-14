@@ -14,7 +14,10 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   defaults, generated values, partitions, or row security withhold the
   generated bridge, the question offers only `direct_rename` and `split_plan`
   and names the reason. Before, such a table made the whole plan
-  `unsupported` as soon as one rename was confirmed.
+  `unsupported` as soon as one rename was confirmed. `direct_rename` renders
+  the name change and nothing else, so it is withheld when more than the
+  name differs or a dependent view changes, and a partition child's column
+  is renamed by its parent's statement.
 
 ### Fixed
 

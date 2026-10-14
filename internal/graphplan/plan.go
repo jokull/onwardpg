@@ -510,6 +510,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			continue
 		}
 		if choices.renameStrategy[rename.from.ObjectID()] == "direct_rename" {
+			if directRenameInheritedFromAncestor(rename, columnRenames, choices, current) {
+				// PostgreSQL propagates a partitioned parent's rename to every
+				// partition, and renaming the inherited column itself fails.
+				continue
+			}
 			for _, statement := range renderDurableDirectColumnRename(rename) {
 				appendStatement(&result, statement)
 			}
@@ -2653,6 +2658,30 @@ func stableOperationID(transitionID string, work protocol.ManualWork) string {
 	return "operation-" + hex.EncodeToString(sum[:8])
 }
 
+// directRenameInheritedFromAncestor reports whether a partition ancestor of
+// the renamed column's table carries the same direct rename, in which case
+// the ancestor's statement renames this column too.
+func directRenameInheritedFromAncestor(rename renameColumn, renames []renameColumn, choices decisions, current *pgschema.Snapshot) bool {
+	table := rename.from.Table
+	for depth := 0; depth < 64; depth++ {
+		object, exists := current.Object(table)
+		child, ok := object.(pgschema.Table)
+		if !exists || !ok || child.PartitionOf == nil {
+			return false
+		}
+		table = child.PartitionOf.Parent
+		for _, candidate := range renames {
+			if candidate.from.Table != table || candidate.from.Name != rename.from.Name || candidate.to.Name != rename.to.Name {
+				continue
+			}
+			if choices.renameStrategy[candidate.from.ObjectID()] == "direct_rename" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // renderDurableDirectColumnRename is the receipted direct_rename strategy of a
 // durable bundle: one native rename in expand, with no overlap bridge. The
 // previous release stops working the moment the statement runs, so the
@@ -2805,17 +2834,21 @@ func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []
 			Choices:            []string{"manual_sql", "single_transaction", "direct_rename", "split_plan"},
 			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
 		}
-		if rename.manualDependencyClosure {
-			// A changed dependent view is owned by the bridge's handoff
-			// pockets; a direct rename has no place for that work.
+		// A direct rename renders the name change and nothing else. It is
+		// offered only when the name is the whole difference: a changed
+		// dependent view is owned by the bridge's handoff pockets, and an
+		// asserted identity whose default, nullability, or other property
+		// also changes would silently lose that change.
+		directRenameWithheld := rename.manualDependencyClosure || !equivalentColumnForRename(rename.from, rename.to)
+		if directRenameWithheld {
 			strategyQuestion.Message = "Column " + id.String() + " will overlap with " + rename.to.ObjectID().String() + ". Choose an operator-authored backfill, explicitly accept a single unbounded transaction for a known-small table, or split the work into a later plan."
 			strategyQuestion.Choices = []string{"manual_sql", "single_transaction", "split_plan"}
 		}
 		if rename.bridgeUnsupported != "" {
 			strategyQuestion.Message = "Column " + id.String() + " is confirmed as " + rename.to.ObjectID().String() + ", but the generated overlap bridge is not available (" + rename.bridgeUnsupported + "). Rename the column directly in expand and accept that the previous release stops working at that moment, or split the work into a later plan."
 			strategyQuestion.Choices = []string{"direct_rename", "split_plan"}
-			if rename.manualDependencyClosure {
-				strategyQuestion.Message = "Column " + id.String() + " is confirmed as " + rename.to.ObjectID().String() + ", but the generated overlap bridge is not available (" + rename.bridgeUnsupported + ") and a dependent view changes with it. Split the work into a later plan."
+			if directRenameWithheld {
+				strategyQuestion.Message = "Column " + id.String() + " is confirmed as " + rename.to.ObjectID().String() + ", but the generated overlap bridge is not available (" + rename.bridgeUnsupported + ") and more than the name changes with it. Split the work into a later plan."
 				strategyQuestion.Choices = []string{"split_plan"}
 			}
 		}
