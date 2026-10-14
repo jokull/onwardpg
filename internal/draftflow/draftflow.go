@@ -645,7 +645,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 		expandVerification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: protocol.PhaseExpand, Ignores: input.Ignores, Options: input.PlannerOptions,
-			Executions: executions,
+			Executions: executions, Desired: desired,
 		})
 		if err != nil {
 			return report, fmt.Errorf("verify generated expand checkpoint: %w", err)
@@ -668,7 +668,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 		verification, err := verify.Run(ctx, verify.Input{
 			AdminURL: input.AdminURL, Chain: proposed, BundleID: input.BundleID,
 			ThroughPhase: "contract", Ignores: input.Ignores, Options: input.PlannerOptions,
-			Executions: executions,
+			Executions: executions, Desired: desired,
 		})
 		if err != nil {
 			return report, fmt.Errorf("verify generated draft: %w", err)

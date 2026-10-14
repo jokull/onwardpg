@@ -4932,6 +4932,66 @@ func TestBuildDirectRenameBounds(t *testing.T) {
 			t.Fatalf("a changed default must withhold direct_rename and the bridge: %#v", question)
 		}
 	})
+	t.Run("dependents of a direct rename stay in expand", func(t *testing.T) {
+		current, desired := pgschema.New(), pgschema.New()
+		table := pgschema.Table{Schema: "public", Name: "orders"}
+		before := pgschema.Column{Table: table.ObjectID(), Name: "old_name", Position: 1, Type: "text"}
+		after := pgschema.Column{Table: table.ObjectID(), Name: "new_name", Position: 1, Type: "text"}
+		index := pgschema.Index{Table: table.ObjectID(), Name: "orders_new_name_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: "new_name"}}}
+		for _, item := range []struct {
+			snapshot *pgschema.Snapshot
+			column   pgschema.Column
+		}{{current, before}, {desired, after}} {
+			if err := item.snapshot.Add(table); err != nil {
+				t.Fatal(err)
+			}
+			if err := item.snapshot.Add(item.column); err != nil {
+				t.Fatal(err)
+			}
+			if err := item.snapshot.AddDependency(item.column.ObjectID(), table.ObjectID()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := desired.Add(index); err != nil {
+			t.Fatal(err)
+		}
+		for _, dependency := range []pgschema.ID{table.ObjectID(), after.ObjectID()} {
+			if err := desired.AddDependency(index.ObjectID(), dependency); err != nil {
+				t.Fatal(err)
+			}
+		}
+		answers := protocol.Answers{}
+		var planned protocol.Result
+		for iteration := 0; iteration < 4; iteration++ {
+			result, err := Build(current, desired, answers, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			answers.CurrentFingerprint, answers.DesiredFingerprint = result.CurrentFingerprint, result.DesiredFingerprint
+			if result.Status != protocol.NeedsInput {
+				planned = result
+				break
+			}
+			for _, question := range result.Questions {
+				value := "direct_rename"
+				if question.Kind == "rename_column" {
+					value = after.ObjectID().String()
+				}
+				answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
+			}
+		}
+		if planned.Status != protocol.Planned {
+			t.Fatalf("expected a planned direct rename, got %#v", planned)
+		}
+		for _, statement := range planned.Statements {
+			if strings.Contains(statement.SQL, "orders_new_name_idx") && (statement.Phase != protocol.PhaseExpand || containsString(statement.Hazards, "dependency_phase_promotion")) {
+				t.Fatalf("an index on a directly renamed column is expand work: %#v", statement)
+			}
+		}
+		if !strings.Contains(joinSQL(planned), "orders_new_name_idx") {
+			t.Fatalf("the index must be planned:\n%s", joinSQL(planned))
+		}
+	})
 	t.Run("partition child is renamed by its parent", func(t *testing.T) {
 		current, desired := pgschema.New(), pgschema.New()
 		parent := pgschema.Table{Schema: "public", Name: "orders", Partition: &pgschema.Partition{Strategy: "RANGE", Raw: "RANGE (id)", Parts: []pgschema.PartitionPart{{Column: "id"}}}}

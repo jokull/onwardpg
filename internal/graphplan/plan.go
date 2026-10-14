@@ -410,6 +410,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	}
 	var deferredColumnRenameExpandHandoffs []protocol.Statement
 	for _, rename := range columnRenames {
+		if !rename.crossType && choices.renameStrategy[rename.from.ObjectID()] == "direct_rename" {
+			// The native rename runs in expand, so the desired name exists
+			// before deployment and its dependents need no contract promotion.
+			continue
+		}
 		contractProviders[rename.to.ObjectID()] = true
 	}
 	for _, rename := range indexRenames {
