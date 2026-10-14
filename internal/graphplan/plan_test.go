@@ -4676,3 +4676,214 @@ func TestPlanAllowsDenseColumnOrderToCloseAfterMiddleDrop(t *testing.T) {
 		t.Fatalf("middle-column drop was incorrectly treated as a physical reorder: %#v", result)
 	}
 }
+
+// A table that gains triggers in the same feature renames several columns and
+// adds columns of other types. Each rename answer must be consumed in turn;
+// the trigger must withhold the overlap bridge at the strategy question, not
+// reject the confirmed identity before the other answers are read.
+func TestBuildKeepsRenameAnswersWhenTriggerWithholdsBridge(t *testing.T) {
+	current, desired := pgschema.New(), pgschema.New()
+	quotes := pgschema.Table{Schema: "public", Name: "quotes"}
+	plain := pgschema.Table{Schema: "public", Name: "plain"}
+	type column struct {
+		table    pgschema.Table
+		name     string
+		position int
+		typ      string
+		notNull  bool
+	}
+	add := func(snapshot *pgschema.Snapshot, columns []column) {
+		t.Helper()
+		for _, item := range columns {
+			object := pgschema.Column{Table: item.table.ObjectID(), Name: item.name, Position: item.position, Type: item.typ, NotNull: item.notNull}
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+			if err := snapshot.AddDependency(object.ObjectID(), item.table.ObjectID()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+		for _, table := range []pgschema.Table{quotes, plain} {
+			if err := snapshot.Add(table); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	add(current, []column{
+		{quotes, "id", 1, "text", true},
+		{quotes, "consumed_at", 2, "timestamp without time zone", false},
+		{quotes, "presentment_currency", 3, "text", true},
+		{quotes, "presentment_total", 4, "integer", true},
+		{plain, "old_name", 1, "text", false},
+	})
+	add(desired, []column{
+		{quotes, "id", 1, "text", true},
+		{quotes, "accepted_at", 2, "timestamp without time zone", false},
+		{quotes, "currency", 3, "text", true},
+		{quotes, "total", 4, "integer", true},
+		{quotes, "withdrawn_at", 5, "timestamp without time zone", false},
+		{quotes, "company", 6, "text", false},
+		{quotes, "accepted_by_user_id", 7, "text", false},
+		{quotes, "based_on_quote_id", 8, "text", false},
+		{plain, "new_name", 1, "text", false},
+	})
+	trigger := pgschema.Trigger{Table: quotes.ObjectID(), Name: "quote_frozen", Definition: `CREATE TRIGGER quote_frozen BEFORE UPDATE ON public.quotes FOR EACH ROW EXECUTE FUNCTION public.quote_frozen()`, Enabled: "O"}
+	if err := desired.Add(trigger); err != nil {
+		t.Fatal(err)
+	}
+	if err := desired.AddDependency(trigger.ObjectID(), quotes.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	// An index on a renamed column is PostgreSQL's automatic rewrite. The
+	// equivalence check must not rewrite the current snapshot in place.
+	for _, item := range []struct {
+		snapshot *pgschema.Snapshot
+		column   string
+	}{{current, "consumed_at"}, {desired, "accepted_at"}} {
+		index := pgschema.Index{Table: quotes.ObjectID(), Name: "quotes_accepted_idx", Method: "btree", Parts: []pgschema.IndexPart{{Column: item.column}}}
+		if err := item.snapshot.Add(index); err != nil {
+			t.Fatal(err)
+		}
+		for _, dependency := range []pgschema.ID{quotes.ObjectID(), pgschema.Column{Table: quotes.ObjectID(), Name: item.column}.ObjectID()} {
+			if err := item.snapshot.AddDependency(index.ObjectID(), dependency); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	currentFingerprint, err := Fingerprint(current, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columnID := func(table pgschema.Table, name string) string {
+		return pgschema.Column{Table: table.ObjectID(), Name: name}.ObjectID().String()
+	}
+	renames := [][2]string{
+		{columnID(quotes, "consumed_at"), columnID(quotes, "accepted_at")},
+		{columnID(quotes, "presentment_currency"), columnID(quotes, "currency")},
+		{columnID(quotes, "presentment_total"), columnID(quotes, "total")},
+		{columnID(plain, "old_name"), columnID(plain, "new_name")},
+	}
+
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 4 {
+		t.Fatalf("expected one rename question per dropped column, got %#v", pending)
+	}
+	for _, question := range pending.Questions {
+		if question.Kind != "rename_column" {
+			t.Fatalf("unexpected first-stage question %#v", question)
+		}
+	}
+	analysisPairs := func(result protocol.Result) map[string]bool {
+		pairs := make(map[string]bool)
+		for _, item := range result.Analysis {
+			if item.Kind == "cross_type_column_identity" {
+				pairs[item.From+" -> "+item.To] = true
+			}
+		}
+		return pairs
+	}
+	if pairs := analysisPairs(pending); !pairs[columnID(quotes, "consumed_at")+" -> "+columnID(quotes, "company")] {
+		t.Fatalf("cross-type analysis must list undecided drop/create pairs: %#v", pending.Analysis)
+	}
+
+	// One answer: the next rename question is asked; nothing is blocked and
+	// the decided columns leave the cross-type analysis.
+	answers := protocol.Answers{
+		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
+		Answers: []protocol.Answer{{Kind: "rename_column", Key: renames[0][0], Value: renames[0][1]}},
+	}
+	partial, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatalf("one rename answer must not fail planning: %v", err)
+	}
+	if partial.Status != protocol.NeedsInput || len(partial.Questions) != 3 || partial.Questions[0].Kind != "rename_column" {
+		t.Fatalf("expected the remaining rename questions, got %#v", partial)
+	}
+	for pair := range analysisPairs(partial) {
+		if strings.HasPrefix(pair, columnID(quotes, "consumed_at")+" ") || strings.HasSuffix(pair, " "+columnID(quotes, "accepted_at")) {
+			t.Fatalf("decided columns must leave the cross-type analysis: %s", pair)
+		}
+	}
+	if pairs := analysisPairs(partial); !pairs[columnID(quotes, "presentment_currency")+" -> "+columnID(quotes, "withdrawn_at")] {
+		t.Fatalf("undecided pairs must stay in the analysis: %#v", partial.Analysis)
+	}
+
+	// Every rename answered: the strategy question is asked for each column.
+	// The trigger withholds the bridge strategies on quotes only.
+	for _, rename := range renames[1:] {
+		answers.Answers = append(answers.Answers, protocol.Answer{Kind: "rename_column", Key: rename[0], Value: rename[1]})
+	}
+	strategies, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatalf("all rename answers must be consumed: %v", err)
+	}
+	if fingerprint, err := Fingerprint(current, Options{}); err != nil || fingerprint != currentFingerprint {
+		t.Fatalf("resolving a rename must not change the current snapshot: %s != %s (%v)", fingerprint, currentFingerprint, err)
+	}
+	if strategies.Status != protocol.NeedsInput || len(strategies.Questions) != 4 {
+		t.Fatalf("expected one strategy question per rename, got %#v", strategies)
+	}
+	if len(strategies.Analysis) != 0 {
+		t.Fatalf("every drop/create pair is decided; analysis must be empty: %#v", strategies.Analysis)
+	}
+	for _, question := range strategies.Questions {
+		if question.Kind != "rename_backfill_strategy" {
+			t.Fatalf("unexpected question %#v", question)
+		}
+		want := []string{"manual_sql", "single_transaction", "direct_rename", "split_plan"}
+		if question.Key != columnID(plain, "old_name") {
+			want = []string{"direct_rename", "split_plan"}
+			if !strings.Contains(question.Message, "existing_trigger_order") {
+				t.Fatalf("strategy question must name the withheld bridge reason: %#v", question)
+			}
+		}
+		if !reflect.DeepEqual(question.Choices, want) {
+			t.Fatalf("strategy choices for %s = %v, want %v", question.Key, question.Choices, want)
+		}
+		answers.Answers = append(answers.Answers, protocol.Answer{Kind: "rename_backfill_strategy", Key: question.Key, Value: "direct_rename", QuestionFingerprint: question.ScopeFingerprint})
+	}
+
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != protocol.Planned {
+		t.Fatalf("expected a planned direct rename, got %#v", planned)
+	}
+	joined := joinSQL(planned)
+	renameCount := 0
+	for _, item := range planned.Statements {
+		if !strings.Contains(item.SQL, " RENAME COLUMN ") {
+			continue
+		}
+		renameCount++
+		if item.Phase != protocol.PhaseExpand || !containsString(item.Hazards, "single_deployment_cutover") || item.TransitionID == "" {
+			t.Fatalf("direct rename must be an expand statement with the cutover hazard and its transition: %#v", item)
+		}
+	}
+	if renameCount != 4 {
+		t.Fatalf("expected 4 direct renames, got %d:\n%s", renameCount, joined)
+	}
+	if strings.Contains(joined, "onwardpg_sync_column_") || strings.Contains(joined, "DROP COLUMN") {
+		t.Fatalf("direct rename must not render the overlap bridge:\n%s", joined)
+	}
+	for _, fragment := range []string{
+		`ADD COLUMN "withdrawn_at" timestamp without time zone`,
+		`ADD COLUMN "company" text`,
+		`ADD COLUMN "accepted_by_user_id" text`,
+		`ADD COLUMN "based_on_quote_id" text`,
+		`CREATE TRIGGER quote_frozen`,
+	} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("plan is missing %q:\n%s", fragment, joined)
+		}
+	}
+	if strings.Contains(joined, "quotes_accepted_idx") {
+		t.Fatalf("the index on a directly renamed column is PostgreSQL's automatic rewrite; it must not be replaced:\n%s", joined)
+	}
+}

@@ -485,13 +485,7 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 			})
 		}
 		for _, reason := range plan.Unsupported {
-			if strings.HasPrefix(reason, "column_physical_order:") {
-				report.Findings = append(report.Findings, Finding{
-					Code:        "column_physical_order",
-					Message:     reason,
-					Remediation: "move newly added columns after retained upstream columns in the declarative CREATE TABLE order, or author and review a replacement-table migration",
-				})
-			}
+			report.Findings = append(report.Findings, unsupportedFinding(reason))
 		}
 		return report, nil
 	}
@@ -1080,6 +1074,24 @@ func buildWithSemanticHints(current, desired *pgschema.Snapshot, plan protocol.R
 		questions = mergeQuestions(questions, plan.Questions)
 	}
 	return protocol.Result{}, nil, nil, nil, nil, fmt.Errorf("semantic hint planning did not converge")
+}
+
+// unsupportedFinding turns one planner blocker into a finding. The code is
+// the blocker family before the first colon, so every blocker is visible in
+// the workflow report instead of only the families with a known remediation.
+func unsupportedFinding(reason string) Finding {
+	code := reason
+	if index := strings.Index(reason, ":"); index > 0 {
+		code = reason[:index]
+	}
+	finding := Finding{Code: code, Message: reason}
+	switch code {
+	case "column_physical_order":
+		finding.Remediation = "move newly added columns after retained upstream columns in the declarative CREATE TABLE order, or author and review a replacement-table migration"
+	default:
+		finding.Remediation = "change the desired schema or the planner options so the blocker no longer applies, then run plan again"
+	}
+	return finding
 }
 
 func suppliedHintsNotReceipted(supplied, receipted []protocol.Hint) []protocol.Hint {

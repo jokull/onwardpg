@@ -7305,7 +7305,7 @@ CREATE INDEX customers_email_idx ON "` + schemaName + `".customers (email);`
 	}
 }
 
-func TestColumnRenameWithExistingTriggerIsRejectedOnPostgreSQL(t *testing.T) {
+func TestColumnRenameWithExistingTriggerOffersDirectRenameOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
@@ -7361,11 +7361,44 @@ CREATE MATERIALIZED VIEW "` + schemaName + `".order_cache AS SELECT new_name AS 
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{{Kind: "rename_column", Key: oldID, Value: newID}},
 	}
+	strategyPending, err := buildIntegration(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategyPending.Status != protocol.NeedsInput || len(strategyPending.Questions) != 1 || strategyPending.Questions[0].Kind != "rename_backfill_strategy" {
+		t.Fatalf("expected a strategy question without the bridge: %#v", strategyPending)
+	}
+	question := strategyPending.Questions[0]
+	if strings.Join(question.Choices, ",") != "direct_rename,split_plan" || !strings.Contains(question.Message, "existing_trigger_order") {
+		t.Fatalf("existing trigger must withhold the bridge strategies and say why: %#v", question)
+	}
+	answers.Answers = append(answers.Answers, protocol.Answer{Kind: "rename_backfill_strategy", Key: oldID, Value: "direct_rename", QuestionFingerprint: question.ScopeFingerprint})
 	plan, err := buildIntegration(current, desired, answers, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertUnsupportedPrefix(t, plan, "single_deployment_column_bridge_required:"+oldID+":existing_trigger_order")
+	if plan.Status != protocol.Planned {
+		t.Fatalf("expected a planned direct rename: %#v", plan)
+	}
+	renames := 0
+	for _, item := range plan.Statements {
+		if strings.Contains(item.SQL, " RENAME COLUMN ") {
+			renames++
+			if item.Phase != protocol.PhaseExpand {
+				t.Fatalf("direct rename belongs to expand: %#v", item)
+			}
+		}
+	}
+	if renames != 1 {
+		t.Fatalf("expected one native rename, got %d: %#v", renames, plan.Statements)
+	}
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseExpand)
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseContract)
+	var kept string
+	if err := conn.QueryRow(ctx, `SELECT new_name FROM "`+schemaName+`".orders`).Scan(&kept); err != nil || kept != "kept" {
+		t.Fatalf("direct rename lost the row value: %q err=%v", kept, err)
+	}
+	assertGraphConverges(t, ctx, url, desired)
 }
 
 func TestColumnRenameOverlapBridgeConvergesOnPostgreSQL(t *testing.T) {

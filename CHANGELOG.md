@@ -3,6 +3,39 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## Unreleased
+
+### Added
+
+- `rename_backfill_strategy` offers `direct_rename`: one native
+  `ALTER TABLE ... RENAME COLUMN` in expand, with no overlap bridge. The
+  statement carries the `single_deployment_cutover` hazard, because the
+  previous release stops working the moment it runs. When existing triggers,
+  defaults, generated values, partitions, or row security withhold the
+  generated bridge, the question offers only `direct_rename` and `split_plan`
+  and names the reason. Before, such a table made the whole plan
+  `unsupported` as soon as one rename was confirmed.
+
+### Fixed
+
+- A column rename answer on a table that cannot take the overlap bridge no
+  longer stops the planner before the other rename answers are read. With
+  several renames on one table, `plan --hints-file` failed with
+  `unused answers` for every rename after the first, and a single `--hint`
+  stopped as `unsupported`; no sequence of answers could complete the plan.
+- The workflow report lists every planner blocker as a finding (code = the
+  blocker family, for example `single_deployment_column_bridge_required`).
+  Before, only `column_physical_order` was shown, so an unsupported plan
+  could show nothing but informational analysis.
+- `cross_type_column_identity` analysis no longer lists a drop/create pair
+  once either column has a confirmed rename. A table with ten renames and
+  seventeen new columns reported 92 pairs, including pairs for columns the
+  hints had already decided.
+- Resolving a confirmed rename of an indexed column rewrote the index parts
+  of the current snapshot in place. Every later build in the same process
+  then computed a different current fingerprint and rejected the receipted
+  answers as stale.
+
 ## v0.1.0-preview.8 — 2026-10-07
 
 ### Fixed

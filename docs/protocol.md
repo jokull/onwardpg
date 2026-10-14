@@ -70,7 +70,9 @@ Current semantic kinds are:
 - `type_change`: column identifier and the `manual_sql` handoff strategy;
 - `rollout`: column identifier and offered strategy (`not_null` is implied);
 - `rename_backfill`: old column identifier and one offered strategy
-  (`manual_sql`, `single_transaction`, or `split_plan`);
+  (`manual_sql`, `single_transaction`, `direct_rename`, or `split_plan`;
+  the planner offers only `direct_rename` and `split_plan` when the table
+  cannot take the generated overlap bridge);
 - `confirm`: exact object and authorization/rebuild/destructive action; and
 - `manual_sql`: exact object and action handed to editable phase SQL.
 

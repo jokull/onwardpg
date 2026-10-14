@@ -225,10 +225,22 @@ the same routine OID does not request a refresh.
 For a confirmed same-type column rename, eligible columns use two physical
 columns plus a bidirectional trigger through expand. A second,
 fingerprint-bound choice requires reviewed manual SQL with an equality
-assertion, explicit consent to a hazardous single-transaction update, or a
-split plan. Contract asserts equality before the native identity-preserving
-rename. Defaults, generated/identity values, partitions, existing trigger
-ordering, and RLS can still block the automatic bridge.
+assertion, explicit consent to a hazardous single-transaction update, a
+direct rename, or a split plan. Contract asserts equality before the native
+identity-preserving rename. Defaults, generated/identity values, partitions,
+existing trigger ordering, and RLS withhold the automatic bridge; the
+confirmed identity then offers only `direct_rename` and `split_plan`, and the
+question names the reason. `direct_rename` is one native `ALTER TABLE ...
+RENAME COLUMN` in expand with no overlap: the previous release stops working
+the moment it runs, which the statement carries as the
+`single_deployment_cutover` hazard. A rename whose dependent view changes
+keeps the bridge and its handoff pockets; `direct_rename` is not offered
+there.
+
+Cross-type drop/create pairs on one table are reported as
+`cross_type_column_identity` analysis. The analysis is informational: it
+never blocks a plan, and a pair leaves it as soon as either column has a
+confirmed rename.
 
 Typed view dependencies are owned by that transition. A retained definition
 whose PostgreSQL rewrite is catalog-provable stays on the generated path. If
