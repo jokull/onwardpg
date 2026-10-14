@@ -19,6 +19,17 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   name differs or a dependent view changes, and a partition child's column
   is renamed by its parent's statement.
 
+- A new UNIQUE constraint on an existing table whose columns contain the
+  columns of a key that PostgreSQL already enforces there (the primary key,
+  or a unique key with the same NULL treatment) is catalog-proven: no
+  `reconcile_contract` question, expand phase, hazard
+  `unique_implied_by_existing_key:<key>`. A foreign key from a new table that
+  references it stays in expand. Before, the key took the contract path and
+  that foreign key stopped the plan with `contract_enforcement_missing_gate`.
+- When the generated plan does not converge after contract, the checkpoint
+  error names the objects whose definition or dependencies differ from the
+  desired schema, instead of two fingerprints.
+
 ### Fixed
 
 - A column rename answer on a table that cannot take the overlap bridge no
@@ -34,6 +45,8 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   once either column has a confirmed rename. A table with ten renames and
   seventeen new columns reported 92 pairs, including pairs for columns the
   hints had already decided.
+- Dependents of a `direct_rename` column (indexes, keys) are no longer
+  promoted to contract: the desired name exists after expand.
 - Resolving a confirmed rename of an indexed column rewrote the index parts
   of the current snapshot in place. Every later build in the same process
   then computed a different current fingerprint and rejected the receipted

@@ -241,6 +241,13 @@ offered `direct_rename`. On a partitioned table the parent's native rename
 propagates to every partition, so a child's `direct_rename` renders no
 statement of its own.
 
+A new UNIQUE constraint on an existing table whose columns contain the
+columns of a key PostgreSQL already enforces there (the primary key, or a
+unique key with the same NULL treatment) can never reject a row, so it is
+installed in expand with the hazard `unique_implied_by_existing_key:<key>`
+and asks no reconciliation question; a foreign key that references it from a
+new table stays in expand.
+
 Cross-type drop/create pairs on one table are reported as
 `cross_type_column_identity` analysis. The analysis is informational: it
 never blocks a plan, and a pair leaves it as soon as either column has a
