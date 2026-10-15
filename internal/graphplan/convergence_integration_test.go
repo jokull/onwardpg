@@ -6900,7 +6900,7 @@ func TestApprovedDestructiveDropsConvergeOnPostgreSQL(t *testing.T) {
 	schemaName := "onwardpg_drop_" + time.Now().UTC().Format("20060102150405")
 	defer func() { _, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`) }()
 	currentDDL := `CREATE SCHEMA "` + schemaName + `";
-CREATE TABLE "` + schemaName + `".keep (id bigint, old_column text, retained_column text);
+CREATE TABLE "` + schemaName + `".keep (id bigint, old_column text NOT NULL, snapshot_version integer NOT NULL DEFAULT 7, retained_column text);
 CREATE INDEX keep_old_column_idx ON "` + schemaName + `".keep (old_column);
 CREATE TABLE "` + schemaName + `".remove_me (id bigint);`
 	if _, err := conn.Exec(ctx, currentDDL); err != nil {
@@ -6924,18 +6924,20 @@ CREATE TABLE "` + schemaName + `".keep (id bigint, retained_column text);`
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The index holds no rows: only the table and the column ask a decision.
-	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 2 {
+	// The index holds no rows: only the table and the columns ask a decision.
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 3 {
 		t.Fatalf("expected table and column drop questions: %#v", pending)
 	}
 	keepTable := (pgschema.Table{Schema: schemaName, Name: "keep"}).ObjectID()
 	removeTable := (pgschema.Table{Schema: schemaName, Name: "remove_me"}).ObjectID()
 	oldColumn := (pgschema.Column{Table: keepTable, Name: "old_column"}).ObjectID()
+	snapshotVersion := (pgschema.Column{Table: keepTable, Name: "snapshot_version"}).ObjectID()
 	answers := protocol.Answers{
 		CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint,
 		Answers: []protocol.Answer{
 			{Kind: "drop", Key: removeTable.String(), Value: "drop"},
 			{Kind: "drop", Key: oldColumn.String(), Value: "drop"},
+			{Kind: "drop", Key: snapshotVersion.String(), Value: "drop"},
 		},
 	}
 	plan, err := buildIntegration(current, desired, answers, Options{ConcurrentIndexes: true})
@@ -6948,7 +6950,20 @@ CREATE TABLE "` + schemaName + `".keep (id bigint, retained_column text);`
 	if !strings.Contains(joinPlan(plan), `DROP INDEX CONCURRENTLY "`+schemaName+`"."keep_old_column_idx";`) {
 		t.Fatalf("expected concurrent index drop: %s", joinPlan(plan))
 	}
-	applyPlan(t, ctx, conn, plan)
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseExpand)
+	table := qualified(schemaName, "keep")
+	if _, err := conn.Exec(ctx, "INSERT INTO "+table+" (id, old_column, snapshot_version, retained_column) VALUES (1, 'old writer', 9, 'old');"); err != nil {
+		t.Fatalf("old writer after expand: %v", err)
+	}
+	var retiredValue *string
+	var defaultVersion int
+	if err := conn.QueryRow(ctx, "INSERT INTO "+table+" (id, retained_column) VALUES (2, 'new') RETURNING old_column, snapshot_version;").Scan(&retiredValue, &defaultVersion); err != nil {
+		t.Fatalf("new writer omitting retired columns after expand: %v", err)
+	}
+	if retiredValue != nil || defaultVersion != 7 {
+		t.Fatalf("expected nullable retired input and preserved default, got old_column=%v snapshot_version=%d", retiredValue, defaultVersion)
+	}
+	applyPlanPhase(t, ctx, conn, plan, protocol.PhaseContract)
 	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
 	if err != nil {
 		t.Fatal(err)

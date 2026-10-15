@@ -4604,6 +4604,31 @@ func renderChange(item change.Change, current, desired *pgschema.Snapshot, creat
 			plain.ConcurrentIndexes = false
 			return withHazards(renderDropWithOptions(index, plain), HazardPartitionedIndexNotConcurrent), nil, nil, nil
 		}
+		if column, ok := item.Before.(pgschema.Column); ok && column.NotNull && column.Default == nil && column.Identity == nil && column.Serial == nil && column.Generated == nil {
+			if desiredTable, retained := desired.Object(column.Table); retained {
+				// The new writer omits this column before contract removes it.
+				// Relax only its required input; keep the old column available
+				// to old writers, and preserve any existing value generator.
+				currentTable, _ := current.Object(column.Table)
+				for _, tableObject := range []pgschema.Object{currentTable, desiredTable} {
+					table, ok := tableObject.(pgschema.Table)
+					if !ok {
+						return nil, nil, []string{"required_column_drop_missing_table:" + column.ObjectID().String()}, nil
+					}
+					if table.Partition != nil || table.PartitionOf != nil {
+						// Parent/child NOT NULL and key removal ordering needs a
+						// hierarchy-wide plan, not an independent column change.
+						return nil, nil, []string{"required_column_drop_partition:" + column.ObjectID().String()}, nil
+					}
+				}
+				hazards := []string(nil)
+				if droppingPrimaryKeyForColumn(current, desired, column.ObjectID()) {
+					hazards = append(hazards, "after_primary_key_drop")
+				}
+				expand := statement("ALTER TABLE "+qualified(column.Table.Schema, column.Table.Name)+" ALTER COLUMN "+quote(column.Name)+" DROP NOT NULL;", protocol.PhaseExpand, "safe", true, hazards...)
+				return append([]protocol.Statement{expand}, renderDropWithOptions(column, options)...), nil, nil, nil
+			}
+		}
 		return renderDropWithOptions(item.Before, options), nil, nil, nil
 	case change.Modify:
 		return renderModify(item.Before, item.After, choices, options, current, desired)
