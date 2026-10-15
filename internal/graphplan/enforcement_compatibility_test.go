@@ -8,6 +8,51 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
+func TestRenderUniqueIndexAcceptanceReplacementTerminatesStatements(t *testing.T) {
+	before := pgschema.Index{
+		Table: (pgschema.Table{Schema: "public", Name: "cart_gift_claim"}).ObjectID(),
+		Name:  "cart_gift_claim_active_trip_gift_unique", Unique: true, Method: "btree",
+		Parts:     []pgschema.IndexPart{{Column: "trip_id"}, {Column: "gift_id"}},
+		Predicate: "status = 'active'",
+	}
+	after := before
+	// Removing a key part tightens uniqueness, so restoration must run in contract.
+	after.Parts = []pgschema.IndexPart{{Column: "trip_id"}}
+	current := pgschema.New()
+	if err := current.Add(before); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name       string
+		concurrent bool
+	}{
+		{name: "concurrent", concurrent: true},
+		{name: "non_concurrent", concurrent: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			statements, unsupported, err := renderUniqueIndexAcceptanceReplacement(before, after, current, Options{ConcurrentIndexes: tc.concurrent})
+			if err != nil || len(unsupported) != 0 {
+				t.Fatalf("render replacement: unsupported=%v err=%v", unsupported, err)
+			}
+			if len(statements) != 2 {
+				t.Fatalf("expected drop and create statements, got %#v", statements)
+			}
+			create := statements[1]
+			if create.Phase != protocol.PhaseContract || !containsString(create.Hazards, "restore_unique_index_enforcement") {
+				t.Fatalf("expected contract-phase unique index restoration, got %#v", create)
+			}
+			if !strings.Contains(create.SQL, " WHERE "+after.Predicate) {
+				t.Fatalf("missing partial predicate: %s", create.SQL)
+			}
+			for _, item := range statements {
+				if !strings.HasSuffix(item.SQL, ";") {
+					t.Errorf("unterminated %s statement: %s", item.Phase, item.SQL)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildUniqueKeyRelaxationIsExpandOnly(t *testing.T) {
 	current, desired := uniqueRelaxationSnapshots(t)
 	plan, err := Build(current, desired, protocol.Answers{}, Options{})

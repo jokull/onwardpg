@@ -48,6 +48,7 @@ func renderUniqueIndexAcceptanceReplacement(before, after pgschema.Index, curren
 	if unsupported != "" {
 		return nil, []string{unsupported}, nil
 	}
+	createSQL = strings.TrimSuffix(createSQL, ";") + ";"
 	createPhase := protocol.PhaseContract
 	createHazards := []string{"restore_unique_index_enforcement", "post_drain_writers_required", "duplicate_rows_possible", "index_build"}
 	if wider {
