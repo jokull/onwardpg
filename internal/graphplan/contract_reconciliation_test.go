@@ -291,3 +291,119 @@ func buildWithManualReconciliation(t *testing.T, current, desired *pgschema.Snap
 	t.Fatal("manual reconciliation questions did not converge")
 	return protocol.Result{}
 }
+
+// A new UNIQUE key whose columns contain the table's primary key can never
+// reject a row: it is installed in expand without a gate, and a foreign key
+// from a new table that references it stays in expand too.
+func TestUniqueKeyImpliedByPrimaryKeyNeedsNoGate(t *testing.T) {
+	build := func(t *testing.T, uniqueColumns []string) (protocol.Result, string) {
+		t.Helper()
+		current, desired := pgschema.New(), pgschema.New()
+		schema := pgschema.Schema{Name: "public"}
+		quotes := pgschema.Table{Schema: "public", Name: "checkout_quote"}
+		columns := []pgschema.Column{
+			{Table: quotes.ObjectID(), Name: "id", Position: 1, Type: "text", NotNull: true},
+			{Table: quotes.ObjectID(), Name: "trip_id", Position: 2, Type: "text"},
+			{Table: quotes.ObjectID(), Name: "company", Position: 3, Type: "text", NotNull: true},
+			{Table: quotes.ObjectID(), Name: "currency", Position: 4, Type: "text", NotNull: true},
+		}
+		primary := pgschema.Constraint{Table: quotes.ObjectID(), Name: "checkout_quote_pkey", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)", Validated: true}
+		primaryIndex := pgschema.Index{Table: quotes.ObjectID(), Name: "checkout_quote_pkey", Constraint: "checkout_quote_pkey", Unique: true, Primary: true, Method: "btree", Parts: []pgschema.IndexPart{{Column: "id"}}}
+		for _, snapshot := range []*pgschema.Snapshot{current, desired} {
+			objects := []pgschema.Object{schema, quotes, primary, primaryIndex}
+			for _, column := range columns {
+				objects = append(objects, column)
+			}
+			for _, object := range objects {
+				if err := snapshot.Add(object); err != nil {
+					t.Fatal(err)
+				}
+			}
+			edges := [][2]pgschema.ID{{quotes.ObjectID(), schema.ObjectID()}, {primary.ObjectID(), quotes.ObjectID()}, {primary.ObjectID(), primaryIndex.ObjectID()}, {primaryIndex.ObjectID(), quotes.ObjectID()}, {primaryIndex.ObjectID(), columns[0].ObjectID()}}
+			for _, column := range columns {
+				edges = append(edges, [2]pgschema.ID{column.ObjectID(), quotes.ObjectID()})
+			}
+			for _, edge := range edges {
+				if err := snapshot.AddDependency(edge[0], edge[1]); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		parts := make([]pgschema.IndexPart, 0, len(uniqueColumns))
+		for _, column := range uniqueColumns {
+			parts = append(parts, pgschema.IndexPart{Column: column})
+		}
+		unique := pgschema.Constraint{Table: quotes.ObjectID(), Name: "quote_key", Type: pgschema.ConstraintUnique, Definition: "UNIQUE (" + strings.Join(uniqueColumns, ", ") + ")", Validated: true}
+		uniqueIndex := pgschema.Index{Table: quotes.ObjectID(), Name: "quote_key", Constraint: "quote_key", Unique: true, Method: "btree", Parts: parts}
+		dues := pgschema.Table{Schema: "public", Name: "payment_due"}
+		dueColumns := []pgschema.Column{
+			{Table: dues.ObjectID(), Name: "id", Position: 1, Type: "text", NotNull: true},
+			{Table: dues.ObjectID(), Name: "quote_id", Position: 2, Type: "text", NotNull: true},
+			{Table: dues.ObjectID(), Name: "trip_id", Position: 3, Type: "text"},
+			{Table: dues.ObjectID(), Name: "company", Position: 4, Type: "text", NotNull: true},
+			{Table: dues.ObjectID(), Name: "currency", Position: 5, Type: "text", NotNull: true},
+		}
+		foreign := pgschema.Constraint{
+			Table: dues.ObjectID(), Name: "payment_due_quote_fk", Type: pgschema.ConstraintForeign,
+			Definition: "FOREIGN KEY (quote_id, trip_id, company, currency) REFERENCES public.checkout_quote(id, trip_id, company, currency)",
+			Reference:  ptrID(quotes.ObjectID()), Validated: true,
+		}
+		objects := []pgschema.Object{unique, uniqueIndex, dues, foreign}
+		for _, column := range dueColumns {
+			objects = append(objects, column)
+		}
+		for _, object := range objects {
+			if err := desired.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		edges := [][2]pgschema.ID{{unique.ObjectID(), quotes.ObjectID()}, {unique.ObjectID(), uniqueIndex.ObjectID()}, {uniqueIndex.ObjectID(), quotes.ObjectID()}, {dues.ObjectID(), schema.ObjectID()}, {foreign.ObjectID(), dues.ObjectID()}, {foreign.ObjectID(), unique.ObjectID()}}
+		for _, column := range dueColumns {
+			edges = append(edges, [2]pgschema.ID{column.ObjectID(), dues.ObjectID()})
+		}
+		for _, column := range uniqueColumns {
+			edges = append(edges, [2]pgschema.ID{uniqueIndex.ObjectID(), pgschema.Column{Table: quotes.ObjectID(), Name: column}.ObjectID()})
+		}
+		for _, edge := range edges {
+			if err := desired.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := Build(current, desired, protocol.Answers{}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result, foreign.ObjectID().String()
+	}
+
+	t.Run("key contains the primary key", func(t *testing.T) {
+		result, _ := build(t, []string{"id", "trip_id", "company", "currency"})
+		if result.Status != protocol.Planned {
+			t.Fatalf("implied unique key must not ask for reconciliation or block: %#v", result)
+		}
+		uniqueSeen, foreignSeen := false, false
+		for _, statement := range result.Statements {
+			switch {
+			case strings.Contains(statement.SQL, `ADD CONSTRAINT "quote_key"`):
+				uniqueSeen = true
+				if statement.Phase != protocol.PhaseExpand || !containsString(statement.Hazards, "unique_implied_by_existing_key:checkout_quote_pkey") {
+					t.Fatalf("implied unique key must be expand work with its proof: %#v", statement)
+				}
+			case strings.Contains(statement.SQL, `ADD CONSTRAINT "payment_due_quote_fk"`):
+				foreignSeen = true
+				if statement.Phase != protocol.PhaseExpand {
+					t.Fatalf("a new table's foreign key to the implied key must stay in expand: %#v", statement)
+				}
+			}
+		}
+		if !uniqueSeen || !foreignSeen {
+			t.Fatalf("expected the unique key and the foreign key in the plan: %#v", result.Statements)
+		}
+	})
+	t.Run("key without the primary key keeps its gate", func(t *testing.T) {
+		result, _ := build(t, []string{"trip_id", "company"})
+		if result.Status != protocol.NeedsInput || len(result.Questions) != 1 || result.Questions[0].Kind != "reconcile_contract" || result.Questions[0].Key != "constraint:public:checkout_quote:quote_key" {
+			t.Fatalf("a unique key the primary key does not imply still needs reconciliation: %#v", result)
+		}
+	})
+}

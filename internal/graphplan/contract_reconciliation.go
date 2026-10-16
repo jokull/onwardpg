@@ -57,6 +57,11 @@ func reconciliationSpecForChange(item change.Change, current, desired *pgschema.
 		if (after.Type == pgschema.ConstraintCheck || after.Type == pgschema.ConstraintForeign) && !after.Validated {
 			return reconciliationSpec{}, false
 		}
+		if item.Before == nil {
+			if _, implied := uniqueConstraintImpliedByExistingKey(after, current, desired); implied {
+				return reconciliationSpec{}, false
+			}
+		}
 		if before, ok := item.Before.(pgschema.Constraint); ok {
 			switch {
 			case before.Type == pgschema.ConstraintCheck && after.Type == pgschema.ConstraintCheck:

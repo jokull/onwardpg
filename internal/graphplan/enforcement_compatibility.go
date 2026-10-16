@@ -2,6 +2,7 @@ package graphplan
 
 import (
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/jokull/onwardpg/internal/protocol"
@@ -47,6 +48,7 @@ func renderUniqueIndexAcceptanceReplacement(before, after pgschema.Index, curren
 	if unsupported != "" {
 		return nil, []string{unsupported}, nil
 	}
+	createSQL = strings.TrimSuffix(createSQL, ";") + ";"
 	createPhase := protocol.PhaseContract
 	createHazards := []string{"restore_unique_index_enforcement", "post_drain_writers_required", "duplicate_rows_possible", "index_build"}
 	if wider {
@@ -298,4 +300,74 @@ func renderUnknownConstraintKindReplacement(before, after pgschema.Constraint, c
 		}
 	}
 	return append([]protocol.Statement{drop}, restore...), nil, nil, nil
+}
+
+// uniqueConstraintImpliedByExistingKey reports whether a new UNIQUE
+// constraint on an existing table can never reject a row, because its key
+// columns contain the columns of a key that PostgreSQL already enforces on
+// that table and keeps enforcing in the desired schema. Two rows equal on the
+// wider key are equal on the narrower key, so the narrower key rejects them
+// first. Such a constraint is catalog-proven: it needs no post-drain gate and
+// can be installed in expand, which keeps a foreign key that references it
+// out of contract. It returns the name of the proving key.
+func uniqueConstraintImpliedByExistingKey(after pgschema.Constraint, current, desired *pgschema.Snapshot) (string, bool) {
+	if after.Type != pgschema.ConstraintUnique || after.Parent != nil || after.Deferrable || current == nil || desired == nil {
+		return "", false
+	}
+	if tableIsPartitioned(current, after.Table) || tableIsPartitioned(desired, after.Table) {
+		return "", false
+	}
+	if _, exists := current.Object(after.ObjectID()); exists {
+		return "", false
+	}
+	newIndex, exists := backingIndexForConstraint(desired, after)
+	if !exists || !newIndex.Unique || newIndex.Exclusion || newIndex.Parent != nil || newIndex.Method != "btree" || strings.TrimSpace(newIndex.Predicate) != "" {
+		return "", false
+	}
+	columns := make(map[string]bool, len(newIndex.Parts))
+	for _, part := range newIndex.Parts {
+		if part.Column == "" || part.Expression != "" {
+			return "", false
+		}
+		columns[part.Column] = true
+	}
+	var names []string
+	for _, object := range current.Objects() {
+		key, ok := object.(pgschema.Constraint)
+		if !ok || key.Table != after.Table || key.Parent != nil || (key.Type != pgschema.ConstraintPrimary && key.Type != pgschema.ConstraintUnique) {
+			continue
+		}
+		retainedObject, retained := desired.Object(key.ObjectID())
+		retainedKey, ok := retainedObject.(pgschema.Constraint)
+		if !retained || !ok || retainedKey.Type != key.Type {
+			continue
+		}
+		oldIndex, oldExists := backingIndexForConstraint(current, key)
+		retainedIndex, retainedExists := backingIndexForConstraint(desired, retainedKey)
+		if !oldExists || !retainedExists || !oldIndex.Unique || oldIndex.Exclusion || oldIndex.Parent != nil || strings.TrimSpace(oldIndex.Predicate) != "" ||
+			!reflect.DeepEqual(oldIndex.Parts, retainedIndex.Parts) || len(oldIndex.Parts) == 0 {
+			continue
+		}
+		// Standard UNIQUE never rejects rows whose key holds a NULL. A proving
+		// UNIQUE key therefore has to treat NULLs as distinct exactly like the
+		// new key does; a primary key has no NULLs and proves both forms.
+		if key.Type == pgschema.ConstraintUnique && newIndex.NullsNotDistinct && !oldIndex.NullsNotDistinct {
+			continue
+		}
+		covered := true
+		for _, part := range oldIndex.Parts {
+			if part.Column == "" || part.Expression != "" || !columns[part.Column] {
+				covered = false
+				break
+			}
+		}
+		if covered {
+			names = append(names, key.Name)
+		}
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+	sort.Strings(names)
+	return names[0], true
 }

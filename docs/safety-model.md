@@ -128,6 +128,13 @@ PostgreSQL read-only transaction. Its result is narrow evidence about a
 historical data effect, never authorization to replay phase SQL or infer a
 repair.
 
+A durable bundle renders a confirmed same-type column rename as an overlap
+bridge so that two releases can run against one schema. The `direct_rename`
+strategy is the one explicit exception: the operator receipts, per column,
+that the previous release may stop working when the native rename runs. The
+planner never selects it; it offers it beside the bridge strategies, and as
+the only generated route when the table cannot take the bridge.
+
 An editable transition is still dependency-bounded. A same-type rename with
 an unproved dependent-view change keeps the generated column bridge and adds
 three ordered pockets for the overlap view, pre-cutover removal, and exact

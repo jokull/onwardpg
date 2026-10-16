@@ -122,8 +122,8 @@ func (h Hint) Validate() error {
 		if err := validateIdentifier("column", h.Name, "name"); err != nil {
 			return err
 		}
-		if h.Strategy != "manual_sql" && h.Strategy != "single_transaction" && h.Strategy != "split_plan" {
-			return fmt.Errorf("rename_backfill strategy must be manual_sql, single_transaction, or split_plan")
+		if h.Strategy != "manual_sql" && h.Strategy != "single_transaction" && h.Strategy != "direct_rename" && h.Strategy != "split_plan" {
+			return fmt.Errorf("rename_backfill strategy must be manual_sql, single_transaction, direct_rename, or split_plan")
 		}
 		return h.reject("from", h.From, "to", h.To, "action", h.Action)
 	case "reconcile":

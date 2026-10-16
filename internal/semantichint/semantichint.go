@@ -160,6 +160,8 @@ func choicesForQuestion(question protocol.Question, current, desired *pgschema.S
 			hazards := []string{"manual_sql"}
 			if strategy == "single_transaction" {
 				hazards = []string{"unbounded_update", "long_transaction", "wal_volume", "replica_lag"}
+			} else if strategy == "direct_rename" {
+				hazards = []string{"single_deployment_cutover", "application_compatibility", "access_exclusive_lock"}
 			} else if strategy == "split_plan" {
 				hazards = []string{"additional_deployment"}
 			}

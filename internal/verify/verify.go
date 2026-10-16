@@ -4,10 +4,14 @@
 package verify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/jackc/pgx/v5"
@@ -70,6 +74,10 @@ type Input struct {
 	ThroughPhase string
 	Ignores      []string
 	Options      graphplan.Options
+	// Desired is the planner's desired snapshot when the caller has one. It
+	// lets a convergence failure name the objects whose catalog state after
+	// contract differs from the desired schema.
+	Desired *pgschema.Snapshot
 	// Executions lets several verifications of one command share executions
 	// that run the same SQL. A nil value gives this verification its own.
 	Executions *Executions
@@ -166,6 +174,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return Report{}, err
 	}
 	if targetManifest.DesiredSource.Fingerprint != report.DesiredFingerprint {
+		if differing := nonConvergentObjects(desired, input.Desired); len(differing) > 0 {
+			return Report{}, fmt.Errorf("the plan does not converge: after contract these objects differ from the desired schema: %s (full history fingerprint %s, bundle desired fingerprint %s)", strings.Join(differing, ", "), report.DesiredFingerprint, targetManifest.DesiredSource.Fingerprint)
+		}
 		return Report{}, fmt.Errorf("full history fingerprint %s does not match bundle desired fingerprint %s", report.DesiredFingerprint, targetManifest.DesiredSource.Fingerprint)
 	}
 	stopResidual := timing.Start("verify_residual_plan")
@@ -518,4 +529,51 @@ func phaseIndex(phase string) int {
 		}
 	}
 	return -1
+}
+
+// nonConvergentObjects lists the objects whose state after the whole plan
+// differs from the planner's desired snapshot: present on one side only, or
+// present on both with a different canonical definition. A nil desired
+// snapshot gives no names.
+func nonConvergentObjects(observed, desired *pgschema.Snapshot) []string {
+	if observed == nil || desired == nil {
+		return nil
+	}
+	var differing []string
+	seen := make(map[pgschema.ID]bool)
+	for _, id := range observed.IDs() {
+		seen[id] = true
+		before, _ := observed.Object(id)
+		after, exists := desired.Object(id)
+		if !exists {
+			differing = append(differing, id.String()+" (not in the desired schema)")
+			continue
+		}
+		beforeJSON, errBefore := json.Marshal(canonicalObject(before))
+		afterJSON, errAfter := json.Marshal(canonicalObject(after))
+		if errBefore != nil || errAfter != nil || !bytes.Equal(beforeJSON, afterJSON) {
+			differing = append(differing, id.String()+" (definition differs)")
+			continue
+		}
+		if !reflect.DeepEqual(observed.Dependencies(id), desired.Dependencies(id)) {
+			differing = append(differing, id.String()+" (dependencies differ)")
+		}
+	}
+	for _, id := range desired.IDs() {
+		if !seen[id] {
+			differing = append(differing, id.String()+" (missing after contract)")
+		}
+	}
+	sort.Strings(differing)
+	return differing
+}
+
+// canonicalObject drops the physical column position, exactly as the
+// snapshot fingerprint does: ADD COLUMN appends, so position is not identity.
+func canonicalObject(object pgschema.Object) pgschema.Object {
+	if column, ok := object.(pgschema.Column); ok {
+		column.Position = 0
+		return column
+	}
+	return object
 }

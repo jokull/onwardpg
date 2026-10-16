@@ -225,10 +225,33 @@ the same routine OID does not request a refresh.
 For a confirmed same-type column rename, eligible columns use two physical
 columns plus a bidirectional trigger through expand. A second,
 fingerprint-bound choice requires reviewed manual SQL with an equality
-assertion, explicit consent to a hazardous single-transaction update, or a
-split plan. Contract asserts equality before the native identity-preserving
-rename. Defaults, generated/identity values, partitions, existing trigger
-ordering, and RLS can still block the automatic bridge.
+assertion, explicit consent to a hazardous single-transaction update, a
+direct rename, or a split plan. Contract asserts equality before the native
+identity-preserving rename. Defaults, generated/identity values, partitions,
+existing trigger ordering, and RLS withhold the automatic bridge; the
+confirmed identity then offers only `direct_rename` and `split_plan`, and the
+question names the reason. `direct_rename` is one native `ALTER TABLE ...
+RENAME COLUMN` in expand with no overlap: the previous release stops working
+the moment it runs, which the statement carries as the
+`single_deployment_cutover` hazard. It renders the name change and nothing
+else, so it is offered only when the name is the whole difference: a rename
+whose dependent view changes keeps the bridge and its handoff pockets, and an
+asserted identity whose default or another property also changes is not
+offered `direct_rename`. On a partitioned table the parent's native rename
+propagates to every partition, so a child's `direct_rename` renders no
+statement of its own.
+
+A new UNIQUE constraint on an existing table whose columns contain the
+columns of a key PostgreSQL already enforces there (the primary key, or a
+unique key with the same NULL treatment) can never reject a row, so it is
+installed in expand with the hazard `unique_implied_by_existing_key:<key>`
+and asks no reconciliation question; a foreign key that references it from a
+new table stays in expand.
+
+Cross-type drop/create pairs on one table are reported as
+`cross_type_column_identity` analysis. The analysis is informational: it
+never blocks a plan, and a pair leaves it as soon as either column has a
+confirmed rename.
 
 Typed view dependencies are owned by that transition. A retained definition
 whose PostgreSQL rewrite is catalog-provable stays on the generated path. If

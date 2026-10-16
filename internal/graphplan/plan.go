@@ -108,6 +108,11 @@ type renameColumn struct {
 	manualDependencyClosure bool
 	dependencyClosure       []pgschema.ID
 	desiredViewDefinitions  []string
+	// bridgeUnsupported names why the generated overlap bridge cannot be
+	// used for this same-type rename (see columnTriggerBridgeUnsupported).
+	// The rename stays confirmed; only the strategies that need the bridge
+	// are withheld from the rename_backfill_strategy question.
+	bridgeUnsupported string
 }
 
 type renameEnum struct {
@@ -294,13 +299,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 		return result, nil
 	}
 	changes, extensionMoves := resolveExtensionMoves(changes)
-	changes, columnRenames, columnRenameQuestions, columnRenameUnsupported, err := resolveColumnRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint, options.DirectColumnRenames, options.PreserveSurplus, options.IdentityHints)
+	changes, columnRenames, columnRenameQuestions, err := resolveColumnRenames(changes, current, desired, resolver, currentFingerprint, desiredFingerprint, options.DirectColumnRenames, options.PreserveSurplus, options.IdentityHints)
 	if err != nil {
 		return protocol.Result{}, err
 	}
-	if len(columnRenameUnsupported) > 0 {
-		return unsupportedResult(result, resolver, columnRenameUnsupported)
-	}
+	result.Analysis = withoutConfirmedRenameAnalysis(result.Analysis, columnRenames)
 	if len(columnRenameQuestions) > 0 {
 		if err := resolver.ValidateAllUsed(); err != nil {
 			return protocol.Result{}, err
@@ -407,6 +410,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 	}
 	var deferredColumnRenameExpandHandoffs []protocol.Statement
 	for _, rename := range columnRenames {
+		if !rename.crossType && choices.renameStrategy[rename.from.ObjectID()] == "direct_rename" {
+			// The native rename runs in expand, so the desired name exists
+			// before deployment and its dependents need no contract promotion.
+			continue
+		}
 		contractProviders[rename.to.ObjectID()] = true
 	}
 	for _, rename := range indexRenames {
@@ -504,6 +512,17 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			continue
 		}
 		if choices.renameStrategy[rename.from.ObjectID()] == "split_plan" {
+			continue
+		}
+		if choices.renameStrategy[rename.from.ObjectID()] == "direct_rename" {
+			if directRenameInheritedFromAncestor(rename, columnRenames, choices, current) {
+				// PostgreSQL propagates a partitioned parent's rename to every
+				// partition, and renaming the inherited column itself fails.
+				continue
+			}
+			for _, statement := range renderDurableDirectColumnRename(rename) {
+				appendStatement(&result, statement)
+			}
 			continue
 		}
 		strategy := choices.renameStrategy[rename.from.ObjectID()]
@@ -815,6 +834,31 @@ func crossTypeColumnIdentityAnalysis(changes []change.Change, identityHints []pr
 		}
 		return result[i].To < result[j].To
 	})
+	return result
+}
+
+// withoutConfirmedRenameAnalysis drops cross-type identity records whose
+// source column already has a confirmed rename, or whose target column was
+// chosen as the new identity of another column. The analysis is computed
+// from the raw diff before rename resolution, so without this step a table
+// with several renames and several new columns reports every drop/create
+// pair, including pairs the caller has already decided.
+func withoutConfirmedRenameAnalysis(analysis []protocol.DecisionAnalysis, renames []renameColumn) []protocol.DecisionAnalysis {
+	if len(renames) == 0 || len(analysis) == 0 {
+		return analysis
+	}
+	decided := make(map[string]bool, len(renames)*2)
+	for _, rename := range renames {
+		decided[rename.from.ObjectID().String()] = true
+		decided[rename.to.ObjectID().String()] = true
+	}
+	result := make([]protocol.DecisionAnalysis, 0, len(analysis))
+	for _, item := range analysis {
+		if item.Kind == "cross_type_column_identity" && (decided[item.From] || decided[item.To]) {
+			continue
+		}
+		result = append(result, item)
+	}
 	return result
 }
 
@@ -1942,7 +1986,7 @@ func dependsOnMovedExtension(snapshot *pgschema.Snapshot, id pgschema.ID, moves 
 	return visit(id)
 }
 
-func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, direct, preserveSurplus bool, identityHints []protocol.Hint) ([]change.Change, []renameColumn, []protocol.Question, []string, error) {
+func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Snapshot, resolver *protocol.Resolver, currentFingerprint, desiredFingerprint string, direct, preserveSurplus bool, identityHints []protocol.Hint) ([]change.Change, []renameColumn, []protocol.Question, error) {
 	var drops, creates []change.Change
 	for _, item := range changes {
 		if item.ID.Kind != pgschema.KindColumn {
@@ -1988,7 +2032,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 		}
 		answer, found, err := resolver.Resolve(question)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, err
 		}
 		if !found {
 			questions = append(questions, question)
@@ -2003,10 +2047,10 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 				}
 			}
 			if candidate.ID.Kind == "" {
-				return nil, nil, nil, nil, fmt.Errorf("resolved column rename candidate %q is unavailable", answer)
+				return nil, nil, nil, fmt.Errorf("resolved column rename candidate %q is unavailable", answer)
 			}
 			if consumed[candidate.ID] {
-				return nil, nil, nil, nil, fmt.Errorf("desired column %s was selected as more than one rename target", candidate.ID)
+				return nil, nil, nil, fmt.Errorf("desired column %s was selected as more than one rename target", candidate.ID)
 			}
 			to := candidate.After.(pgschema.Column)
 			crossType := from.Type != to.Type
@@ -2019,8 +2063,13 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 				})
 				continue
 			}
-			if reason := columnTriggerBridgeUnsupported(current, desired, from, to); !direct && reason != "" {
-				return nil, nil, nil, []string{"single_deployment_column_bridge_required:" + drop.ID.String() + ":" + reason}, nil
+			// A bridge blocker does not reject the confirmed identity. It is
+			// carried on the rename so the strategy question can withhold the
+			// bridge strategies; returning here would stop before the other
+			// rename answers are consumed and report them as unused.
+			bridgeUnsupported := ""
+			if !direct {
+				bridgeUnsupported = columnTriggerBridgeUnsupported(current, desired, from, to)
 			}
 			consumed[drop.ID], consumed[candidate.ID] = true, true
 			manualDependencyClosure := false
@@ -2052,7 +2101,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 				}
 				consumed[object.ObjectID()] = true
 			}
-			rename := renameColumn{from: from, to: to, manualDependencyClosure: manualDependencyClosure}
+			rename := renameColumn{from: from, to: to, manualDependencyClosure: manualDependencyClosure, bridgeUnsupported: bridgeUnsupported}
 			if manualDependencyClosure {
 				rename.dependencyClosure = consumeColumnTransitionChanges(changes, current, desired, from, to, consumed)
 				rename.desiredViewDefinitions = desiredViewDefinitions(desired, rename.dependencyClosure)
@@ -2061,7 +2110,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 		}
 	}
 	if len(consumed) == 0 {
-		return changes, renames, questions, nil, nil
+		return changes, renames, questions, nil
 	}
 	filtered := make([]change.Change, 0, len(changes)-len(consumed))
 	for _, item := range changes {
@@ -2069,7 +2118,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 			filtered = append(filtered, item)
 		}
 	}
-	return filtered, renames, questions, nil, nil
+	return filtered, renames, questions, nil
 }
 
 func assertedColumnIdentity(hints []protocol.Hint, from, to pgschema.Column) bool {
@@ -2261,11 +2310,17 @@ func equivalentAutomaticColumnReferenceAfterRename(before, after pgschema.Object
 		if !ok {
 			return false
 		}
-		for i := range before.Parts {
-			if before.Parts[i].Column == from.Name {
-				before.Parts[i].Column = to.Name
+		// Rewrite a copy: before shares its Parts backing array with the
+		// current snapshot, and an in-place rename would change the current
+		// fingerprint under every later build of the same process.
+		parts := make([]pgschema.IndexPart, len(before.Parts))
+		copy(parts, before.Parts)
+		for i := range parts {
+			if parts[i].Column == from.Name {
+				parts[i].Column = to.Name
 			}
 		}
+		before.Parts = parts
 		// Index definitions are diagnostic-only and are deliberately not part
 		// of semantic graph equality.
 		before.Definition, next.Definition = "", ""
@@ -2608,6 +2663,47 @@ func stableOperationID(transitionID string, work protocol.ManualWork) string {
 	return "operation-" + hex.EncodeToString(sum[:8])
 }
 
+// directRenameInheritedFromAncestor reports whether a partition ancestor of
+// the renamed column's table carries the same direct rename, in which case
+// the ancestor's statement renames this column too.
+func directRenameInheritedFromAncestor(rename renameColumn, renames []renameColumn, choices decisions, current *pgschema.Snapshot) bool {
+	table := rename.from.Table
+	for depth := 0; depth < 64; depth++ {
+		object, exists := current.Object(table)
+		child, ok := object.(pgschema.Table)
+		if !exists || !ok || child.PartitionOf == nil {
+			return false
+		}
+		table = child.PartitionOf.Parent
+		for _, candidate := range renames {
+			if candidate.from.Table != table || candidate.from.Name != rename.from.Name || candidate.to.Name != rename.to.Name {
+				continue
+			}
+			if choices.renameStrategy[candidate.from.ObjectID()] == "direct_rename" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// renderDurableDirectColumnRename is the receipted direct_rename strategy of a
+// durable bundle: one native rename in expand, with no overlap bridge. The
+// previous release stops working the moment the statement runs, so the
+// statement carries that as an explicit hazard and keeps the transition id of
+// the confirmed identity.
+func renderDurableDirectColumnRename(rename renameColumn) []protocol.Statement {
+	transitionID := rename.from.ObjectID().String() + "->" + rename.to.ObjectID().String()
+	statements := renderDirectColumnRename(rename)
+	for index := range statements {
+		statements[index].TransitionID = transitionID
+		if index == 0 {
+			statements[index].Hazards = append(statements[index].Hazards, "single_deployment_cutover", "application_compatibility")
+		}
+	}
+	return statements
+}
+
 func renderDirectColumnRename(rename renameColumn) []protocol.Statement {
 	table := qualified(rename.from.Table.Schema, rename.from.Table.Name)
 	statements := []protocol.Statement{
@@ -2739,9 +2835,27 @@ func resolveRenameBridges(tables []renameTable, columns []renameColumn, views []
 		}
 		strategyQuestion := protocol.Question{
 			ID: "rename_backfill_strategy:" + id.String(), Kind: "rename_backfill_strategy", Key: id.String(),
-			Message:            "Column " + id.String() + " will overlap with " + rename.to.ObjectID().String() + ". Choose an operator-authored backfill, explicitly accept a single unbounded transaction for a known-small table, or split the work into a later plan.",
-			Choices:            []string{"manual_sql", "single_transaction", "split_plan"},
+			Message:            "Column " + id.String() + " will overlap with " + rename.to.ObjectID().String() + ". Choose an operator-authored backfill, explicitly accept a single unbounded transaction for a known-small table, rename the column directly in expand and accept that the previous release stops working at that moment, or split the work into a later plan.",
+			Choices:            []string{"manual_sql", "single_transaction", "direct_rename", "split_plan"},
 			CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint,
+		}
+		// A direct rename renders the name change and nothing else. It is
+		// offered only when the name is the whole difference: a changed
+		// dependent view is owned by the bridge's handoff pockets, and an
+		// asserted identity whose default, nullability, or other property
+		// also changes would silently lose that change.
+		directRenameWithheld := rename.manualDependencyClosure || !equivalentColumnForRename(rename.from, rename.to)
+		if directRenameWithheld {
+			strategyQuestion.Message = "Column " + id.String() + " will overlap with " + rename.to.ObjectID().String() + ". Choose an operator-authored backfill, explicitly accept a single unbounded transaction for a known-small table, or split the work into a later plan."
+			strategyQuestion.Choices = []string{"manual_sql", "single_transaction", "split_plan"}
+		}
+		if rename.bridgeUnsupported != "" {
+			strategyQuestion.Message = "Column " + id.String() + " is confirmed as " + rename.to.ObjectID().String() + ", but the generated overlap bridge is not available (" + rename.bridgeUnsupported + "). Rename the column directly in expand and accept that the previous release stops working at that moment, or split the work into a later plan."
+			strategyQuestion.Choices = []string{"direct_rename", "split_plan"}
+			if directRenameWithheld {
+				strategyQuestion.Message = "Column " + id.String() + " is confirmed as " + rename.to.ObjectID().String() + ", but the generated overlap bridge is not available (" + rename.bridgeUnsupported + ") and more than the name changes with it. Split the work into a later plan."
+				strategyQuestion.Choices = []string{"split_plan"}
+			}
 		}
 		strategy, found, err := resolver.Resolve(strategyQuestion)
 		if err != nil {
@@ -4460,7 +4574,16 @@ func renderChange(item change.Change, current, desired *pgschema.Snapshot, creat
 			}
 			statements, consumed, unsupported, err := renderConstraintCreateUsingExistingIndex(constraint, current, desired)
 			if !createdTables[constraint.Table] {
-				statements = withPhase(statements, protocol.PhaseContract, "review", "compatible_writers_required")
+				if provingKey, implied := uniqueConstraintImpliedByExistingKey(constraint, current, desired); implied {
+					// The existing key already rejects every row this
+					// constraint would reject, so no writer can violate it
+					// and it is additive expand work.
+					for index := range statements {
+						statements[index].Hazards = append(statements[index].Hazards, "unique_implied_by_existing_key:"+provingKey)
+					}
+				} else {
+					statements = withPhase(statements, protocol.PhaseContract, "review", "compatible_writers_required")
+				}
 			}
 			return statements, consumed, unsupported, err
 		}
@@ -4480,6 +4603,31 @@ func renderChange(item change.Change, current, desired *pgschema.Snapshot, creat
 			plain := options
 			plain.ConcurrentIndexes = false
 			return withHazards(renderDropWithOptions(index, plain), HazardPartitionedIndexNotConcurrent), nil, nil, nil
+		}
+		if column, ok := item.Before.(pgschema.Column); ok && column.NotNull && column.Default == nil && column.Identity == nil && column.Serial == nil && column.Generated == nil {
+			if desiredTable, retained := desired.Object(column.Table); retained {
+				// The new writer omits this column before contract removes it.
+				// Relax only its required input; keep the old column available
+				// to old writers, and preserve any existing value generator.
+				currentTable, _ := current.Object(column.Table)
+				for _, tableObject := range []pgschema.Object{currentTable, desiredTable} {
+					table, ok := tableObject.(pgschema.Table)
+					if !ok {
+						return nil, nil, []string{"required_column_drop_missing_table:" + column.ObjectID().String()}, nil
+					}
+					if table.Partition != nil || table.PartitionOf != nil {
+						// Parent/child NOT NULL and key removal ordering needs a
+						// hierarchy-wide plan, not an independent column change.
+						return nil, nil, []string{"required_column_drop_partition:" + column.ObjectID().String()}, nil
+					}
+				}
+				hazards := []string(nil)
+				if droppingPrimaryKeyForColumn(current, desired, column.ObjectID()) {
+					hazards = append(hazards, "after_primary_key_drop")
+				}
+				expand := statement("ALTER TABLE "+qualified(column.Table.Schema, column.Table.Name)+" ALTER COLUMN "+quote(column.Name)+" DROP NOT NULL;", protocol.PhaseExpand, "safe", true, hazards...)
+				return append([]protocol.Statement{expand}, renderDropWithOptions(column, options)...), nil, nil, nil
+			}
 		}
 		return renderDropWithOptions(item.Before, options), nil, nil, nil
 	case change.Modify:
