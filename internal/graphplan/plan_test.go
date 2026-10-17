@@ -2366,7 +2366,7 @@ func TestTableRenameDoesNotAbsorbUserNamedChildRename(t *testing.T) {
 	to := pgschema.Table{Schema: "app", Name: "customers"}
 	before := pgschema.Constraint{Table: from.ObjectID(), Name: "billing_identity", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)"}
 	after := pgschema.Constraint{Table: to.ObjectID(), Name: "customer_identity", Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)"}
-	if equivalentChildForTableRename(before, after, from, to) {
+	if equivalentChildForTableRename(pgschema.New(), pgschema.New(), before, after, from, to) {
 		t.Fatal("user-selected child names must remain a material table-rename difference")
 	}
 }
@@ -2687,6 +2687,160 @@ func TestBuildAllowsConfirmedTableRenameReferencedByForeignKey(t *testing.T) {
 		planned.Statements[2].SQL != `ALTER TABLE "public"."users" RENAME TO "accounts";` {
 		t.Fatalf("unexpected FK-safe rename plan %#v", planned)
 	}
+}
+
+// A catalog export of the desired schema carries the rewritten REFERENCES
+// target (pg_get_constraintdef after ALTER TABLE ... RENAME), not the old one.
+// Those foreign keys are the automatic rewrite and must ride the table rename.
+func TestBuildTableRenameConsumesForeignKeyDefinitionRewrite(t *testing.T) {
+	oldTable := pgschema.Table{Schema: "public", Name: "users"}
+	newTable := pgschema.Table{Schema: "public", Name: "accounts"}
+	orders := pgschema.Table{Schema: "public", Name: "orders"}
+	// usingIndex is the referenced key index as the catalog reports it: the
+	// derived <table>_pkey follows the rename, an explicit name does not.
+	foreignKey := func(table pgschema.Table, name, definition string, reference pgschema.Table, usingIndex string, columns, referenced []string) pgschema.Constraint {
+		return pgschema.Constraint{
+			Table: table.ObjectID(), Name: name, Type: pgschema.ConstraintForeign, Definition: definition,
+			Reference: ptrID(reference.ObjectID()), UsingIndex: usingIndex, Validated: true, ForeignKeyColumns: columns, ReferencedColumns: referenced,
+		}
+	}
+	tests := []struct {
+		name          string
+		before, after pgschema.Constraint
+		wantRename    string
+	}{
+		{
+			name:   "outside table",
+			before: foreignKey(orders, "orders_user_fkey", "FOREIGN KEY (user_id) REFERENCES public.users(id)", oldTable, "users_pkey", []string{"user_id"}, []string{"id"}),
+			after:  foreignKey(orders, "orders_user_fkey", "FOREIGN KEY (user_id) REFERENCES public.accounts(id)", newTable, "accounts_pkey", []string{"user_id"}, []string{"id"}),
+		},
+		{
+			name:   "outside table composite",
+			before: foreignKey(orders, "orders_tenant_user_fkey", "FOREIGN KEY (tenant_id, user_id) REFERENCES public.users(tenant_id, id) MATCH FULL ON DELETE CASCADE", oldTable, "users_tenant_id_unique", []string{"tenant_id", "user_id"}, []string{"tenant_id", "id"}),
+			after:  foreignKey(orders, "orders_tenant_user_fkey", "FOREIGN KEY (tenant_id, user_id) REFERENCES public.accounts(tenant_id, id) MATCH FULL ON DELETE CASCADE", newTable, "users_tenant_id_unique", []string{"tenant_id", "user_id"}, []string{"tenant_id", "id"}),
+		},
+		{
+			name:   "self reference with pinned name",
+			before: foreignKey(oldTable, "users_parent_fk", "FOREIGN KEY (parent_id) REFERENCES public.users(id) ON DELETE SET NULL", oldTable, "users_pkey", []string{"parent_id"}, []string{"id"}),
+			after:  foreignKey(newTable, "users_parent_fk", "FOREIGN KEY (parent_id) REFERENCES public.accounts(id) ON DELETE SET NULL", newTable, "accounts_pkey", []string{"parent_id"}, []string{"id"}),
+		},
+		{
+			name:       "self reference with derived name",
+			before:     foreignKey(oldTable, "users_parent_id_fkey", "FOREIGN KEY (parent_id) REFERENCES public.users(id)", oldTable, "users_pkey", []string{"parent_id"}, []string{"id"}),
+			after:      foreignKey(newTable, "accounts_parent_id_fkey", "FOREIGN KEY (parent_id) REFERENCES public.accounts(id)", newTable, "accounts_pkey", []string{"parent_id"}, []string{"id"}),
+			wantRename: `ALTER TABLE "public"."accounts" RENAME CONSTRAINT "users_parent_id_fkey" TO "accounts_parent_id_fkey";`,
+		},
+		{
+			name:   "quoted self reference",
+			before: foreignKey(oldTable, "users_parent_fk", `FOREIGN KEY (parent_id) REFERENCES public."users"(id)`, oldTable, "users_pkey", []string{"parent_id"}, []string{"id"}),
+			after:  foreignKey(newTable, "users_parent_fk", `FOREIGN KEY (parent_id) REFERENCES "public".accounts(id)`, newTable, "accounts_pkey", []string{"parent_id"}, []string{"id"}),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			planned := buildConfirmedTableRenameWithForeignKey(t, oldTable, newTable, orders, test.before, test.after)
+			if planned.Status != protocol.Planned {
+				t.Fatalf("status = %s unsupported=%v questions=%#v", planned.Status, planned.Unsupported, planned.Questions)
+			}
+			sqls := make([]string, 0, len(planned.Statements))
+			for _, statement := range planned.Statements {
+				sqls = append(sqls, statement.SQL)
+			}
+			want := []string{
+				"CREATE VIEW \"public\".\"accounts\" WITH (security_invoker = true) AS\nSELECT \"id\", \"tenant_id\", \"parent_id\" FROM \"public\".\"users\";",
+				`DROP VIEW "public"."accounts";`,
+				`ALTER TABLE "public"."users" RENAME TO "accounts";`,
+			}
+			if test.wantRename != "" {
+				want = append(want, test.wantRename)
+			}
+			want = append(want, `ALTER TABLE "public"."accounts" RENAME CONSTRAINT "users_pkey" TO "accounts_pkey";`)
+			if !reflect.DeepEqual(sqls, want) {
+				t.Fatalf("statements =\n%s\nwant\n%s", strings.Join(sqls, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+// The REFERENCES target and key index are the only FK fields the rename may
+// absorb: a genuine FK change in the same snapshot is still planned.
+func TestBuildTableRenameKeepsGenuineForeignKeyChange(t *testing.T) {
+	oldTable := pgschema.Table{Schema: "public", Name: "users"}
+	newTable := pgschema.Table{Schema: "public", Name: "accounts"}
+	orders := pgschema.Table{Schema: "public", Name: "orders"}
+	before := pgschema.Constraint{Table: orders.ObjectID(), Name: "orders_user_fkey", Type: pgschema.ConstraintForeign, Definition: "FOREIGN KEY (user_id) REFERENCES public.users(id)", Reference: ptrID(oldTable.ObjectID()), UsingIndex: "users_pkey", Validated: true, ForeignKeyColumns: []string{"user_id"}, ReferencedColumns: []string{"id"}}
+	renamed := before
+	renamed.Reference = ptrID(newTable.ObjectID())
+	renamed.Definition = "FOREIGN KEY (user_id) REFERENCES public.accounts(id)"
+	renamed.UsingIndex = "accounts_pkey"
+	cascade := renamed
+	cascade.Definition = "FOREIGN KEY (user_id) REFERENCES public.accounts(id) ON DELETE CASCADE"
+	cascade.ForeignKeyOnDelete = pgschema.ForeignKeyCascade
+	otherIndex := renamed
+	otherIndex.UsingIndex = "users_tenant_id_unique"
+	for name, after := range map[string]pgschema.Constraint{"on delete action": cascade, "key index": otherIndex} {
+		t.Run(name, func(t *testing.T) {
+			planned := buildConfirmedTableRenameWithForeignKey(t, oldTable, newTable, orders, before, after)
+			// Unconsumed, the change surfaces as FK DDL or as a question about it.
+			for _, statement := range planned.Statements {
+				if strings.Contains(statement.SQL, "orders_user_fkey") {
+					return
+				}
+			}
+			for _, question := range planned.Questions {
+				if question.Key == after.ObjectID().String() {
+					return
+				}
+			}
+			t.Fatalf("genuine FK change was absorbed by the table rename: %#v", planned)
+		})
+	}
+}
+
+func buildConfirmedTableRenameWithForeignKey(t *testing.T, oldTable, newTable, orders pgschema.Table, beforeFK, afterFK pgschema.Constraint) protocol.Result {
+	t.Helper()
+	current, desired := pgschema.New(), pgschema.New()
+	schema := pgschema.Schema{Name: "public"}
+	tableColumns := func(table pgschema.Table) []pgschema.Object {
+		primary := table.Name + "_pkey"
+		return []pgschema.Object{
+			pgschema.Column{Table: table.ObjectID(), Name: "id", Position: 1, Type: "bigint", NotNull: true},
+			pgschema.Column{Table: table.ObjectID(), Name: "tenant_id", Position: 2, Type: "bigint", NotNull: true},
+			pgschema.Column{Table: table.ObjectID(), Name: "parent_id", Position: 3, Type: "bigint"},
+			pgschema.Constraint{Table: table.ObjectID(), Name: primary, Type: pgschema.ConstraintPrimary, Definition: "PRIMARY KEY (id)", UsingIndex: primary, Validated: true},
+			pgschema.Index{Table: table.ObjectID(), Name: primary, Unique: true, Primary: true, Constraint: primary, Method: "btree", Parts: []pgschema.IndexPart{{Column: "id"}}},
+			pgschema.Constraint{Table: table.ObjectID(), Name: "users_tenant_id_unique", Type: pgschema.ConstraintUnique, Definition: "UNIQUE (tenant_id, id)", UsingIndex: "users_tenant_id_unique", Validated: true},
+			pgschema.Index{Table: table.ObjectID(), Name: "users_tenant_id_unique", Unique: true, Constraint: "users_tenant_id_unique", Method: "btree", Parts: []pgschema.IndexPart{{Column: "tenant_id"}, {Column: "id"}}},
+		}
+	}
+	orderColumns := []pgschema.Object{
+		pgschema.Column{Table: orders.ObjectID(), Name: "user_id", Position: 1, Type: "bigint"},
+		pgschema.Column{Table: orders.ObjectID(), Name: "tenant_id", Position: 2, Type: "bigint"},
+	}
+	add := func(snapshot *pgschema.Snapshot, table pgschema.Table, fk pgschema.Constraint) {
+		objects := append([]pgschema.Object{schema, table, orders}, tableColumns(table)...)
+		objects = append(append(objects, orderColumns...), fk)
+		for _, object := range objects {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	add(current, oldTable, beforeFK)
+	add(desired, newTable, afterFK)
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
+		t.Fatalf("expected one rename_table question, got status=%s questions=%#v unsupported=%v analysis=%#v", pending.Status, pending.Questions, pending.Unsupported, pending.Analysis)
+	}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: oldTable.ObjectID().String(), Value: newTable.ObjectID().String(), QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	planned, err := Build(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return planned
 }
 
 func TestBuildAllowsConfirmedTableRenameWithRetainedTrigger(t *testing.T) {

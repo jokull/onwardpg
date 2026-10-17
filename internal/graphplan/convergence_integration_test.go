@@ -870,6 +870,83 @@ func TestDependentViewRenameRequiresCompatibilityBridgeOnPostgreSQL(t *testing.T
 	assertRenameCompatibilityBridge(t, plan)
 }
 
+// The desired catalog prints every foreign key into the renamed table with the
+// new REFERENCES target. The rename must still be the whole plan: no FK is
+// dropped, re-added or re-validated.
+func TestTableRenameWithInboundAndSelfForeignKeysConvergesOnPostgreSQL(t *testing.T) {
+	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set ONWARDPG_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	lockGraphPlanIntegration(t, ctx, conn)
+	schemaName := "onwardpg_fk_table_rename_" + time.Now().UTC().Format("20060102150405")
+	defer func() { _, _ = conn.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+quote(schemaName)+" CASCADE") }()
+	ddl := func(table string) string {
+		s := quote(schemaName)
+		return "CREATE SCHEMA " + s + ";" +
+			"CREATE TABLE " + s + "." + table + " (id bigint PRIMARY KEY, tenant_id bigint NOT NULL, parent_id bigint, manager_id bigint REFERENCES " + s + "." + table + " (id)," +
+			" CONSTRAINT users_tenant_id_unique UNIQUE (tenant_id, id), UNIQUE (id, tenant_id)," +
+			" CONSTRAINT users_parent_fk FOREIGN KEY (parent_id) REFERENCES " + s + "." + table + " (id) ON DELETE SET NULL);" +
+			"CREATE TABLE " + s + ".orders (id bigint PRIMARY KEY, tenant_id bigint NOT NULL, user_id bigint NOT NULL," +
+			" CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES " + s + "." + table + " (id)," +
+			" CONSTRAINT orders_user_tenant_fk FOREIGN KEY (user_id, tenant_id) REFERENCES " + s + "." + table + " (id, tenant_id)," +
+			" CONSTRAINT orders_tenant_user_fk FOREIGN KEY (tenant_id, user_id) REFERENCES " + s + "." + table + " (tenant_id, id) MATCH FULL ON DELETE CASCADE);"
+	}
+	if _, err := conn.Exec(ctx, ddl("users")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(path, []byte(ddl("accounts")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := source.LoadGraph(ctx, source.Parse("file://"+path), url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := buildIntegration(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
+		t.Fatalf("expected one rename_table question, got %#v", pending)
+	}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0], QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	plan, err := buildIntegration(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned {
+		t.Fatalf("expected planned rename: %#v", plan)
+	}
+	for _, statement := range plan.Statements {
+		if strings.Contains(statement.SQL, "FOREIGN KEY") || strings.Contains(statement.SQL, "VALIDATE") || strings.Contains(statement.SQL, "DROP CONSTRAINT") {
+			t.Fatalf("table rename rebuilt a foreign key: %s", statement.SQL)
+		}
+	}
+	applyPlan(t, ctx, conn, plan)
+	actual, err := source.LoadGraph(ctx, source.Parse(url), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredFingerprint, _ := desired.Fingerprint()
+	actualFingerprint, _ := actual.Fingerprint()
+	if desiredFingerprint != actualFingerprint {
+		desiredJSON, _ := desired.CanonicalJSON()
+		actualJSON, _ := actual.CanonicalJSON()
+		t.Fatalf("residual graph diff after applying plan\ndesired: %s\nactual:  %s", desiredJSON, actualJSON)
+	}
+}
+
 func TestPartitionAttachAndDetachConvergeOnPostgreSQL(t *testing.T) {
 	url := os.Getenv("ONWARDPG_TEST_DATABASE_URL")
 	if url == "" {
