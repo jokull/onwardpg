@@ -649,13 +649,25 @@ onwardpg contract check \
   [--statement-timeout 30s] [--config .onwardpg.toml]
 ~~~
 
-Checks whether the selected history-head bundle is ready for contract without
-executing migration SQL. The environment variable supplies the database URL so
+Checks whether the selected bundle is ready for contract without executing
+migration SQL. `--bundle` defaults to the history head. It can also name an
+earlier bundle of the target history, for a window that runs several bundles
+back to back (expand 1, contract 1, expand 2, ...). Such a check is ready only
+while the database matches that bundle's receipted post-expand catalog, which
+exists only after every earlier contract and before any later expand; any
+other position is refused with `predecessor_contract_pending`,
+`expand_not_applied`, `contract_already_applied`, or
+`successor_expand_applied`. The report states `history_head`,
+`chain_position`, and `chain_length`. The environment variable supplies the database URL so
 credentials do not enter bundle receipts. The command validates the hash chain,
 requires the disposable-verification post-expand checkpoint, inspects the
 caller database in one repeatable-read/read-only transaction, compares its
 typed graph, runs receipted Boolean data gates, and validates expiring writer
-evidence bound to the exact plan and environment.
+evidence bound to the exact plan and environment. `--evidence` takes one
+evidence object or a JSON array of them, one per bundle; the check uses the
+object bound to the selected bundle and refuses a file with none or with two.
+A ready report records the attestation it accepted under `evidence` (digest,
+release, observation window, and cohorts).
 
 The report includes the selected target, environment, bundle and PlanID
 identity, generation, entry digest,

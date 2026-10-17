@@ -5,6 +5,49 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ## v0.1.0-preview.11 — 2026-10-17
 
+### Added
+
+- `onwardpg contract check --bundle ID` can check a bundle that is not the
+  history head, for a cutover window that runs several bundles back to back
+  (expand 1, contract 1, expand 2, ...) behind a write barrier. The check is
+  ready only while the database matches that bundle's receipted post-expand
+  catalog, which exists only after every earlier contract and before any
+  later expand. Out-of-order states are refused with
+  `predecessor_contract_pending`, `expand_not_applied`,
+  `contract_already_applied`, or `successor_expand_applied`. The report adds
+  `history_head`, `chain_position`, and `chain_length`.
+- `--evidence` accepts a JSON array of writer-evidence objects, one per
+  bundle, so one file attests the write barrier for the whole pending chain
+  prefix. The check uses the object bound to the selected bundle and refuses
+  a file with none or with two. A ready report records the accepted
+  attestation under `evidence`: digest, release, observation window, and
+  cohorts. Build the file from the bundle manifests and check each contract
+  in chain order:
+
+  ```sh
+  jq -n \
+    --arg environment production --arg release cutover-2026-10-18 \
+    --arg observed_at 2026-10-18T06:00:00Z --arg expires_at 2026-10-18T10:00:00Z \
+    --slurpfile cohorts write-barrier-cohorts.json \
+    '[inputs | {target, environment: $environment, plan_id,
+      bundle_entry_digest: .history.entry_digest,
+      desired_fingerprint: .desired_source.fingerprint, generation,
+      release: $release, observed_at: $observed_at, expires_at: $expires_at,
+      cohorts: $cohorts[0]}]' \
+    migrations/onward/app/T1/manifest.json \
+    migrations/onward/app/T2/manifest.json > cutover-evidence.json
+
+  onwardpg contract check --target app --bundle T1 \
+    --environment production --database-env PROD_READONLY_DATABASE_URL \
+    --evidence cutover-evidence.json
+  ```
+
+  `write-barrier-cohorts.json` lists one cohort per required category (`web`,
+  `workers`, `scheduled_jobs`, `queues`, `connection_pools`, `previews`,
+  `ad_hoc_writers`), each with status `read_only`, `drained`, or `isolated`,
+  `source_kind` `manual`, and a `source` that names the barrier. The
+  observation window must not exceed 24 hours.
+
 ### Fixed
 
 - A table or column rename on PostgreSQL 18 no longer names the replay's NOT
