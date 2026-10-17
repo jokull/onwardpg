@@ -166,3 +166,26 @@ func TestColumnRenameCarriesPartialUniqueIndexesOnPostgreSQL(t *testing.T) {
 		}
 	}
 }
+
+func TestTableRenameWithReorderedColumnsConvergesOnPostgreSQL(t *testing.T) {
+	ctx, conn, url, _, current, desired := columnRenameCatalogs(t, "onwardpg_table_rename_order",
+		"CREATE SCHEMA %[1]s; CREATE TABLE %[1]s.users (id bigint PRIMARY KEY, name text); ALTER TABLE %[1]s.users ADD COLUMN created_at timestamptz;",
+		"CREATE SCHEMA %[1]s; CREATE TABLE %[1]s.accounts (id bigint PRIMARY KEY, created_at timestamptz, name text);")
+	pending, err := Build(current, desired, protocol.Answers{}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != protocol.NeedsInput || len(pending.Questions) != 1 || pending.Questions[0].Kind != "rename_table" {
+		t.Fatalf("expected one rename_table question, got %#v", pending)
+	}
+	answers := protocol.Answers{CurrentFingerprint: pending.CurrentFingerprint, DesiredFingerprint: pending.DesiredFingerprint, Answers: []protocol.Answer{{Kind: "rename_table", Key: pending.Questions[0].Key, Value: pending.Questions[0].Choices[0], QuestionFingerprint: pending.Questions[0].ScopeFingerprint}}}
+	plan, err := buildIntegration(current, desired, answers, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != protocol.Planned {
+		t.Fatalf("expected planned rename: %#v", plan)
+	}
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}

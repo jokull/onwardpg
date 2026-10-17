@@ -4171,7 +4171,8 @@ func tableRenameRejection(current, desired *pgschema.Snapshot, from, to pgschema
 func plannableColumnChangeDuringTableRename(before, after pgschema.Object) bool {
 	beforeColumn, beforeOK := before.(pgschema.Column)
 	afterColumn, afterOK := after.(pgschema.Column)
-	return beforeOK && afterOK && beforeColumn.Name == afterColumn.Name && beforeColumn.Position == afterColumn.Position
+	// Position is not compared: see equivalentChildForTableRename.
+	return beforeOK && afterOK && beforeColumn.Name == afterColumn.Name
 }
 
 func tableChildren(snapshot *pgschema.Snapshot, table pgschema.ID) map[string]pgschema.Object {
@@ -4375,6 +4376,10 @@ func equivalentChildForTableRename(current, desired *pgschema.Snapshot, before, 
 		}
 		before.Table = to.ObjectID()
 		before.NotNullConstraintName, next.NotNullConstraintName = "", ""
+		// ADD COLUMN appends physically and RENAME changes no ordinal, so a
+		// declared order that differs from the catalog order is not identity;
+		// unreachableColumnPhysicalOrder reports it as compatibility evidence.
+		before.Position, next.Position = 0, 0
 		return reflect.DeepEqual(before, next)
 	case pgschema.Constraint:
 		next, ok := after.(pgschema.Constraint)
