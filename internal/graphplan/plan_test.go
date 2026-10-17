@@ -4593,7 +4593,7 @@ func TestColumnRenamePreservesAutomaticallyRewrittenConstraint(t *testing.T) {
 }
 
 func TestRenameIdentifierTokensPreservesStrings(t *testing.T) {
-	got := renameIdentifierTokens(`CHECK ((old_name <> 'old_name') AND "old_name" IS NOT NULL)`, "old_name", "new_name")
+	got := renameIdentifierTokens(`CHECK ((old_name <> 'old_name') AND "old_name" IS NOT NULL)`, map[string]string{"old_name": "new_name"})
 	want := `CHECK ((new_name <> 'old_name') AND "new_name" IS NOT NULL)`
 	if got != want {
 		t.Fatalf("renameIdentifierTokens = %q, want %q", got, want)
@@ -4602,7 +4602,7 @@ func TestRenameIdentifierTokensPreservesStrings(t *testing.T) {
 
 func TestNormalizeTriggerColumnReferenceChangesOnlyColumnRegions(t *testing.T) {
 	definition := "CREATE TRIGGER old_name BEFORE UPDATE OF old_name ON app.orders FOR EACH ROW WHEN (old.old_name IS DISTINCT FROM new.old_name AND audit_old_name() IS NULL) EXECUTE FUNCTION app.old_name()"
-	got := normalizeTriggerColumnReference(definition, "old_name", "new_name")
+	got := normalizeTriggerColumnReference(definition, map[string]string{"old_name": "new_name"})
 	want := "CREATE TRIGGER old_name BEFORE UPDATE OF new_name ON app.orders FOR EACH ROW WHEN (old.new_name IS DISTINCT FROM new.new_name AND audit_old_name() IS NULL) EXECUTE FUNCTION app.old_name()"
 	if got != want {
 		t.Fatalf("normalized trigger = %q, want %q", got, want)
