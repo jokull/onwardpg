@@ -712,10 +712,6 @@ func run(ctx context.Context, input Input, started **workspace.Export) (Report, 
 }
 
 func pendingEditRequirements(plan protocol.Result) []EditRequirement {
-	gateByID := make(map[string]protocol.ContractGate, len(plan.ContractGates))
-	for _, gate := range plan.ContractGates {
-		gateByID[gate.ID] = gate
-	}
 	var result []EditRequirement
 	for _, statement := range plan.Statements {
 		if !strings.Contains(statement.SQL, "ONWARDPG TODO") {
@@ -731,8 +727,10 @@ func pendingEditRequirements(plan protocol.Result) []EditRequirement {
 			requirement.Purpose = statement.Manual.Summary
 			requirement.ExecutionMode = statement.Manual.ExecutionMode
 		}
-		for gateID, gate := range gateByID {
-			if strings.Contains(statement.SQL, gateID) && strings.Contains(gate.BooleanSQL, "ONWARDPG TODO") {
+		// Plan order, not map order, decides which matching gate names the
+		// requirement.
+		for _, gate := range plan.ContractGates {
+			if strings.Contains(statement.SQL, gate.ID) && strings.Contains(gate.BooleanSQL, "ONWARDPG TODO") {
 				requirement.Purpose = "define the exact contract invariant: " + gate.Reason
 				requirement.ExecutionMode = "read_only_boolean"
 				requirement.RequiredProof = "one resolved read-only SELECT returning exactly one Boolean row; verify.sql cannot satisfy this contract gate"

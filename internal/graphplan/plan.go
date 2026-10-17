@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -4161,7 +4163,10 @@ func tableRenameRejection(current, desired *pgschema.Snapshot, from, to pgschema
 	}
 	fromChildren := tableChildren(current, from.ObjectID())
 	toChildren := tableChildren(desired, to.ObjectID())
-	for key, before := range fromChildren {
+	// The first mismatch in stable key order names the rejection, so the
+	// reason (and every digest over it) is the same on every run.
+	for _, key := range slices.Sorted(maps.Keys(fromChildren)) {
+		before := fromChildren[key]
 		after, exists := toChildren[key]
 		if !exists {
 			return "child_identity_mismatch:" + before.ObjectID().String(), true
@@ -4170,7 +4175,8 @@ func tableRenameRejection(current, desired *pgschema.Snapshot, from, to pgschema
 			return "child_semantics_changed:" + before.ObjectID().String(), true
 		}
 	}
-	for key, after := range toChildren {
+	for _, key := range slices.Sorted(maps.Keys(toChildren)) {
+		after := toChildren[key]
 		if _, exists := fromChildren[key]; !exists {
 			if _, column := after.(pgschema.Column); !column {
 				return "new_noncolumn_child:" + after.ObjectID().String(), true
@@ -7334,7 +7340,8 @@ func renderDomainConstraintChanges(before, after pgschema.Domain) ([]protocol.St
 	identifier := qualified(after.Schema, after.Name)
 	var statements []protocol.Statement
 	var dropped, added []string
-	for name, oldConstraint := range beforeByName {
+	for _, name := range slices.Sorted(maps.Keys(beforeByName)) {
+		oldConstraint := beforeByName[name]
 		newConstraint, exists := afterByName[name]
 		if !exists {
 			dropped = append(dropped, name)
@@ -7599,9 +7606,10 @@ func renderEnumRewrite(before, after pgschema.Enum, current, desired *pgschema.S
 	if len(currentColumns) != len(desiredColumns) {
 		return nil, nil, []string{"enum_rewrite_column_set:" + after.ObjectID().String()}, nil
 	}
-	for id, column := range currentColumns {
+	ids := sortedIDKeys(currentColumns)
+	for _, id := range ids {
 		next, exists := desiredColumns[id]
-		if !exists || !reflect.DeepEqual(column, next) {
+		if !exists || !reflect.DeepEqual(currentColumns[id], next) {
 			return nil, nil, []string{"enum_rewrite_column_change:" + id.String()}, nil
 		}
 	}
@@ -7617,11 +7625,6 @@ func renderEnumRewrite(before, after pgschema.Enum, current, desired *pgschema.S
 	if after.Comment != nil {
 		statements = append(statements, statement("COMMENT ON TYPE "+qualified(after.Schema, after.Name)+" IS "+literal(*after.Comment)+";", "contract", "safe", true, "enum_rewrite"))
 	}
-	ids := make([]pgschema.ID, 0, len(currentColumns))
-	for id := range currentColumns {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
 	for _, id := range ids {
 		column := desiredColumns[id]
 		identifier := "ALTER TABLE " + qualified(column.Table.Schema, column.Table.Name) + " ALTER COLUMN " + quote(column.Name)
@@ -8383,6 +8386,17 @@ func sharedNamespaceKeys(object pgschema.Object) []sharedNamespaceKey {
 	default:
 		return nil
 	}
+}
+
+// sortedIDKeys returns a map's keys in stable ID order. Range over the result
+// wherever the first match, or the iteration order, reaches planner output.
+func sortedIDKeys[V any](values map[pgschema.ID]V) []pgschema.ID {
+	ids := make([]pgschema.ID, 0, len(values))
+	for id := range values {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	return ids
 }
 
 func sortedManualWorkIDs(work map[pgschema.ID]protocol.ManualWork) []pgschema.ID {
@@ -9576,7 +9590,7 @@ func orderedTypedDerivedViews(snapshot *pgschema.Snapshot, included map[pgschema
 	}
 	for len(remaining) > 0 {
 		progress := false
-		for id := range remaining {
+		for _, id := range sortedIDKeys(remaining) {
 			object, exists := snapshot.Object(id)
 			view, ok := object.(pgschema.View)
 			if !exists || !ok {
