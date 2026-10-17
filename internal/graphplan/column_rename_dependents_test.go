@@ -170,6 +170,28 @@ func TestRenameIdentifierTokensAppliesRenamesInOnePass(t *testing.T) {
 	}
 }
 
+// A column rename never renames a function or a type: PostgreSQL leaves an
+// index on lower(lower) as lower(upper) after RENAME COLUMN lower TO upper, so
+// a desired upper(upper) is a real index change that must still be planned.
+func TestColumnRenameDoesNotRewriteFunctionOrTypeNames(t *testing.T) {
+	renames := map[string]string{"lower": "upper", "text": "body"}
+	got := renameIdentifierTokens(`(lower(lower) || (text)::text || "lower" ("text"))`, renames)
+	if want := `(lower(upper) || (body)::text || "lower" ("body"))`; got != want {
+		t.Fatalf("renameIdentifierTokens = %q, want %q", got, want)
+	}
+	table := pgschema.Table{Schema: "app", Name: "words"}.ObjectID()
+	index := func(expression string) pgschema.Index {
+		return pgschema.Index{Table: table, Name: "words_idx", Method: "btree", Parts: []pgschema.IndexPart{{Expression: expression}}}
+	}
+	set := columnRenamesOf(pgschema.Column{Table: table, Name: "lower", Type: "text"}, pgschema.Column{Table: table, Name: "upper", Type: "text"})
+	if equivalentAutomaticColumnReferencesAfterRenames(index("lower(lower)"), index("upper(upper)"), set) {
+		t.Fatal("a changed function was absorbed as a column rename")
+	}
+	if !equivalentAutomaticColumnReferencesAfterRenames(index("lower(lower)"), index("lower(upper)"), set) {
+		t.Fatal("the column reference inside the function call was not carried by the rename")
+	}
+}
+
 // A partial UNIQUE index rebuilt across expand and contract would enforce
 // nothing in between, so one that names a renamed column only in its WHERE
 // predicate, an expression key, or INCLUDE must be carried by the rename.

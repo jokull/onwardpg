@@ -2588,7 +2588,10 @@ func triggerWhenExpressionEnd(value string, start int) int {
 
 // renameIdentifierTokens makes the narrow catalog transformation PostgreSQL
 // performs for a column rename. It changes identifier tokens only; quoted
-// strings (for example CHECK values) are preserved verbatim.
+// strings (for example CHECK values) are preserved verbatim, and so is a token
+// in a function-name or type-cast position (followed by "(" or after "::"),
+// because a column rename never renames a function or a type: an index on
+// lower(lower) becomes lower(upper), not upper(upper).
 func renameIdentifierTokens(value string, renames map[string]string) string {
 	if len(renames) == 0 {
 		return value
@@ -2629,7 +2632,7 @@ func renameIdentifierTokens(value string, renames map[string]string) string {
 				identifier.WriteByte(value[i])
 				i++
 			}
-			if to, renamed := renames[identifier.String()]; renamed {
+			if to, renamed := renames[identifier.String()]; renamed && !notColumnReferencePosition(value, start, i) {
 				result.WriteString(quote(to))
 			} else {
 				result.WriteString(value[start:i])
@@ -2642,7 +2645,7 @@ func renameIdentifierTokens(value string, renames map[string]string) string {
 			for i < len(value) && isIdentifierPart(value[i]) {
 				i++
 			}
-			if to, renamed := renames[value[start:i]]; renamed {
+			if to, renamed := renames[value[start:i]]; renamed && !notColumnReferencePosition(value, start, i) {
 				result.WriteString(to)
 			} else {
 				result.WriteString(value[start:i])
@@ -2653,6 +2656,24 @@ func renameIdentifierTokens(value string, renames map[string]string) string {
 		i++
 	}
 	return result.String()
+}
+
+// notColumnReferencePosition reports whether the token value[start:end] is a
+// function name (the next non-space byte is "(") or a type name (the previous
+// non-space bytes are "::"). Neither can be a column reference.
+func notColumnReferencePosition(value string, start, end int) bool {
+	next := end
+	for next < len(value) && (value[next] == ' ' || value[next] == '\t' || value[next] == '\n') {
+		next++
+	}
+	if next < len(value) && value[next] == '(' {
+		return true
+	}
+	previous := start
+	for previous > 0 && (value[previous-1] == ' ' || value[previous-1] == '\t' || value[previous-1] == '\n') {
+		previous--
+	}
+	return previous >= 2 && value[previous-1] == ':' && value[previous-2] == ':'
 }
 
 func isIdentifierStart(value byte) bool {
