@@ -1016,7 +1016,7 @@ dev_mode = "workspace"
 		t.Fatalf("development direct rename missing from %q", confirmedFastForward.SQL)
 	}
 	if postgresMajor >= 18 {
-		if !strings.Contains(confirmedFastForward.SQL, `ALTER TABLE "app"."accounts" RENAME CONSTRAINT "accounts_quote_mode_not_null" TO "accounts_pricing_mode_not_null";`) {
+		if !strings.Contains(confirmedFastForward.SQL, `EXECUTE format('ALTER TABLE %s RENAME CONSTRAINT %I TO %I', '"app"."accounts"'::regclass, current_name, 'accounts_pricing_mode_not_null')`) {
 			t.Fatalf("development NOT NULL constraint rename missing from %q", confirmedFastForward.SQL)
 		}
 	}
