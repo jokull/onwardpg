@@ -2073,33 +2073,23 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 			}
 			consumed[drop.ID], consumed[candidate.ID] = true, true
 			manualDependencyClosure := false
-			// PostgreSQL rewrites catalog references to a renamed column.  Keep
-			// only modifications which are exactly that automatic rewrite out of
-			// the plan; a real change to a dependent object must still be planned.
-			// The dependency edge is the authority for deciding which objects are
-			// eligible.  In particular, never infer dependency from a substring in
-			// an expression or generated SQL.
+			// Dependent views are judged per rename here; every other dependent
+			// is judged after the loop against all renames of the plan.
 			for _, object := range current.Objects() {
-				if !dependsOn(current, object.ObjectID(), from.ObjectID()) {
+				view, isView := object.(pgschema.View)
+				if !isView || !dependsOn(current, object.ObjectID(), from.ObjectID()) {
 					continue
 				}
 				afterObject, exists := desired.Object(object.ObjectID())
-				if view, isView := object.(pgschema.View); isView {
-					if exists && equivalentViewAfterColumnRename(view, afterObject, from, to) {
-						consumed[view.ObjectID()] = true
-						continue
-					}
-					// A non-trivial desired view definition is an explicit API
-					// change. The generated table bridge remains useful, but the
-					// overlap view and final dependency cutover require bounded SQL
-					// owned by the developer or agent.
-					manualDependencyClosure = true
+				if exists && equivalentViewAfterColumnRename(view, afterObject, from, to) {
+					consumed[view.ObjectID()] = true
 					continue
 				}
-				if !exists || !equivalentAutomaticColumnReferencesAfterRenames(object, afterObject, columnRenamesOf(from, to)) {
-					continue
-				}
-				consumed[object.ObjectID()] = true
+				// A non-trivial desired view definition is an explicit API
+				// change. The generated table bridge remains useful, but the
+				// overlap view and final dependency cutover require bounded SQL
+				// owned by the developer or agent.
+				manualDependencyClosure = true
 			}
 			rename := renameColumn{from: from, to: to, manualDependencyClosure: manualDependencyClosure, bridgeUnsupported: bridgeUnsupported}
 			if manualDependencyClosure {
@@ -2109,16 +2099,59 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 			renames = append(renames, rename)
 		}
 	}
+	consumeAutomaticColumnRenameDependents(current, desired, renames, consumed)
 	if len(consumed) == 0 {
 		return changes, renames, questions, nil
 	}
-	filtered := make([]change.Change, 0, len(changes)-len(consumed))
+	filtered := make([]change.Change, 0, len(changes))
 	for _, item := range changes {
 		if !consumed[item.ID] {
 			filtered = append(filtered, item)
 		}
 	}
 	return filtered, renames, questions, nil
+}
+
+// consumeAutomaticColumnRenameDependents keeps out of the plan every
+// dependent whose desired state is exactly PostgreSQL's catalog rewrite after
+// all same-type column renames of the plan run; a real change to a dependent
+// must still be planned. Judging one rename at a time would never match a
+// CHECK, index, or foreign key that names two renamed columns. The dependency
+// edge is the authority for deciding which objects are eligible. In
+// particular, never infer dependency from a substring in an expression or
+// generated SQL.
+func consumeAutomaticColumnRenameDependents(current, desired *pgschema.Snapshot, renames []renameColumn, consumed map[pgschema.ID]bool) {
+	set := columnRenameSet{}
+	renamedColumns := make(map[pgschema.ID]bool)
+	for _, rename := range renames {
+		if rename.crossType {
+			continue
+		}
+		set.add(rename.from, rename.to)
+		renamedColumns[rename.from.ObjectID()] = true
+	}
+	if len(set) == 0 {
+		return
+	}
+	for _, object := range current.Objects() {
+		id := object.ObjectID()
+		if _, isView := object.(pgschema.View); isView || consumed[id] {
+			continue
+		}
+		eligible := false
+		for _, dependency := range current.Dependencies(id) {
+			if renamedColumns[dependency] {
+				eligible = true
+				break
+			}
+		}
+		if !eligible {
+			continue
+		}
+		if after, exists := desired.Object(id); exists && equivalentAutomaticColumnReferencesAfterRenames(object, after, set) {
+			consumed[id] = true
+		}
+	}
 }
 
 func assertedColumnIdentity(hints []protocol.Hint, from, to pgschema.Column) bool {
