@@ -139,3 +139,30 @@ func TestColumnRenamesKeepDependentsOfSeveralRenamedColumnsOnPostgreSQL(t *testi
 	applyPlan(t, ctx, conn, plan)
 	assertGraphConverges(t, ctx, url, desired)
 }
+
+func TestColumnRenameCarriesPartialUniqueIndexesOnPostgreSQL(t *testing.T) {
+	ddl := func(trip string) string {
+		return "CREATE SCHEMA %[1]s;" +
+			"CREATE TABLE %[1]s.claims (id bigint PRIMARY KEY, order_id bigint, gift_key text, kind text, status text, " + trip + " bigint);" +
+			"CREATE UNIQUE INDEX claims_active_order_gift_unique ON %[1]s.claims (order_id, gift_key) WHERE " + trip + " IS NULL AND status IN ('claimed', 'granted');" +
+			"CREATE UNIQUE INDEX claims_esim_trip_unique ON %[1]s.claims (" + trip + ") WHERE kind = 'esim' AND " + trip + " IS NOT NULL;" +
+			"CREATE INDEX claims_trip_expression_idx ON %[1]s.claims ((" + trip + " + 1)) INCLUDE (" + trip + ");"
+	}
+	ctx, conn, url, schemaName, current, desired := columnRenameCatalogs(t, "onwardpg_column_rename_partial", ddl("trip_line_item_id"), ddl("trip_id"))
+	plan := planDirectColumnRenames(t, current, desired, schemaName, map[string]string{"claims.trip_line_item_id": "trip_id"})
+	assertOnlyColumnRenameStatements(t, plan)
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+	claims := quote(schemaName) + ".claims"
+	if _, err := conn.Exec(ctx, "INSERT INTO "+claims+" (id, order_id, gift_key, kind, status, trip_id) VALUES (1, 7, 'g', 'esim', 'claimed', NULL), (2, 8, 'g', 'esim', 'claimed', 9)"); err != nil {
+		t.Fatal(err)
+	}
+	for _, duplicate := range []string{
+		"INSERT INTO " + claims + " (id, order_id, gift_key, kind, status, trip_id) VALUES (3, 7, 'g', 'other', 'granted', NULL)",
+		"INSERT INTO " + claims + " (id, order_id, gift_key, kind, status, trip_id) VALUES (4, 10, 'h', 'esim', 'claimed', 9)",
+	} {
+		if _, err := conn.Exec(ctx, duplicate); err == nil {
+			t.Fatalf("partial unique index stopped enforcing after the rename: %s", duplicate)
+		}
+	}
+}

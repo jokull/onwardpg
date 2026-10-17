@@ -2117,9 +2117,14 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 // all same-type column renames of the plan run; a real change to a dependent
 // must still be planned. Judging one rename at a time would never match a
 // CHECK, index, or foreign key that names two renamed columns. The dependency
-// edge is the authority for deciding which objects are eligible. In
-// particular, never infer dependency from a substring in an expression or
-// generated SQL.
+// edge is the authority for deciding which objects are eligible, with one
+// exception: PostgreSQL records the columns of an index predicate or key
+// expression as automatic dependencies, which the graph does not carry, so an
+// index on a renamed table whose predicate or expression names a renamed
+// column as an identifier token is eligible too. Without it a partial UNIQUE
+// index would be dropped in expand and rebuilt in contract, enforcing nothing
+// in between. Eligibility only admits the comparison; the desired index must
+// still equal the rewrite exactly.
 func consumeAutomaticColumnRenameDependents(current, desired *pgschema.Snapshot, renames []renameColumn, consumed map[pgschema.ID]bool) {
 	set := columnRenameSet{}
 	renamedColumns := make(map[pgschema.ID]bool)
@@ -2144,6 +2149,9 @@ func consumeAutomaticColumnRenameDependents(current, desired *pgschema.Snapshot,
 				eligible = true
 				break
 			}
+		}
+		if index, isIndex := object.(pgschema.Index); isIndex && !eligible {
+			eligible = indexExpressionNamesRenamedColumn(index, set[index.Table])
 		}
 		if !eligible {
 			continue
@@ -2395,8 +2403,11 @@ func equivalentAutomaticColumnReferencesAfterRenames(before, after pgschema.Obje
 			if to, renamed := own[parts[i].Column]; renamed && parts[i].Column != "" {
 				parts[i].Column = to
 			}
+			parts[i].Expression = renameIdentifierTokens(parts[i].Expression, own)
 		}
 		before.Parts = parts
+		before.Include = renameColumnNames(before.Include, own)
+		before.Predicate = renameIdentifierTokens(before.Predicate, own)
 		// Index definitions are diagnostic-only and are deliberately not part
 		// of semantic graph equality.
 		before.Definition, next.Definition = "", ""
@@ -2411,6 +2422,21 @@ func equivalentAutomaticColumnReferencesAfterRenames(before, after pgschema.Obje
 	default:
 		return false
 	}
+}
+
+func indexExpressionNamesRenamedColumn(index pgschema.Index, renames map[string]string) bool {
+	if len(renames) == 0 {
+		return false
+	}
+	if renameIdentifierTokens(index.Predicate, renames) != index.Predicate {
+		return true
+	}
+	for _, part := range index.Parts {
+		if renameIdentifierTokens(part.Expression, renames) != part.Expression {
+			return true
+		}
+	}
+	return false
 }
 
 func renameColumnNames(columns []string, renames map[string]string) []string {
