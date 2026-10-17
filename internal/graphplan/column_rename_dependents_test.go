@@ -9,6 +9,15 @@ import (
 	"github.com/jokull/onwardpg/pgschema"
 )
 
+// columnRenamesOf builds a rename set from (from, to) column pairs.
+func columnRenamesOf(pairs ...pgschema.Column) columnRenameSet {
+	renames := columnRenameSet{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		renames.add(pairs[i], pairs[i+1])
+	}
+	return renames
+}
+
 func TestColumnRenameAbsorbsForeignKeyColumnLists(t *testing.T) {
 	parents := pgschema.Table{Schema: "app", Name: "parents"}.ObjectID()
 	children := pgschema.Table{Schema: "app", Name: "children"}.ObjectID()
