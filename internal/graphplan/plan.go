@@ -3085,7 +3085,7 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 						})
 					}
 				}
-				if !equivalentChildForTableRename(before, after, from, to) {
+				if !equivalentChildForTableRename(current, desired, before, after, from, to) {
 					beforeColumn := before.(pgschema.Column)
 					afterColumn := after.(pgschema.Column)
 					afterColumn.Table = from.ObjectID()
@@ -3141,7 +3141,7 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 				}
 				afterObject, exists := desired.Object(before.ObjectID())
 				after, ok := afterObject.(pgschema.Constraint)
-				if !exists || !ok || !equivalentExternalReferenceAfterTableRename(before, after, to) {
+				if !exists || !ok || !equivalentExternalReferenceAfterTableRename(current, desired, before, after, from, to) {
 					continue
 				}
 				consumed[before.ObjectID()] = true
@@ -3974,7 +3974,7 @@ func equivalentTableForRename(current, desired *pgschema.Snapshot, from, to pgsc
 		if !exists {
 			return false
 		}
-		if !equivalentChildForTableRename(before, after, from, to) && !plannableColumnChangeDuringTableRename(before, after) {
+		if !equivalentChildForTableRename(current, desired, before, after, from, to) && !plannableColumnChangeDuringTableRename(before, after) {
 			return false
 		}
 	}
@@ -4008,7 +4008,7 @@ func tableRenameRejection(current, desired *pgschema.Snapshot, from, to pgschema
 		if !exists {
 			return "child_identity_mismatch:" + before.ObjectID().String(), true
 		}
-		if !equivalentChildForTableRename(before, after, from, to) && !plannableColumnChangeDuringTableRename(before, after) {
+		if !equivalentChildForTableRename(current, desired, before, after, from, to) && !plannableColumnChangeDuringTableRename(before, after) {
 			return "child_semantics_changed:" + before.ObjectID().String(), true
 		}
 	}
@@ -4052,7 +4052,13 @@ func tableChildKey(object pgschema.Object, table pgschema.ID) string {
 	case pgschema.Constraint:
 		child.Table = pgschema.ID{}
 		if child.Reference != nil && *child.Reference == table {
+			// A self-reference's target and key index follow the table; the
+			// comparison in equivalentChildForTableRename verifies the mapping.
 			child.Reference = nil
+			child.UsingIndex = ""
+			if start, end, schema, name, ok := foreignKeyReferenceTarget(child.Definition); ok && foreignKeyTargetIs(schema, name, table.Schema, table.Name) {
+				child.Definition = child.Definition[:start] + child.Definition[end:]
+			}
 		}
 		return "derived_constraint:" + stableChildKey(child)
 	case pgschema.Index:
@@ -4206,13 +4212,15 @@ func childTable(object pgschema.Object) pgschema.ID {
 	}
 }
 
-func equivalentExternalReferenceAfterTableRename(before, after pgschema.Constraint, to pgschema.Table) bool {
+func equivalentExternalReferenceAfterTableRename(current, desired *pgschema.Snapshot, before, after pgschema.Constraint, from, to pgschema.Table) bool {
 	reference := to.ObjectID()
 	before.Reference = &reference
+	before.Definition = foreignKeyDefinitionAfterTableRename(before.Definition, after.Definition, from, to)
+	before.UsingIndex = foreignKeyIndexAfterTableRename(current, desired, before.UsingIndex, after.UsingIndex, from, to)
 	return reflect.DeepEqual(before, after)
 }
 
-func equivalentChildForTableRename(before, after pgschema.Object, from, to pgschema.Table) bool {
+func equivalentChildForTableRename(current, desired *pgschema.Snapshot, before, after pgschema.Object, from, to pgschema.Table) bool {
 	switch before := before.(type) {
 	case pgschema.Column:
 		next, ok := after.(pgschema.Column)
@@ -4238,6 +4246,8 @@ func equivalentChildForTableRename(before, after pgschema.Object, from, to pgsch
 		if before.Reference != nil && *before.Reference == from.ObjectID() {
 			reference := to.ObjectID()
 			before.Reference = &reference
+			before.Definition = foreignKeyDefinitionAfterTableRename(before.Definition, next.Definition, from, to)
+			before.UsingIndex = foreignKeyIndexAfterTableRename(current, desired, before.UsingIndex, next.UsingIndex, from, to)
 		}
 		return reflect.DeepEqual(before, next)
 	case pgschema.Index:
@@ -4317,6 +4327,92 @@ func normalizeTriggerTableReference(definition string, from, to pgschema.Table) 
 	return definition
 }
 
+// foreignKeyDefinitionAfterTableRename returns after when before differs from
+// it only by the REFERENCES relation PostgreSQL rewrites from -> to on ALTER
+// TABLE ... RENAME; otherwise it returns before unchanged.
+func foreignKeyDefinitionAfterTableRename(before, after string, from, to pgschema.Table) string {
+	beforeStart, beforeEnd, beforeSchema, beforeName, ok := foreignKeyReferenceTarget(before)
+	if !ok {
+		return before
+	}
+	afterStart, afterEnd, afterSchema, afterName, ok := foreignKeyReferenceTarget(after)
+	if !ok || (beforeSchema == "") != (afterSchema == "") ||
+		!foreignKeyTargetIs(beforeSchema, beforeName, from.Schema, from.Name) ||
+		!foreignKeyTargetIs(afterSchema, afterName, to.Schema, to.Name) ||
+		before[:beforeStart] != after[:afterStart] || before[beforeEnd:] != after[afterEnd:] {
+		return before
+	}
+	return after
+}
+
+// foreignKeyIndexAfterTableRename returns after, the referenced key index of a
+// foreign key into to, when it is the same table child as before on from (the
+// identity the rename's derived child renames carry); otherwise before.
+func foreignKeyIndexAfterTableRename(current, desired *pgschema.Snapshot, before, after string, from, to pgschema.Table) string {
+	if before == after {
+		return before
+	}
+	beforeIndex, beforeExists := current.Object((pgschema.Index{Table: from.ObjectID(), Name: before}).ObjectID())
+	afterIndex, afterExists := desired.Object((pgschema.Index{Table: to.ObjectID(), Name: after}).ObjectID())
+	if !beforeExists || !afterExists || tableChildKey(beforeIndex, from.ObjectID()) != tableChildKey(afterIndex, to.ObjectID()) {
+		return before
+	}
+	return after
+}
+
+// foreignKeyReferenceTarget locates the referenced relation in
+// pg_get_constraintdef FOREIGN KEY text: the [start, end) span of the
+// (optionally schema-qualified) name after REFERENCES, and its parsed parts.
+func foreignKeyReferenceTarget(definition string) (start, end int, schema, name string, ok bool) {
+	const head = "FOREIGN KEY ("
+	if !strings.HasPrefix(definition, head) {
+		return 0, 0, "", "", false
+	}
+	closing := triggerWhenExpressionEnd(definition, len(head))
+	if closing < 0 || !strings.HasPrefix(definition[closing:], ") REFERENCES ") {
+		return 0, 0, "", "", false
+	}
+	start = closing + len(") REFERENCES ")
+	name, end, ok = catalogIdentifier(definition, start)
+	if ok && end < len(definition) && definition[end] == '.' {
+		schema = name
+		name, end, ok = catalogIdentifier(definition, end+1)
+	}
+	if !ok || end >= len(definition) || definition[end] != '(' {
+		return 0, 0, "", "", false
+	}
+	return start, end, schema, name, true
+}
+
+// catalogIdentifier reads one identifier as ruleutils prints it: either
+// double-quoted (with "" escapes) or a bare token taken verbatim.
+func catalogIdentifier(value string, start int) (string, int, bool) {
+	if start >= len(value) {
+		return "", start, false
+	}
+	if value[start] == '"' {
+		end := skipSQLProtectedText(value, start)
+		if end < start+2 || value[end-1] != '"' {
+			return "", start, false
+		}
+		return strings.ReplaceAll(value[start+1:end-1], `""`, `"`), end, true
+	}
+	if !isIdentifierStart(value[start]) {
+		return "", start, false
+	}
+	end := start + 1
+	for end < len(value) && isIdentifierPart(value[end]) {
+		end++
+	}
+	return value[start:end], end, true
+}
+
+// foreignKeyTargetIs matches a parsed REFERENCES relation to a table. An
+// unqualified target is one PostgreSQL resolved through the search path.
+func foreignKeyTargetIs(schema, name, tableSchema, tableName string) bool {
+	return name == tableName && (schema == "" || schema == tableSchema)
+}
+
 func normalizeTableReference(definition string, from, to pgschema.Table) string {
 	for _, pair := range [][2]string{
 		{qualified(from.Schema, from.Name), qualified(to.Schema, to.Name)},
@@ -4344,13 +4440,13 @@ func tableRenameCompatibility(current, desired *pgschema.Snapshot, from, to pgsc
 		switch before := object.(type) {
 		case pgschema.Column:
 			sourceColumnCount++
-			if !equivalentChildForTableRename(before, after, from, to) {
+			if !equivalentChildForTableRename(current, desired, before, after, from, to) {
 				unsupported = append(unsupported, "table_rename_compatibility_column_change:"+before.ObjectID().String())
 				continue
 			}
 			columns = append(columns, before)
 		case pgschema.TablePrivilege:
-			if !equivalentChildForTableRename(before, after, from, to) {
+			if !equivalentChildForTableRename(current, desired, before, after, from, to) {
 				unsupported = append(unsupported, "table_rename_compatibility_privilege_change:"+before.ObjectID().String())
 				continue
 			}
