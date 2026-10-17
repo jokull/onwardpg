@@ -3,6 +3,19 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## v0.1.0-preview.11 — 2026-10-17
+
+### Fixed
+
+- Planning the same inputs twice writes a byte-identical bundle. Before, the
+  `rename_table` rejection reason named whichever mismatching child Go map
+  iteration reached first, so `plan.json` and the plan, result, and history
+  entry digests changed between runs while the phases stayed the same. The
+  reason now names the first mismatch in stable key order. The same fix
+  covers the order of replaced and validated domain-constraint statements,
+  the `enum_rewrite_column_change` and `derived_view_closure_object`
+  reasons, and which contract gate names a draft edit requirement.
+
 ## v0.1.0-preview.10 — 2026-10-17
 
 ### Fixed
