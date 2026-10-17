@@ -113,18 +113,22 @@ func multiColumnRenameSnapshots(t *testing.T) (current, desired *pgschema.Snapsh
 	return build("lo", "hi"), build("low", "high"), map[string]string{column("lo"): column("low"), column("hi"): column("high")}
 }
 
-func TestColumnRenamesAbsorbADependentNamingSeveralRenamedColumns(t *testing.T) {
-	current, desired, renames := multiColumnRenameSnapshots(t)
+// buildDirectColumnRenames answers each rename_column question from renames
+// (old column ID -> new column ID) and each strategy question with
+// direct_rename; any other question means a dependent was not absorbed.
+func buildDirectColumnRenames(t *testing.T, current, desired *pgschema.Snapshot, renames map[string]string) protocol.Result {
+	t.Helper()
 	var answers protocol.Answers
-	var plan protocol.Result
 	for attempt := 0; attempt < 4; attempt++ {
 		result, err := Build(current, desired, answers, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan = result
 		if result.Status != protocol.NeedsInput {
-			break
+			if result.Status != protocol.Planned {
+				t.Fatalf("expected a planned rename: %#v", result)
+			}
+			return result
 		}
 		answers.CurrentFingerprint, answers.DesiredFingerprint = result.CurrentFingerprint, result.DesiredFingerprint
 		for _, question := range result.Questions {
@@ -133,15 +137,18 @@ func TestColumnRenamesAbsorbADependentNamingSeveralRenamedColumns(t *testing.T) 
 				value = renames[question.Key]
 			}
 			if value == "" {
-				t.Fatalf("a dependent of both renamed columns was not absorbed: %s %s", question.Kind, question.Key)
+				t.Fatalf("column renames left an unabsorbed dependent: %s %s", question.Kind, question.Key)
 			}
 			answers.Answers = append(answers.Answers, protocol.Answer{Kind: question.Kind, Key: question.Key, Value: value, QuestionFingerprint: question.ScopeFingerprint})
 		}
 	}
-	if plan.Status != protocol.Planned {
-		t.Fatalf("expected a planned rename: %#v", plan)
-	}
-	sql := joinSQL(plan)
+	t.Fatal("column rename questions did not settle")
+	return protocol.Result{}
+}
+
+func TestColumnRenamesAbsorbADependentNamingSeveralRenamedColumns(t *testing.T) {
+	current, desired, renames := multiColumnRenameSnapshots(t)
+	sql := joinSQL(buildDirectColumnRenames(t, current, desired, renames))
 	if strings.Contains(sql, "CHECK") || strings.Contains(sql, "INDEX") || strings.Count(sql, "RENAME COLUMN") != 2 {
 		t.Fatalf("expected exactly the two column renames:\n%s", sql)
 	}
@@ -151,5 +158,60 @@ func TestRenameIdentifierTokensAppliesRenamesInOnePass(t *testing.T) {
 	got := renameIdentifierTokens(`CHECK ((a < b) AND ("b" > 0))`, map[string]string{"a": "b", "b": "a"})
 	if want := `CHECK ((b < a) AND ("a" > 0))`; got != want {
 		t.Fatalf("renameIdentifierTokens = %q, want %q", got, want)
+	}
+}
+
+// A partial UNIQUE index rebuilt across expand and contract would enforce
+// nothing in between, so one that names a renamed column only in its WHERE
+// predicate, an expression key, or INCLUDE must be carried by the rename.
+func TestColumnRenameCarriesPartialExpressionAndIncludeIndexes(t *testing.T) {
+	table := pgschema.Table{Schema: "app", Name: "claims"}
+	build := func(trip string) *pgschema.Snapshot {
+		snapshot := pgschema.New()
+		columns := []pgschema.Column{
+			{Table: table.ObjectID(), Name: "order_id", Position: 1, Type: "bigint"},
+			{Table: table.ObjectID(), Name: trip, Position: 2, Type: "bigint"},
+			{Table: table.ObjectID(), Name: "code", Position: 3, Type: "text"},
+		}
+		indexes := []pgschema.Index{
+			{Table: table.ObjectID(), Name: "claims_active_order_unique", Unique: true, Method: "btree",
+				Parts: []pgschema.IndexPart{{Column: "order_id"}}, Predicate: "(" + trip + " IS NULL)"},
+			{Table: table.ObjectID(), Name: "claims_trip_unique", Unique: true, Method: "btree",
+				Parts: []pgschema.IndexPart{{Column: trip}}, Predicate: "((code = 'esim'::text) AND (" + trip + " IS NOT NULL))"},
+			{Table: table.ObjectID(), Name: "claims_trip_code_idx", Method: "btree",
+				Parts: []pgschema.IndexPart{{Expression: "(" + trip + " + 1)"}}, Include: []string{trip}},
+		}
+		objects := []pgschema.Object{pgschema.Schema{Name: "app"}, table}
+		for _, column := range columns {
+			objects = append(objects, column)
+		}
+		for _, index := range indexes {
+			objects = append(objects, index)
+		}
+		for _, object := range objects {
+			if err := snapshot.Add(object); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// The source graph projects only key and INCLUDE columns as index
+		// dependencies (predicate and expression columns are automatic
+		// catalog dependencies), so the fixture does the same.
+		for _, edge := range [][2]pgschema.ID{
+			{indexes[0].ObjectID(), columns[0].ObjectID()},
+			{indexes[1].ObjectID(), columns[1].ObjectID()},
+			{indexes[2].ObjectID(), columns[1].ObjectID()},
+		} {
+			if err := snapshot.AddDependency(edge[0], edge[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return snapshot
+	}
+	column := func(name string) string {
+		return (pgschema.Column{Table: table.ObjectID(), Name: name}).ObjectID().String()
+	}
+	sql := joinSQL(buildDirectColumnRenames(t, build("trip_line_item_id"), build("trip_id"), map[string]string{column("trip_line_item_id"): column("trip_id")}))
+	if strings.Contains(sql, "INDEX") || strings.Count(sql, "RENAME COLUMN") != 1 {
+		t.Fatalf("expected only the column rename:\n%s", sql)
 	}
 }
