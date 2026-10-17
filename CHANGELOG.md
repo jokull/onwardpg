@@ -7,6 +7,14 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
 ### Fixed
 
+- A table or column rename on PostgreSQL 18 no longer names the replay's NOT
+  NULL constraint. PostgreSQL appends a collision suffix (`not_null1`,
+  `not_null3`, ...) to a generated name past 63 bytes, and the suffix depends
+  on creation history, so production and onwardpg's replay can name the same
+  constraint differently. Before, the plan emitted `ALTER TABLE ... RENAME
+  CONSTRAINT <replay name> TO ...`, which failed on production. The plan now
+  finds the constraint by table and column in `pg_constraint` at apply time
+  and renames it only when its name differs from the target.
 - Planning the same inputs twice writes a byte-identical bundle. Before, the
   `rename_table` rejection reason named whichever mismatching child Go map
   iteration reached first, so `plan.json` and the plan, result, and history

@@ -74,7 +74,15 @@ column, including the 63-byte shortening and the `not_null1`, `not_null2`, ...
 collision suffix, is represented by the column alone and its name is never
 compared. A custom name, or a generated name left on a renamed table or column,
 blocks as `not_null_constraint:`; `ALTER TABLE ... RENAME CONSTRAINT` to the
-current default clears the latter. Customized options,
+current default clears the latter. Because the suffix depends on creation
+history, a production database and onwardpg's replay can give one NOT NULL
+constraint different names. A planned table or column rename therefore finds
+the constraint by table and column (`pg_constraint.conrelid` and `conkey`) at
+apply time and never names the replay's constraint. Other generated names (an
+unnamed CHECK, foreign key, primary key, unique constraint, or index) are part
+of their object's graph identity, so a production/replay difference there is
+graph drift that `onwardpg drift check` reports, not a name hidden from the
+comparison. Customized options,
 comments, expressions, persistence, or names on implicit serial and identity
 backing sequences also block when their state is not retained by the typed
 column. The
