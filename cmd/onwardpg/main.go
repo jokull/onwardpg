@@ -489,7 +489,7 @@ func runContractAt(arguments []string, start string) int {
 	}
 	flags := flag.NewFlagSet("contract check", flag.ContinueOnError)
 	targetName := flags.String("target", "", "configured database target name")
-	bundleID := flags.String("bundle", "", "history-head bundle to check")
+	bundleID := flags.String("bundle", "", "history bundle to check (default: the head; an earlier bundle is checked in chain order)")
 	environment := flags.String("environment", "", "deployment environment identity")
 	databaseEnv := flags.String("database-env", "", "environment variable containing a read-only PostgreSQL URL")
 	evidencePath := flags.String("evidence", "", "writer-drain evidence JSON")
@@ -535,7 +535,20 @@ func runContractAt(arguments []string, start string) int {
 	}
 	entry := chain.Entries[len(chain.Entries)-1]
 	if *bundleID != "" && entry.Artifact.Manifest.BundleID != *bundleID {
-		return writeError("stale_bundle", fmt.Errorf("bundle %q is not the history head %q", *bundleID, entry.Artifact.Manifest.BundleID))
+		found := false
+		for _, candidate := range chain.Entries {
+			if candidate.Artifact.Manifest.BundleID == *bundleID {
+				entry, found = candidate, true
+				break
+			}
+		}
+		if !found {
+			return writeError("stale_bundle", fmt.Errorf("bundle %q is not in the target history", *bundleID))
+		}
+	}
+	history := make([]bundle.Artifact, 0, len(chain.Entries))
+	for _, candidate := range chain.Entries {
+		history = append(history, candidate.Artifact)
 	}
 	var evidence []byte
 	if *evidencePath != "" {
@@ -552,7 +565,7 @@ func runContractAt(arguments []string, start string) int {
 		IgnoreExtensionVersions: append([]string(nil), manifest.Planner.Options.IgnoreExtensionVersions...),
 	}
 	report, err := contractcheck.Run(context.Background(), contractcheck.Input{
-		Artifact: entry.Artifact, ExpectedHead: chain.HeadDigest, DatabaseURL: databaseURL, Environment: *environment,
+		Artifact: entry.Artifact, ExpectedHead: chain.HeadDigest, Chain: history, DatabaseURL: databaseURL, Environment: *environment,
 		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options, LiveIgnore: target.LiveIgnore,
 	})
 	if err != nil {
