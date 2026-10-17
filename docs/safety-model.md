@@ -135,6 +135,15 @@ that the previous release may stop working when the native rename runs. The
 planner never selects it; it offers it beside the bridge strategies, and as
 the only generated route when the table cannot take the bridge.
 
+A table or column rename retains a dependent (a foreign key, CHECK, or index)
+only when the desired object equals the current one after the exact rewrite
+PostgreSQL makes for that rename; every other difference is planned as its
+own change. The rewrite is driven by catalog edges, with one documented
+exception: PostgreSQL records index predicate and expression columns as
+automatic dependencies the graph does not carry, so those columns are matched
+by whole identifier tokens, never inside string literals or in a function or
+type position.
+
 An editable transition is still dependency-bounded. A same-type rename with
 an unproved dependent-view change keeps the generated column bridge and adds
 three ordered pockets for the overlap view, pre-cutover removal, and exact

@@ -3,6 +3,36 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## v0.1.0-preview.10 — 2026-10-17
+
+### Fixed
+
+- A table rename keeps the foreign keys that point at it. A catalog export
+  prints each such foreign key with the new `REFERENCES` target and the
+  referenced key index under its derived new name (`users_pkey` ->
+  `accounts_pkey`). Before, every inbound foreign key became a drop, `ADD ...
+  NOT VALID`, and `VALIDATE`, and a self-referencing foreign key made the
+  table lose its rename candidacy (`child_semantics_changed`). Any other
+  foreign-key change is still planned.
+- A column rename keeps the foreign keys on either end. The owning table's
+  renames rewrite the local column list and the `ON DELETE SET NULL/DEFAULT`
+  list; the referenced table's renames rewrite only the `REFERENCES` column
+  list. Before, each such foreign key became a reconcile question and a drop
+  and re-add.
+- A CHECK, index, or foreign key that names several renamed columns is judged
+  against every rename of the plan in one pass. Before, it never matched and
+  was rebuilt (a CHECK through `NOT VALID` and `VALIDATE`).
+- A column rename carries an index that names the column in its `WHERE`
+  predicate, a key expression, or `INCLUDE`. Before, such an index was dropped
+  in expand and rebuilt in contract, so a partial UNIQUE index enforced
+  nothing between the two phases. Predicate and expression columns are
+  matched by whole identifier tokens; a token in a function or type position
+  is never rewritten, so `lower(lower)` -> `upper(upper)` is still an index
+  change.
+- A table rename ignores declared column order. A column that a later
+  migration appended but the schema declares mid-table no longer costs the
+  table its rename candidacy (`child_semantics_changed:column:...`).
+
 ## v0.1.0-preview.9 — 2026-10-16
 
 ### Added

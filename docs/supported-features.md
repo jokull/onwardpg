@@ -241,6 +241,22 @@ offered `direct_rename`. On a partitioned table the parent's native rename
 propagates to every partition, so a child's `direct_rename` renders no
 statement of its own.
 
+A column rename carries the dependents that PostgreSQL rewrites with it, so
+they are neither dropped in expand nor rebuilt in contract. Each dependent is
+judged once against every rename of the plan, so a CHECK, index, or foreign
+key that names several renamed columns (or swapped names, `a -> b, b -> a`)
+matches in one pass. A foreign key takes the owning table's renames on its
+local column list and `ON DELETE SET NULL/DEFAULT` list and the referenced
+table's renames on its `REFERENCES` column list; the relation name and the
+referenced key index stay as they are. An index takes the renames on its key
+columns, key expressions, `WHERE` predicate, and `INCLUDE` list, so a partial
+UNIQUE index keeps enforcing through the rename. The catalog records predicate
+and expression columns as automatic dependencies that the graph does not
+carry, so those are matched by whole identifier tokens; a token in a function
+or type position (`lower(...)`, `::text`) is never rewritten. The desired
+dependent must equal the rewritten current one exactly; anything else is still
+planned.
+
 A new UNIQUE constraint on an existing table whose columns contain the
 columns of a key PostgreSQL already enforces there (the primary key, or a
 unique key with the same NULL treatment) can never reject a row, so it is
@@ -372,6 +388,15 @@ confirmed table rename when their catalog definitions differ only at protected
 relation references. PostgreSQL preserves their relation identity and stored
 materialized rows; a broader simultaneous dependent-view change is explicit
 unsupported work, rather than a replacement ordered before the table rename.
+Foreign keys that point at the renamed table, from other tables or from the
+table itself, are retained when the desired `REFERENCES` target moving from
+the old to the new name, and the referenced key index carrying its derived new
+name (`users_pkey -> accounts_pkey`), are the only differences. Another
+foreign-key change, such as a new `ON DELETE` action or a different key index,
+is still planned. Declared column order is not identity for a table rename:
+`RENAME` changes no ordinal, so a column that a later migration appended but
+the schema declares mid-table keeps the rename. An order the catalog cannot
+reach is still reported as compatibility evidence.
 
 A confirmed column rename can still prove which typed triggers PostgreSQL
 would rewrite: onwardpg recognizes only `UPDATE OF` column lists and the
