@@ -215,3 +215,19 @@ func TestColumnRenameCarriesPartialExpressionAndIncludeIndexes(t *testing.T) {
 		t.Fatalf("expected only the column rename:\n%s", sql)
 	}
 }
+
+// ADD COLUMN appends physically, so the declared order of a renamed table
+// may differ from the catalog order; RENAME cannot change either.
+func TestTableRenameIgnoresColumnPosition(t *testing.T) {
+	from, to := pgschema.Table{Schema: "app", Name: "users"}, pgschema.Table{Schema: "app", Name: "accounts"}
+	before := pgschema.Column{Table: from.ObjectID(), Name: "email", Position: 3, Type: "text"}
+	after := pgschema.Column{Table: to.ObjectID(), Name: "email", Position: 2, Type: "text"}
+	if !equivalentChildForTableRename(pgschema.New(), pgschema.New(), before, after, from, to) {
+		t.Fatal("a column that moved only in declared order lost the table rename")
+	}
+	retyped := after
+	retyped.Type = "varchar"
+	if !plannableColumnChangeDuringTableRename(before, retyped) {
+		t.Fatal("a retyped column that also moved in declared order is still a plannable change")
+	}
+}
