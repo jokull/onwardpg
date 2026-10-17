@@ -126,7 +126,7 @@ Usage of verify:
 ```text
 Usage of contract check:
   -bundle string
-        history-head bundle to check
+        history bundle to check (default: the head; an earlier bundle is checked in chain order)
   -config string
         repository configuration path (default ".onwardpg.toml")
   -database-env string

@@ -108,8 +108,8 @@ writers cannot reopen a conflict between the probe and build.
 
 ## Check a live post-expand database
 
-The bundle must be the selected target's history head and must contain the
-post-expand checkpoint receipted by disposable verification:
+The bundle must contain the post-expand checkpoint receipted by disposable
+verification. By default the check selects the target's history head:
 
 ```sh
 export PROD_READONLY_DATABASE_URL='postgres://...'
@@ -138,6 +138,49 @@ named reconciliation, not arbitrary batch reordering.
 
 Catalog mismatch distinguishes an unapplied expand baseline, an already-contracted desired graph,
 and unrelated/partial drift. Data gates run in the same read-only snapshot.
+
+## Several bundles in one window
+
+A cutover can run several planned bundles back to back behind a database
+write barrier: expand 1, contract 1, expand 2, contract 2, and so on, with no
+deployment in between. Each contract can be checked with `--bundle` while
+later bundles are already in the history. The check is ready only while the
+database matches that bundle's receipted post-expand catalog. That catalog
+exists only after every earlier bundle's contract and this bundle's expand,
+and before any later bundle's expand, so the comparison enforces chain order.
+A database at an earlier bundle's catalog is refused with
+`predecessor_contract_pending`; one at a later bundle's catalog is refused with
+`successor_expand_applied`.
+
+The write barrier satisfies `writers:legacy` through ordinary writer evidence:
+every required cohort is attested `read_only` (or `drained`/`isolated`) with a
+`manual` source that names the barrier. One file can cover the whole pending
+prefix as a JSON array with one evidence object per bundle. The check uses the
+object bound to the selected bundle, refuses a file with no such object or
+with two, and records the accepted attestation under `evidence` in the
+report. Build the array from the bundle manifests, after verification has
+installed each expand checkpoint:
+
+```sh
+jq -n \
+  --arg environment production --arg release cutover-2026-10-18 \
+  --arg observed_at 2026-10-18T06:00:00Z --arg expires_at 2026-10-18T10:00:00Z \
+  --slurpfile cohorts write-barrier-cohorts.json \
+  '[inputs | {target, environment: $environment, plan_id,
+    bundle_entry_digest: .history.entry_digest,
+    desired_fingerprint: .desired_source.fingerprint, generation,
+    release: $release, observed_at: $observed_at, expires_at: $expires_at,
+    cohorts: $cohorts[0]}]' \
+  migrations/onward/app/T1/manifest.json \
+  migrations/onward/app/T2/manifest.json > cutover-evidence.json
+
+onwardpg contract check --target app --bundle T1 \
+  --environment production --database-env PROD_READONLY_DATABASE_URL \
+  --evidence cutover-evidence.json
+```
+
+`write-barrier-cohorts.json` is the array of cohorts for the seven required
+categories. The observation window must not exceed 24 hours.
 
 Writer evidence is provider-neutral and bound to target, environment, PlanID,
 desired fingerprint, bundle entry digest, generation, release, observation

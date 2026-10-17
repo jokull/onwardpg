@@ -102,13 +102,18 @@ type ReconciliationReadiness struct {
 }
 
 type Report struct {
-	Status              string                    `json:"status"`
-	Target              string                    `json:"target"`
-	Environment         string                    `json:"environment"`
-	BundleID            string                    `json:"bundle_id"`
-	PlanID              string                    `json:"plan_id"`
-	Generation          int                       `json:"generation"`
-	BundleEntryDigest   string                    `json:"bundle_entry_digest"`
+	Status            string `json:"status"`
+	Target            string `json:"target"`
+	Environment       string `json:"environment"`
+	BundleID          string `json:"bundle_id"`
+	PlanID            string `json:"plan_id"`
+	Generation        int    `json:"generation"`
+	BundleEntryDigest string `json:"bundle_entry_digest"`
+	// HistoryHead is false when the checked bundle is followed by later
+	// bundles in the target history. ChainPosition is 1-based.
+	HistoryHead         bool                      `json:"history_head"`
+	ChainPosition       int                       `json:"chain_position"`
+	ChainLength         int                       `json:"chain_length"`
 	ExpectedFingerprint string                    `json:"expected_expand_fingerprint"`
 	ActualFingerprint   string                    `json:"actual_fingerprint,omitempty"`
 	Unsupported         []string                  `json:"unsupported,omitempty"`
@@ -116,13 +121,17 @@ type Report struct {
 	Observer            ObserverProjection        `json:"observer"`
 	GateResults         []GateResult              `json:"gates,omitempty"`
 	Reconciliations     []ReconciliationReadiness `json:"reconciliations,omitempty"`
+	Evidence            *EvidenceReceipt          `json:"evidence,omitempty"`
 	Findings            []Finding                 `json:"findings,omitempty"`
 	Digest              string                    `json:"digest"`
 }
 
 type Input struct {
-	Artifact         bundle.Artifact
-	ExpectedHead     string
+	Artifact     bundle.Artifact
+	ExpectedHead string
+	// Chain is the target history in order, ending at ExpectedHead. With it,
+	// Artifact may be any entry; without it, Artifact must be the head.
+	Chain            []bundle.Artifact
 	DatabaseURL      string
 	Environment      string
 	Evidence         []byte
@@ -697,8 +706,9 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		return Report{}, fmt.Errorf("validate bundle: %w", err)
 	}
 	manifest := input.Artifact.Manifest
-	if manifest.History == nil || input.ExpectedHead == "" || manifest.History.EntryDigest != input.ExpectedHead {
-		return Report{}, fmt.Errorf("selected bundle is not the expected history chain head")
+	chain, err := selectChainEntry(input)
+	if err != nil {
+		return Report{}, err
 	}
 	checkpoint, err := bundle.ReadCatalogCheckpoint(input.Artifact)
 	if err != nil {
@@ -717,6 +727,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		Status: "blocked", Target: manifest.Target, Environment: input.Environment,
 		BundleID: manifest.BundleID, PlanID: manifest.PlanID, Generation: manifest.Generation,
 		BundleEntryDigest: manifest.History.EntryDigest, ExpectedFingerprint: checkpoint.ExpandFingerprint,
+		HistoryHead: chain.head(), ChainPosition: chain.index + 1, ChainLength: len(chain.entries),
 		CheckedAt: input.Now.UTC().Format(time.RFC3339),
 	}
 
@@ -815,13 +826,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		}
 	}
 	if comparable != checkpoint.ExpandFingerprint {
-		code, message := "catalog_drift", "production does not match the receipted post-expand catalog"
-		switch comparable {
-		case checkpoint.BaselineFingerprint:
-			code, message = "expand_not_applied", "production still matches the pre-expand baseline"
-		case checkpoint.DesiredFingerprint:
-			code, message = "contract_already_applied", "production already matches the desired post-contract catalog"
-		}
+		code, message := chain.classifyCatalogPosition(comparable, checkpoint)
 		report.Findings = append(report.Findings, Finding{Code: code, Message: message, Remediation: "inspect deployment state and catalog drift before running contract"})
 		return finalize(report), nil
 	}
@@ -864,7 +869,12 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			report.Findings = append(report.Findings, Finding{Code: "contract_evidence_missing", Message: "writer-drain or operation evidence is required before contract can become ready"})
 			return finalize(report), nil
 		}
-		evidence, err := DecodeEvidence(input.Evidence)
+		evidence, evidenceBytes, err := selectEvidence(input.Evidence, manifest)
+		if errors.Is(err, errNoEvidenceBinding) {
+			report.Status = "stale"
+			report.Findings = append(report.Findings, Finding{Code: "writer_evidence_binding_mismatch", Message: err.Error()})
+			return finalize(report), nil
+		}
 		if err != nil {
 			report.Findings = append(report.Findings, Finding{Code: "writer_evidence_invalid", Message: err.Error()})
 			return finalize(report), nil
@@ -878,6 +888,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 		for _, gate := range evidenceGates {
 			report.GateResults = append(report.GateResults, GateResult{ID: gate.ID, Kind: gate.Kind, Passed: true})
 		}
+		report.Evidence = evidenceReceipt(evidence, evidenceBytes)
 	}
 	if len(failedDataGateIDs) > 0 {
 		sort.Strings(failedDataGateIDs)
