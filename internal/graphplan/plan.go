@@ -2347,15 +2347,6 @@ func (renames columnRenameSet) add(from, to pgschema.Column) {
 	renames[from.Table][from.Name] = to.Name
 }
 
-// columnRenamesOf builds a rename set from (from, to) column pairs.
-func columnRenamesOf(pairs ...pgschema.Column) columnRenameSet {
-	renames := columnRenameSet{}
-	for i := 0; i+1 < len(pairs); i += 2 {
-		renames.add(pairs[i], pairs[i+1])
-	}
-	return renames
-}
-
 // equivalentAutomaticColumnReferencesAfterRenames reports whether after is
 // exactly the catalog state PostgreSQL leaves on before when every column
 // rename of the plan runs. Each rewrite is scoped to the table whose columns a
