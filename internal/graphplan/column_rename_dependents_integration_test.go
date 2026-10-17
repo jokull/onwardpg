@@ -118,3 +118,24 @@ func TestColumnRenameKeepsForeignKeysOnBothEndsOnPostgreSQL(t *testing.T) {
 	applyPlan(t, ctx, conn, plan)
 	assertGraphConverges(t, ctx, url, desired)
 }
+
+func TestColumnRenamesKeepDependentsOfSeveralRenamedColumnsOnPostgreSQL(t *testing.T) {
+	ddl := func(a, b, c, d string) string {
+		return "CREATE SCHEMA %[1]s;" +
+			"CREATE TABLE %[1]s.accounts (id bigint, tenant_id bigint, PRIMARY KEY (id, tenant_id));" +
+			"CREATE TABLE %[1]s.drafts (id bigint PRIMARY KEY, " + a + " timestamptz, " + b + " text, " + c + " text, " + d + " bigint, tenant_id bigint," +
+			" CONSTRAINT drafts_resolution_state CHECK ((" + a + " IS NULL AND " + b + " IS NULL AND " + c + " IS NULL) OR (" + a + " IS NOT NULL AND " + b + " IN ('ok', 'failed') AND " + c + " IS NOT NULL AND " + d + " > 0))," +
+			" CONSTRAINT drafts_account_fk FOREIGN KEY (" + d + ", tenant_id) REFERENCES %[1]s.accounts (id, tenant_id));" +
+			"CREATE INDEX drafts_state_idx ON %[1]s.drafts (" + b + ", " + c + ");"
+	}
+	ctx, conn, url, schemaName, current, desired := columnRenameCatalogs(t, "onwardpg_column_renames_multi",
+		ddl("resolved_at", "resolution_status", "resolution_receipt", "account_id"),
+		ddl("settled_at", "settle_status", "settle_receipt", "owner_id"))
+	plan := planDirectColumnRenames(t, current, desired, schemaName, map[string]string{
+		"drafts.resolved_at": "settled_at", "drafts.resolution_status": "settle_status",
+		"drafts.resolution_receipt": "settle_receipt", "drafts.account_id": "owner_id",
+	})
+	assertOnlyColumnRenameStatements(t, plan)
+	applyPlan(t, ctx, conn, plan)
+	assertGraphConverges(t, ctx, url, desired)
+}
