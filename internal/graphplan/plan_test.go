@@ -3489,8 +3489,20 @@ func TestBuildDevelopmentColumnRenamePreservesPostgres18NotNullConstraintName(t 
 	if planned.Status != protocol.Planned || len(planned.Statements) != 2 {
 		t.Fatalf("PostgreSQL 18 direct rename = %#v", planned)
 	}
-	if got, want := planned.Statements[1].SQL, `ALTER TABLE "app"."accounts" RENAME CONSTRAINT "accounts_quote_mode_not_null" TO "accounts_pricing_mode_not_null";`; got != want {
-		t.Fatalf("PostgreSQL 18 constraint rename = %q, want %q", got, want)
+	// The constraint is found by (table, column) at apply time: the replay's
+	// name may carry a collision counter that the target database does not.
+	got := planned.Statements[1].SQL
+	for _, fragment := range []string{
+		`con.conrelid = '"app"."accounts"'::regclass AND con.contype = 'n'`,
+		`a.attname = 'pricing_mode'`,
+		`EXECUTE format('ALTER TABLE %s RENAME CONSTRAINT %I TO %I', '"app"."accounts"'::regclass, current_name, 'accounts_pricing_mode_not_null')`,
+	} {
+		if !strings.Contains(got, fragment) {
+			t.Fatalf("PostgreSQL 18 constraint rename = %q, missing %q", got, fragment)
+		}
+	}
+	if strings.Contains(got, "accounts_quote_mode_not_null") {
+		t.Fatalf("PostgreSQL 18 constraint rename names the replay's constraint: %q", got)
 	}
 }
 

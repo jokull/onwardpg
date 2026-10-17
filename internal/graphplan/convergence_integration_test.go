@@ -7382,7 +7382,7 @@ CREATE INDEX customers_email_idx ON "` + schemaName + `".customers (email);`
 	if plan.Status != protocol.Planned || !strings.Contains(joinSQL(plan), `RENAME CONSTRAINT "accounts_pkey" TO "customers_pkey"`) || !strings.Contains(joinSQL(plan), `RENAME TO "customers_email_idx"`) {
 		t.Fatalf("expected explicit conventional child renames: %#v", plan)
 	}
-	if strings.HasPrefix(conn.PgConn().ParameterStatus("server_version"), "18.") && !strings.Contains(joinSQL(plan), `RENAME CONSTRAINT "accounts_id_not_null" TO "customers_id_not_null"`) {
+	if strings.HasPrefix(conn.PgConn().ParameterStatus("server_version"), "18.") && !strings.Contains(joinSQL(plan), `RENAME CONSTRAINT %I TO %I', '"`+schemaName+`"."customers"'::regclass, current_name, 'customers_id_not_null')`) {
 		t.Fatalf("expected PostgreSQL 18 generated NOT NULL constraint rename: %#v", plan)
 	}
 	applyPlan(t, ctx, conn, plan)

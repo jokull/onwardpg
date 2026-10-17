@@ -98,9 +98,14 @@ type tableChildRename struct {
 	to   pgschema.Object
 }
 
+// notNullConstraintRename carries a PostgreSQL 18 NOT NULL constraint to the
+// generated name of its renamed table or column. The constraint is identified
+// by (table, column) only: from is the replay's name and decides whether a
+// rename is needed, never which constraint the statement renames.
 type notNullConstraintRename struct {
-	from string
-	to   string
+	column string
+	from   string
+	to     string
 }
 
 type renameColumn struct {
@@ -2886,9 +2891,25 @@ func appendNotNullConstraintRename(statements []protocol.Statement, table string
 		return statements
 	}
 	return append(statements, statement(
-		"ALTER TABLE "+table+" RENAME CONSTRAINT "+quote(from)+" TO "+quote(to)+";",
+		renderNotNullConstraintRenameSQL(table, rename.to.Name, to),
 		phase, "review", true, "access_exclusive_lock", "not_null_constraint_identity",
 	))
+}
+
+// renderNotNullConstraintRenameSQL renames the NOT NULL constraint of
+// table.column to target. PostgreSQL 18 appends a collision counter to a
+// generated name that runs past NAMEDATALEN, and the counter depends on
+// creation history, so the replay's name need not be the target database's.
+// The statement therefore finds the real name at apply time through
+// pg_constraint (conrelid, conkey) and never names the replay's constraint.
+func renderNotNullConstraintRenameSQL(table, column, target string) string {
+	return "DO $onwardpg$ DECLARE current_name name; BEGIN " +
+		"SELECT con.conname INTO current_name FROM pg_constraint con " +
+		"JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1] " +
+		"WHERE con.conrelid = " + literal(table) + "::regclass AND con.contype = 'n' AND array_length(con.conkey, 1) = 1 AND a.attname = " + literal(column) + "; " +
+		"IF current_name IS NULL THEN RAISE EXCEPTION " + literal(strings.ReplaceAll("onwardpg found no NOT NULL constraint on "+table+"."+quote(column), "%", "%%")) + "; END IF; " +
+		"IF current_name <> " + literal(target) + " THEN EXECUTE format('ALTER TABLE %s RENAME CONSTRAINT %I TO %I', " + literal(table) + "::regclass, current_name, " + literal(target) + "); END IF; " +
+		"END $onwardpg$;"
 }
 
 func assertedTableIdentity(hints []protocol.Hint, from, to pgschema.Table) bool {
@@ -3240,8 +3261,9 @@ func resolveTableRenames(changes []change.Change, current, desired *pgschema.Sna
 					afterColumn := after.(pgschema.Column)
 					if beforeColumn.NotNullConstraintName != "" && afterColumn.NotNullConstraintName != "" && beforeColumn.NotNullConstraintName != afterColumn.NotNullConstraintName {
 						notNullConstraintRenames = append(notNullConstraintRenames, notNullConstraintRename{
-							from: beforeColumn.NotNullConstraintName,
-							to:   afterColumn.NotNullConstraintName,
+							column: afterColumn.Name,
+							from:   beforeColumn.NotNullConstraintName,
+							to:     afterColumn.NotNullConstraintName,
 						})
 					}
 				}
@@ -4674,7 +4696,7 @@ func renderTableRename(rename renameTable) ([]protocol.Statement, error) {
 	}
 	for _, constraintRename := range rename.notNullConstraintRenames {
 		statements = append(statements, statement(
-			"ALTER TABLE "+to+" RENAME CONSTRAINT "+quote(constraintRename.from)+" TO "+quote(constraintRename.to)+";",
+			renderNotNullConstraintRenameSQL(to, constraintRename.column, constraintRename.to),
 			"contract", "review", true, "derived_catalog_name", "brief_lock",
 		))
 	}
