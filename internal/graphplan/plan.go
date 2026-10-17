@@ -2085,7 +2085,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 				}
 				afterObject, exists := desired.Object(object.ObjectID())
 				if view, isView := object.(pgschema.View); isView {
-					if exists && equivalentAutomaticColumnReferenceAfterRename(view, afterObject, from, to) {
+					if exists && equivalentViewAfterColumnRename(view, afterObject, from, to) {
 						consumed[view.ObjectID()] = true
 						continue
 					}
@@ -2096,7 +2096,7 @@ func resolveColumnRenames(changes []change.Change, current, desired *pgschema.Sn
 					manualDependencyClosure = true
 					continue
 				}
-				if !exists || !equivalentAutomaticColumnReferenceAfterRename(object, afterObject, from, to) {
+				if !exists || !equivalentAutomaticColumnReferencesAfterRenames(object, afterObject, columnRenamesOf(from, to)) {
 					continue
 				}
 				consumed[object.ObjectID()] = true
@@ -2295,29 +2295,72 @@ func dependsOn(snapshot *pgschema.Snapshot, object, dependency pgschema.ID) bool
 	return false
 }
 
-func equivalentAutomaticColumnReferenceAfterRename(before, after pgschema.Object, from, to pgschema.Column) bool {
+// columnRenameSet holds the same-type column renames of one plan, per table:
+// old column name -> new column name.
+type columnRenameSet map[pgschema.ID]map[string]string
+
+func (renames columnRenameSet) add(from, to pgschema.Column) {
+	if renames[from.Table] == nil {
+		renames[from.Table] = make(map[string]string)
+	}
+	renames[from.Table][from.Name] = to.Name
+}
+
+// columnRenamesOf builds a rename set from (from, to) column pairs.
+func columnRenamesOf(pairs ...pgschema.Column) columnRenameSet {
+	renames := columnRenameSet{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		renames.add(pairs[i], pairs[i+1])
+	}
+	return renames
+}
+
+// equivalentAutomaticColumnReferencesAfterRenames reports whether after is
+// exactly the catalog state PostgreSQL leaves on before when every column
+// rename of the plan runs. Each rewrite is scoped to the table whose columns a
+// field names.
+func equivalentAutomaticColumnReferencesAfterRenames(before, after pgschema.Object, renames columnRenameSet) bool {
 	switch before := before.(type) {
 	case pgschema.Constraint:
 		next, ok := after.(pgschema.Constraint)
 		if !ok {
 			return false
 		}
-		before.Definition = renameIdentifierTokens(before.Definition, from.Name, to.Name)
-		before.CheckExpression = renameIdentifierTokens(before.CheckExpression, from.Name, to.Name)
+		own := renames[before.Table]
+		if before.Type == pgschema.ConstraintForeign {
+			// The two column lists name columns of different tables, so each
+			// takes its own table's renames. The referenced key index keeps
+			// its name: RENAME COLUMN does not rename indexes.
+			var referenced map[string]string
+			if before.Reference != nil {
+				referenced = renames[*before.Reference]
+			}
+			definition, ok := foreignKeyDefinitionAfterColumnRenames(before.Definition, own, referenced)
+			if !ok {
+				return false
+			}
+			before.Definition = definition
+			before.ForeignKeyColumns = renameColumnNames(before.ForeignKeyColumns, own)
+			before.ReferencedColumns = renameColumnNames(before.ReferencedColumns, referenced)
+			return reflect.DeepEqual(before, next)
+		}
+		before.Definition = renameIdentifierTokens(before.Definition, own)
+		before.CheckExpression = renameIdentifierTokens(before.CheckExpression, own)
 		return reflect.DeepEqual(before, next)
 	case pgschema.Index:
 		next, ok := after.(pgschema.Index)
 		if !ok {
 			return false
 		}
+		own := renames[before.Table]
 		// Rewrite a copy: before shares its Parts backing array with the
 		// current snapshot, and an in-place rename would change the current
 		// fingerprint under every later build of the same process.
 		parts := make([]pgschema.IndexPart, len(before.Parts))
 		copy(parts, before.Parts)
 		for i := range parts {
-			if parts[i].Column == from.Name {
-				parts[i].Column = to.Name
+			if to, renamed := own[parts[i].Column]; renamed && parts[i].Column != "" {
+				parts[i].Column = to
 			}
 		}
 		before.Parts = parts
@@ -2330,22 +2373,63 @@ func equivalentAutomaticColumnReferenceAfterRename(before, after pgschema.Object
 		if !ok {
 			return false
 		}
-		before.Definition = normalizeTriggerColumnReference(before.Definition, from.Name, to.Name)
-		return reflect.DeepEqual(before, next)
-	case pgschema.View:
-		next, ok := after.(pgschema.View)
-		if !ok || before.Materialized != next.Materialized || !isSimpleUnquotedIdentifier(from.Name) || !isSimpleUnquotedIdentifier(to.Name) {
-			return false
-		}
-		expected, ok := automaticSimpleViewColumnRenameDefinition(before.Definition, from.Name, to.Name)
-		if !ok {
-			return false
-		}
-		before.Definition = expected
+		before.Definition = normalizeTriggerColumnReference(before.Definition, renames[before.Table])
 		return reflect.DeepEqual(before, next)
 	default:
 		return false
 	}
+}
+
+func renameColumnNames(columns []string, renames map[string]string) []string {
+	if len(columns) == 0 || len(renames) == 0 {
+		return columns
+	}
+	result := make([]string, len(columns))
+	for i, column := range columns {
+		if to, renamed := renames[column]; renamed {
+			column = to
+		}
+		result[i] = column
+	}
+	return result
+}
+
+// foreignKeyDefinitionAfterColumnRenames rewrites pg_get_constraintdef
+// FOREIGN KEY text as PostgreSQL does after column renames: own renames apply
+// to the local column list and the trailing ON DELETE SET NULL/DEFAULT list,
+// referenced renames only inside the REFERENCES column list. The relation name
+// is never touched. It reports false when the text has an unexpected shape.
+func foreignKeyDefinitionAfterColumnRenames(definition string, own, referenced map[string]string) (string, bool) {
+	if len(own) == 0 && len(referenced) == 0 {
+		return definition, true
+	}
+	start, end, _, _, ok := foreignKeyReferenceTarget(definition)
+	if !ok {
+		return "", false
+	}
+	// definition[end] is the opening parenthesis of the referenced columns.
+	closing := triggerWhenExpressionEnd(definition, end+1)
+	if closing < 0 {
+		return "", false
+	}
+	return renameIdentifierTokens(definition[:start], own) + definition[start:end] +
+		renameIdentifierTokens(definition[end:closing], referenced) +
+		renameIdentifierTokens(definition[closing:], own), true
+}
+
+// equivalentViewAfterColumnRename recognizes PostgreSQL's rewrite of a view
+// over one renamed column; see automaticSimpleViewColumnRenameDefinition.
+func equivalentViewAfterColumnRename(before pgschema.View, after pgschema.Object, from, to pgschema.Column) bool {
+	next, ok := after.(pgschema.View)
+	if !ok || before.Materialized != next.Materialized || !isSimpleUnquotedIdentifier(from.Name) || !isSimpleUnquotedIdentifier(to.Name) {
+		return false
+	}
+	expected, ok := automaticSimpleViewColumnRenameDefinition(before.Definition, from.Name, to.Name)
+	if !ok {
+		return false
+	}
+	before.Definition = expected
+	return reflect.DeepEqual(before, next)
 }
 
 func isSimpleUnquotedIdentifier(value string) bool {
@@ -2410,13 +2494,13 @@ func automaticSimpleViewColumnRenameDefinition(definition, from, to string) (str
 // regions PostgreSQL changes for ALTER TABLE ... RENAME COLUMN: UPDATE OF
 // column lists and the WHEN predicate. Trigger names, relation targets,
 // routines, and other definition text deliberately remain untouched.
-func normalizeTriggerColumnReference(definition, from, to string) string {
+func normalizeTriggerColumnReference(definition string, renames map[string]string) string {
 	result := definition
 	if start := strings.Index(strings.ToUpper(result), " UPDATE OF "); start >= 0 {
 		start += len(" UPDATE OF ")
 		if end := strings.Index(strings.ToUpper(result[start:]), " ON "); end >= 0 {
 			end += start
-			result = result[:start] + renameIdentifierTokens(result[start:end], from, to) + result[end:]
+			result = result[:start] + renameIdentifierTokens(result[start:end], renames) + result[end:]
 		}
 	}
 	when := strings.Index(strings.ToUpper(result), " WHEN (")
@@ -2428,7 +2512,7 @@ func normalizeTriggerColumnReference(definition, from, to string) string {
 	if end < start {
 		return result
 	}
-	return result[:start] + renameIdentifierTokens(result[start:end], from, to) + result[end:]
+	return result[:start] + renameIdentifierTokens(result[start:end], renames) + result[end:]
 }
 
 func triggerWhenExpressionEnd(value string, start int) int {
@@ -2455,7 +2539,10 @@ func triggerWhenExpressionEnd(value string, start int) int {
 // renameIdentifierTokens makes the narrow catalog transformation PostgreSQL
 // performs for a column rename. It changes identifier tokens only; quoted
 // strings (for example CHECK values) are preserved verbatim.
-func renameIdentifierTokens(value, from, to string) string {
+func renameIdentifierTokens(value string, renames map[string]string) string {
+	if len(renames) == 0 {
+		return value
+	}
 	var result strings.Builder
 	for i := 0; i < len(value); {
 		if value[i] == '\'' {
@@ -2492,7 +2579,7 @@ func renameIdentifierTokens(value, from, to string) string {
 				identifier.WriteByte(value[i])
 				i++
 			}
-			if identifier.String() == from {
+			if to, renamed := renames[identifier.String()]; renamed {
 				result.WriteString(quote(to))
 			} else {
 				result.WriteString(value[start:i])
@@ -2505,7 +2592,7 @@ func renameIdentifierTokens(value, from, to string) string {
 			for i < len(value) && isIdentifierPart(value[i]) {
 				i++
 			}
-			if value[start:i] == from {
+			if to, renamed := renames[value[start:i]]; renamed {
 				result.WriteString(to)
 			} else {
 				result.WriteString(value[start:i])
