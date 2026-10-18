@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jokull/onwardpg/internal/bundle"
+	"github.com/jokull/onwardpg/internal/driftcheck"
 	"github.com/jokull/onwardpg/internal/graphplan"
 	"github.com/jokull/onwardpg/internal/protocol"
 	"github.com/jokull/onwardpg/internal/source"
@@ -122,8 +123,53 @@ type Report struct {
 	GateResults         []GateResult              `json:"gates,omitempty"`
 	Reconciliations     []ReconciliationReadiness `json:"reconciliations,omitempty"`
 	Evidence            *EvidenceReceipt          `json:"evidence,omitempty"`
-	Findings            []Finding                 `json:"findings,omitempty"`
-	Digest              string                    `json:"digest"`
+	// Ignored is present when the check ran with --ignore selectors. It
+	// records the selectors and every object that they removed from the
+	// comparison, so that a ready report shows what it did not compare.
+	Ignored *IgnoredReport `json:"ignored,omitempty"`
+	// Differences lists, when the catalogs compared with ignore selectors do
+	// not match, the objects that differ after those selectors are applied.
+	Differences []driftcheck.Difference `json:"differences,omitempty"`
+	Findings    []Finding               `json:"findings,omitempty"`
+	Digest      string                  `json:"digest"`
+}
+
+// IgnoredReport records a comparison that ran with ignore selectors. The
+// expected side is the selected bundle's post-expand catalog, replayed in
+// disposable PostgreSQL; the actual side is the live catalog.
+type IgnoredReport struct {
+	Selectors []IgnoredSelector `json:"selectors"`
+	// ExpectedMasked and ActualMasked list every object that the selectors
+	// removed from each side, including the columns, constraints, and indexes
+	// of an ignored table and the objects of an ignored schema.
+	ExpectedMasked []string `json:"expected_masked,omitempty"`
+	ActualMasked   []string `json:"actual_masked,omitempty"`
+	// ReplayedFingerprint is the fingerprint of the replayed catalog without
+	// the selectors. It equals the receipted expected_expand_fingerprint, which
+	// proves that the replay rebuilt the receipted checkpoint.
+	ReplayedFingerprint string `json:"replayed_fingerprint"`
+	// ExpectedFingerprint and ActualFingerprint are the compared fingerprints,
+	// with the selectors applied to both sides.
+	ExpectedFingerprint string `json:"expected_fingerprint"`
+	ActualFingerprint   string `json:"actual_fingerprint"`
+}
+
+// IgnoredSelector is one --ignore selector and the ignore receipts that it
+// matched on each side.
+type IgnoredSelector struct {
+	Selector string   `json:"selector"`
+	Expected []string `json:"expected,omitempty"`
+	Actual   []string `json:"actual,omitempty"`
+}
+
+// ExpectedCatalog is the selected bundle's post-expand catalog, replayed in
+// disposable PostgreSQL (see verify.ReplayExpandCheckpoint).
+type ExpectedCatalog struct {
+	// Receipted is inspected with the bundle's planner ignore selectors, as
+	// the checkpoint was; its fingerprint must equal the checkpoint.
+	Receipted *pgschema.Snapshot
+	// Filtered is inspected with those selectors and Input.Ignores.
+	Filtered *pgschema.Snapshot
 }
 
 type Input struct {
@@ -142,6 +188,12 @@ type Input struct {
 	// acknowledge unsupported state; it cannot hide an object from the
 	// receipted checkpoint comparison.
 	LiveIgnore []string
+	// Ignores are explicit ignore selectors, with the semantics of drift
+	// check --ignore. They are applied to both sides of the comparison:
+	// Expected must then hold the replayed post-expand catalog, and each
+	// selector must match an object on one side.
+	Ignores  []string
+	Expected *ExpectedCatalog
 }
 
 // observerAccess says what a command reads through the observer connection.
@@ -805,28 +857,70 @@ func Run(ctx context.Context, input Input) (Report, error) {
 			return Report{}, err
 		}
 	}
+	// Without ignore selectors the live catalog is compared with the
+	// receipted checkpoint. With them, both sides are inspected again with
+	// the selectors applied and the compared fingerprints come from those.
+	compared, expectedFingerprint := actual, checkpoint.ExpandFingerprint
+	var expectedFiltered *pgschema.Snapshot
+	if len(input.Ignores) > 0 {
+		filtered, ignored, finding, err := inspectIgnored(ctx, tx, input, observer, actual, checkpoint)
+		if err != nil {
+			return Report{}, err
+		}
+		report.Ignored = ignored
+		if finding != nil {
+			report.Findings = append(report.Findings, *finding)
+			return finalize(report), nil
+		}
+		compared, expectedFiltered, expectedFingerprint = filtered, input.Expected.Filtered, ignored.ExpectedFingerprint
+	}
 	// Unsupported state is part of the observed fingerprint, but a receipted
 	// checkpoint never contains any. Classify catalog drift on the modeled
 	// graph alone so that unsupported state cannot masquerade as drift, and
 	// report that state by name.
 	comparable := report.ActualFingerprint
-	if unsupported := actual.Unsupported(); len(unsupported) > 0 {
+	if report.Ignored != nil {
+		comparable = report.Ignored.ActualFingerprint
+	}
+	if unsupported := compared.Unsupported(); len(unsupported) > 0 {
 		report.Status, report.Unsupported = "unsupported", unsupported
 		report.Findings = append(report.Findings, Finding{
 			Code:        "unsupported_catalog_state",
 			Message:     "production holds catalog state the planner cannot model: " + strings.Join(unsupported, ", "),
 			Remediation: "resolve the state; provider-owned extension, schema, and parameter ACL state can be acknowledged in the target's live_ignore list; diff and drift check refuse the same catalog",
 		})
-		modeled, err := actual.Project(nil, func(string) bool { return false })
+		modeled, err := compared.Project(nil, func(string) bool { return false })
 		if err != nil {
 			return Report{}, err
+		}
+		if expectedFiltered != nil {
+			if _, modeled, err = source.AlignIgnoreReceipts(expectedFiltered, modeled); err != nil {
+				return Report{}, err
+			}
 		}
 		if comparable, err = graphplan.Fingerprint(modeled, input.Options); err != nil {
 			return Report{}, err
 		}
 	}
-	if comparable != checkpoint.ExpandFingerprint {
-		code, message := chain.classifyCatalogPosition(comparable, checkpoint)
+	if comparable != expectedFingerprint {
+		if report.Ignored == nil {
+			code, message := chain.classifyCatalogPosition(comparable, checkpoint)
+			report.Findings = append(report.Findings, Finding{Code: code, Message: message, Remediation: "inspect deployment state and catalog drift before running contract"})
+			return finalize(report), nil
+		}
+		// The receipts of other chain positions are fingerprints without the
+		// selectors, so the position is named from the unfiltered catalog.
+		// A catalog at no receipted position is drift under the selectors,
+		// and the objects that differ are listed.
+		code, message := chain.classifyCatalogPosition(report.ActualFingerprint, checkpoint)
+		if code == "catalog_drift" {
+			message = "production does not match the receipted post-expand catalog with the ignore selectors applied to both sides"
+			differences, err := driftcheck.Compare(manifest.Target, manifest.History.EntryDigest, expectedFiltered, compared)
+			if err != nil {
+				return Report{}, err
+			}
+			report.Differences = differences.Differences
+		}
 		report.Findings = append(report.Findings, Finding{Code: code, Message: message, Remediation: "inspect deployment state and catalog drift before running contract"})
 		return finalize(report), nil
 	}
@@ -913,6 +1007,106 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	}
 	report.Status = "ready"
 	return finalize(report), nil
+}
+
+// inspectIgnored inspects the live catalog again, in the same snapshot, with
+// the bundle's observer selectors and input.Ignores, and projects it as Run
+// projects the unfiltered catalog. It checks that the replayed catalog
+// reproduces the receipted checkpoint, that every selector matched an object
+// on one side, and fingerprints both sides under the union of their ignore
+// receipts, as drift check compares them.
+func inspectIgnored(ctx context.Context, tx pgx.Tx, input Input, observer observerContext, unfiltered *pgschema.Snapshot, checkpoint bundle.CatalogCheckpoint) (*pgschema.Snapshot, *IgnoredReport, *Finding, error) {
+	expected := input.Expected
+	if expected == nil || expected.Receipted == nil || expected.Filtered == nil {
+		return nil, nil, nil, fmt.Errorf("ignore selectors require the replayed post-expand catalog")
+	}
+	planner := input.Artifact.Manifest.Planner
+	selectors := append(planner.ObserverIgnores(), input.Ignores...)
+	actual, err := source.InspectGraphTransaction(ctx, tx, selectors, false)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("inspect production catalog read-only with ignore selectors: %w", err)
+	}
+	actual, _, finding, err := projectObserverSnapshot(actual, observer)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if finding != nil {
+		return nil, nil, nil, fmt.Errorf("observer projection changed between two inspections of one snapshot: %s", finding.Message)
+	}
+	if actual, _, _, err = source.ProjectLiveIgnored(actual, input.LiveIgnore); err != nil {
+		return nil, nil, nil, err
+	}
+	if actual, err = withoutObserverIgnoreReceipts(actual, planner.ObserverIgnoreSelectors); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := source.ValidateIgnoreSelectors(input.Ignores, expected.Filtered, actual); err != nil {
+		return nil, nil, nil, err
+	}
+	report := &IgnoredReport{
+		ExpectedMasked: maskedObjects(expected.Receipted, expected.Filtered),
+		ActualMasked:   maskedObjects(unfiltered, actual),
+	}
+	for _, selector := range sortedUnique(input.Ignores) {
+		report.Selectors = append(report.Selectors, IgnoredSelector{
+			Selector: selector,
+			Expected: matchedReceipts(selector, expected.Filtered), Actual: matchedReceipts(selector, actual),
+		})
+	}
+	if report.ReplayedFingerprint, err = graphplan.Fingerprint(expected.Receipted, input.Options); err != nil {
+		return nil, nil, nil, err
+	}
+	alignedExpected, alignedActual, err := source.AlignIgnoreReceipts(expected.Filtered, actual)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if report.ExpectedFingerprint, err = graphplan.Fingerprint(alignedExpected, input.Options); err != nil {
+		return nil, nil, nil, err
+	}
+	if report.ActualFingerprint, err = graphplan.Fingerprint(alignedActual, input.Options); err != nil {
+		return nil, nil, nil, err
+	}
+	if report.ReplayedFingerprint != checkpoint.ExpandFingerprint {
+		return nil, report, &Finding{
+			Code:        "expand_checkpoint_not_reproduced",
+			Message:     "the history replayed in disposable PostgreSQL does not reproduce the receipted post-expand catalog " + checkpoint.ExpandFingerprint + "; it gave " + report.ReplayedFingerprint,
+			Remediation: "use a scratch server of the PostgreSQL major in the history receipts, and run onwardpg verify --bundle " + input.Artifact.Manifest.BundleID + " --check",
+		}, nil
+	}
+	return alignedActual, report, nil, nil
+}
+
+// maskedObjects lists the objects of unfiltered that filtered does not have.
+func maskedObjects(unfiltered, filtered *pgschema.Snapshot) []string {
+	var masked []string
+	for _, id := range unfiltered.IDs() {
+		if _, exists := filtered.Object(id); !exists {
+			masked = append(masked, id.String())
+		}
+	}
+	return masked
+}
+
+func matchedReceipts(selector string, snapshot *pgschema.Snapshot) []string {
+	var matched []string
+	for _, actual := range snapshot.Ignored() {
+		if source.SelectorMatches(selector, actual) {
+			matched = append(matched, actual)
+		}
+	}
+	return matched
+}
+
+func sortedUnique(values []string) []string {
+	result := append([]string(nil), values...)
+	sort.Strings(result)
+	write := 0
+	for _, value := range result {
+		if write == 0 || result[write-1] != value {
+			result[write] = value
+			write++
+		}
+	}
+	return result[:write]
 }
 
 func pendingReconciliations(artifact bundle.Artifact, pendingGateIDs []string) ([]ReconciliationReadiness, error) {

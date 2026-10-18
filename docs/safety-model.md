@@ -229,8 +229,9 @@ for reviewed, persistent provider-owned state. `config check` validates those
 selectors across authoritative DDL and the development catalog; a selector may
 then be dormant in a history-to-working comparison when the object exists only
 in development. Durable bundles receipt only configured selectors that
-actually affected that bundle's graphs. Ignoring a schema does not recursively
-ignore its contents.
+actually affected that bundle's graphs. Ignoring a schema also ignores every
+object in it; a foreign key from a kept table into an ignored schema or table
+is an error, not a silent exclusion.
 
 The planner cannot prove data validity, safe casts, backfills, lock duration,
 or application compatibility. Reviewers own those operational decisions. Test

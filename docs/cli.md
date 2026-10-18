@@ -646,7 +646,8 @@ onwardpg contract check \
   --environment NAME \
   --database-env ENV \
   [--evidence writer-evidence.json] \
-  [--statement-timeout 30s] [--config .onwardpg.toml]
+  [--statement-timeout 30s] [--config .onwardpg.toml] \
+  [--ignore SELECTOR]
 ~~~
 
 Checks whether the selected bundle is ready for contract without executing
@@ -681,6 +682,63 @@ so unsupported state is no longer reported as `catalog_drift`.
 `--statement-timeout` limits each read-only catalog or data-gate query and
 defaults to 30 seconds. `ready` does not execute or schedule contract. See
 [contract readiness](contract-readiness.md) for the evidence format.
+
+### Ignore selectors
+
+`--ignore SELECTOR` removes catalog objects from the checkpoint comparison,
+with the selectors and semantics of `drift check --ignore`. It is repeatable.
+Use it for objects in the live database that are not drift for the bundle,
+such as an archive schema that the operator created in the window or a column
+of another pending change:
+
+~~~sh
+onwardpg contract check --bundle money-model-v2 \
+  --environment production --database-env PROD_READONLY_DATABASE_URL \
+  --evidence writer-evidence.json \
+  --ignore schema:legacy \
+  --ignore column:public.homepage_genesis_draft.preview_token_hash \
+  --ignore constraint:public.staff_note_link_audit.staff_note_link_audit_0tpoJNbameCY_fkey
+~~~
+
+| Selector | Removes |
+| --- | --- |
+| `schema:SCHEMA` | the schema and every table, column, constraint, index, sequence, view, routine, trigger, policy, and type in it |
+| `table:SCHEMA.TABLE` | the table and its columns, constraints, indexes, triggers, policies, and grants |
+| `column:SCHEMA.TABLE.COLUMN` | one column |
+| `constraint:SCHEMA.TABLE.NAME` | one constraint, such as a foreign key |
+| `index:SCHEMA.TABLE.NAME` | one index |
+| `extension:NAME` | one extension |
+| `KIND:*` | every object of the kind |
+
+Names are the catalog names, unquoted and case-sensitive. The receipted
+checkpoint is a fingerprint, so the command rebuilds the expected catalog: it
+replays the history through the selected bundle's expand in the disposable
+PostgreSQL of the target's `scratch_database_env`, as `verify` does when it
+receipts the checkpoint, and needs that variable. It never replays history
+against the live connection. The replay without the selectors must reproduce
+the receipted checkpoint, or the check stops with
+`expand_checkpoint_not_reproduced`. Both sides are then inspected with the
+selectors and compared under the union of their ignore receipts, as in
+`drift check`. A missing foreign key in the live database is therefore ignored
+with a selector that matches the expected side only.
+
+A selector that matches nothing on either side stops the command with
+`invalid_ignore`, so a stale selector cannot hide drift. An ignored object
+cannot hide drift in an object that is kept: a foreign key from a kept table to
+an ignored table, or into an ignored schema, stops the command with
+`invalid_ignore` until the key itself is ignored. An ignored schema does not
+acknowledge unsupported state in it; use [live_ignore](#live_ignore) for that.
+
+The report then has an `ignored` object: `selectors` lists each selector with
+the ignore receipts that it matched on the expected and actual side,
+`expected_masked` and `actual_masked` list every object removed from each
+side (also the columns, constraints, and indexes of an ignored table),
+`replayed_fingerprint` is the replay without the selectors, and
+`expected_fingerprint` and `actual_fingerprint` are the compared fingerprints.
+A ready report keeps this object and its digest covers it. When the catalogs
+still differ, the finding is `catalog_drift` and `differences` lists the
+objects that differ after the selectors are applied, as in `drift check`.
+Without `--ignore` the command is unchanged and needs no scratch database.
 
 ## diff (and compatibility `plan --from --to`)
 

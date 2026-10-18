@@ -481,7 +481,7 @@ func runDrift(arguments []string) int { return runDriftAt(arguments, ".") }
 
 func runContractAt(arguments []string, start string) int {
 	if helpRequested(arguments) {
-		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg contract check [--bundle ID] --environment NAME --database-env ENV [--evidence FILE] [--target NAME]")
+		_, _ = fmt.Fprintln(os.Stdout, "Usage: onwardpg contract check [--bundle ID] --environment NAME --database-env ENV [--evidence FILE] [--target NAME] [--ignore SELECTOR]")
 		return 0
 	}
 	if len(arguments) == 0 || arguments[0] != "check" {
@@ -495,6 +495,8 @@ func runContractAt(arguments []string, start string) int {
 	evidencePath := flags.String("evidence", "", "writer-drain evidence JSON")
 	statementTimeout := flags.Duration("statement-timeout", 30*time.Second, "timeout for each read-only data gate")
 	configName := flags.String("config", ".onwardpg.toml", "repository configuration path")
+	var ignores stringsFlag
+	flags.Var(&ignores, "ignore", "validated catalog selector to exclude from both sides of the checkpoint comparison; repeatable")
 	if help, err := parseFlagSet(flags, arguments[1:]); help {
 		return 0
 	} else if err != nil {
@@ -564,11 +566,37 @@ func runContractAt(arguments []string, start string) int {
 		SchemaQualifier:         manifest.Planner.Options.SchemaQualifier,
 		IgnoreExtensionVersions: append([]string(nil), manifest.Planner.Options.IgnoreExtensionVersions...),
 	}
+	var expected *contractcheck.ExpectedCatalog
+	if len(ignores) > 0 {
+		// The checkpoint is a fingerprint. To apply the selectors to the
+		// expected side too, rebuild that catalog: replay the history through
+		// this bundle's expand in disposable PostgreSQL, as verify does when
+		// it receipts the checkpoint.
+		scratchEnv := target.ScratchEnv()
+		scratchURL := os.Getenv(scratchEnv)
+		if scratchURL == "" {
+			return writeError("source_error", fmt.Errorf("environment variable %s is required: contract check --ignore replays accepted history through the bundle's expand in disposable PostgreSQL to apply the selectors to the expected catalog; it never replays history against the live connection", scratchEnv))
+		}
+		planning := manifest.Planner.IgnoreSelectors
+		snapshots, replayErr := verify.ReplayExpandCheckpoint(commandContext(), scratchURL, chain, manifest.BundleID,
+			planning, sortedUniqueStrings(append(append([]string(nil), planning...), ignores...)))
+		if replayErr != nil {
+			if errors.Is(replayErr, source.ErrInvalidIgnore) {
+				return writeError("invalid_ignore", replayErr)
+			}
+			return writeError("source_error", fmt.Errorf("replay expected post-expand catalog: %w", replayErr))
+		}
+		expected = &contractcheck.ExpectedCatalog{Receipted: snapshots[0], Filtered: snapshots[1]}
+	}
 	report, err := contractcheck.Run(context.Background(), contractcheck.Input{
 		Artifact: entry.Artifact, ExpectedHead: chain.HeadDigest, Chain: history, DatabaseURL: databaseURL, Environment: *environment,
 		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options, LiveIgnore: target.LiveIgnore,
+		Ignores: sortedUniqueStrings(ignores), Expected: expected,
 	})
 	if err != nil {
+		if errors.Is(err, source.ErrInvalidIgnore) {
+			return writeError("invalid_ignore", err)
+		}
 		return writeError("contract_check_error", err)
 	}
 	_ = writeJSON(os.Stdout, report)

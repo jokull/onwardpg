@@ -1213,7 +1213,7 @@ ORDER BY n.nspname, c.relname, con.conname`)
 					return err
 				}
 			} else if tracker.tableIgnored(*object.Reference) {
-				return fmt.Errorf("foreign key %s references ignored table %s; review and explicitly ignore the dependent constraint before excluding its referenced table", object.ObjectID(), *object.Reference)
+				return ignoreError{fmt.Errorf("foreign key %s references ignored table %s; review and explicitly ignore the dependent constraint before excluding its referenced table", object.ObjectID(), *object.Reference)}
 			}
 		}
 		if object.Parent != nil {
@@ -3217,6 +3217,37 @@ func parseOptions(options []string) []pgschema.Option {
 	return result
 }
 
+// schemaScopedKinds are the selector kinds whose name starts with the schema
+// of the object, as in table:SCHEMA.NAME or column:SCHEMA.TABLE.NAME. An
+// ignored schema excludes every object of these kinds in it. Other kinds are
+// not schema objects (extension:NAME names an extension, not a schema) or are
+// unsupported-state markers, which an ignored schema does not acknowledge.
+var schemaScopedKinds = map[string]bool{
+	"table": true, "column": true, "constraint": true, "index": true,
+	"view": true, "materialized_view": true, "routine": true, "trigger": true,
+	"policy": true, "row_level_security": true, "replica_identity": true,
+	"table_privilege": true, "sequence": true, "enum": true, "domain": true,
+	"composite": true, "range_type": true,
+}
+
+// SelectorMatches reports whether the requested selector excludes the
+// catalog object named by actual: the same selector, every object of the
+// kind for kind:*, and for schema:NAME the schema and every object in it.
+func SelectorMatches(requested, actual string) bool {
+	if requested == actual {
+		return true
+	}
+	kind, value, _ := strings.Cut(actual, ":")
+	if requested == kind+":*" {
+		return true
+	}
+	ignoredSchema, found := strings.CutPrefix(requested, "schema:")
+	if !found || !schemaScopedKinds[kind] {
+		return false
+	}
+	return strings.HasPrefix(value, ignoredSchema+".")
+}
+
 type ignoreTracker struct {
 	requested []string
 	used      map[string]bool
@@ -3228,16 +3259,15 @@ func newIgnoreTracker(selectors []string) (*ignoreTracker, error) {
 	for _, selector := range selectors {
 		kind, value, found := strings.Cut(selector, ":")
 		if !found || kind == "" || value == "" || strings.Contains(value, "*") && value != "*" {
-			return nil, fmt.Errorf("invalid ignore selector %q; expected kind:name or kind:*", selector)
+			return nil, ignoreError{fmt.Errorf("invalid ignore selector %q; expected kind:name or kind:*", selector)}
 		}
 	}
 	return tracker, nil
 }
 
 func (t *ignoreTracker) Skip(actual string, snapshot *pgschema.Snapshot) (bool, error) {
-	kind := strings.SplitN(actual, ":", 2)[0]
 	for _, requested := range t.requested {
-		if requested == actual || requested == kind+":*" {
+		if SelectorMatches(requested, actual) {
 			t.used[requested] = true
 			if err := snapshot.AddIgnored(actual); err != nil {
 				return false, err
@@ -3265,7 +3295,19 @@ func (t *ignoreTracker) Validate() error {
 	}
 	if len(unused) > 0 {
 		sort.Strings(unused)
-		return fmt.Errorf("unused ignore selectors: %s", strings.Join(unused, ", "))
+		return ignoreError{fmt.Errorf("unused ignore selectors: %s", strings.Join(unused, ", "))}
 	}
 	return nil
 }
+
+// ErrInvalidIgnore matches an error that an ignore selector caused: a
+// malformed selector, a selector that matched nothing, or a selector that
+// would remove an object that a kept object depends on.
+var ErrInvalidIgnore = errors.New("invalid ignore selector")
+
+// ignoreError keeps the message of its cause and also matches
+// ErrInvalidIgnore.
+type ignoreError struct{ err error }
+
+func (e ignoreError) Error() string   { return e.err.Error() }
+func (e ignoreError) Unwrap() []error { return []error{e.err, ErrInvalidIgnore} }
