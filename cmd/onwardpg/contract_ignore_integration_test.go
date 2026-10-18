@@ -206,6 +206,14 @@ ALTER TABLE public.audit DROP CONSTRAINT "audit_Mixed_fkey";`)
 			!strings.Contains(result.stdout, "child_parent_fkey") || !strings.Contains(result.stdout, "references ignored table") {
 			t.Fatalf("%d %s", result.code, result.stdout)
 		}
+		// drift check refuses the same selectors the same way.
+		drift := captureStdout(t, func() int {
+			return runDriftAt([]string{"check", "--target", "primary", "--database", liveURL,
+				"--ignore", legacy, "--ignore", column, "--ignore", fkey, "--ignore", "table:public.parent"}, repository)
+		})
+		if drift.code == 0 || !strings.Contains(drift.stdout, "invalid_ignore") || !strings.Contains(drift.stdout, "child_parent_fkey") {
+			t.Fatalf("drift check = %d, %s", drift.code, drift.stdout)
+		}
 		// Without the table selector the missing key is drift.
 		result, report = check(legacy, column, fkey)
 		if result.code != 4 || len(report.Differences) != 1 || report.Differences[0].ObjectID != "constraint:public:child:child_parent_fkey" {

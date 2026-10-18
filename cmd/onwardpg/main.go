@@ -684,6 +684,9 @@ func runDriftAt(arguments []string, start string) int {
 	// replay, which is the slow part of the command.
 	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, target.LiveIgnore, 30*time.Second)
 	if err != nil {
+		if errors.Is(err, source.ErrInvalidIgnore) {
+			return writeError("invalid_ignore", err)
+		}
 		return writeError("drift_observer_error", fmt.Errorf("inspect live catalog through the read-only observer boundary: %w", err))
 	}
 	if observerFinding != nil {
@@ -706,6 +709,9 @@ func runDriftAt(arguments []string, start string) int {
 	// batch in the mode that its bundle declares.
 	expected, err := verify.ReplayHistory(ctx, scratchURL, chain, selectors)
 	if err != nil {
+		if errors.Is(err, source.ErrInvalidIgnore) {
+			return writeError("invalid_ignore", err)
+		}
 		return writeError("source_error", fmt.Errorf("replay expected history: %w", err))
 	}
 	if err := source.ValidateIgnoreSelectors(ignores, expected, actual); err != nil {

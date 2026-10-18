@@ -32,8 +32,13 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   from a kept table into the ignored schema is an error, as one into an
   ignored table already was, so an ignored object cannot hide drift in a kept
   one. Unsupported-state markers in the schema are not acknowledged by it.
-- Ignore-selector errors from `contract check` and the scratch replay are
-  reported as `invalid_ignore`.
+- When two given selectors match the same object, such as `schema:NAME` and
+  a selector of an object in that schema, or `table:*` and one table, both
+  are used. Before, only the first of them was marked used, and the other was
+  reported as an unused selector.
+- `drift check` and `contract check` report an ignore-selector error from the
+  live inspection or the scratch replay, such as a foreign key into an
+  ignored table, as `invalid_ignore`.
 
 ## v0.1.0-preview.12 — 2026-10-18
 
