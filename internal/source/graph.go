@@ -3265,18 +3265,25 @@ func newIgnoreTracker(selectors []string) (*ignoreTracker, error) {
 	return tracker, nil
 }
 
+// Skip reports whether a requested selector excludes actual. Every requested
+// selector that matches is marked used: schema:NAME and a selector of an
+// object in that schema can overlap, and neither is then stale.
 func (t *ignoreTracker) Skip(actual string, snapshot *pgschema.Snapshot) (bool, error) {
+	skip := false
 	for _, requested := range t.requested {
 		if SelectorMatches(requested, actual) {
 			t.used[requested] = true
-			if err := snapshot.AddIgnored(actual); err != nil {
-				return false, err
-			}
-			t.excluded[actual] = true
-			return true, nil
+			skip = true
 		}
 	}
-	return false, nil
+	if !skip {
+		return false, nil
+	}
+	if err := snapshot.AddIgnored(actual); err != nil {
+		return false, err
+	}
+	t.excluded[actual] = true
+	return true, nil
 }
 
 // tableIgnored reports tables actually excluded by the table inspector. A
