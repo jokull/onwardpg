@@ -1180,12 +1180,19 @@ ORDER BY n.nspname, c.relname, con.conname`)
 			object.Parent = &parent
 		}
 		selector := "constraint:" + namespace + "." + tableName + "." + object.Name
+		skip, err := tracker.Skip(selector, snapshot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
 		// PostgreSQL copies an inherited CHECK constraint onto a partition but
 		// does not populate conparentid or a pg_depend edge. The catalog proves
 		// this one parent only when the child is a partition, the child CHECK is
 		// inherited, and exactly one direct parent has the same catalog-rendered
 		// definition. Anything else stays explicit unsupported state rather than
-		// becoming a name-based planner guess.
+		// becoming a name-based planner guess. An ignored constraint has none.
 		if object.Type == pgschema.ConstraintCheck && object.Parent == nil && (!local || inheritanceCount > 0) {
 			if partition && inheritedCandidateCount != nil && *inheritedCandidateCount == 1 && inheritedSchema != nil && inheritedTable != nil && inheritedName != nil {
 				parent := (pgschema.Constraint{Table: (pgschema.Table{Schema: *inheritedSchema, Name: *inheritedTable}).ObjectID(), Name: *inheritedName}).ObjectID()
@@ -1193,13 +1200,6 @@ ORDER BY n.nspname, c.relname, con.conname`)
 			} else if err := addBlocker("inherited_check_constraint:"+selector, snapshot, tracker); err != nil {
 				return err
 			}
-		}
-		skip, err := tracker.Skip(selector, snapshot)
-		if err != nil {
-			return err
-		}
-		if skip {
-			continue
 		}
 		if err := snapshot.Add(object); err != nil {
 			return err
@@ -1337,6 +1337,7 @@ ORDER BY n.nspname, t.relname, i.relname`, nullsNotDistinct)
 			return err
 		}
 		object.Table = relationObjectID(relationKind, namespace, tableName)
+		tracker.recordIndex(namespace, tableName, relationKind, object.Name, constraint)
 		if predicate != nil {
 			object.Predicate = *predicate
 		}
@@ -2482,7 +2483,11 @@ func inspectGraphBlockers(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Sna
 // session is normalized as contextual PostgreSQL creation ownership; every
 // explicit owner deviation is preserved as a blocker. Extension-owned members
 // are intentionally represented atomically by their typed Extension node and
-// excluded here through pg_depend.deptype='e'.
+// excluded here through pg_depend.deptype='e'. A schema, sequence, type, or
+// routine ACL that holds exactly the privileges of acldefault, as GRANT then
+// REVOKE leaves it, means what the NULL ACL means and is not a blocker; the
+// items are compared as sets, and pg_init_privs keeps a former extension
+// member's ACL explicit.
 func inspectCatalogSafetyBlockers(ctx context.Context, tx pgx.Tx, snapshot *pgschema.Snapshot, tracker *ignoreTracker, version int) error {
 	rows, err := tx.Query(ctx, graphCatalogSafetyBlockersQuery)
 	if err != nil {
@@ -2674,7 +2679,7 @@ func addBlocker(selector string, snapshot *pgschema.Snapshot, tracker *ignoreTra
 	if err != nil {
 		return err
 	}
-	if !skip {
+	if !skip && !tracker.masks(selector) {
 		return snapshot.AddUnsupported(selector)
 	}
 	return nil
@@ -2760,6 +2765,9 @@ FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relacl IS NOT NULL AND c.relkind IN ('S', 'f')
   AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+  AND (NOT (c.relacl @> acldefault(CASE c.relkind WHEN 'S' THEN 's' ELSE 'r' END::"char", c.relowner)
+            AND c.relacl <@ acldefault(CASE c.relkind WHEN 'S' THEN 's' ELSE 'r' END::"char", c.relowner))
+       OR EXISTS (SELECT 1 FROM pg_init_privs i WHERE i.classoid = 'pg_class'::regclass AND i.objoid = c.oid AND i.objsubid = 0))
 UNION ALL
 SELECT 'acl:table_owner:' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -2794,11 +2802,15 @@ SELECT 'acl:type:' || quote_ident(n.nspname) || '.' || quote_ident(t.typname)
 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
 WHERE t.typacl IS NOT NULL AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  AND (NOT (t.typacl @> acldefault('T', t.typowner) AND t.typacl <@ acldefault('T', t.typowner))
+       OR EXISTS (SELECT 1 FROM pg_init_privs i WHERE i.classoid = 'pg_type'::regclass AND i.objoid = t.oid AND i.objsubid = 0))
 UNION ALL
 SELECT 'acl:routine:' || quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' || pg_get_function_identity_arguments(p.oid) || ')'
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE p.proacl IS NOT NULL AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+  AND (NOT (p.proacl @> acldefault('f', p.proowner) AND p.proacl <@ acldefault('f', p.proowner))
+       OR EXISTS (SELECT 1 FROM pg_init_privs i WHERE i.classoid = 'pg_proc'::regclass AND i.objoid = p.oid AND i.objsubid = 0))
 UNION ALL
 SELECT 'acl:default:' || quote_ident(r.rolname) || ':' || COALESCE(quote_ident(n.nspname), '*') || ':' || d.defaclobjtype::text
 FROM pg_default_acl d JOIN pg_roles r ON r.oid = d.defaclrole LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
@@ -3221,7 +3233,8 @@ func parseOptions(options []string) []pgschema.Option {
 // of the object, as in table:SCHEMA.NAME or column:SCHEMA.TABLE.NAME. An
 // ignored schema excludes every object of these kinds in it. Other kinds are
 // not schema objects (extension:NAME names an extension, not a schema) or are
-// unsupported-state markers, which an ignored schema does not acknowledge.
+// unsupported-state markers. A selector never names a marker by its object,
+// but an excluded object masks its markers (see markerOwners).
 var schemaScopedKinds = map[string]bool{
 	"table": true, "column": true, "constraint": true, "index": true,
 	"view": true, "materialized_view": true, "routine": true, "trigger": true,
@@ -3252,10 +3265,14 @@ type ignoreTracker struct {
 	requested []string
 	used      map[string]bool
 	excluded  map[string]bool
+	// indexes maps SCHEMA, NUL, INDEX to the selectors of the index, its
+	// constraint, and its relation, for markers that name an index without
+	// its table.
+	indexes map[string][]string
 }
 
 func newIgnoreTracker(selectors []string) (*ignoreTracker, error) {
-	tracker := &ignoreTracker{requested: append([]string(nil), selectors...), used: make(map[string]bool), excluded: make(map[string]bool)}
+	tracker := &ignoreTracker{requested: append([]string(nil), selectors...), used: make(map[string]bool), excluded: make(map[string]bool), indexes: make(map[string][]string)}
 	for _, selector := range selectors {
 		kind, value, found := strings.Cut(selector, ":")
 		if !found || kind == "" || value == "" || strings.Contains(value, "*") && value != "*" {
@@ -3284,6 +3301,39 @@ func (t *ignoreTracker) Skip(actual string, snapshot *pgschema.Snapshot) (bool, 
 	}
 	t.excluded[actual] = true
 	return true, nil
+}
+
+// masks reports whether an unsupported-state marker describes state of an
+// object that this inspection excluded (see markerOwners). The marker is then
+// dropped without a receipt of its own: the receipt of the excluded object
+// already records the exclusion, and a catalog that an existing checkpoint
+// accepted keeps its fingerprint.
+func (t *ignoreTracker) masks(marker string) bool {
+	if len(t.excluded) == 0 {
+		return false
+	}
+	for _, owner := range markerOwners(marker, t.indexOwners) {
+		if t.excluded[owner] {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *ignoreTracker) recordIndex(schema, table, relationKind, index string, constraint *string) {
+	relation := "table:"
+	if relationKind == "m" {
+		relation = "materialized_view:"
+	}
+	owners := []string{"index:" + schema + "." + table + "." + index}
+	if constraint != nil {
+		owners = append(owners, "constraint:"+schema+"."+table+"."+*constraint)
+	}
+	t.indexes[schema+"\x00"+index] = append(owners, relation+schema+"."+table)
+}
+
+func (t *ignoreTracker) indexOwners(schema, index string) []string {
+	return t.indexes[schema+"\x00"+index]
 }
 
 // tableIgnored reports tables actually excluded by the table inspector. A

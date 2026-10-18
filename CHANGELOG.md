@@ -3,6 +3,43 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## v0.1.0-preview.14 — 2026-10-18
+
+### Fixed
+
+- An ignored object now masks the unsupported state of itself and of the
+  objects in it, in every command that takes ignore selectors. Before,
+  `contract check --ignore schema:legacy` still answered `unsupported` with
+  `acl:schema:legacy` when the schema was granted to `pg_read_all_data`:
+  the selector removed the schema and its objects, but not their ACLs.
+  `schema:NAME` now masks the schema's ACL, ownership, and `IN SCHEMA`
+  default ACLs, and the ACL, ownership, storage, and comment state of each
+  table, column, index, sequence, type, and routine in it. `table:`,
+  `column:`, `index:`, `constraint:`, `sequence:`, `routine:`, type, and
+  `extension:` selectors mask the state of their own object, and `table:`
+  also that of its columns and indexes. Unsupported state of a kept object,
+  and cluster or database state such as a default ACL for every schema or a
+  parameter grant, still blocks. A masked marker has no ignore receipt of its
+  own, so a catalog that a checkpoint accepted keeps its fingerprint.
+  `contract check` lists the masked markers after the masked objects in
+  `ignored.expected_masked` and `ignored.actual_masked`.
+- A new NOT NULL column without a default no longer promotes its dependents
+  to contract. Expand adds the column as nullable and contract sets it NOT
+  NULL. That contract work made the column a contract provider, so each
+  UNIQUE constraint, foreign key, CHECK, index, and view over it moved to
+  contract with `dependency_phase_promotion`. A promoted UNIQUE or foreign key
+  has no gate, so the plan became `unsupported` with
+  `contract_enforcement_missing_gate`. A new `quote.company NOT NULL` in two
+  UNIQUE constraints and in a composite foreign key from `payment_due` did
+  this. preview.12 exempted a column modification of this kind; a new column
+  now follows the same rule. A new primary key over the column is contract
+  work of its own and still follows `SET NOT NULL`.
+- A sequence, type, or routine ACL that holds exactly the default privileges,
+  as `GRANT` then `REVOKE` leaves it, is no longer unsupported state. It means
+  what the NULL ACL means. Schema and table ACLs already compared this way.
+  The items are compared as sets, and an object with `pg_init_privs`, a
+  former extension member, keeps its explicit ACL.
+
 ## v0.1.0-preview.13 — 2026-10-18
 
 ### Added

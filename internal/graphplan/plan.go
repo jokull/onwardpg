@@ -645,7 +645,7 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			if promoted {
 				statements = withPhase(statements, "contract", "review", "dependency_phase_promotion")
 			}
-			if item.Kind != change.Drop && statementsContainPhase(statements, protocol.PhaseContract) && (promoted || !dependentNeutralColumnModify(item)) {
+			if item.Kind != change.Drop && statementsContainPhase(statements, protocol.PhaseContract) && (promoted || !dependentNeutralColumnChange(item)) {
 				contractProviders[item.ID] = true
 			}
 			if deferUntilTableRename {
@@ -8295,15 +8295,22 @@ func schemaDropMustFollowTableRename(schemaID pgschema.ID, renames []renameTable
 	return false
 }
 
-// dependentNeutralColumnModify reports a column modification whose contract
-// work is only a default change, a NOT NULL change, or a comment. These are
-// not contract providers: no CHECK, index, view, or other column reads a
-// column's default or nullability. The dependents that need NOT NULL, a
-// primary key and REPLICA IDENTITY USING INDEX, render in contract on their
-// own, and contract keeps graph order, so they still follow SET NOT NULL. A
-// domain default stays a provider: ADD COLUMN over the domain fills existing
-// rows with whichever domain default exists at that moment.
-func dependentNeutralColumnModify(item change.Change) bool {
+// dependentNeutralColumnChange reports a column change whose contract work
+// is only a default change, a NOT NULL change, or a comment: a modification of
+// those attributes, or a new NOT NULL column without a default, identity,
+// serial, or generation expression, which expand adds as nullable and
+// contract sets NOT NULL. These are not contract providers: no UNIQUE, foreign
+// key, CHECK, index, view, or other column reads a column's default or
+// nullability. The dependents that need NOT NULL, a primary key and REPLICA
+// IDENTITY USING INDEX, render in contract on their own, and contract keeps
+// graph order, so they still follow SET NOT NULL. A domain default stays a
+// provider: ADD COLUMN over the domain fills existing rows with whichever
+// domain default exists at that moment.
+func dependentNeutralColumnChange(item change.Change) bool {
+	if item.Kind == change.Create {
+		column, ok := item.After.(pgschema.Column)
+		return ok && column.NotNull && column.Default == nil && column.Identity == nil && column.Serial == nil && column.Generated == nil
+	}
 	if item.Kind != change.Modify {
 		return false
 	}

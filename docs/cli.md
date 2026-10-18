@@ -726,13 +726,29 @@ A selector that matches nothing on either side stops the command with
 `invalid_ignore`, so a stale selector cannot hide drift. An ignored object
 cannot hide drift in an object that is kept: a foreign key from a kept table to
 an ignored table, or into an ignored schema, stops the command with
-`invalid_ignore` until the key itself is ignored. An ignored schema does not
-acknowledge unsupported state in it; use [live_ignore](#live_ignore) for that.
+`invalid_ignore` until the key itself is ignored.
+
+An ignored object also masks the unsupported state of itself and of the
+objects in it. `schema:legacy` masks `acl:schema:legacy`,
+`ownership:schema:legacy=ROLE`, `acl:default:ROLE:legacy:TYPE`, and the ACL,
+ownership, storage, and comment state of each table, column, index, sequence,
+type, and routine in `legacy`. `table:`, `column:`, `index:`, `constraint:`,
+`sequence:`, `routine:`, a type selector, and `extension:` mask the state of
+their own object, and `table:` also that of its columns and indexes. The rule
+is the same in every command that takes ignore selectors. Unsupported state of
+any other object still blocks, and so does state of the cluster or the database
+(a default ACL for every schema, a parameter grant, a publication, a cast).
+A masked marker has no ignore receipt of its own: the receipt of its object
+records the exclusion, so a catalog that a checkpoint accepted keeps its
+fingerprint. To acknowledge provider state of a kept object, use
+[live_ignore](#live_ignore).
 
 The report then has an `ignored` object: `selectors` lists each selector with
 the ignore receipts that it matched on the expected and actual side,
 `expected_masked` and `actual_masked` list every object removed from each
-side (also the columns, constraints, and indexes of an ignored table),
+side (also the columns, constraints, and indexes of an ignored table), then
+every unsupported-state selector masked with its object (such as
+`acl:schema:legacy`),
 `replayed_fingerprint` is the replay without the selectors, and
 `expected_fingerprint` and `actual_fingerprint` are the compared fingerprints.
 A ready report keeps this object and its digest covers it. When the catalogs
