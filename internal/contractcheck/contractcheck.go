@@ -141,7 +141,9 @@ type IgnoredReport struct {
 	Selectors []IgnoredSelector `json:"selectors"`
 	// ExpectedMasked and ActualMasked list every object that the selectors
 	// removed from each side, including the columns, constraints, and indexes
-	// of an ignored table and the objects of an ignored schema.
+	// of an ignored table and the objects of an ignored schema, and then every
+	// unsupported-state selector that the selectors masked with its object,
+	// such as acl:schema:NAME of an ignored schema.
 	ExpectedMasked []string `json:"expected_masked,omitempty"`
 	ActualMasked   []string `json:"actual_masked,omitempty"`
 	// ReplayedFingerprint is the fingerprint of the replayed catalog without
@@ -1075,12 +1077,23 @@ func inspectIgnored(ctx context.Context, tx pgx.Tx, input Input, observer observ
 	return alignedActual, report, nil, nil
 }
 
-// maskedObjects lists the objects of unfiltered that filtered does not have.
+// maskedObjects lists the objects of unfiltered that filtered does not have,
+// then the unsupported-state selectors of unfiltered that filtered does not
+// have.
 func maskedObjects(unfiltered, filtered *pgschema.Snapshot) []string {
 	var masked []string
 	for _, id := range unfiltered.IDs() {
 		if _, exists := filtered.Object(id); !exists {
 			masked = append(masked, id.String())
+		}
+	}
+	kept := make(map[string]bool)
+	for _, selector := range filtered.Unsupported() {
+		kept[selector] = true
+	}
+	for _, selector := range unfiltered.Unsupported() {
+		if !kept[selector] {
+			masked = append(masked, selector)
 		}
 	}
 	return masked

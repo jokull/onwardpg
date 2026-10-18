@@ -235,4 +235,83 @@ ALTER TABLE public.audit DROP CONSTRAINT "audit_Mixed_fkey";`)
 			t.Fatalf("%d %s", result.code, result.stdout)
 		}
 	})
+
+	// The archive schema is granted to pg_read_all_data. Its ACL and the ACLs
+	// of its objects are unsupported state, which schema:legacy masks with the
+	// schema and records under ignored.
+	exec(`GRANT USAGE ON SCHEMA legacy TO pg_read_all_data;
+GRANT SELECT ON ALL TABLES IN SCHEMA legacy TO pg_read_all_data;
+GRANT USAGE ON SEQUENCE legacy.archive_seq TO pg_read_all_data;
+GRANT SELECT (body) ON legacy.order_snapshot TO pg_read_all_data;`)
+	maskedState := []string{"acl:column:legacy.order_snapshot.body", "acl:relation:legacy.archive_seq", "acl:schema:legacy"}
+
+	t.Run("a selected schema with grants is ready and its masked state is recorded", func(t *testing.T) {
+		result, report := check(legacy, column, fkey)
+		if result.code != 0 || report.Status != "ready" || len(report.Unsupported) != 0 || report.Ignored == nil {
+			t.Fatalf("%d %s", result.code, result.stdout)
+		}
+		masked := map[string]bool{}
+		for _, selector := range report.Ignored.ActualMasked {
+			masked[selector] = true
+		}
+		for _, selector := range append([]string{"table_privilege:legacy:order_snapshot:SELECT:pg_read_all_data"}, maskedState...) {
+			if !masked[selector] {
+				t.Fatalf("actual masked %v lacks %s", report.Ignored.ActualMasked, selector)
+			}
+		}
+		drift := captureStdout(t, func() int {
+			return runDriftAt([]string{"check", "--target", "primary", "--database", liveURL, "--ignore", legacy, "--ignore", column, "--ignore", fkey}, repository)
+		})
+		if strings.Contains(drift.stdout, "acl:") || strings.Contains(drift.stdout, `"status":"unsupported"`) {
+			t.Fatalf("drift check = %d, %s", drift.code, drift.stdout)
+		}
+	})
+
+	t.Run("without the schema selector the grants are unsupported", func(t *testing.T) {
+		result, report := check(column, fkey)
+		if result.code == 0 || report.Status != "unsupported" || !reflect.DeepEqual(report.Unsupported, maskedState) {
+			t.Fatalf("%d %s", result.code, result.stdout)
+		}
+	})
+
+	t.Run("a grant on a schema outside the selectors is still unsupported", func(t *testing.T) {
+		exec("CREATE SCHEMA staging; GRANT USAGE ON SCHEMA staging TO pg_read_all_data")
+		defer exec("DROP SCHEMA staging")
+		result, report := check(legacy, column, fkey)
+		if result.code == 0 || report.Status != "unsupported" || !reflect.DeepEqual(report.Unsupported, []string{"acl:schema:staging"}) {
+			t.Fatalf("%d %s", result.code, result.stdout)
+		}
+		if result, report := check(legacy, column, fkey, "schema:staging"); result.code != 0 || report.Status != "ready" {
+			t.Fatalf("%d %s", result.code, result.stdout)
+		}
+	})
+
+	// GRANT then REVOKE leaves the schema ACL explicit, {owner=UC/owner}. It
+	// holds exactly the default privileges, so with no selector it is neither
+	// unsupported nor drift.
+	t.Run("an explicit owner-only schema ACL is the default ACL", func(t *testing.T) {
+		exec("GRANT USAGE ON SCHEMA public TO pg_read_all_data; REVOKE USAGE ON SCHEMA public FROM pg_read_all_data")
+		exec("CREATE SCHEMA scratch_acl; GRANT USAGE ON SCHEMA scratch_acl TO pg_read_all_data; REVOKE USAGE ON SCHEMA scratch_acl FROM pg_read_all_data")
+		var acl string
+		if err := live.QueryRow(ctx, "SELECT nspacl::text FROM pg_namespace WHERE nspname = 'scratch_acl'").Scan(&acl); err != nil || strings.Contains(acl, "pg_read_all_data") || acl == "" {
+			t.Fatalf("scratch_acl ACL = %q, %v", acl, err)
+		}
+		// The schema is drift for the bundle, so a selector removes it; the
+		// selector masks no ACL state because there is none.
+		result, report := check(legacy, column, fkey, "schema:scratch_acl")
+		if result.code != 0 || report.Status != "ready" || report.Ignored == nil {
+			t.Fatalf("%d %s", result.code, result.stdout)
+		}
+		for _, selector := range report.Ignored.ActualMasked {
+			if strings.HasPrefix(selector, "acl:schema:") && selector != "acl:schema:legacy" {
+				t.Fatalf("an explicit default ACL was unsupported state: %s", selector)
+			}
+		}
+		exec("DROP SCHEMA scratch_acl")
+		exec("REVOKE ALL ON SCHEMA legacy FROM pg_read_all_data; REVOKE ALL ON ALL TABLES IN SCHEMA legacy FROM pg_read_all_data; REVOKE ALL ON SEQUENCE legacy.archive_seq FROM pg_read_all_data; REVOKE SELECT (body) ON legacy.order_snapshot FROM pg_read_all_data")
+		exec("DROP SCHEMA legacy CASCADE; ALTER TABLE public.draft DROP COLUMN preview_token_hash; ALTER TABLE public.audit ADD CONSTRAINT \"audit_Mixed_fkey\" FOREIGN KEY (parent_id) REFERENCES public.parent (id)")
+		if result, report := check(); result.code != 0 || report.Status != "ready" || len(report.Unsupported) != 0 {
+			t.Fatalf("%d %s", result.code, result.stdout)
+		}
+	})
 }
