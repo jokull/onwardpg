@@ -23,6 +23,17 @@ Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
   own, so a catalog that a checkpoint accepted keeps its fingerprint.
   `contract check` lists the masked markers after the masked objects in
   `ignored.expected_masked` and `ignored.actual_masked`.
+- A new NOT NULL column without a default no longer promotes its dependents
+  to contract. Expand adds the column as nullable and contract sets it NOT
+  NULL. That contract work made the column a contract provider, so each
+  UNIQUE constraint, foreign key, CHECK, index, and view over it moved to
+  contract with `dependency_phase_promotion`. A promoted UNIQUE or foreign key
+  has no gate, so the plan became `unsupported` with
+  `contract_enforcement_missing_gate`. A new `quote.company NOT NULL` in two
+  UNIQUE constraints and in a composite foreign key from `payment_due` did
+  this. preview.12 exempted a column modification of this kind; a new column
+  now follows the same rule. A new primary key over the column is contract
+  work of its own and still follows `SET NOT NULL`.
 - A sequence, type, or routine ACL that holds exactly the default privileges,
   as `GRANT` then `REVOKE` leaves it, is no longer unsupported state. It means
   what the NULL ACL means. Schema and table ACLs already compared this way.
