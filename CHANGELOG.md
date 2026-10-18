@@ -3,6 +3,26 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## v0.1.0-preview.12 — 2026-10-18
+
+### Fixed
+
+- A column whose only contract work is `ALTER COLUMN ... DROP DEFAULT` or
+  `SET NOT NULL` no longer promotes its dependents to contract. Before, every
+  change with a contract statement promoted each desired dependent with the
+  `dependency_phase_promotion` hazard. One `DROP DEFAULT` on `quote.status`
+  moved its CHECK change, an index, and 11 views into contract, so the
+  window between expand and contract ran without them. A promoted CHECK
+  change could also lose its validation gate and make the plan unsupported.
+  No CHECK, index, or view reads a column's default or nullability, so these
+  dependents now keep their own phase. A new primary key or
+  `REPLICA IDENTITY USING INDEX` still follows `SET NOT NULL`: both are
+  contract work of their own. A type, collation, identity, serial, or
+  generated-expression change still promotes its dependents, and so does a
+  domain default change, because `ADD COLUMN` over the domain fills existing
+  rows with the domain default of that moment. A column that is itself
+  promoted still promotes its dependents.
+
 ## v0.1.0-preview.11 — 2026-10-17
 
 ### Added
