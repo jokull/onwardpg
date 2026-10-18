@@ -135,6 +135,8 @@ Usage of contract check:
         deployment environment identity
   -evidence string
         writer-drain evidence JSON
+  -ignore value
+        validated catalog selector to exclude from both sides of the checkpoint comparison; repeatable
   -statement-timeout duration
         timeout for each read-only data gate (default 30s)
   -target string
