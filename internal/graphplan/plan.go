@@ -641,10 +641,11 @@ func Build(current, desired *pgschema.Snapshot, answers protocol.Answers, option
 			if item.Kind != change.Drop && dependsOnMovedExtension(desired, item.ID, extensionMoves) {
 				statements = withPhase(statements, "contract", "review", "extension_schema_move_dependency")
 			}
-			if item.Kind != change.Drop && dependsOnContractProvider(desired, item.ID, contractProviders) {
+			promoted := item.Kind != change.Drop && dependsOnContractProvider(desired, item.ID, contractProviders)
+			if promoted {
 				statements = withPhase(statements, "contract", "review", "dependency_phase_promotion")
 			}
-			if item.Kind != change.Drop && statementsContainPhase(statements, protocol.PhaseContract) {
+			if item.Kind != change.Drop && statementsContainPhase(statements, protocol.PhaseContract) && (promoted || !dependentNeutralColumnModify(item)) {
 				contractProviders[item.ID] = true
 			}
 			if deferUntilTableRename {
@@ -8292,6 +8293,36 @@ func schemaDropMustFollowTableRename(schemaID pgschema.ID, renames []renameTable
 		}
 	}
 	return false
+}
+
+// dependentNeutralColumnModify reports a column modification whose contract
+// work is only a default change, a NOT NULL change, or a comment. These are
+// not contract providers: no CHECK, index, view, or other column reads a
+// column's default or nullability. The dependents that need NOT NULL, a
+// primary key and REPLICA IDENTITY USING INDEX, render in contract on their
+// own, and contract keeps graph order, so they still follow SET NOT NULL. A
+// domain default stays a provider: ADD COLUMN over the domain fills existing
+// rows with whichever domain default exists at that moment.
+func dependentNeutralColumnModify(item change.Change) bool {
+	if item.Kind != change.Modify {
+		return false
+	}
+	before, ok := item.Before.(pgschema.Column)
+	if !ok {
+		return false
+	}
+	after, ok := item.After.(pgschema.Column)
+	if !ok {
+		return false
+	}
+	// Position and the NOT NULL constraint name are not structural; the
+	// change differ ignores them too.
+	before.Position, after.Position = 0, 0
+	before.NotNullConstraintName, after.NotNullConstraintName = "", ""
+	before.Default, after.Default = nil, nil
+	before.NotNull, after.NotNull = false, false
+	before.Comment, after.Comment = nil, nil
+	return reflect.DeepEqual(before, after)
 }
 
 func dependsOnContractProvider(snapshot *pgschema.Snapshot, object pgschema.ID, providers map[pgschema.ID]bool) bool {
