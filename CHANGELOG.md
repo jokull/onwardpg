@@ -3,6 +3,43 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## v0.1.0-preview.13 — 2026-10-18
+
+### Added
+
+- `onwardpg contract check --ignore SELECTOR` takes the selectors of
+  `drift check --ignore` and applies them to both sides of the checkpoint
+  comparison. A cutover database can hold objects that are not drift for the
+  bundle: an archive schema that the operator created in the window, a column
+  of another pending change, or foreign keys that a restore could not create.
+  Before, the check answered `catalog_drift` and could not become ready. The
+  checkpoint is a fingerprint, so with `--ignore` the command replays the
+  history through the bundle's expand in the target's scratch database, as
+  `verify` does when it receipts the checkpoint, proves that the replay
+  reproduces the receipted fingerprint (`expand_checkpoint_not_reproduced`
+  otherwise), and compares both sides with the selectors applied. A selector
+  that matches nothing is `invalid_ignore`. The report adds `ignored`: each
+  selector with the receipts it matched on each side, every masked object on
+  each side, and the compared fingerprints; a ready report keeps it. When the
+  catalogs still differ, `differences` lists the objects as `drift check`
+  does. Without `--ignore` the command is unchanged.
+
+### Changed
+
+- `schema:NAME` now ignores the schema and every object in it, in every
+  command that takes ignore selectors. Before, it removed only the schema
+  node, so the tables of an ignored schema were still compared. A foreign key
+  from a kept table into the ignored schema is an error, as one into an
+  ignored table already was, so an ignored object cannot hide drift in a kept
+  one. Unsupported-state markers in the schema are not acknowledged by it.
+- When two given selectors match the same object, such as `schema:NAME` and
+  a selector of an object in that schema, or `table:*` and one table, both
+  are used. Before, only the first of them was marked used, and the other was
+  reported as an unused selector.
+- `drift check` and `contract check` report an ignore-selector error from the
+  live inspection or the scratch replay, such as a foreign key into an
+  ignored table, as `invalid_ignore`.
+
 ## v0.1.0-preview.12 — 2026-10-18
 
 ### Fixed

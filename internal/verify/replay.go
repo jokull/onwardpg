@@ -41,6 +41,35 @@ func ReplayHistory(ctx context.Context, adminURL string, chain history.Chain, ig
 	return snapshot, nil
 }
 
+// ReplayExpandCheckpoint executes the chain through the expand phase of
+// bundleID in one disposable database, as verify does when it receipts the
+// expand checkpoint: every earlier bundle runs through contract. The result is
+// inspected once for each ignore set, and the snapshots are returned in that
+// order.
+func ReplayExpandCheckpoint(ctx context.Context, adminURL string, chain history.Chain, bundleID string, ignoreSets ...[]string) ([]*pgschema.Snapshot, error) {
+	if adminURL == "" {
+		return nil, fmt.Errorf("disposable database admin URL is required")
+	}
+	if len(ignoreSets) == 0 {
+		return nil, fmt.Errorf("at least one ignore set is required")
+	}
+	prefix, err := chain.Through(bundleID)
+	if err != nil {
+		return nil, err
+	}
+	if err := requirePostgresMajor(ctx, adminURL, prefix); err != nil {
+		return nil, err
+	}
+	snapshots, _, failure, err := executeDisposableInspect(ctx, adminURL, prefix, bundleID, protocol.PhaseExpand, ignoreSets)
+	if err != nil {
+		return nil, err
+	}
+	if failure != nil {
+		return nil, replayFailure(failure)
+	}
+	return snapshots, nil
+}
+
 // requirePostgresMajor rejects a scratch server whose major version is not the
 // one that the history was receipted on. The same SQL can give a different
 // catalog on another major.

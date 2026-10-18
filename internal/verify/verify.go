@@ -246,7 +246,17 @@ func selectedBatchCount(artifact bundle.Artifact, throughPhase string) (int, err
 	return count, nil
 }
 
-func executeDisposable(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignores []string) (snapshot *pgschema.Snapshot, batches int, failure *Failure, resultErr error) {
+func executeDisposable(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignores []string) (*pgschema.Snapshot, int, *Failure, error) {
+	snapshots, batches, failure, err := executeDisposableInspect(ctx, adminURL, chain, targetBundle, throughPhase, [][]string{ignores})
+	if err != nil || failure != nil {
+		return nil, batches, failure, err
+	}
+	return snapshots[0], batches, nil, nil
+}
+
+// executeDisposableInspect runs the chain in one disposable database and
+// inspects the result once for each ignore set, in order.
+func executeDisposableInspect(ctx context.Context, adminURL string, chain history.Chain, targetBundle, throughPhase string, ignoreSets [][]string) (snapshots []*pgschema.Snapshot, batches int, failure *Failure, resultErr error) {
 	database, err := scratchdb.Create(ctx, adminURL, "onwardpg_verify")
 	if err != nil {
 		return nil, 0, nil, err
@@ -344,11 +354,14 @@ func executeDisposable(ctx context.Context, adminURL string, chain history.Chain
 		return nil, batches, nil, fmt.Errorf("close disposable execution connection: %w", err)
 	}
 	stopReplay()
-	snapshot, err = source.LoadDatabaseGraphForComparison(ctx, database.Config, ignores)
-	if err != nil {
-		return nil, batches, nil, fmt.Errorf("inspect disposable result: %w", err)
+	for _, ignores := range ignoreSets {
+		snapshot, err := source.LoadDatabaseGraphForComparison(ctx, database.Config, ignores)
+		if err != nil {
+			return nil, batches, nil, fmt.Errorf("inspect disposable result: %w", err)
+		}
+		snapshots = append(snapshots, snapshot)
 	}
-	return snapshot, batches, nil, nil
+	return snapshots, batches, nil, nil
 }
 
 func batchFailure(bundleID, batchID, phase string, transactional bool, err error) *Failure {

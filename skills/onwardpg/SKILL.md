@@ -251,6 +251,11 @@ parameter entry also hides a later grant of that parameter to another role.
 
 Provider objects that the planner does model, such as an extra extension, still
 show as differences. Pass `--ignore SELECTOR` for those, and report the list.
+`contract check` takes the same `--ignore` selectors and applies them to both
+sides of the checkpoint comparison; it then needs the scratch database and
+records the selectors and every masked object under `ignored`. `schema:NAME`
+ignores every object in the schema. Pass a selector only with the user's
+approval and only for objects that are not drift for the bundle.
 
 A result never authorizes a repair. Resolve drift through a reviewed bundle or
 a deliberate change to the declared schema.

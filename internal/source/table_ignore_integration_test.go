@@ -183,13 +183,26 @@ CREATE SEQUENCE drizzle.unrelated_sequence;`); err != nil {
 		if _, ok := snapshot.Object((pgschema.Table{Schema: "drizzle", Name: "__drizzle_migrations"}).ObjectID()); ok {
 			t.Fatal("scoped journal retained")
 		}
+		// An ignored schema excludes its contents too. A selector of an
+		// object in it overlaps and is not stale.
 		selectors = append(selectors, "schema:drizzle", "sequence:drizzle.unrelated_sequence")
 		snapshot, err = inspectGraphConfig(ctx, config, selectors, true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(snapshot.Ignored()) != len(selectors) {
-			t.Fatalf("explicit boundary receipt = %#v", snapshot.Ignored())
+		for _, id := range snapshot.IDs() {
+			if id.Schema == "drizzle" || id.Kind == pgschema.KindSchema && id.Name == "drizzle" {
+				t.Fatalf("ignored schema retained %s", id)
+			}
+		}
+		for _, receipt := range []string{"schema:drizzle", "sequence:drizzle.unrelated_sequence", "table:drizzle.__drizzle_migrations"} {
+			found := false
+			for _, ignored := range snapshot.Ignored() {
+				found = found || ignored == receipt
+			}
+			if !found {
+				t.Fatalf("explicit boundary receipt %#v lacks %s", snapshot.Ignored(), receipt)
+			}
 		}
 	})
 	t.Run("ignored replica index still fails", func(t *testing.T) {

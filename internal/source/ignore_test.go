@@ -1,6 +1,7 @@
 package source
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -66,5 +67,51 @@ func TestTableIgnoreRequiresObservedTableExclusion(t *testing.T) {
 				t.Fatalf("ignore receipt = %#v", got)
 			}
 		})
+	}
+}
+
+func TestSelectorMatchesKindsAndSchemaContents(t *testing.T) {
+	for _, test := range []struct {
+		requested, actual string
+		want              bool
+	}{
+		{"extension:pg_stat_statements", "extension:pg_stat_statements", true},
+		{"index:public.users.users_email_idx", "index:public.users.users_email_idx", true},
+		{"column:public.draft.preview_token_hash", "column:public.draft.preview_token_hash", true},
+		{"constraint:public.audit.audit_Mixed_fkey", "constraint:public.audit.audit_Mixed_fkey", true},
+		{"constraint:public.audit.audit_mixed_fkey", "constraint:public.audit.audit_Mixed_fkey", false},
+		{"table:*", "table:legacy.order_snapshot", true},
+		// An ignored schema excludes the schema and every object in it.
+		{"schema:legacy", "schema:legacy", true},
+		{"schema:legacy", "table:legacy.order_snapshot", true},
+		{"schema:legacy", "column:legacy.order_snapshot.body", true},
+		{"schema:legacy", "routine:legacy.archive(integer)", true},
+		{"schema:legacy", "materialized_view:legacy.totals", true},
+		// It does not reach another schema with the same prefix, an extension
+		// that has the schema's name, or unsupported-state markers.
+		{"schema:legacy", "table:legacy_v2.order_snapshot", false},
+		{"schema:legacy", "table:public.legacy", false},
+		{"schema:legacy", "extension:legacy", false},
+		{"schema:legacy", "aggregate:legacy.total(integer)", false},
+		{"schema:*", "table:legacy.order_snapshot", false},
+		{"table:legacy.order_snapshot", "column:legacy.order_snapshot.body", false},
+	} {
+		if got := SelectorMatches(test.requested, test.actual); got != test.want {
+			t.Errorf("SelectorMatches(%q, %q) = %v, want %v", test.requested, test.actual, got, test.want)
+		}
+	}
+}
+
+func TestIgnoredSchemaContentsMarkTheSchemaSelectorUsed(t *testing.T) {
+	snapshot := pgschema.New()
+	if err := snapshot.AddIgnored("table:legacy.order_snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateIgnoreSelectors([]string{"schema:legacy"}, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	err := ValidateIgnoreSelectors([]string{"schema:legacy", "schema:archive"}, snapshot)
+	if !errors.Is(err, ErrInvalidIgnore) || err.Error() != "unused ignore selectors: schema:archive" {
+		t.Fatalf("stale selector error = %v", err)
 	}
 }

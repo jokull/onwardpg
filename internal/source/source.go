@@ -88,9 +88,8 @@ func ValidateIgnoreSelectors(selectors []string, snapshots ...*pgschema.Snapshot
 	}
 	for _, snapshot := range snapshots {
 		for _, actual := range snapshot.Ignored() {
-			kind := strings.SplitN(actual, ":", 2)[0]
 			for _, requested := range tracker.requested {
-				if requested == actual || requested == kind+":*" {
+				if SelectorMatches(requested, actual) {
 					tracker.used[requested] = true
 				}
 			}
@@ -111,9 +110,8 @@ func ActiveIgnoreSelectors(selectors []string, snapshots ...*pgschema.Snapshot) 
 	}
 	for _, snapshot := range snapshots {
 		for _, actual := range snapshot.Ignored() {
-			kind := strings.SplitN(actual, ":", 2)[0]
 			for _, requested := range tracker.requested {
-				if requested == actual || requested == kind+":*" {
+				if SelectorMatches(requested, actual) {
 					tracker.used[requested] = true
 				}
 			}
