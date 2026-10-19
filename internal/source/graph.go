@@ -835,6 +835,10 @@ ORDER BY n.nspname, c.relname, a.attnum`, generated, notNullConstraintName)
 		if notNullName != nil {
 			object.NotNullConstraintName = *notNullName
 		}
+		if defaultOrGenerated != nil {
+			canonical := pgschema.CanonicalExpression(*defaultOrGenerated)
+			defaultOrGenerated = &canonical
+		}
 		if _, exists := snapshot.Object(object.Table); !exists {
 			continue
 		}
@@ -1155,6 +1159,11 @@ ORDER BY n.nspname, c.relname, con.conname`)
 			continue
 		}
 		object.Type = graphConstraintType(kind)
+		if object.Type == pgschema.ConstraintCheck {
+			// A restored catalog can deparse the same predicate with flatter
+			// AND/OR nesting; compare the flat form.
+			object.Definition = pgschema.CanonicalExpression(object.Definition)
+		}
 		if object.Type == pgschema.ConstraintForeign {
 			object.ForeignKeyColumns = localColumns
 			object.ReferencedColumns = referencedColumns
@@ -1339,7 +1348,7 @@ ORDER BY n.nspname, t.relname, i.relname`, nullsNotDistinct)
 		object.Table = relationObjectID(relationKind, namespace, tableName)
 		tracker.recordIndex(namespace, tableName, relationKind, object.Name, constraint)
 		if predicate != nil {
-			object.Predicate = *predicate
+			object.Predicate = pgschema.CanonicalExpression(*predicate)
 		}
 		if _, exists := snapshot.Object(object.Table); !exists {
 			continue
@@ -1429,7 +1438,7 @@ ORDER BY n.nspname, t.relname, i.relname, idx.ord`, included)
 			part.Column = *column
 		}
 		if expression != nil {
-			part.Expression = *expression
+			part.Expression = pgschema.CanonicalExpression(*expression)
 		}
 		if collation != nil {
 			part.Collation = *collation

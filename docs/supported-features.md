@@ -154,7 +154,11 @@ implication is assumed.
 Changing an ordinary constraint's kind under the same name uses that loose
 fallback too; onwardpg does not treat shared identity as semantic compatibility.
 Foreign-key dependents reject explicitly instead of receiving an out-of-order
-drop. CHECK mutations use the catalog-deparsed predicate: bounded implication
+drop. CHECK predicates, index predicates and expressions, defaults, and
+generated columns are compared with nested AND and OR chains flattened, the
+form PostgreSQL deparses after a dump and restore, so a `BETWEEN` chain does
+not read as a change against a restored copy.
+CHECK mutations use the catalog-deparsed predicate: bounded implication
 proves literal-set, branch, and finite-to-fixed-regex widenings, while unknown
 relationships use a loose expand envelope and staged contract restoration.
 Unambiguous cross-name CHECK families are correlated by typed constrained-column
