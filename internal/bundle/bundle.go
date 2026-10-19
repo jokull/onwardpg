@@ -437,6 +437,8 @@ func Build(input Input) (Artifact, error) {
 		}
 	}
 	if input.Answers != nil {
+		canonical := input.Answers.Canonical()
+		input.Answers = &canonical
 		if input.Answers.CurrentFingerprint != input.Result.CurrentFingerprint || input.Answers.DesiredFingerprint != input.Result.DesiredFingerprint {
 			return Artifact{}, fmt.Errorf("answer receipt does not match bundled planner result")
 		}

@@ -46,6 +46,7 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 				return Resolution{}, err
 			}
 			resolution.Hints = usedHints(hints, used)
+			resolution.Answers = resolution.Answers.Canonical()
 			return resolution, nil
 		}
 		matched, err := MatchQuestions(resolution.Result.Questions, hints, current, desired)
@@ -58,6 +59,7 @@ func Resolve(current, desired *pgschema.Snapshot, hints []protocol.Hint, options
 				return Resolution{}, err
 			}
 			resolution.Hints = usedHints(hints, used)
+			resolution.Answers = resolution.Answers.Canonical()
 			resolution.Deferred = deferred
 			return resolution, nil
 		}
