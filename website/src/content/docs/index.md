@@ -51,6 +51,9 @@ can still produce. If that cannot fit one deployment, split the change across
 releases. onwardpg asks for the missing decisions and SQL; it cannot infer
 application behavior or a backfill's business meaning from the schema.
 
+If you already use Drizzle Kit, Atlas, or pgroll, [how onwardpg compares](https://github.com/jokull/onwardpg/blob/main/docs/ecosystem-comparison.md)
+describes which part of a schema change each tool owns and when to pick which.
+
 ## Quick start
 
 ### Install
@@ -220,9 +223,7 @@ for those options.
 ## Day-to-day use
 
 Run `onwardpg plan` as you edit the schema. It updates the active migration
-instead of adding a migration for every draft. After rebasing onto new migration
-history, run it again. Decisions and SQL edits carry forward when they still
-apply; changes to their underlying schema can require another answer or review.
+instead of adding a migration for every draft.
 
 ```sh
 onwardpg plan       # Revise the active plan
@@ -239,6 +240,42 @@ previous rename decision may need confirming again. That keeps a changed set
 of possible identities from silently reusing an earlier answer. Use the complete
 suggested command (`argv`) for each answer: it can carry confirmed decisions
 that have not yet been saved while your edited SQL waits for the remaining choices.
+
+### Restacking
+
+Suppose a teammate merges a migration while your branch is open. After you
+rebase, the migration history your bundle was planned from has moved. Run the
+same command:
+
+```sh
+onwardpg plan
+```
+
+onwardpg does not read Git. It replays the accepted migration history now in
+`migrations/onward`, materializes your desired schema, and plans the same
+bundle again from the new base. The bundle keeps its name and directory; its
+generation number increases. Work the merged migration already did disappears
+from your plan, because the base now contains it.
+
+Each decision you answered is bound to the schema objects and choices of its
+question. A decision carries forward when that question is unchanged. If the
+objects or choices changed, `plan` exits `2` with an `answer_invalidated`
+finding naming the decision and asks it again. A decision whose question is
+gone is dropped; nothing replaces it.
+
+SQL you wrote inside the edit markers is transplanted into the refreshed
+generated SQL, and `verify.sql` is always yours. If you edited generated SQL
+outside the markers and the new plan changed that same phase, `plan` stops with
+`edited_phase_conflict` and reports the old generated, your current, and the
+new generated SQL for you to merge. Run `onwardpg verify` again before you
+commit.
+
+Editing the desired schema and rerunning `plan`, as in
+[Required columns](#required-columns), is the same revision with the base held
+still. With a development database connected, a restack can also report a
+`workspace_fast_forward` action with reason `accepted_history_changed`: the
+SQL to bring your local database up to the new base. It is never part of the
+bundle.
 
 ### Use your framework's schema
 
