@@ -1268,12 +1268,12 @@ func answersReceipt(answers protocol.Answers) *protocol.Answers {
 	if len(answers.Answers) == 0 {
 		return nil
 	}
-	copy := answers
-	return &copy
+	canonical := answers.Canonical()
+	return &canonical
 }
 
 func finalizeRebind(report *protocol.RebindReport, carried protocol.Answers, remaining map[string]protocol.Answer, current []protocol.Question, final bool) {
-	report.Answers = carried
+	report.Answers = carried.Canonical()
 	sort.Strings(report.Carried)
 	if final {
 		for _, id := range sortedAnswerIDs(remaining) {

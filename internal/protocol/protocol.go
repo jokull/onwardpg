@@ -279,6 +279,22 @@ type Answer struct {
 	Manual              *ManualWork `json:"manual,omitempty"`
 }
 
+// Canonical returns a copy with the answers sorted by question id
+// (kind:key). Answer order carries no meaning, so a receipt written in this
+// order depends only on the answer set, not on the order the questions were
+// answered in.
+func (a Answers) Canonical() Answers {
+	result := a
+	if a.Answers != nil {
+		result.Answers = make([]Answer, len(a.Answers))
+		copy(result.Answers, a.Answers)
+	}
+	sort.SliceStable(result.Answers, func(i, j int) bool {
+		return result.Answers[i].Kind+":"+result.Answers[i].Key < result.Answers[j].Kind+":"+result.Answers[j].Key
+	})
+	return result
+}
+
 // Resolver validates and consumes a fingerprint-bound answer document. It is
 // the only answer-consumption path so stale and unused intent cannot be
 // ignored.

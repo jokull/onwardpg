@@ -3,6 +3,31 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## v0.1.0-preview.15 — 2026-10-19
+
+### Fixed
+
+- An expression whose catalog nests an AND or OR chain no longer reads as
+  changed against a catalog that holds the same chain flat. `BETWEEN` keeps
+  its own AND node, so `CHECK (x BETWEEN 1 AND 5 AND y > 0)` deparses as
+  `(((x >= 1) AND (x <= 5)) AND (y > 0))`. A dump of that catalog restores
+  the text flat, and `drift check` and `contract check` against the restored
+  copy reported the constraint as `changed_in_actual`. Inspection now records
+  table CHECK constraints, partial index predicates, index expressions,
+  column defaults, and generated columns in the flat form, which is what
+  PostgreSQL deparses for the flat expression, so the two catalogs compare and
+  fingerprint equal. Domains, policies, views, and triggers were already read
+  flat. A schema with such an expression has a new fingerprint, so a pending
+  bundle planned over it before this release no longer matches its own
+  receipts: run `onwardpg plan` and `onwardpg verify` for it again.
+- `answers.json` and `decisions.json` list answers by question id (kind and
+  key). Before, they kept the order in which the answers were given, so a
+  bundle planned with an incremental hint loop had a different entry digest
+  than the same bundle planned once with the final hint set, and a second
+  plan rewrote it. One plan of a given input now gives one entry digest. A
+  bundle written by an earlier release keeps its digests until it is planned
+  again.
+
 ## v0.1.0-preview.14 — 2026-10-18
 
 ### Fixed

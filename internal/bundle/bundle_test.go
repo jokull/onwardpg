@@ -530,3 +530,36 @@ func plannedResult(statements ...protocol.Statement) protocol.Result {
 	}
 	return result
 }
+
+func TestBuildReceiptsAnswersInQuestionOrderNotAnswerOrder(t *testing.T) {
+	drop := protocol.Answer{Kind: "drop", Key: "column:public:users:legacy", Value: "drop", QuestionFingerprint: "sha256:drop"}
+	rename := protocol.Answer{Kind: "column_identity", Key: "column:public:users:name", Value: "rename", QuestionFingerprint: "sha256:rename"}
+	hints := []protocol.Hint{{Kind: "drop", Object: "column", Name: []string{"public", "users", "legacy"}}}
+	build := func(answers ...protocol.Answer) Artifact {
+		t.Helper()
+		artifact, err := Build(Input{
+			Metadata: metadata(), Result: plannedResult(statement("ALTER TABLE public.users DROP COLUMN legacy;", "contract", true)),
+			Answers: &protocol.Answers{CurrentFingerprint: currentFingerprint, DesiredFingerprint: desiredFingerprint, Answers: answers},
+			Hints:   hints,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return artifact
+	}
+	first, second := build(drop, rename), build(rename, drop)
+	for _, name := range []string{"answers.json", "decisions.json"} {
+		if string(first.Files[name]) != string(second.Files[name]) {
+			t.Fatalf("%s depends on answer order:\n%s\n%s", name, first.Files[name], second.Files[name])
+		}
+	}
+	if first.Manifest.AnswersDigest != second.Manifest.AnswersDigest || first.Manifest.SemanticDigest != second.Manifest.SemanticDigest {
+		t.Fatalf("digests depend on answer order: %#v %#v", first.Manifest, second.Manifest)
+	}
+	if first.Manifest.History != nil && first.Manifest.History.EntryDigest != second.Manifest.History.EntryDigest {
+		t.Fatal("history entry digest depends on answer order")
+	}
+	if err := second.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
