@@ -1,0 +1,11 @@
+-- onwardpg: forward-only PostgreSQL migration plan.
+-- Review every batch, safety classification, and hazard in the JSON plan before execution.
+-- ============================================================================
+-- EXPAND — run before the one application deployment anchored to this plan.
+-- Old code must remain usable while new code begins using the expanded shape.
+-- Transactional and non-transactional batches are marked below; this phase is not split by transaction.
+-- ============================================================================
+-- onwardpg:batch nontransactional
+-- Batch batch-expand-001: non-transactional; execute outside BEGIN/COMMIT.
+-- Review: safety=review; hazards=baseline_replay.
+CREATE TABLE public.events (id bigint PRIMARY KEY, x integer NOT NULL, y integer NOT NULL, CONSTRAINT events_check CHECK (x BETWEEN 1 AND 5 AND y > 0));

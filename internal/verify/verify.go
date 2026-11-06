@@ -74,6 +74,9 @@ type Input struct {
 	ThroughPhase string
 	Ignores      []string
 	Options      graphplan.Options
+	// ReplayedDesiredFingerprint is the current catalog-form fingerprint of
+	// receipted history, supplied when an older receipt used a different form.
+	ReplayedDesiredFingerprint string
 	// Desired is the planner's desired snapshot when the caller has one. It
 	// lets a convergence failure name the objects whose catalog state after
 	// contract differs from the desired schema.
@@ -173,7 +176,7 @@ func Run(ctx context.Context, input Input) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	if targetManifest.DesiredSource.Fingerprint != report.DesiredFingerprint {
+	if targetManifest.DesiredSource.Fingerprint != report.DesiredFingerprint && input.ReplayedDesiredFingerprint != report.DesiredFingerprint {
 		if differing := nonConvergentObjects(desired, input.Desired); len(differing) > 0 {
 			return Report{}, fmt.Errorf("the plan does not converge: after contract these objects differ from the desired schema: %s (full history fingerprint %s, bundle desired fingerprint %s)", strings.Join(differing, ", "), report.DesiredFingerprint, targetManifest.DesiredSource.Fingerprint)
 		}
