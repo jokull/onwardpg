@@ -36,12 +36,13 @@ type Target struct {
 	// draft, and dev plan build and drop standalone indexes with CONCURRENTLY
 	// unless the command line or the stored choice of a bundle says otherwise.
 	// init does not read it.
-	ConcurrentIndexes bool     `toml:"concurrent_indexes" json:"concurrent_indexes,omitempty"`
-	Ignore            []string `toml:"ignore" json:"ignore,omitempty"`
-	// LiveIgnore acknowledges unsupported state that a managed provider owns in
-	// live clusters (see source.ValidateLiveIgnoreSelectors). Only commands
-	// that read a live catalog consult it.
-	LiveIgnore []string `toml:"live_ignore" json:"live_ignore,omitempty"`
+	ConcurrentIndexes bool         `toml:"concurrent_indexes" json:"concurrent_indexes,omitempty"`
+	Ignore            IgnorePolicy `toml:"ignore" json:"ignore,omitempty"`
+}
+
+type IgnorePolicy struct {
+	Schema []string `toml:"schema" json:"schema,omitempty"`
+	Live   []string `toml:"live" json:"live,omitempty"`
 }
 
 func Load(name string) (Config, error) {
@@ -51,8 +52,26 @@ func Load(name string) (Config, error) {
 	}
 	defer file.Close()
 	limited := io.LimitReader(file, 1<<20)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return Config{}, fmt.Errorf("read onwardpg config: %w", err)
+	}
+	var raw struct {
+		Targets map[string]map[string]any `toml:"targets"`
+	}
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return Config{}, fmt.Errorf("decode onwardpg config: %w", err)
+	}
+	for name, target := range raw.Targets {
+		if _, old := target["live_ignore"]; old {
+			return Config{}, fmt.Errorf("target %s: replace live_ignore = [...] with [targets.%s.ignore] live = [...]", name, name)
+		}
+		if _, old := target["ignore"].([]any); old {
+			return Config{}, fmt.Errorf("target %s: replace ignore = [...] with [targets.%s.ignore] schema = [...]", name, name)
+		}
+	}
 	var config Config
-	if err := toml.NewDecoder(limited).DisallowUnknownFields().Decode(&config); err != nil {
+	if err := toml.NewDecoder(strings.NewReader(string(data))).DisallowUnknownFields().Decode(&config); err != nil {
 		return Config{}, fmt.Errorf("decode onwardpg config: %w", err)
 	}
 	if err := config.Validate(); err != nil {
@@ -134,13 +153,13 @@ func (t Target) Validate() error {
 	if t.DevMode != "" && t.DevMode != "workspace" && t.DevMode != "strict" {
 		return fmt.Errorf("dev_mode must be workspace or strict")
 	}
-	for _, selector := range t.Ignore {
+	for _, selector := range t.Ignore.Schema {
 		kind, name, found := strings.Cut(selector, ":")
 		if !found || kind == "" || name == "" || strings.Contains(name, "*") && name != "*" || strings.TrimSpace(selector) != selector {
 			return fmt.Errorf("invalid ignore selector %q; expected kind:name or kind:*", selector)
 		}
 	}
-	if err := source.ValidateLiveIgnoreSelectors(t.LiveIgnore); err != nil {
+	if err := source.ValidateLiveIgnoreSelectors(t.Ignore.Live); err != nil {
 		return err
 	}
 	return nil

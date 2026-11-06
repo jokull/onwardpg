@@ -57,7 +57,8 @@ boundary:
 ```toml
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 dev_mode = "workspace"
-ignore = ["table:public.django_migrations"]
+[targets.app.ignore]
+schema = ["table:public.django_migrations"]
 ```
 
 These fields belong under `[targets.app]`. Set the dev URL to the local

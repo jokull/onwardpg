@@ -14,19 +14,19 @@ import (
 // clone-verification boundary. No live policy is inferred when no development
 // database is configured, and failed inspection never produces a receipt.
 func ObserverIgnoreSelectors(ctx context.Context, target Target, planning ...*pgschema.Snapshot) ([]string, error) {
-	if len(target.Ignore) == 0 || target.DevDatabaseEnv == "" {
+	if len(target.Ignore.Schema) == 0 || target.DevDatabaseEnv == "" {
 		return nil, nil
 	}
 	url := os.Getenv(target.DevDatabaseEnv)
 	if url == "" {
 		return nil, fmt.Errorf("environment variable %s is required to validate observer ignore selectors", target.DevDatabaseEnv)
 	}
-	live, err := source.LoadGraphForComparison(ctx, source.Parse(url), "", target.Ignore)
+	live, err := source.LoadGraphForComparison(ctx, source.Parse(url), "", target.Ignore.Schema)
 	if err != nil {
 		return nil, fmt.Errorf("inspect development observer policy: %w", err)
 	}
 	snapshots := append(append([]*pgschema.Snapshot(nil), planning...), live)
-	if err := source.ValidateIgnoreSelectors(target.Ignore, snapshots...); err != nil {
+	if err := source.ValidateIgnoreSelectors(target.Ignore.Schema, snapshots...); err != nil {
 		return nil, fmt.Errorf("validate observer ignore selectors: %w", err)
 	}
 	// Bind only exact objects observed in this catalog, even when configuration

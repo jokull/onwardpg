@@ -43,9 +43,8 @@ type Observer struct {
 	// BypassRLS reports that the observer role has BYPASSRLS.
 	BypassRLS       bool     `json:"bypass_rls,omitempty"`
 	ProjectedAccess []string `json:"projected_access,omitempty"`
-	// LiveIgnored lists unsupported state observed in the live catalog that
-	// the target's live_ignore list acknowledged: environmental state of the
-	// cluster, shown but not a blocker.
+	// LiveIgnored lists selectors matched by the target's live_ignore list.
+	// They were removed from the compared live catalog.
 	LiveIgnored []string `json:"live_ignored,omitempty"`
 	// LiveIgnoreUnmatched lists configured live_ignore selectors that matched
 	// nothing in this catalog. It is information only and never changes the

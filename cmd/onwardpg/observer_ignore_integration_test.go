@@ -43,7 +43,7 @@ INSERT INTO public.django_migrations (app, name, applied) VALUES ('app', '0001_i
 		if err := planning.AddIgnored("table:public.items"); err != nil {
 			t.Fatal(err)
 		}
-		selectors, err := workspace.ObserverIgnoreSelectors(ctx, workspace.Target{DevDatabaseEnv: "ONWARDPG_JOURNAL_LIVE_URL", Ignore: []string{"table:*"}}, planning)
+		selectors, err := workspace.ObserverIgnoreSelectors(ctx, workspace.Target{DevDatabaseEnv: "ONWARDPG_JOURNAL_LIVE_URL", Ignore: workspace.IgnorePolicy{Schema: []string{"table:*"}}}, planning)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -59,7 +59,8 @@ schema_file = "schema.sql"
 scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 dev_database_env = "ONWARDPG_JOURNAL_LIVE_URL"
 dev_mode = "workspace"
-ignore = ["table:public.django_migrations"]
+[targets.primary.ignore]
+schema = ["table:public.django_migrations"]
 `
 	writeTestFile(t, repository, ".onwardpg.toml", config)
 	writeTestFile(t, repository, "schema.sql", baseline)

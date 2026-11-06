@@ -192,7 +192,7 @@ Usage: onwardpg diff --from SOURCE --to SOURCE [options]
   -schema-qualifier value
         scope to one schema and render names using this qualifier (empty means unqualified)
   -target string
-        configured target whose live_ignore list applies to PostgreSQL URL sources
+        configured target whose ignore.live list applies to PostgreSQL URL sources
   -to string
         desired PostgreSQL URL or CREATE-statement SQL file
   -to-env string

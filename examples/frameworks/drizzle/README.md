@@ -30,7 +30,8 @@ its table and schema explicitly before baseline:
 ```toml
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 dev_mode = "workspace"
-ignore = ["schema:drizzle", "table:drizzle.__drizzle_migrations"]
+[targets.app.ignore]
+schema = ["schema:drizzle", "table:drizzle.__drizzle_migrations"]
 ```
 
 These keys belong under `[targets.app]`. Set the development URL to the existing

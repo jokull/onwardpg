@@ -3,6 +3,17 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## Unreleased
+
+### Added
+
+- Targets now use one `[targets.NAME.ignore]` table. `schema` carries the old
+  required-match `ignore` policy; `live` carries live-only object and provider
+  state selectors. `live` accepts whole-segment wildcards such as
+  `trigger:public.*.s1a_write` and never enters bundle planner receipts.
+  The old `ignore = [...]` and `live_ignore = [...]` keys fail with a migration
+  message. Existing bundles and checkpoints remain valid.
+
 ## v0.1.0-preview.15 — 2026-10-19
 
 ### Fixed

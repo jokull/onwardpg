@@ -27,7 +27,8 @@ journal before baseline so live contract checks use that boundary too:
 ```toml
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 dev_mode = "workspace"
-ignore = ["table:public._prisma_migrations"]
+[targets.app.ignore]
+schema = ["table:public._prisma_migrations"]
 ```
 
 Put these keys under `[targets.app]` and set the dev URL to the existing local

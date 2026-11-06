@@ -86,7 +86,7 @@ dev_database_env = "ONWARDPG_UNUSED_DEV_DATABASE_URL"
 scratch_database_env = "` + scratchEnv + `"
 `
 		if liveIgnore {
-			body += "live_ignore = ['" + ownership + "']\n"
+			body += "[targets.primary.ignore]\nlive = ['" + ownership + "']\n"
 		}
 		return body
 	}

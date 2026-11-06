@@ -17,7 +17,8 @@ bundle_root = "onward-bundles"
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
-ignore = ["extension:pg_stat_statements", "schema:auth"]
+[targets.primary-postgres.ignore]
+schema = ["extension:pg_stat_statements", "schema:auth"]
 `
 	if err := os.WriteFile(name, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
@@ -30,7 +31,7 @@ ignore = ["extension:pg_stat_statements", "schema:auth"]
 	if len(target.SchemaCommand) == 0 || target.ScratchEnv() != "ONWARDPG_SCRATCH_DATABASE_URL" {
 		t.Fatalf("config = %#v", config)
 	}
-	if len(target.Ignore) != 2 || target.Ignore[0] != "extension:pg_stat_statements" {
+	if len(target.Ignore.Schema) != 2 || target.Ignore.Schema[0] != "extension:pg_stat_statements" {
 		t.Fatalf("target ignores = %#v", target.Ignore)
 	}
 	path, err := config.BundlePath("/repo", "primary-postgres", "customer-profile")
@@ -122,26 +123,30 @@ dev_database_env = "DEV_DATABASE_URL"
 bundle_root = "onward-bundles"
 [targets.db]
 schema_file = "schema.sql"
-live_ignore = ["parameter_acl:*"]
+[targets.db.ignore]
+live = ["parameter_acl:*"]
 `,
 		"live-ignore-malformed-ownership": `version = 1
 bundle_root = "onward-bundles"
 [targets.db]
 schema_file = "schema.sql"
-live_ignore = ["ownership:schema:=provider"]
+[targets.db.ignore]
+live = ["ownership:schema:=provider"]
 `,
-		"live-ignore-outside-provider-state": `version = 1
+		"live-ignore-unknown-object-kind": `version = 1
 bundle_root = "onward-bundles"
 [targets.db]
 schema_file = "schema.sql"
-live_ignore = ["table:public.orders"]
+[targets.db.ignore]
+live = ["event_trigger:audit"]
 `,
 		"invalid-ignore": `version = 1
 bundle_root = "onward-bundles"
 [targets.db]
 schema_file = "schema.sql"
 dev_database_env = "DEV_DATABASE_URL"
-ignore = ["extension:pg*"]
+[targets.db.ignore]
+schema = ["extension:pg*"]
 `,
 	}
 	for label, data := range tests {
@@ -219,7 +224,8 @@ func TestLoadReadsLiveIgnoreWithoutRequiringItToMatchAnyCatalog(t *testing.T) {
 bundle_root = "onward-bundles"
 [targets.db]
 schema_file = "schema.sql"
-live_ignore = [
+[targets.db.ignore]
+live = [
   "ownership:extension:earthdistance=pscale_admin",
   "ownership:schema:pscale_extensions=pscale_admin",
   "parameter_acl:session_replication_role",
@@ -232,8 +238,21 @@ live_ignore = [
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := config.Targets["db"].LiveIgnore; len(got) != 3 || got[2] != "parameter_acl:session_replication_role" {
+	if got := config.Targets["db"].Ignore.Live; len(got) != 3 || got[2] != "parameter_acl:session_replication_role" {
 		t.Fatalf("live_ignore = %#v", got)
+	}
+}
+
+func TestLoadExplainsOldIgnoreKeys(t *testing.T) {
+	for _, old := range []string{`ignore = ["table:public.orders"]`, `live_ignore = ["parameter_acl:user"]`} {
+		name := filepath.Join(t.TempDir(), ".onwardpg.toml")
+		data := "version = 1\nbundle_root = \"onward-bundles\"\n[targets.db]\nschema_file = \"schema.sql\"\n" + old + "\n"
+		if err := os.WriteFile(name, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(name); err == nil || !strings.Contains(err.Error(), "[targets.db.ignore]") {
+			t.Fatalf("old form %s: %v", old, err)
+		}
 	}
 }
 

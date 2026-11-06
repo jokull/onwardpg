@@ -47,12 +47,12 @@ in diagnostics.
 Provider-owned state in a live cluster has one narrow exception. Ownership of an
 extension or a schema by a role other than the inspecting role, and
 `pg_parameter_acl` grants, remain blockers for every command, and the attribute
-ledger keeps them classified as blocked. A target's `live_ignore` list can
-acknowledge an exact selector for commands that read a live catalog
-(`drift check`, `contract check`, and `diff --target`). The list removes only
-that blocker marker, never a typed object, before the comparison fingerprint is
-computed, so a catalog that differs from the expected graph only by acknowledged
-state compares equal; the removed selectors are listed and
+ledger keeps them classified as blocked. A target's `ignore.live` list can
+acknowledge those markers or exclude live-only typed objects for commands that
+read a live catalog (`drift check`, `contract check`, and `diff --target`). The
+list removes matched state before the comparison fingerprint is computed, so a
+catalog that differs from the expected graph only by acknowledged state compares
+equal; the matched selectors are listed and
 `observer.observed_fingerprint` reports the catalog's fingerprint before
 removal. It is not applied to replayed
 history, DDL sources, planning, or verification. It is not a default: a new

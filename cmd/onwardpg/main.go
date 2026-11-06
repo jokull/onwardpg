@@ -590,7 +590,7 @@ func runContractAt(arguments []string, start string) int {
 	}
 	report, err := contractcheck.Run(context.Background(), contractcheck.Input{
 		Artifact: entry.Artifact, ExpectedHead: chain.HeadDigest, Chain: history, DatabaseURL: databaseURL, Environment: *environment,
-		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options, LiveIgnore: target.LiveIgnore,
+		Evidence: evidence, StatementTimeout: *statementTimeout, Options: options, LiveIgnore: target.Ignore.Live,
 		Ignores: sortedUniqueStrings(ignores), Expected: expected,
 	})
 	if err != nil {
@@ -682,7 +682,7 @@ func runDriftAt(arguments []string, start string) int {
 	// connection (the role guard, the read itself) needs only that
 	// connection, so a wrong role or URL stops here, before the history
 	// replay, which is the slow part of the command.
-	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, target.LiveIgnore, 30*time.Second)
+	actual, observer, observerFinding, err := contractcheck.InspectObserverCatalog(ctx, databaseURL, selectors, target.Ignore.Live, 30*time.Second)
 	if err != nil {
 		if errors.Is(err, source.ErrInvalidIgnore) {
 			return writeError("invalid_ignore", err)
@@ -2353,13 +2353,13 @@ func runLowLevelPlan(command string, arguments []string) int {
 	flags.Var(&ignores, "ignore", "selector to exclude")
 	var ignoreExtensionVersions stringsFlag
 	flags.Var(&ignoreExtensionVersions, "ignore-extension-version", "extension name whose version changes should be ignored; repeat for multiple names")
-	// live_ignore belongs to live observation. The legacy `plan --from --to`
+	// ignore.live belongs to live observation. The legacy `plan --from --to`
 	// spelling shares this function but must keep refusing unsupported catalog
 	// state, so only diff accepts --target and --config.
 	var targetName, configName string
 	configName = ".onwardpg.toml"
 	if command == "diff" {
-		flags.StringVar(&targetName, "target", "", "configured target whose live_ignore list applies to PostgreSQL URL sources")
+		flags.StringVar(&targetName, "target", "", "configured target whose ignore.live list applies to PostgreSQL URL sources")
 		flags.StringVar(&configName, "config", ".onwardpg.toml", "repository configuration read for --target")
 	}
 	if help, err := parseFlagSet(flags, arguments); help {
@@ -2413,7 +2413,7 @@ func runLowLevelPlan(command string, arguments []string) int {
 		if err != nil {
 			return writeError("invalid_config", err)
 		}
-		liveIgnore = target.LiveIgnore
+		liveIgnore = target.Ignore.Live
 	}
 	ctx := context.Background()
 	fromSpec, toSpec := source.Parse(*from), source.Parse(*to)
@@ -2583,7 +2583,7 @@ func runConfig(arguments []string) int {
 		if err != nil {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
 		}
-		selectors := sortedUniqueStrings(target.Ignore)
+		selectors := sortedUniqueStrings(target.Ignore.Schema)
 		graph, err := source.LoadDDLGraphForComparison(ctx, compiled.DDL, compiled.Provenance, adminURL, selectors)
 		if err != nil {
 			return writeError("source_error", fmt.Errorf("target %s: %w", targetName, err))
@@ -2944,7 +2944,7 @@ func resolveConfiguredTarget(config workspace.Config, selected *string) (workspa
 }
 
 func targetIgnoreSelectors(target workspace.Target, command []string) []string {
-	return sortedUniqueStrings(append(append([]string(nil), target.Ignore...), command...))
+	return sortedUniqueStrings(append(append([]string(nil), target.Ignore.Schema...), command...))
 }
 
 type stringsFlag []string

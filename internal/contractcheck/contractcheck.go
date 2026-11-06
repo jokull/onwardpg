@@ -79,9 +79,8 @@ type ObserverProjection struct {
 	// row-level security hides from other readers.
 	BypassRLS       bool     `json:"bypass_rls,omitempty"`
 	ProjectedAccess []string `json:"projected_access,omitempty"`
-	// LiveIgnored lists the unsupported-state selectors, observed in this
-	// catalog, that the target's live_ignore list acknowledged. They are
-	// environmental state the reader still sees, but not a blocker.
+	// LiveIgnored lists selectors matched by the target's live_ignore list.
+	// They were removed from the compared live catalog.
 	LiveIgnored []string `json:"live_ignored,omitempty"`
 	// LiveIgnoreUnmatched lists configured live_ignore selectors that matched
 	// nothing in this catalog. It is information only: the same configuration
@@ -186,9 +185,8 @@ type Input struct {
 	Now              time.Time
 	StatementTimeout time.Duration
 	Options          graphplan.Options
-	// LiveIgnore holds the target's live_ignore selectors. It can only
-	// acknowledge unsupported state; it cannot hide an object from the
-	// receipted checkpoint comparison.
+	// LiveIgnore holds the target's live_ignore selectors, applied only to the
+	// live side of the checkpoint comparison.
 	LiveIgnore []string
 	// Ignores are explicit ignore selectors, with the semantics of drift
 	// check --ignore. They are applied to both sides of the comparison:
