@@ -267,7 +267,8 @@ bundle_root = "migrations/onward"
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_SCRATCH_DATABASE_URL"
-ignore = ["extension:pg_stat_statements"]
+[targets.primary.ignore]
+schema = ["extension:pg_stat_statements"]
 ~~~
 
 schema_command may replace schema_file. Configuration rejects unknown fields,

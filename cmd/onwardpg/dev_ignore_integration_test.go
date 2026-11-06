@@ -47,7 +47,8 @@ schema_file = "schema.sql"
 scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 dev_database_env = "ONWARDPG_IGNORE_DEV_URL"
 dev_mode = %q
-ignore = ["table:public.django_migrations"]
+[targets.primary.ignore]
+schema = ["table:public.django_migrations"]
 `, mode))
 			result := captureStdout(t, func() int { return runDevAt([]string{"plan"}, repository) })
 			var report struct {

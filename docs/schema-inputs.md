@@ -25,10 +25,11 @@ bundle_root = "migrations/onward"
 [targets.primary-postgres]
 schema_command = ["pnpm", "--filter", "db", "schema:export"]
 dev_database_env = "ONWARDPG_DEV_DATABASE_URL"
-ignore = ["extension:pg_stat_statements"]
+[targets.primary-postgres.ignore]
+schema = ["extension:pg_stat_statements"]
 ```
 
-`ignore` is a reviewed catalog boundary for provider-owned state that should
+`ignore.schema` is a reviewed catalog boundary for provider-owned state that should
 not enter the declarative history. It is not a DDL filter and it does not make
 schema selectors recursive. `config check` validates each selector against the
 exported DDL plus the read-only development catalog and reports what matched.

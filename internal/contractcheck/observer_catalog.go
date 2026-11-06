@@ -18,9 +18,9 @@ import (
 // graph projects only the proven inspection overlay: the database owner's
 // ambient identity and owner-granted, non-grantable SELECT access belonging to
 // the dedicated observer roles. Application authorization remains in the
-// graph and therefore remains visible to drift comparison. liveIgnore removes
-// only the unsupported-state selectors a project acknowledged for its live
-// clusters (see source.ProjectLiveIgnored) and reports those it removed.
+// graph and therefore remains visible to drift comparison unless liveIgnore
+// excludes it. liveIgnore also removes acknowledged unsupported-state markers
+// (see source.ProjectLiveIgnored) and reports the matched selectors.
 func InspectObserverCatalog(ctx context.Context, databaseURL string, ignores, liveIgnore []string, statementTimeout time.Duration) (*pgschema.Snapshot, ObserverProjection, *Finding, error) {
 	if databaseURL == "" {
 		return nil, ObserverProjection{}, nil, fmt.Errorf("observer database URL is required")

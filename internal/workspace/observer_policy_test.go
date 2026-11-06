@@ -8,7 +8,7 @@ import (
 
 func TestObserverPolicyRequiresSuccessfulConfiguredDatabaseInspection(t *testing.T) {
 	const env = "ONWARDPG_OBSERVER_POLICY_TEST_URL"
-	target := Target{DevDatabaseEnv: env, Ignore: []string{"table:public.django_migrations"}}
+	target := Target{DevDatabaseEnv: env, Ignore: IgnorePolicy{Schema: []string{"table:public.django_migrations"}}}
 	for _, test := range []struct{ name, url, message string }{
 		{"missing environment", "", "is required"},
 		{"unavailable database", "postgres://postgres@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1", "inspect development observer policy"},

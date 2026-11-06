@@ -191,7 +191,8 @@ bundle_root = "onward-bundles"
 schema_file = "schema.sql"
 dev_database_env = "ONWARDPG_UNUSED_DEV_DATABASE_URL"
 scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
-live_ignore = [`+strings.Join(quoted, ", ")+`]
+[targets.primary.ignore]
+live = [`+strings.Join(quoted, ", ")+`]
 `)
 	}
 	extension, schema := "ownership:extension:citext="+role, "ownership:schema:provider_ext="+role

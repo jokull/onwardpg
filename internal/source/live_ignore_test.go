@@ -20,6 +20,13 @@ func TestValidateLiveIgnoreSelectorsGrammar(t *testing.T) {
 		"parameter_acl:session_replication_role",
 		`parameter_acl:"extwlist.extensions"`,
 		`parameter_acl:"a""b"`,
+		"trigger:public.trip.s1a_write",
+		"trigger:public.*.s1a_write",
+		"table:legacy.*",
+		"table:*",
+		"table:public.orders",
+		"extension:earthdistance",
+		"table_owner:public.orders",
 	}
 	for _, selector := range valid {
 		if err := ValidateLiveIgnoreSelectors([]string{selector}); err != nil {
@@ -63,8 +70,9 @@ func TestValidateLiveIgnoreSelectorsGrammar(t *testing.T) {
 		"parameter_acl:session_replication_role=on",
 		"parameter_acl:session_replication_role ",
 		" parameter_acl:session_replication_role",
-		"extension:earthdistance",
-		"table:public.orders",
+		"trigger:public.s1a_*",
+		"trigger:public.*write",
+		"table:",
 		"acl:schema:public",
 		"event_trigger:audit",
 	}
@@ -167,7 +175,51 @@ func TestProjectLiveIgnoredWithoutSelectorsKeepsTheSnapshot(t *testing.T) {
 	if err != nil || projected != snapshot || removed != nil || unmatched != nil {
 		t.Fatalf("projected=%p removed=%#v err=%v", projected, removed, err)
 	}
-	if _, _, _, err := ProjectLiveIgnored(snapshot, []string{"table:public.orders"}); err == nil {
+	if _, _, _, err := ProjectLiveIgnored(snapshot, []string{"table:pub*"}); err == nil {
 		t.Fatal("unsupported kind accepted")
+	}
+}
+
+func TestLiveSelectorMatchesWholeSegments(t *testing.T) {
+	for _, actual := range []string{"trigger:public.trip.s1a_write", `trigger:public."trip.v2".s1a_write`} {
+		if !liveSelectorMatches("trigger:public.*.s1a_write", actual) {
+			t.Fatalf("wildcard did not match %s", actual)
+		}
+	}
+	if liveSelectorMatches("trigger:public.*.s1a_write", "trigger:public.trip.s1a_delete") ||
+		liveSelectorMatches("trigger:public.*.s1a_write", "trigger:other.trip.s1a_write") {
+		t.Fatal("wildcard widened beyond one segment")
+	}
+}
+
+func TestProjectLiveIgnoredRemovesOnlyLiveObjectsWithoutReceipts(t *testing.T) {
+	snapshot := pgschema.New()
+	schema := pgschema.Schema{Name: "public"}
+	table := pgschema.Table{Schema: "public", Name: "trip"}
+	trigger := pgschema.Trigger{Table: table.ObjectID(), Name: "s1a_write"}
+	for _, object := range []pgschema.Object{schema, table, trigger} {
+		if err := snapshot.Add(object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := snapshot.AddDependency(table.ObjectID(), schema.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.AddDependency(trigger.ObjectID(), table.ObjectID()); err != nil {
+		t.Fatal(err)
+	}
+	projected, removed, unmatched, err := ProjectLiveIgnored(snapshot, []string{"trigger:public.trip.s1a_write", "trigger:public.trip.s1a_delete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := projected.Object(trigger.ObjectID()); ok || len(projected.Ignored()) != 0 || len(snapshot.IDs()) != 3 {
+		t.Fatalf("live projection changed the input or retained the trigger: projected=%v input=%v", projected.IDs(), snapshot.IDs())
+	}
+	if !reflect.DeepEqual(removed, []string{"trigger:public.trip.s1a_write"}) || !reflect.DeepEqual(unmatched, []string{"trigger:public.trip.s1a_delete"}) {
+		t.Fatalf("removed=%v unmatched=%v", removed, unmatched)
+	}
+	projected, removed, _, err = ProjectLiveIgnored(snapshot, []string{"table:public.trip"})
+	if err != nil || len(projected.IDs()) != 1 || !reflect.DeepEqual(removed, []string{"table:public.trip"}) {
+		t.Fatalf("table projection: ids=%v removed=%v err=%v", projected.IDs(), removed, err)
 	}
 }
