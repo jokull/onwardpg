@@ -74,4 +74,16 @@ scratch_database_env = "ONWARDPG_TEST_DATABASE_URL"
 	if len(artifact.Manifest.Planner.IgnoreSelectors) != 0 || len(artifact.Manifest.Planner.ObserverIgnoreSelectors) != 0 {
 		t.Fatalf("live selector entered planner boundary: %#v", artifact.Manifest.Planner)
 	}
+	writeTestFile(t, repository, "schema.sql", ddl+" CREATE TABLE public.extra (id bigint PRIMARY KEY);")
+	planned := captureStdout(t, func() int { return runWorkflowPlanAt([]string{"add-extra"}, repository) })
+	if planned.code != 0 {
+		t.Fatalf("plan: %d %s", planned.code, planned.stdout)
+	}
+	artifact, err = bundle.Read(filepath.Join(repository, "onward-bundles/primary/add-extra"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Manifest.Planner.IgnoreSelectors) != 0 || len(artifact.Manifest.Planner.ObserverIgnoreSelectors) != 0 {
+		t.Fatalf("planned bundle captured live selector: %#v", artifact.Manifest.Planner)
+	}
 }
