@@ -1234,7 +1234,20 @@ func runBundleAt(arguments []string, start string) int {
 	if err != nil {
 		return writeError("source_error", fmt.Errorf("fingerprint current desired schema: %w", err))
 	}
+	var replayedDesiredFingerprint string
 	if workingFingerprint != manifest.DesiredSource.Fingerprint {
+		// Replaying receipted SQL puts both catalogs under this build's
+		// canonical form when the bundle used an older form.
+		replayed, replayErr := verify.ReplayHistory(ctx, adminURL, prefix, manifest.Planner.IgnoreSelectors)
+		if replayErr != nil {
+			return writeError("source_error", fmt.Errorf("replay receipted desired schema: %w", replayErr))
+		}
+		replayedDesiredFingerprint, replayErr = graphplan.Fingerprint(replayed, options)
+		if replayErr != nil {
+			return writeError("source_error", fmt.Errorf("fingerprint receipted desired schema: %w", replayErr))
+		}
+	}
+	if workingFingerprint != manifest.DesiredSource.Fingerprint && workingFingerprint != replayedDesiredFingerprint {
 		// This result rests on one export run. Run the export again so that
 		// a nondeterministic export is reported as such, not as a stale bundle.
 		if err := workspace.ConfirmUnchanged(ctx, export); err != nil {
@@ -1267,6 +1280,7 @@ func runBundleAt(arguments []string, start string) int {
 		expandReport, expandErr := verify.Run(ctx, verify.Input{
 			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: protocol.PhaseExpand,
 			Ignores: manifest.Planner.IgnoreSelectors, Options: options, Executions: executions,
+			ReplayedDesiredFingerprint: replayedDesiredFingerprint,
 		})
 		if expandErr != nil {
 			return writeError("verification_error", expandErr)
@@ -1293,12 +1307,14 @@ func runBundleAt(arguments []string, start string) int {
 			report, err = verify.Run(ctx, verify.Input{
 				AdminURL: adminURL, Chain: verificationChain, BundleID: *bundleID, ThroughPhase: *through,
 				Ignores: manifest.Planner.IgnoreSelectors, Options: options, Executions: executions,
+				ReplayedDesiredFingerprint: replayedDesiredFingerprint,
 			})
 		}
 	} else {
 		report, err = verify.Run(ctx, verify.Input{
 			AdminURL: adminURL, Chain: chain, BundleID: *bundleID, ThroughPhase: *through,
 			Ignores: manifest.Planner.IgnoreSelectors, Options: options,
+			ReplayedDesiredFingerprint: replayedDesiredFingerprint,
 		})
 	}
 	if err != nil {

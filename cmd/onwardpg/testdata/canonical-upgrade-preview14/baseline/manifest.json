@@ -1,0 +1,49 @@
+{
+  "bundle_id": "baseline",
+  "generation": 1,
+  "target": "primary",
+  "purpose": "baseline",
+  "state": "planned",
+  "baseline_source": {
+    "kind": "ddl",
+    "description": "empty PostgreSQL catalog",
+    "fingerprint": "sha256:c8134f690504dc3eea7bab77111cfb1fb631e8365ae7922cad76e1461206bdb8",
+    "postgres_major": 18
+  },
+  "desired_source": {
+    "kind": "ddl_export",
+    "description": "baseline declarative schema_file:schema.sql",
+    "fingerprint": "sha256:ac608f2459b86104e88b68c67be240f84feecd95ee4b6cf6d84d584f4f7a550f",
+    "postgres_major": 18
+  },
+  "planner": {
+    "version": "dev",
+    "build": {
+      "version": "dev",
+      "commit": "unknown",
+      "dirty": false,
+      "go_version": "go1.26.9",
+      "supported_postgres_majors": [
+        15,
+        16,
+        17,
+        18
+      ]
+    },
+    "options": {}
+  },
+  "history": {
+    "parent_digest": "sha256:0b05f30557045e39165f45204121a7d04c11851b5e82d8955f8372e01003bfda",
+    "entry_digest": "sha256:5834b9fba630623e2df76bb144725558fb94d008d683b26402d3c78d136cf920"
+  },
+  "result_digest": "sha256:56410aa9ba71e0cc4d5b14e478ee5de81c5f9c2ff3a40b25cdcffca4b16e02b4",
+  "plan_digest": "sha256:56410aa9ba71e0cc4d5b14e478ee5de81c5f9c2ff3a40b25cdcffca4b16e02b4",
+  "phase_source": "generated",
+  "phases": {
+    "expand": {
+      "path": "phases/expand.sql",
+      "digest": "sha256:5288da45be114dac1af6bbf418ac1d439372339458e8a9f9300e26c3c74dde6b",
+      "transactional": false
+    }
+  }
+}

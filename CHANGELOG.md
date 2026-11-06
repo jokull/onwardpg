@@ -3,6 +3,18 @@
 All notable changes to onwardpg are documented here. Published versions follow
 Semantic Versioning; preview tags use the form `vX.Y.Z-preview.N`.
 
+## Unreleased
+
+### Fixed
+
+- `verify --check` now compares an older bundle's receipted history with the
+  current exported schema under the same catalog form when their fingerprints
+  differ. Preview.15's flat AND/OR expression form changed fingerprints of
+  unchanged `CHECK` constraints, making preview.14 bundles appear stale under
+  preview.16. Existing bundles verify without rewriting receipts; a real schema
+  edit remains `working_schema_changed`. This supersedes preview.15's advice to
+  replan such bundles.
+
 ## v0.1.0-preview.16 — 2026-11-06
 
 ### Added
